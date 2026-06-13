@@ -120,3 +120,10 @@ v1 is interactive. The user can: approve/deny risky tool calls
 ([04](04-tools.md)), interrupt the loop, edit or reject the plan, and answer
 when the harness escalates. Unattended autonomy is explicitly future work
 ([07](07-roadmap.md)).
+
+## This loop is also the unit of the swarm
+
+In the multi-agent design ([08](08-orchestration-and-swarm.md)), a **worker** is
+exactly this loop — one tiny model, scoped to a single subtask, in its own
+isolated worktree. The orchestrator coordinates many such loops; it does not
+replace them. Improvements to this loop propagate to every worker for free.

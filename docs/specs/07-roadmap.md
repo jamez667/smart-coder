@@ -11,7 +11,7 @@ under control. Everything else builds on a working, reliable single-step loop.
   ([02](02-model-backends.md)).
 - `dumb-coder doctor`: backend reachable, model present, context budget printed.
 - Trivial loop: prompt → model text → print. No tools yet.
-- **Exit criteria:** can chat with Gemma 3n E4B via both backends from the CLI.
+- **Exit criteria:** can chat with Gemma 4 E4B via both backends from the CLI.
 
 ## M1 — Reliable tool calls (the core risk)
 **Goal:** a small model issues *well-formed* tool calls, reliably.
@@ -63,14 +63,34 @@ under control. Everything else builds on a working, reliable single-step loop.
 **Goal:** fully offline on a phone, the showcase of the "small model" thesis.
 - On-device adapter (in-process or local runtime) ([02](02-model-backends.md)).
 - Tighter default budgets/timeouts for mobile constraints.
-- **Exit criteria:** a scoped task runs offline on-device with Gemma 3n E4B.
+- **Exit criteria:** a scoped task runs offline on-device with Gemma 4 E4B.
+
+## M7 — Orchestration & the worker swarm
+**Goal:** scale out — many tiny workers on one codebase under a larger
+orchestrator ([08](08-orchestration-and-swarm.md)). Deliberately sequenced
+**after** the single-agent loop is solid (M0–M5), since each worker *is* that
+loop.
+- Orchestrator profile + worker profiles via the gateway ([02](02-model-backends.md)).
+- Task board (subtask DAG, status, deps) + decomposition into independent subtasks.
+- Worktree-per-worker isolation; bounded-concurrency scheduler.
+- Integration: ordered branch merges, conflict arbitration by the orchestrator,
+  mandatory integration verification.
+- Serialized shared-workspace fallback for non-parallelizable work.
+- CLI surfacing of swarm state (active workers, board, integration)
+  ([06](06-cli-ux.md)).
+- **Exit criteria:** a task that decomposes into ≥3 independent subtasks is
+  completed by parallel workers and integrated green, faster than the
+  single-agent baseline — with failure containment (a derailed worker is
+  discarded/reassigned, never corrupts the result).
 
 ---
 
 ## Post-v1 / future ideas
 - **MCP client** — consume external Model Context Protocol tool servers.
 - **User-defined tools** via config.
-- **Multi-model routing** — a tiny fast planner + a slightly larger coder.
+- **Heterogeneous swarms** — specialized worker roles (searcher/editor/tester/
+  integrator) mapped to different small models, beyond the M7 baseline
+  ([08](08-orchestration-and-swarm.md)).
 - **Embedding-based retrieval** with a small local embedder (optional).
 - **TUI** (v2 interface).
 - **Bounded autonomous mode** — unattended runs with strong budgets/guardrails.

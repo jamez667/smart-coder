@@ -2,7 +2,7 @@
 
 ## Why this is the most important component
 
-A frontier model with a 200k window can absorb sloppy context. **Gemma 3n E4B
+A frontier model with a 200k window can absorb sloppy context. **Gemma 4 E4B
 class models often have an effective window of a few thousand tokens** and
 degrade fast as it fills. For `dumb-coder`, deciding *what goes into each prompt*
 is the difference between a working agent and a confused one. The Context Manager

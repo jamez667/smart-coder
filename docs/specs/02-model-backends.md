@@ -5,7 +5,7 @@
 One agent, many runtimes. The same `dumb-coder` session must run against
 **Ollama, llama.cpp's server, vLLM, an on-device Android runtime, or any
 OpenAI-compatible endpoint** with nothing but a config change. The harness is
-tuned for small models (≤ 12B, ideally Gemma 3n E4B), but it must not be
+tuned for small models (≤ 12B, ideally Gemma 4 E4B), but it must not be
 coupled to *how* those models are served.
 
 ## The `ModelBackend` trait
@@ -89,7 +89,7 @@ Backends and models are selected by config (file + CLI flags + env), not code.
 # ~/.config/dumb-coder/config.toml  (illustrative)
 [model]
 backend = "ollama"            # ollama | openai | llamacpp | android
-model   = "gemma3n:e4b"
+model   = "gemma4:e4b"
 context_tokens = 8192         # override / cap the window we actually use
 temperature = 0.2
 seed = 42
@@ -101,7 +101,9 @@ api_key_env = "DC_API_KEY"   # optional, for remote OpenAI-compat servers
 
 Multiple named profiles are allowed (e.g. a fast `planner` model and a separate
 `coder` model), so the harness can route different loop phases to different small
-models if desired.
+models if desired. This is the mechanism behind the **orchestrator vs. worker**
+split in the swarm — the orchestrator is just a larger profile (up to the 12B
+ceiling) and workers are tiny profiles ([08](08-orchestration-and-swarm.md)).
 
 ## Tokenizer & budgeting
 

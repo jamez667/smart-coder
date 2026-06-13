@@ -15,7 +15,7 @@ dumb-coder
 dumb-coder run "add input validation to parse_config and a test for it"
 
 # Pick a backend/model ad hoc
-dumb-coder --backend ollama --model gemma3n:e4b
+dumb-coder --backend ollama --model gemma4:e4b
 
 # Replay / inspect a previous session log
 dumb-coder replay <session-id>
@@ -112,3 +112,11 @@ Per the permission layer ([04](04-tools.md)):
 - Full-screen TUI (panes, mouse) — candidate for v2 ([07](07-roadmap.md)).
 - Editor/IDE integration.
 - Remote/daemon mode or web UI.
+
+## Note: swarm rendering (later)
+
+When the worker swarm lands ([08](08-orchestration-and-swarm.md), M7 in
+[07](07-roadmap.md)), the CLI gains a view of swarm state — active workers and
+their subtasks, the task board, and integration/merge progress — rendered from
+the same event stream. The line-oriented model above is designed to extend to
+this (one block per worker); a full-screen TUI for it remains a v2 consideration.

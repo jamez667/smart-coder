@@ -117,3 +117,13 @@ Manager can pull in only what's relevant rather than dumping whole files.
    into the loop.
 5. When the plan is complete and verification passes, the orchestrator stops and
    summarizes the diff for the user.
+
+## Single agent vs. the swarm
+
+The components above describe **one** agent. The second core capability —
+**many tiny workers on one codebase under a larger orchestrator** — is layered
+*above* this: each worker runs its own instance of the agent loop + tools +
+context manager (in its own isolated worktree), and a swarm-coordinator drives
+decomposition, scheduling, and integration. That layer reuses everything here
+unchanged; see [08 — Orchestration & the worker swarm](08-orchestration-and-swarm.md).
+It is sequenced after the single-agent core is solid ([07](07-roadmap.md)).

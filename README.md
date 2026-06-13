@@ -2,7 +2,7 @@
 
 An agentic coding tool built to run entirely on **small** language models — 12B
 parameters at the absolute ceiling, and ideally something tiny like
-**Gemma 3n E4B** (~4B effective params, runnable on a phone).
+**Gemma 4 E4B** (~4B-class, small enough to run on a phone).
 
 The bet behind `dumb-coder`: most agentic coding tools assume a large frontier
 model and lean on its raw intelligence. `dumb-coder` assumes the opposite. The
@@ -10,6 +10,11 @@ model is "dumb" — limited reasoning depth, small context window, shaky at
 free-form tool calls — and the *harness* does the heavy lifting. The interesting
 engineering is in the scaffolding that makes a small, cheap, local model behave
 like a competent coding agent.
+
+The second bet: **scale out, not up.** Instead of one big model, run a *swarm*
+of very small workers (Gemma 4 E4B class) on the same codebase, coordinated by a
+single larger orchestrator (up to the 12B ceiling) that plans, assigns, and
+integrates their work. See [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md).
 
 ## Why small models?
 
@@ -33,7 +38,7 @@ for the design. Start with the [overview](docs/specs/00-overview.md).
 | Implementation language | **Rust** (single static binary, low overhead) |
 | Interface | **CLI / terminal** agent loop |
 | Inference backend | **Pluggable** — Ollama, llama.cpp, vLLM, on-device Android, any OpenAI-compatible server |
-| Model ceiling | ≤ 12B params; primary target **Gemma 3n E4B** |
+| Model ceiling | ≤ 12B params; primary target **Gemma 4 E4B** |
 
 ## Spec index
 
@@ -45,3 +50,4 @@ for the design. Start with the [overview](docs/specs/00-overview.md).
 - [05 — Context management](docs/specs/05-context-management.md)
 - [06 — CLI & UX](docs/specs/06-cli-ux.md)
 - [07 — Roadmap & milestones](docs/specs/07-roadmap.md)
+- [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md)

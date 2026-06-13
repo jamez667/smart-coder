@@ -4,7 +4,7 @@
 
 `dumb-coder` is a terminal-based agentic coding assistant whose defining
 constraint is that it runs on **small** language models — never larger than 12B
-parameters, and ideally on a model as small as **Gemma 3n E4B**.
+parameters, and ideally on a model as small as **Gemma 4 E4B**.
 
 The thesis is that a well-engineered harness can extract competent,
 *reliable* coding behavior from a model that, on its own, is a poor agent. We
@@ -28,7 +28,7 @@ major design decision in `dumb-coder` is a direct response to one of these:
 
 ## Goals (v1)
 
-1. **Run a real coding task end-to-end** on Gemma 3n E4B class models: read a
+1. **Run a real coding task end-to-end** on Gemma 4 E4B class models: read a
    repo, make a focused change across a few files, run tests, iterate.
 2. **Backend-agnostic.** The same agent runs against Ollama, a llama.cpp
    server, vLLM, or an on-device Android runtime with only config changes.
@@ -72,3 +72,7 @@ major design decision in `dumb-coder` is a direct response to one of these:
    on it.
 5. **Everything is inspectable.** Plans, prompts, tool calls, and context
    windows are all visible and logged.
+6. **Scale out, not up.** When one tiny model isn't enough, add more of them.
+   Prefer a *swarm* of narrowly-scoped small workers under a single larger
+   orchestrator over reaching for a bigger model. See
+   [08 — Orchestration & the worker swarm](08-orchestration-and-swarm.md).
