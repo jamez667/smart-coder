@@ -174,3 +174,6 @@ conflicts were resolved.
   see [06](06-cli-ux.md).
 - This is a **post-core** capability: the single-agent loop (M0–M5) must be
   solid first. See the roadmap ([07](07-roadmap.md)).
+- The swarm's **input** is the task board produced by Phase 6 of the staged
+  workflow, *after* its human checkpoint ([09](09-workflow-and-checkpoints.md));
+  the orchestrator drives those planning phases, then the swarm executes.

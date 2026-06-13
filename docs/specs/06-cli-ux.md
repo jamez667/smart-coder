@@ -81,6 +81,26 @@ Per the permission layer ([04](04-tools.md)):
 - `Ctrl-C` interrupts the loop cleanly at the next turn boundary (no half-applied
   edits left dangling — edits are atomic per call).
 
+## Workflow checkpoints
+
+Beyond per-tool confirmations, the CLI gates the **phase boundaries** of the
+staged workflow ([09](09-workflow-and-checkpoints.md)). At each checkpoint the
+agent presents the phase artifact and waits for a decision:
+
+```
+⛳ checkpoint — phase 3/6: LAYOUT   (specs ✓  architecture ✓)
+   artifact written to docs/plan/03-layout.md   (review the diff)
+
+   [a]pprove · [r]evise (edit the file yourself) · [s]end back · [v]iew · [q]uit ›
+```
+
+- **Approve** advances to the next phase; **revise** lets you edit the artifact
+  file and accept your version; **send back** regenerates with your notes (and
+  may target an earlier phase); **quit** stops but keeps approved artifacts.
+- The current phase and which gates are passed are always shown.
+- In `run` / `--json` mode, the configured gate policy decides whether the
+  workflow auto-advances or stops at the first un-approved gate and reports.
+
 ## Inspection & debugging
 
 - `--verbose` / `-v` — show the full assembled prompt per turn (what the model

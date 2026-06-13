@@ -76,3 +76,7 @@ major design decision in `dumb-coder` is a direct response to one of these:
    Prefer a *swarm* of narrowly-scoped small workers under a single larger
    orchestrator over reaching for a bigger model. See
    [08 — Orchestration & the worker swarm](08-orchestration-and-swarm.md).
+7. **Plan in phases, gate with humans.** Move through specs → architecture →
+   layout → test-first stages → implementation plan → work decomposition, with a
+   human checkpoint between each. Catch mistakes where they're cheap, before code
+   is written. See [09 — Workflow & human checkpoints](09-workflow-and-checkpoints.md).

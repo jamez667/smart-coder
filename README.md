@@ -16,6 +16,12 @@ of very small workers (Gemma 4 E4B class) on the same codebase, coordinated by a
 single larger orchestrator (up to the 12B ceiling) that plans, assigns, and
 integrates their work. See [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md).
 
+The third bet: **structured, gated workflow.** Every non-trivial task moves
+through staged phases — specs → architecture → layout → test-first stage
+breakdown → implementation plan → work decomposition — with a **human checkpoint
+between each**. The agent works autonomously within a phase and stops for
+sign-off at the boundary. See [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md).
+
 ## Why small models?
 
 - **Local & private** — runs on a laptop, a homelab box, or even an Android
@@ -51,3 +57,4 @@ for the design. Start with the [overview](docs/specs/00-overview.md).
 - [06 — CLI & UX](docs/specs/06-cli-ux.md)
 - [07 — Roadmap & milestones](docs/specs/07-roadmap.md)
 - [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md)
+- [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md)

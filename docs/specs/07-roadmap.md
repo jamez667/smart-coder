@@ -59,11 +59,19 @@ under control. Everything else builds on a working, reliable single-step loop.
 - **Exit criteria:** a newcomer can install, `doctor`, and run a task guided only
   by CLI output.
 
-## M6 — On-device / Android backend
-**Goal:** fully offline on a phone, the showcase of the "small model" thesis.
-- On-device adapter (in-process or local runtime) ([02](02-model-backends.md)).
-- Tighter default budgets/timeouts for mobile constraints.
-- **Exit criteria:** a scoped task runs offline on-device with Gemma 4 E4B.
+## M6 — Staged workflow & human checkpoints
+**Goal:** drive tasks through the gated pipeline ([09](09-workflow-and-checkpoints.md))
+so mistakes are caught before code is written. Runs with the single-agent core;
+its final phase becomes the swarm's input (M7).
+- Phase engine: specs → architecture → layout → test-first stage breakdown →
+  implementation plan → work decomposition.
+- Durable, versioned phase artifacts on disk (resumable across sessions).
+- Checkpoint gates in the CLI: approve / revise / send-back (incl. to earlier
+  phases) / abort ([06](06-cli-ux.md)); harness-enforced, model can't self-approve.
+- Adaptive ceremony + configurable gate set (collapse phases for trivial tasks).
+- **Exit criteria:** a real task is taken from a one-line request through all six
+  gated phases to an approved, test-defined work decomposition — with send-back
+  correctly invalidating and regenerating downstream artifacts.
 
 ## M7 — Orchestration & the worker swarm
 **Goal:** scale out — many tiny workers on one codebase under a larger
@@ -82,6 +90,12 @@ loop.
   completed by parallel workers and integrated green, faster than the
   single-agent baseline — with failure containment (a derailed worker is
   discarded/reassigned, never corrupts the result).
+
+## M8 — On-device / Android backend
+**Goal:** fully offline on a phone, the showcase of the "small model" thesis.
+- On-device adapter (in-process or local runtime) ([02](02-model-backends.md)).
+- Tighter default budgets/timeouts for mobile constraints.
+- **Exit criteria:** a scoped task runs offline on-device with Gemma 4 E4B.
 
 ---
 

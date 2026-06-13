@@ -116,10 +116,11 @@ fixed model behavior.
 
 ## Human-in-the-loop (v1)
 
-v1 is interactive. The user can: approve/deny risky tool calls
-([04](04-tools.md)), interrupt the loop, edit or reject the plan, and answer
-when the harness escalates. Unattended autonomy is explicitly future work
-([07](07-roadmap.md)).
+v1 is interactive, at two granularities: **micro** — approve/deny risky tool
+calls ([04](04-tools.md)), interrupt the loop, answer escalations; and
+**macro** — sign off at the phase checkpoints of the staged workflow
+([09](09-workflow-and-checkpoints.md)). Unattended autonomy is explicitly future
+work ([07](07-roadmap.md)).
 
 ## This loop is also the unit of the swarm
 
