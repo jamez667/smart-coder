@@ -66,22 +66,51 @@ context budget, and its own isolated workspace. The swarm layer is a coordinator
 *above* that loop. This keeps the design composable: improve the agent loop and
 every worker improves.
 
+## Concurrency posture: parallel intelligence, serialized writes
+
+The hard lesson from production multi-agent systems ([10](10-prior-art.md)):
+naive parallel writers are **fragile** because agents lack shared global context —
+each makes locally-sensible but globally-incoherent choices, and independently-
+correct diffs can still break in combination (semantic conflicts). Cognition's
+distilled rule is **"writes stay single-threaded; multiple agents contribute
+intelligence."**
+
+So `dumb-coder` defaults to the **conservative** posture and treats aggressive
+parallel-write as an opt-in we validate empirically against the eval suite
+([07](07-roadmap.md)):
+
+- **Parallelize exploration & proposals** — many workers read, search, and
+  draft scoped changes concurrently in isolation (cheap, the swarm's real win).
+- **Serialize integration** — changes land into the shared mainline **one at a
+  time, through the orchestrator**, each gated by integration verification, so
+  the mainline always has a single coherent state.
+
+This keeps the throughput benefit (the slow part — reasoning over code — happens
+in parallel) while removing the riskiest failure mode (uncoordinated concurrent
+writes).
+
 ## Isolation: how N models edit one codebase safely
 
-The central hazard is many writers on the same files. Two modes:
+Under that posture, isolation has two modes:
 
-### Default — worktree-per-worker (parallel, isolated)
+### Default — worktree-per-worker (parallel work, serialized landing)
 Each worker gets its **own git worktree on its own branch** off a shared base
-commit. Workers edit freely in parallel without stepping on each other; the
-filesystem enforces isolation. The orchestrator integrates results by merging
-branches back (see Integration below). This is the default because it maximizes
-the cheap-parallelism payoff of small models.
+commit, and works in parallel without stepping on others — the filesystem
+enforces isolation. Their branches are then **integrated one at a time** by the
+orchestrator (see Integration below), not merged in an uncontrolled free-for-all.
+This captures the cheap-parallelism payoff of small models *without* concurrent
+writes to a shared mainline.
 
 ### Fallback — serialized shared workspace (for tightly-coupled work)
 When a task doesn't decompose into independent pieces, the swarm degrades
 gracefully to **one shared workspace with a file-lease queue**: a worker must
 hold a lease on the files it edits; the orchestrator serializes conflicting
 leases. Slower, but safe for changes that can't be cleanly partitioned.
+
+### Opt-in — full parallel-write (experimental)
+For workloads proven (via the eval suite) to decompose cleanly, the orchestrator
+may relax to fully concurrent integration. Off by default; enabled per-task via
+config once the gains are demonstrated to outweigh the conflict risk.
 
 The orchestrator chooses the mode per task based on how independent the subtasks
 are (and the user can force one via config).

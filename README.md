@@ -58,3 +58,4 @@ for the design. Start with the [overview](docs/specs/00-overview.md).
 - [07 — Roadmap & milestones](docs/specs/07-roadmap.md)
 - [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md)
 - [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md)
+- [10 — Prior art & references](docs/specs/10-prior-art.md)

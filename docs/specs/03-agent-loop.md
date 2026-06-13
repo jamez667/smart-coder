@@ -71,7 +71,8 @@ Two layers:
    - *Sanity* — did the tool actually change what the step claimed?
 2. **Gated, after edits:** run the project's build/test/lint (a verification
    tool, [04](04-tools.md)). Failures are fed back as observations and the step
-   re-attempts; persistent failure triggers re-plan or a user prompt.
+   re-attempts; persistent failure triggers re-plan or a user prompt. This
+   **auto test/lint-repair loop** is borrowed from aider ([10](10-prior-art.md)).
 
 ### STOP
 The loop ends when: the plan completes and verification passes; a budget is

@@ -64,6 +64,17 @@ problem — **getting a valid tool call out of the model**:
 
 This is central: small models emit malformed tool calls far more often than
 large ones, so wherever the backend can *enforce* structure, we use it.
+Constrained decoding turns the typical 1–5% parse-error rate into 0 and lets a
+small model perform like a much larger one on structured output — well-evidenced
+prior art ([10](10-prior-art.md)). Our **primary target, Gemma 4 E4B, has native
+function-calling**, so it can use the OpenAI-style path directly; the grammar/
+schema paths matter most for models that lack it.
+
+> **Caveat — the alignment tax.** Over-constraining can *degrade* a small model's
+> reasoning ("structure snowballing", [10](10-prior-art.md)). So constrain only
+> the **tool-call envelope** — let the model reason freely in an unconstrained
+> scratchpad first, then emit the structured call. Don't grammar-constrain the
+> thinking, only the action.
 
 ## Planned adapters (v1)
 

@@ -2,11 +2,15 @@
 
 ## Why this is the most important component
 
-A frontier model with a 200k window can absorb sloppy context. **Gemma 4 E4B
-class models often have an effective window of a few thousand tokens** and
-degrade fast as it fills. For `dumb-coder`, deciding *what goes into each prompt*
-is the difference between a working agent and a confused one. The Context Manager
-(`dc-context`) treats the window as a scarce, hard-budgeted resource.
+A frontier model with a 200k window can absorb sloppy context. Gemma 4 E4B
+actually advertises a **128K window** ([10](10-prior-art.md)) — but the
+**effective** usable context of a small model is reliably *less* than advertised,
+and quality degrades as the window fills (a small model gets *confused* by
+irrelevant context long before it runs out of tokens). So the discipline holds:
+for `dumb-coder`, deciding *what goes into each prompt* is the difference between
+a working agent and a confused one. The Context Manager (`dc-context`) treats the
+window as a scarce, hard-budgeted resource — budgeting against an **effective**
+limit (a configurable fraction of the advertised window), not the nominal max.
 
 ## The budget
 
@@ -45,6 +49,16 @@ repo lets the manager pull **only the relevant chunks**:
   hardware).
 - Inject the top-K chunks that fit the retrieval zone, each labeled with
   `path:line` so the model can ask to read more precisely.
+
+**Borrowed algorithm — the PageRank repo map (aider).** Rather than ad-hoc
+ranking, `dc-index` builds a **tree-sitter symbol-definition/-reference graph**
+over the repo and runs **PageRank** to score how central each symbol is, with
+boosts for identifiers mentioned in the current task/conversation (~10×) and for
+files already in play (~50×). The output is a compact, token-budgeted "map" of
+the *most-referenced* symbols — relevance precomputed from the code's actual
+dependency structure instead of asking a small model to navigate. This measurably
+beats naive file inclusion on edit accuracy and is a strong default for the
+relevance ranking above. See [10 — Prior art](10-prior-art.md).
 
 ### 2. Just-in-time, step-scoped context
 Context is rebuilt **per step**, not accumulated forever. When the loop moves to

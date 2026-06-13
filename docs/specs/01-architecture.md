@@ -94,7 +94,9 @@ Manager can pull in only what's relevant rather than dumping whole files.
 - **Events & logging.** Every step emits a structured event (`PlanCreated`,
   `ModelTurn`, `ToolCall`, `ToolResult`, `ContextCompacted`, `BudgetHit`,
   `Stopped`). The CLI renders these live; they're also written to a session log
-  for replay/debugging.
+  for replay/debugging. This **event-stream architecture** — all agent↔env
+  interaction as typed events through one hub — is borrowed from OpenHands
+  ([10](10-prior-art.md)).
 - **Budgets.** Token, wall-clock, step-count, and tool-call budgets are
   first-class and enforced by the orchestrator, not left to the model.
 - **Determinism knobs.** Temperature, seed, and sampling are pinned per session

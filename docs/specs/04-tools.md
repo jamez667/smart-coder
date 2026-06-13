@@ -8,7 +8,8 @@ Tools are how the model affects the world. For a small model, the tool design
 1. **Narrow & explicit beats broad & flexible.** A few sharply-scoped tools with
    strict schemas outperform a handful of powerful, open-ended ones. Small
    models pick the wrong tool and fill args poorly when the surface is large or
-   ambiguous.
+   ambiguous. This is SWE-agent's **Agent-Computer Interface** principle — design
+   the tool surface *for* the model ([10](10-prior-art.md)).
 2. **Structure is enforced, not requested.** Wherever the backend allows
    ([02](02-model-backends.md)), tool-call output is constrained by grammar/JSON
    schema so it's valid by construction. Otherwise, parse-and-repair.
