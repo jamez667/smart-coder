@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dc-proto",
+    "crates/dc-model",
+    "crates/dc-eval",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jamez667/dumb-coder"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

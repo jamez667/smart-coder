@@ -1,0 +1,10 @@
+# dumb-coder eval suite (M1). Each task is a red->green coding problem.
+# Paths are resolved relative to this file. See docs/specs/11-testing-and-tdd.md.
+
+[[tasks]]
+id = "even-parity"
+description = "Fix is_even in impl.sh so the parity contract test passes."
+fixture = "tasks/even-parity/fixture"
+solution = "tasks/even-parity/solution"
+verify_cmd = "sh test.sh"
+contract_tests = ["test.sh"]

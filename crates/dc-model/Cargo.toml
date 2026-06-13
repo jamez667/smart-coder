@@ -1,0 +1,10 @@
+[package]
+name = "dc-model"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model Gateway: the pluggable ModelBackend trait and adapters."
+
+[dependencies]
+dc-proto = { path = "../dc-proto" }
