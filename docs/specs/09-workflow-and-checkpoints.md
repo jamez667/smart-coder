@@ -131,6 +131,12 @@ The **orchestrator** model ([08](08-orchestration-and-swarm.md)) runs Phases 1�
 to execute. So the workflow is the connective tissue from "a request" to "an
 orchestrated swarm building against approved, test-defined work."
 
+This is the **tiered model assignment** ([02](02-model-backends.md)) in action:
+the reasoning-heavy planning phases — including **authoring the tests** in Phase 4
+— run on the biggest allowed model (T1, the architect), while the high-volume,
+test-guarded implementation runs on the tiny, fast workers (T2). Hard to define,
+cheap to satisfy.
+
 ## Scaling the ceremony to the task
 
 Full six-phase ceremony is overkill for "fix this typo." The workflow is

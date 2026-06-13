@@ -9,8 +9,14 @@ of ground — cheaply and in parallel. This is the second core bet of
 [00](00-overview.md)):
 
 > One **orchestrator** model (the biggest we allow — up to the 12B ceiling)
-> plans, decomposes, assigns, and integrates. A **swarm of worker** models
-> (E4B-class, the smallest) each execute one small subtask in isolation.
+> plans, decomposes, assigns, **authors the tests**, and integrates. A **swarm of
+> worker** models (E4B-class, the smallest) each execute one small subtask in
+> isolation, making those tests pass.
+
+This is the **tiered model assignment** of [02](02-model-backends.md): the
+orchestrator is the T1 "architect" tier; workers are the T2 "coder" tier. Match
+the model to the difficulty of the work — define intent with the big model, fill
+it in with the cheap ones.
 
 This plays directly to small-model strengths: a worker only ever sees a tight,
 single-purpose task with minimal context (exactly the regime small models handle

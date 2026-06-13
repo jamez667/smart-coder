@@ -27,6 +27,14 @@ opinion of its own work.
 In short: tests turn "trust the model" into "trust the test runner." That swap is
 what makes a 4B-class model viable for real edits.
 
+**Who writes the tests matters.** Authoring a good test is *harder* than passing
+it — it pins down intent and edge cases, which is exactly the reasoning a tiny
+model is worst at. So under the **tiered model assignment** ([02](02-model-backends.md)),
+test authoring (Phase 4) is **T1 "architect" work** (the biggest allowed model),
+while making the tests pass is **T2 "coder" work** for the tiny fast workers. The
+expensive judgment is spent defining correctness once; the cheap models race to
+satisfy it.
+
 ## The cycle: red → green → refactor (harness-driven)
 
 ```

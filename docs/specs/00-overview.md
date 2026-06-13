@@ -72,10 +72,13 @@ major design decision in `dumb-coder` is a direct response to one of these:
    on it.
 5. **Everything is inspectable.** Plans, prompts, tool calls, and context
    windows are all visible and logged.
-6. **Scale out, not up.** When one tiny model isn't enough, add more of them.
-   Prefer a *swarm* of narrowly-scoped small workers under a single larger
-   orchestrator over reaching for a bigger model. See
-   [08 — Orchestration & the worker swarm](08-orchestration-and-swarm.md).
+6. **Scale out, not up — and tier by difficulty.** When one tiny model isn't
+   enough, add more of them. Prefer a *swarm* of narrowly-scoped small workers
+   under a single larger orchestrator over reaching for a bigger model — and
+   **match model size to cognitive load**: the biggest allowed model defines
+   intent (architecture, tests), the tiny fast ones fill it in. See
+   [08 — Orchestration & the worker swarm](08-orchestration-and-swarm.md) and
+   [02 — Tiered model assignment](02-model-backends.md).
 7. **Plan in phases, gate with humans.** Move through specs → architecture →
    layout → test-first stages → implementation plan → work decomposition, with a
    human checkpoint between each. Catch mistakes where they're cheap, before code

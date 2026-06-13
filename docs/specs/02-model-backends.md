@@ -116,6 +116,51 @@ models if desired. This is the mechanism behind the **orchestrator vs. worker**
 split in the swarm — the orchestrator is just a larger profile (up to the 12B
 ceiling) and workers are tiny profiles ([08](08-orchestration-and-swarm.md)).
 
+## Tiered model assignment
+
+Named profiles enable the most important routing decision in `dumb-coder`:
+**match model capability to the cognitive difficulty of the work.** The hard,
+judgment-heavy work goes to the biggest model we allow; the narrow, verifiable
+work goes to the smallest, fastest ones. Crucially, **writing a good test or
+architecture is harder than writing code against it** — defining intent precisely
+needs reasoning; making an approved failing test go green is constrained and
+checkable ([11](11-testing-and-tdd.md)).
+
+| Tier | Model (default) | Does | Why this tier |
+| --- | --- | --- | --- |
+| **T1 — architect** | biggest allowed (≤12B, e.g. a 12B / Gemma 4 31B) | architecture, layout, **test authoring**, work decomposition, conflict arbitration & integration | defining *what correct means* — highest reasoning load, lowest volume |
+| **T2 — coder** | tiny & fast (Gemma 4 E4B) | implement code to make approved tests pass; scoped edits | narrow, verifiable, high volume — perfect for cheap parallel workers |
+| **T0 — scout** *(optional)* | tiniest / specialized | read-only search & navigation, mechanical lookups | trivial, ultra-cheap, runs constantly |
+
+This maps directly onto the workflow ([09](09-workflow-and-checkpoints.md)) and
+the swarm ([08](08-orchestration-and-swarm.md)): planning Phases 2–6 run on T1
+(the orchestrator), execution runs on a swarm of T2 workers, and T1 also does
+integration/arbitration.
+
+```toml
+# Profiles wire the tiers to concrete models/backends.
+[profile.architect]   # T1
+backend = "ollama"
+model   = "gemma4:31b"        # the "bigger model" for architecture + tests
+
+[profile.coder]       # T2
+backend = "ollama"
+model   = "gemma4:e4b"        # small + fast, runs many in parallel
+
+[profile.scout]       # T0 (optional)
+model   = "gemma4:e2b"
+
+[tiers]
+architect = "architect"
+coder     = "coder"
+scout     = "scout"           # falls back to coder if unset
+```
+
+Degenerate cases are first-class: point every tier at the **same** model on
+constrained hardware (the tiering becomes role prompts only), or keep all tiers
+≤12B to preserve the no-frontier thesis, or — explicitly opting out of that
+thesis — set T1 to something larger. The split is config, not code.
+
 ## Tokenizer & budgeting
 
 Accurate token counts matter more on small models because the window is tiny.
