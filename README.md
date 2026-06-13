@@ -40,17 +40,19 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 
 ## Status
 
-📋 **Specification phase.** No implementation yet. See [`docs/specs/`](docs/specs/)
-for the design. Start with the [overview](docs/specs/00-overview.md).
+🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
+the [overview](docs/specs/00-overview.md)). First code landed: the **M1 eval
+harness** (`crates/`) — a TDD-enforcing, backend-agnostic scoreboard for red→green
+tasks (see [roadmap](docs/specs/07-roadmap.md)).
 
-## Key decisions (locked for v1)
+## Key decisions
 
 | Decision | Choice |
 | --- | --- |
-| Implementation language | **Rust** (single static binary, low overhead) |
-| Interface | **CLI / terminal** agent loop |
-| Inference backend | **Pluggable** — Ollama, llama.cpp, vLLM, on-device Android, any OpenAI-compatible server |
-| Model ceiling | ≤ 12B params; primary target **Gemma 4 E4B** |
+| Implementation language | **Rust** (portable core + thin per-platform shells) |
+| Interface | **CLI** core; **Android app** first client, **Windows client** later ([12](docs/specs/12-platform-clients.md)) |
+| Inference backend | **Pluggable** via `ModelBackend` — **AICore** on Android; Ollama / llama.cpp / vLLM / OpenAI-compatible elsewhere |
+| Model ceiling | ≤ 12B params; primary target **Gemma 4 E4B** (AICore runs it as Gemini Nano 4) |
 
 ## Spec index
 
@@ -65,4 +67,5 @@ for the design. Start with the [overview](docs/specs/00-overview.md).
 - [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md)
 - [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md)
 - [11 — Testing & TDD](docs/specs/11-testing-and-tdd.md)
+- [12 — Platform clients (Android app, Windows) & AICore](docs/specs/12-platform-clients.md)
 - [10 — Prior art & references](docs/specs/10-prior-art.md)

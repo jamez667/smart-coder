@@ -2,12 +2,16 @@
 //! runtime (see spec 02-model-backends).
 //!
 //! Everything above this crate talks to the [`ModelBackend`] trait, never to a
-//! concrete runtime. For M1 we ship two implementations:
+//! concrete runtime. So far we ship three implementations:
 //!
-//! * [`AndroidCoreBackend`] — the **primary target** (AICore / LiteRT-LM,
-//!   on-device Gemma 4). It compiles everywhere but only *runs* on an Android
-//!   device, so on other hosts it returns a clear, actionable error rather than
-//!   pretending.
+//! * [`CallbackBackend`] — the **integration seam** (spec 12): inference is an
+//!   injected closure. On Android the closure is a JNI up-call into the Kotlin
+//!   AICore wrapper; on the desktop/tests it's any local function. Fully testable
+//!   on the host without a device.
+//! * [`AndroidCoreBackend`] — the on-device target's *self-contained* form
+//!   (AICore / LiteRT-LM, Gemma 4). It compiles everywhere but only *runs* on an
+//!   Android device, so on other hosts it returns a clear, actionable error
+//!   rather than pretending.
 //! * [`MockBackend`] — a scriptable stand-in so the harness and tests run in
 //!   CI / on a dev box where no device is present.
 //!
@@ -235,6 +239,66 @@ impl ModelBackend for MockBackend {
     }
 }
 
+/// A backend whose generation is delegated to an injected closure.
+///
+/// This is the **integration seam for the on-device Android target** (spec 12):
+/// the Rust agent core stays platform-agnostic, and the actual inference is
+/// supplied from outside. On Android, the closure performs a JNI up-call into the
+/// Kotlin ML Kit GenAI / AICore wrapper and returns the generated text; in tests
+/// and on the desktop it can be any local function. Because the closure is just
+/// `Fn(&GenerateRequest) -> Result<GenerateResponse>`, the whole contract is
+/// exercisable on the host without an Android device.
+pub struct CallbackBackend<F> {
+    name: String,
+    caps: Capabilities,
+    generate: F,
+}
+
+impl<F> CallbackBackend<F>
+where
+    F: Fn(&GenerateRequest) -> Result<GenerateResponse>,
+{
+    /// Build a callback backend with the given name, capabilities, and closure.
+    pub fn new(name: impl Into<String>, caps: Capabilities, generate: F) -> Self {
+        Self {
+            name: name.into(),
+            caps,
+            generate,
+        }
+    }
+
+    /// Convenience constructor matching the Android-core capability profile
+    /// (on-device, native tool-calling, Gemma 4's 128K window).
+    pub fn android_core(generate: F) -> Self {
+        Self::new(
+            "android-core",
+            Capabilities {
+                max_context_tokens: 128_000,
+                native_tool_calling: true,
+                on_device: true,
+            },
+            generate,
+        )
+    }
+}
+
+impl<F> ModelBackend for CallbackBackend<F>
+where
+    F: Fn(&GenerateRequest) -> Result<GenerateResponse>,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.caps.clone()
+    }
+
+    fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        (self.generate)(req)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +339,51 @@ mod tests {
         assert!(caps.on_device);
         assert!(caps.native_tool_calling);
         assert_eq!(caps.max_context_tokens, 128_000);
+    }
+
+    #[test]
+    fn callback_backend_delegates_to_the_injected_closure() {
+        // Stands in for the Android JNI up-call into Kotlin/AICore: here the
+        // "model" just echoes the last user message in upper case.
+        let backend = CallbackBackend::android_core(|req: &GenerateRequest| {
+            let last = req
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            Ok(GenerateResponse {
+                content: last.to_uppercase(),
+            })
+        });
+
+        assert_eq!(backend.name(), "android-core");
+        assert!(backend.capabilities().on_device);
+
+        let req = GenerateRequest::new(vec![Message::user("ping")]);
+        assert_eq!(backend.generate(&req).unwrap().content, "PING");
+    }
+
+    #[test]
+    fn callback_backend_propagates_errors_from_the_closure() {
+        // Models the AICore feature being unavailable / download pending.
+        let backend = CallbackBackend::android_core(|_req: &GenerateRequest| {
+            Err(DcError::Backend("AICore feature not yet downloaded".into()))
+        });
+        let req = GenerateRequest::new(vec![Message::user("hi")]);
+        assert!(backend.generate(&req).is_err());
+    }
+
+    #[test]
+    fn callback_backend_is_usable_through_the_trait_object() {
+        // Confirms the seam works behind `&dyn ModelBackend`, which is how the
+        // agent loop will hold whatever backend it's handed.
+        let backend = CallbackBackend::android_core(|_r| {
+            Ok(GenerateResponse {
+                content: "ok".into(),
+            })
+        });
+        let dynamic: &dyn ModelBackend = &backend;
+        let req = GenerateRequest::new(vec![Message::user("x")]);
+        assert_eq!(dynamic.generate(&req).unwrap().content, "ok");
     }
 }

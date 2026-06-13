@@ -93,15 +93,28 @@ loop.
   single-agent baseline — with failure containment (a derailed worker is
   discarded/reassigned, never corrupts the result).
 
-## M8 — On-device / Android backend
-**Goal:** fully offline on a phone, the showcase of the "small model" thesis.
-- On-device adapter with two flavors ([02](02-model-backends.md), [10](10-prior-art.md)):
-  **AICore** (OS-managed Gemma 4 / Gemini Nano 4, flagship devices) and
-  **LiteRT-LM** (self-hosted Gemma 4 E4B/E2B, broad devices); prefer AICore,
-  fall back to LiteRT-LM.
-- Tighter default budgets/timeouts for mobile constraints.
-- **Exit criteria:** a scoped task runs fully offline on-device with Gemma 4 —
-  via AICore on a flagship and via self-hosted LiteRT-LM on a mid-range device.
+## M8 — Android app + AICore (first platform client)
+**Goal:** the showcase of the "small model" thesis — fully on-device on a phone,
+as a **native Android app** using **AICore** (Gemma 4 / Gemini Nano 4) via ML Kit
+GenAI ([12](12-platform-clients.md), [10](10-prior-art.md)).
+- `dc-android` cdylib (Rust core via cargo-ndk) + Kotlin app shell.
+- AICore inference wired through `dc_model::CallbackBackend` over the JNI bridge
+  ([02](02-model-backends.md)).
+- Android effects/tools: app-scoped working directory (no arbitrary shell);
+  platform abstraction for filesystem ([04](04-tools.md)).
+- Tighter default budgets/timeouts for mobile.
+- **Exit criteria:** a scoped task runs fully offline on a device via AICore.
+- *(Stretch: self-hosted LiteRT-LM fallback for non-AICore devices.)*
+
+## M9 — Windows client (flexible)
+**Goal:** the capable desktop client — same Rust core, full tools, flexible
+backends ([12](12-platform-clients.md)).
+- Desktop shell (CLI per [06](06-cli-ux.md); GUI optional) for `x86_64-pc-windows-msvc`.
+- Flexible backends (Ollama / llama.cpp / OpenAI-compat) incl. up to the 12B
+  ceiling, so this client can act as the **T1 orchestrator** ([02](02-model-backends.md)).
+- Full filesystem + shell with the permission layer ([04](04-tools.md)).
+- **Exit criteria:** completes a real multi-file TDD task on Windows; optionally
+  orchestrates an Android device as an on-device worker ([08](08-orchestration-and-swarm.md)).
 
 ---
 

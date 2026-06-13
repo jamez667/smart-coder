@@ -101,6 +101,11 @@ schema paths matter most for models that lack it.
    feature flag; thinnest viable adapter first. (A desktop/CPU `llama.cpp` or
    `MLC` build covers the same "in-process, offline" need off-phone.)
 
+   On Android, AICore is reachable only from a native app via ML Kit GenAI, so the
+   adapter is realised as a **callback backend** (`CallbackBackend`) whose closure
+   crosses a JNI bridge into the Kotlin AICore wrapper — keeping the Rust core
+   platform-agnostic. See [12 — Platform clients](12-platform-clients.md).
+
 > A backend can technically point at a large model, but `dumb-coder` is
 > developed and benchmarked against small ones — that's the whole premise.
 
