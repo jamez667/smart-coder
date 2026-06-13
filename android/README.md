@@ -26,9 +26,10 @@ Kotlin UI ─▶ Rust core (.so) ──(needs a generation)──▶ JNI callbac
 
 1. Add Rust Android targets: `rustup target add aarch64-linux-android` (+ other ABIs).
 2. Install [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk): `cargo install cargo-ndk`.
-3. Build the core as a shared lib per ABI and place the `.so`s into the Gradle
-   module's `src/main/jniLibs/<abi>/` (a `dc-android` cdylib crate exposing the
-   JNI entry points is future work — see spec 12).
+3. Build the **`dc-android`** crate (the cdylib exposing the JNI entry points —
+   `crates/dc-android`, already in the workspace) as a shared lib per ABI, e.g.
+   `cargo ndk -t arm64-v8a build --release -p dc-android`, and place the resulting
+   `libdc_android.so` into the Gradle module's `src/main/jniLibs/<abi>/`.
 4. Add the ML Kit GenAI dependency to the app `build.gradle` (confirm the current
    artifact id from Google's docs).
 5. Build the APK with Gradle and run on a device that supports AICore (flagship

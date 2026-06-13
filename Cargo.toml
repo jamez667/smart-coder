@@ -5,6 +5,7 @@ members = [
     "crates/dc-model",
     "crates/dc-core",
     "crates/dc-eval",
+    "crates/dc-android",
 ]
 
 [workspace.package]

@@ -23,11 +23,15 @@ class NativeBridge(private val backend: AiCoreBackend) {
     }
 
     /**
-     * Kotlin -> Rust. Hands a task to the agent core. The core will call
-     * [onGenerate] (below) whenever it needs the model. Returns a result/summary
-     * string. Signature is illustrative; align with the Rust export.
+     * Kotlin -> Rust. Hands a task + the app-scoped working directory to the
+     * agent core. The core calls [onGenerate] (below) whenever it needs the
+     * model, and returns a summary string.
+     *
+     * Matches the Rust export
+     * `Java_dev_dumbcoder_android_NativeBridge_runTask(env, this, String, String)`
+     * in the `dc-android` crate.
      */
-    external fun runTask(task: String): String
+    external fun runTask(task: String, workspace: String): String
 
     /**
      * Rust -> Kotlin callback. Invoked by the core for each model turn. Runs the
