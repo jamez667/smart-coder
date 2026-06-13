@@ -27,6 +27,31 @@ Sources: [Ollama `gemma4:e4b`](https://ollama.com/library/gemma4:e4b),
 [Google AI — Gemma 4 overview](https://ai.google.dev/gemma/docs/core),
 [InfoWorld](https://www.infoworld.com/article/4156597/googles-gemma-4-shines-on-local-systems-both-big-and-small.html).
 
+## On-device Android: AICore vs LiteRT-LM
+
+Two ways to run Gemma 4 locally on Android, both feeding the on-device adapter
+([02](02-model-backends.md), M8 in [07](07-roadmap.md)):
+
+- **AICore (OS-managed).** Android's **AICore** system service ships and manages
+  the model on the device's behalf; on supported devices **Gemma 4 runs as
+  Gemini Nano 4** — so AICore *is* a Gemma 4 path, not a departure from it. No
+  weights to bundle, hardware-accelerated, ~4× faster / ~60% less battery than
+  the prior gen. **Catch:** flagship-only (~12GB RAM, supported SoC, Gemini Nano
+  v3+ on board). The recommended *production* path where the hardware exists.
+- **LiteRT-LM (self-hosted).** Ship and run **Gemma 4 E4B/E2B** ourselves via
+  **LiteRT-LM** (the recommended successor to the now-maintenance-mode MediaPipe
+  LLM Inference API). Models are published ready-to-run
+  (`litert-community/gemma-4-E4B-it-litert-lm`). Broader device reach and full
+  control; cost is bundling weights.
+
+**Our posture:** prefer AICore when present, fall back to self-hosted LiteRT-LM —
+"runs broadly on modest hardware" beats "fastest on flagships only."
+
+Sources: [Announcing Gemma 4 in the AICore Developer Preview](https://android-developers.googleblog.com/2026/04/AI-Core-Developer-Preview.html),
+[Gemma 4 = engine behind Gemini Nano on Android](https://gadgetbond.com/google-gemma-4-android-local-agentic-ai-intelligence/),
+[LLM Inference guide for Android (Google AI Edge)](https://ai.google.dev/edge/mediapipe/solutions/genai/llm_inference/android),
+[gemma-4-E4B-it-litert-lm](https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm).
+
 ## Feasibility evidence
 
 - **Harness >> raw model.** Surveys are blunt: "every model performs

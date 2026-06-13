@@ -95,9 +95,13 @@ loop.
 
 ## M8 — On-device / Android backend
 **Goal:** fully offline on a phone, the showcase of the "small model" thesis.
-- On-device adapter (in-process or local runtime) ([02](02-model-backends.md)).
+- On-device adapter with two flavors ([02](02-model-backends.md), [10](10-prior-art.md)):
+  **AICore** (OS-managed Gemma 4 / Gemini Nano 4, flagship devices) and
+  **LiteRT-LM** (self-hosted Gemma 4 E4B/E2B, broad devices); prefer AICore,
+  fall back to LiteRT-LM.
 - Tighter default budgets/timeouts for mobile constraints.
-- **Exit criteria:** a scoped task runs offline on-device with Gemma 4 E4B.
+- **Exit criteria:** a scoped task runs fully offline on-device with Gemma 4 —
+  via AICore on a flagship and via self-hosted LiteRT-LM on a mid-range device.
 
 ---
 

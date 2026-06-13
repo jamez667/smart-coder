@@ -85,9 +85,21 @@ schema paths matter most for models that lack it.
    Ollama-specific options. First-class because it's the easiest local setup.
 3. **llama.cpp (direct/server)** — to expose **GBNF grammar** constrained
    decoding, which gives the most reliable tool calls on tiny models.
-4. **On-device / Android** — run the model in-process or via a local runtime
-   (e.g. an MLC/llama.cpp build) so the tool can operate fully offline on a
-   phone. Likely behind a feature flag; thinnest viable adapter first.
+4. **On-device / Android** — run the model fully offline on a phone, the
+   showcase of the small-model thesis. Two flavors behind one adapter
+   ([10](10-prior-art.md)):
+   - **AICore (OS-managed)** — call Android's **AICore** system service, which
+     runs **Gemma 4 as Gemini Nano 4** on-device: most efficient (no weights to
+     ship, hardware-accelerated, big battery wins), but **flagship-only**
+     (~12GB RAM + supported SoC). Preferred where available.
+   - **LiteRT-LM (self-hosted)** — ship and run **Gemma 4 E4B/E2B** ourselves via
+     the **LiteRT-LM** runtime (the recommended successor to MediaPipe LLM
+     Inference). Broader device support and full control, at the cost of bundling
+     weights.
+   The adapter **prefers AICore when present and falls back to self-hosted
+   LiteRT-LM** — consistent with "runs broadly on modest hardware." Behind a
+   feature flag; thinnest viable adapter first. (A desktop/CPU `llama.cpp` or
+   `MLC` build covers the same "in-process, offline" need off-phone.)
 
 > A backend can technically point at a large model, but `dumb-coder` is
 > developed and benchmarked against small ones — that's the whole premise.
