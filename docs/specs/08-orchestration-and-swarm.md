@@ -136,7 +136,10 @@ are (and the user can force one via config).
 Integration is where multi-writer risk is actually paid down:
 
 1. Worker finishes → its branch passes the worker's **local** verification
-   ([04](04-tools.md)) before it's offered for integration. Failing work never
+   ([04](04-tools.md)) before it's offered for integration: its **contract tests
+   are green** and the suite still passes ([11](11-testing-and-tdd.md)). The
+   orchestrator hands each worker a subtask *and its frozen tests*; "done" is
+   objectively the test result, not the worker's claim. Failing work never
    reaches the merge.
 2. Orchestrator merges branches in dependency order. Clean merges proceed
    automatically.

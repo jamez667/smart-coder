@@ -64,7 +64,8 @@ Kept deliberately small. Each does one thing.
 - `run_verification` — run the project's configured build/test/lint command.
   This is the verify gate from [03](03-agent-loop.md); separated from
   `run_command` so the harness can call it on its own and parse results
-  predictably.
+  predictably. Returns **structured per-test pass/fail + failure messages**, not
+  a raw log — the spine of the TDD loop ([11](11-testing-and-tdd.md)).
 
 ### Version control (Mutating)
 - `git_status` / `git_diff` (ReadOnly) — ground the model in actual repo state.
@@ -93,6 +94,9 @@ execution:
   model can't grant itself permission.
 - All actions are **sandboxed to the workspace root**; path traversal outside it
   is rejected.
+- **Approved contract tests are frozen.** `edit_file`/`delete` on a human-approved
+  test path is **denied** for worker models and flagged to the orchestrator/human
+  — a worker must make tests pass, never weaken them ([11](11-testing-and-tdd.md)).
 
 ## Tool results & the model
 

@@ -33,15 +33,17 @@ under control. Everything else builds on a working, reliable single-step loop.
 - **Exit criteria:** multi-turn tasks stay coherent on an 8k window without
   blowing the budget; logged prompts show only relevant context.
 
-## M3 — Editing & verification (closing the loop)
-**Goal:** the agent actually changes code and proves it.
+## M3 — Editing & TDD verification (closing the loop)
+**Goal:** the agent actually changes code and *proves* it via tests.
 - Mutating tools: anchored `edit_file`, `create_file`, atomic apply+record.
-- `run_command` + `run_verification` behind the permission layer
-  ([04](04-tools.md)).
-- VERIFY gate: build/test/lint feedback re-enters the loop ([03](03-agent-loop.md)).
-- Permission prompts + workspace sandboxing in the CLI ([06](06-cli-ux.md)).
-- **Exit criteria:** completes a real "edit a few files + make tests pass" task
-  on a sample repo, with verification gating success.
+- `run_command` + `run_verification` with **structured per-test results**, behind
+  the permission layer ([04](04-tools.md)).
+- **TDD loop:** verify-red-first → implement → green → whole-suite gate
+  ([11](11-testing-and-tdd.md)); test feedback re-enters the loop ([03](03-agent-loop.md)).
+- Frozen contract-test protection + permission prompts + workspace sandboxing
+  ([04](04-tools.md), [06](06-cli-ux.md)).
+- **Exit criteria:** given a failing unit test, the agent drives it red→green
+  without breaking the suite or weakening the test — on a sample repo.
 
 ## M4 — Planning & recovery
 **Goal:** survive multi-step tasks and the model's own mistakes.
@@ -111,6 +113,10 @@ loop.
 - **LoRA/adapter experiments** — light task-specific tuning of the small model.
 
 ## Cross-cutting throughout
+- **We dogfood TDD.** Every milestone lands with unit tests for its components,
+  written test-first ([11](11-testing-and-tdd.md)) — the harness that drives
+  tiny models red→green is itself built red→green. Unit tests are part of each
+  milestone's definition of done.
 - A **fixed task suite** (sample repos + graded tasks) as the regression
   benchmark; tracked from M1 so harness changes are measured against real
   small-model behavior.

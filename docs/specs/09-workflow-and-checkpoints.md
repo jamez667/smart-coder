@@ -70,10 +70,13 @@ files, and their responsibilities — derived from the architecture.
 
 ### Phase 4 — Stage breakdown (test-first / TDD)
 **Produces:** the work split into **incremental stages**, each stage defined
-**by its acceptance tests written first**. A stage's definition of done is "these
-tests go green." This is where TDD enters: tests are specified before any
-implementation is planned.
-**Checkpoint:** confirm the staging order and that the tests capture the intent.
+**by its unit tests written first** (full TDD, [11](11-testing-and-tdd.md)). A
+stage's definition of done is "these tests go green." This is where TDD enters:
+tests are specified before any implementation is planned, and the harness
+verifies each new test actually **fails first** (no vacuous tests).
+**Checkpoint:** confirm the staging order and that the tests capture the intent —
+**approving the tests here freezes them as the contract** workers must satisfy
+(and may not weaken) downstream ([08](08-orchestration-and-swarm.md), [11](11-testing-and-tdd.md)).
 
 ### Phase 5 — Implementation plan
 **Produces:** for each stage, the concrete plan to make its tests pass — the

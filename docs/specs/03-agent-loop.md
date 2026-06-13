@@ -70,9 +70,11 @@ Two layers:
    - *Budget checks* — token / step / wall-clock / tool-call budgets.
    - *Sanity* — did the tool actually change what the step claimed?
 2. **Gated, after edits:** run the project's build/test/lint (a verification
-   tool, [04](04-tools.md)). Failures are fed back as observations and the step
-   re-attempts; persistent failure triggers re-plan or a user prompt. This
-   **auto test/lint-repair loop** is borrowed from aider ([10](10-prior-art.md)).
+   tool, [04](04-tools.md)). The **tests are the primary signal** — under TDD the
+   step's target is a specific failing test going green ([11](11-testing-and-tdd.md)).
+   Failures are fed back as observations and the step re-attempts; persistent
+   failure triggers re-plan or a user prompt. This **auto test/lint-repair loop**
+   is borrowed from aider ([10](10-prior-art.md)).
 
 ### STOP
 The loop ends when: the plan completes and verification passes; a budget is

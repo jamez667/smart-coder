@@ -80,3 +80,7 @@ major design decision in `dumb-coder` is a direct response to one of these:
    layout → test-first stages → implementation plan → work decomposition, with a
    human checkpoint between each. Catch mistakes where they're cheap, before code
    is written. See [09 — Workflow & human checkpoints](09-workflow-and-checkpoints.md).
+8. **Tests are the control system.** Full TDD, mandatory at the unit level: a
+   failing test defines every unit of work, and "done" is green. The test is the
+   objective oracle a small model lacks — trust the test runner, not the model.
+   See [11 — Testing & TDD](11-testing-and-tdd.md).

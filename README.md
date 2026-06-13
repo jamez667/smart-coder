@@ -22,6 +22,12 @@ breakdown → implementation plan → work decomposition — with a **human chec
 between each**. The agent works autonomously within a phase and stops for
 sign-off at the boundary. See [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md).
 
+The fourth bet: **tests are the control system.** Full TDD, mandatory at the unit
+level — every unit of work is defined by a failing test *before* it's
+implemented, and "done" means the test goes green. A test is the unambiguous,
+machine-checkable oracle a dumb model lacks: it turns "trust the model" into
+"trust the test runner." See [11 — Testing & TDD](docs/specs/11-testing-and-tdd.md).
+
 ## Why small models?
 
 - **Local & private** — runs on a laptop, a homelab box, or even an Android
@@ -58,4 +64,5 @@ for the design. Start with the [overview](docs/specs/00-overview.md).
 - [07 — Roadmap & milestones](docs/specs/07-roadmap.md)
 - [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md)
 - [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md)
+- [11 — Testing & TDD](docs/specs/11-testing-and-tdd.md)
 - [10 — Prior art & references](docs/specs/10-prior-art.md)
