@@ -1,49 +1,68 @@
 /*
- * AiCoreBackend — wraps on-device Gemini Nano (Gemma 4) via the ML Kit GenAI
- * APIs, exposed as a blocking generate() that the Rust core calls over JNI.
+ * AiCoreBackend — on-device text generation via the ML Kit GenAI Prompt API
+ * (Gemini Nano / Gemma 4 through AICore), exposed as a blocking generate() that
+ * the Rust core calls over JNI.
  *
- * STATUS: ILLUSTRATIVE REFERENCE — NOT COMPILED OR TESTED HERE.
- * The exact ML Kit GenAI class/method names, the Gradle artifact, and the
- * availability/download flow MUST be confirmed against Google's current docs:
- *   https://developers.google.com/ml-kit/genai/prompt/android
- * The structure (check availability -> ensure downloaded -> generate) is stable;
- * the precise API surface is what to verify.
+ * STATUS: REFERENCE — NOT COMPILED OR TESTED HERE (no Android SDK/device in CI).
+ * The API surface below matches the ML Kit GenAI Prompt API as of mid-2026:
+ *   dependency: com.google.mlkit:genai-prompt:1.0.0-beta2   (beta; may change)
+ *   docs: https://developers.google.com/ml-kit/genai/prompt/android/get-started
+ *   ref:  https://developers.google.com/android/reference/kotlin/com/google/mlkit/genai/prompt/GenerativeModel
+ *   sample: https://github.com/googlesamples/mlkit/tree/master/android/genai
+ * VERIFY the download-feature flow and exact package names against the current
+ * beta — those are the parts most likely to drift.
  */
 package dev.dumbcoder.android
 
-import android.content.Context
+import com.google.mlkit.genai.common.FeatureStatus
+import com.google.mlkit.genai.prompt.Generation
+import com.google.mlkit.genai.prompt.GenerativeModel
+import com.google.mlkit.genai.prompt.generateContentRequest
+import kotlinx.coroutines.runBlocking
 
 /**
- * Thin wrapper over ML Kit GenAI / AICore.
+ * Thin wrapper over the ML Kit GenAI Prompt API.
  *
- * ML Kit GenAI is asynchronous. The JNI callback that the Rust core invokes is
- * expected to block until a result is ready, so [generateBlocking] bridges the
- * async API to a synchronous return. Call it OFF the main thread (JNI native
- * calls already run on a worker thread in our design).
+ * ML Kit GenAI is asynchronous (Kotlin coroutines). The JNI callback that the
+ * Rust core invokes is synchronous, so [generateBlocking] bridges with
+ * `runBlocking`. Call it OFF the main thread — JNI native calls in our design run
+ * on a worker thread, so this is fine.
  */
-class AiCoreBackend(private val context: Context) {
+class AiCoreBackend {
 
-    /**
-     * Run a single non-streaming generation and return the text.
-     *
-     * Pseudocode against ML Kit GenAI (verify names):
-     *   1. val model = Generation.getClient(options)            // or GenerativeModel(...)
-     *   2. check feature status; if downloadable, trigger download and await
-     *   3. val result = model.generateContent(prompt).await()   // Tasks/coroutine
-     *   4. return result.text
-     *
-     * On failure (feature unavailable, download pending, device unsupported)
-     * throw; the Rust side maps the exception to a DcError::Backend so the agent
-     * loop can react (e.g. surface to the user) rather than crashing.
-     */
-    fun generateBlocking(prompt: String, maxTokens: Int, temperature: Float): String {
-        // TODO: implement against the current ML Kit GenAI Prompt API.
-        throw NotImplementedError("wire to ML Kit GenAI Prompt API (AICore)")
+    // Created lazily; reused across turns.
+    private val model: GenerativeModel by lazy { Generation.getClient() }
+
+    /** True if the on-device feature is ready (already downloaded). */
+    fun isAvailable(): Boolean = runBlocking {
+        model.checkStatus() == FeatureStatus.AVAILABLE
     }
 
-    /** True if AICore/Gemini Nano is supported and ready on this device. */
-    fun isAvailable(): Boolean {
-        // TODO: ML Kit GenAI feature-status check.
-        return false
+    /**
+     * Ensure the model is downloaded, then run a single non-streaming generation
+     * and return the text.
+     *
+     * `maxTokens`/`temperature` are accepted from the core for forward
+     * compatibility; the current Prompt API beta exposes limited generation
+     * config, so they may be applied via the request builder or ignored — wire
+     * to GenerationConfig if/when available.
+     */
+    fun generateBlocking(prompt: String, maxTokens: Int, temperature: Float): String = runBlocking {
+        when (model.checkStatus()) {
+            FeatureStatus.UNAVAILABLE ->
+                throw IllegalStateException("AICore/Gemini Nano not supported on this device")
+            FeatureStatus.DOWNLOADABLE -> {
+                // TODO: confirm the exact download API/await in the current beta.
+                // The get-started guide downloads the feature and reports progress;
+                // block here until it completes (or throws).
+                model.downloadFeature() // <-- VERIFY: method name / awaiting completion
+            }
+            FeatureStatus.AVAILABLE -> { /* ready */ }
+            else -> { /* treat unknown as ready and let generateContent surface errors */ }
+        }
+
+        val request = generateContentRequest { text(prompt) }
+        val result = model.generateContent(request) // suspend
+        result.text
     }
 }

@@ -30,8 +30,9 @@ Kotlin UI ─▶ Rust core (.so) ──(needs a generation)──▶ JNI callbac
    `crates/dc-android`, already in the workspace) as a shared lib per ABI, e.g.
    `cargo ndk -t arm64-v8a build --release -p dc-android`, and place the resulting
    `libdc_android.so` into the Gradle module's `src/main/jniLibs/<abi>/`.
-4. Add the ML Kit GenAI dependency to the app `build.gradle` (confirm the current
-   artifact id from Google's docs).
+4. Add the ML Kit GenAI Prompt API dependency to the app `build.gradle`:
+   `implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")` (beta — confirm
+   the current version), plus `kotlinx-coroutines`. Requires `minSdk 26`.
 5. Build the APK with Gradle and run on a device that supports AICore (flagship
    SoC, sufficient RAM — see spec 10).
 
