@@ -41,9 +41,18 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). First code landed: the **M1 eval
-harness** (`crates/`) — a TDD-enforcing, backend-agnostic scoreboard for red→green
-tasks (see [roadmap](docs/specs/07-roadmap.md)).
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 30 tests):
+
+- **M1 eval harness** (`dc-eval`) — a TDD-enforcing, backend-agnostic scoreboard
+  for red→green tasks (verify-red-first, frozen contract tests, green-after-solve).
+- **M0 agent loop** (`dc-core`) — a bounded act→observe loop that drives any
+  `ModelBackend` through tool calls to edit files; plugs into the harness as
+  `AgentSolver`. The full pipeline (model output → tool calls → edits → scored
+  red→green) is tested end-to-end with a scripted backend.
+- **Model gateway** (`dc-model`) — the `ModelBackend` trait + `MockBackend` and
+  `CallbackBackend` (the Android/AICore seam).
+
+See the [roadmap](docs/specs/07-roadmap.md).
 
 ## Key decisions
 

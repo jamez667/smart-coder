@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dc-proto",
     "crates/dc-model",
+    "crates/dc-core",
     "crates/dc-eval",
 ]
 
@@ -13,4 +14,5 @@ repository = "https://github.com/jamez667/dumb-coder"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"

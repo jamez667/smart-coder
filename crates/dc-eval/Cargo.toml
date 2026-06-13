@@ -17,5 +17,9 @@ path = "src/main.rs"
 [dependencies]
 dc-proto = { path = "../dc-proto" }
 dc-model = { path = "../dc-model" }
+dc-core = { path = "../dc-core" }
 serde = { workspace = true }
 toml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

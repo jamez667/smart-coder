@@ -19,5 +19,5 @@ pub mod task;
 
 pub use report::Report;
 pub use runner::{run_suite, run_task, Outcome, TaskResult};
-pub use solver::{FileSolver, FnSolver, NoopSolver, Solver};
+pub use solver::{AgentSolver, FileSolver, FnSolver, NoopSolver, Solver};
 pub use task::{EvalTask, TaskSuite};
