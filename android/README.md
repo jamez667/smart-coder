@@ -1,12 +1,12 @@
 # Android client (reference scaffolding)
 
-> **Status: reference only — not built or tested here.** The project's CI runs on
-> a Linux VM with **no Android SDK/NDK and no device**, so this directory holds
-> *illustrative* Kotlin/JNI reference for the Android app described in
+> **Status: reference scaffolding — not built or tested here.** The project's CI
+> runs on a Linux VM with **no Android SDK/NDK and no device**, so this is a
+> complete-but-unbuilt module skeleton for the Android app described in
 > [`../docs/specs/12-platform-clients.md`](../docs/specs/12-platform-clients.md).
-> Build and run it on a development machine + device. Treat the ML Kit GenAI calls
-> as **TODO: verify against the current API** — exact class/method names could not
-> be fetched while writing this.
+> The Kotlin uses the real ML Kit GenAI Prompt API; build and run it on a
+> development machine + device, verifying the download-feature flow against the
+> current beta.
 
 ## What the Android client is
 
@@ -22,26 +22,42 @@ Kotlin UI ─▶ Rust core (.so) ──(needs a generation)──▶ JNI callbac
                   └──────────────────────── generated text ◀──────────────────────────────┘
 ```
 
+## Module layout
+
+```
+android/
+├── settings.gradle.kts        # includes :app
+├── build.gradle.kts           # root (AGP + Kotlin plugin versions)
+├── gradle.properties
+└── app/
+    ├── build.gradle.kts       # genai-prompt + coroutines deps; minSdk 26; arm64-v8a
+    └── src/main/
+        ├── AndroidManifest.xml
+        ├── jniLibs/<abi>/      # libdc_android.so dropped here (built by cargo-ndk)
+        └── kotlin/dev/dumbcoder/android/
+            ├── MainActivity.kt   # button -> runTask -> shows result
+            ├── NativeBridge.kt   # JNI: runTask (down) + onGenerate (up)
+            └── AiCoreBackend.kt  # ML Kit GenAI Prompt API wrapper
+```
+
 ## Build outline (on a machine with the Android SDK + NDK)
 
 1. Add Rust Android targets: `rustup target add aarch64-linux-android` (+ other ABIs).
 2. Install [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk): `cargo install cargo-ndk`.
-3. Build the **`dc-android`** crate (the cdylib exposing the JNI entry points —
-   `crates/dc-android`, already in the workspace) as a shared lib per ABI, e.g.
-   `cargo ndk -t arm64-v8a build --release -p dc-android`, and place the resulting
-   `libdc_android.so` into the Gradle module's `src/main/jniLibs/<abi>/`.
-4. Add the ML Kit GenAI Prompt API dependency to the app `build.gradle`:
-   `implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")` (beta — confirm
-   the current version), plus `kotlinx-coroutines`. Requires `minSdk 26`.
-5. Build the APK with Gradle and run on a device that supports AICore (flagship
-   SoC, sufficient RAM — see spec 10).
+3. From the repo root, build the **`dc-android`** cdylib per ABI straight into the
+   module's jniLibs:
+   `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release -p dc-android`.
+4. Open `android/` in Android Studio (or `./gradlew :app:assembleDebug`) — the
+   `genai-prompt` dependency and `minSdk 26` are already set in `app/build.gradle.kts`.
+5. Run on a device that supports AICore (flagship SoC, sufficient RAM — see spec 10).
 
-## Files here
+## Status of each file
 
-- `kotlin/AiCoreBackend.kt` — wraps ML Kit GenAI / AICore as a blocking
-  `generate(prompt)`; the JNI callback calls this.
-- `kotlin/NativeBridge.kt` — `external fun` declarations for the Rust core and the
-  callback the core invokes for inference.
+| File | State |
+| --- | --- |
+| `NativeBridge.kt` | signatures match the `dc-android` Rust exports |
+| `AiCoreBackend.kt` | real ML Kit GenAI Prompt API calls; **verify the download-feature flow** against the current beta |
+| `MainActivity.kt`, Gradle files, manifest | minimal skeleton; **untested** — version-bump and adjust as needed |
 
-Both are **illustrative**; wire them up against the real Rust JNI exports and the
-current ML Kit GenAI API.
+Nothing here has been compiled or run (no Android SDK/NDK/device in CI). The Rust
+half (`crates/dc-android`) *is* compiled against the real `jni` API and tested.
