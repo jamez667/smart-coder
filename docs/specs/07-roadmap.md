@@ -81,13 +81,19 @@ under control. Everything else builds on a working, reliable single-step loop.
   `update_plan` / on retry-exhaustion, not by inferring which call satisfied a
   step); per-step token/wall-clock budgets; re-running the planner mid-task.
 
-## M5 — UX, replay & polish
+## M5 — UX, replay & polish (partially landed)
 **Goal:** pleasant, inspectable, scriptable.
-- Live event rendering, plan panel, honest stop lines ([06](06-cli-ux.md)).
-- `--verbose` prompt inspection, session logging, `replay`, `--json`, `--dry-run`.
-- One-shot `run` mode + permission policies (`--yolo`, allowlist).
+- ✅ **Event-stream architecture** ([01](01-architecture.md)): typed `AgentEvent`s
+  emitted through an `EventSink` at every phase — the hub all observers consume.
+- ✅ Live event rendering + plan panel + honest stop lines — delivered as a
+  **full-screen TUI** (`dc-tui`, ratatui), ahead of the spec's line-oriented plan
+  (the v2 TUI, [06](06-cli-ux.md)/[07](07-roadmap.md)). `dumb-coder run "<task>"`.
+- ✅ One-shot `run` mode (`run <task> [--verify CMD] [--plan]`).
+- *Remaining:* `--verbose` prompt inspection, session logging + `replay`, `--json`
+  line output (the event stream makes these mechanical now), `--dry-run`,
+  `--yolo`/allowlist permission flags wired to `PermissionPolicy`.
 - **Exit criteria:** a newcomer can install, `doctor`, and run a task guided only
-  by CLI output.
+  by CLI output. *(The TUI covers the live-run guidance; logging/replay pending.)*
 
 ## M6 — Staged workflow & human checkpoints
 **Goal:** drive tasks through the gated pipeline ([09](09-workflow-and-checkpoints.md))

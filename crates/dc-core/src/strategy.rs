@@ -186,7 +186,7 @@ impl ToolCallStrategy for Grammar {
 ///
 /// Returns a boxed strategy so the loop can hold it behind the trait object. The
 /// ordering reflects the reliability hierarchy: grammar > native FC > parse+repair.
-pub fn select_strategy(caps: &Capabilities) -> Box<dyn ToolCallStrategy> {
+pub fn select_strategy(caps: &Capabilities) -> Box<dyn ToolCallStrategy + Send + Sync> {
     match caps.tool_calling {
         ToolCalling::Gbnf => Box::new(Grammar),
         ToolCalling::OpenAiStyle => Box::new(NativeTools),

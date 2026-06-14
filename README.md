@@ -41,7 +41,18 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 182 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 200 tests):
+
+- **Event stream + live TUI** (`dc-core` event hub + `dc-tui`) — every phase of a
+  run emits a typed `AgentEvent` (RunStarted / Planned / ToolCall / ToolResult /
+  Verification / Stalled / Advice / Stopped) through an `EventSink` (spec 01's
+  event-stream architecture). `dc-tui` is a full-screen [ratatui](https://ratatui.rs)
+  dashboard that consumes it: a plan panel, a color-coded live activity log, a
+  metrics/context-budget bar, and an honest stop line. The agent runs on a worker
+  thread streaming events to the render loop. Drive it with
+  `dumb-coder run "<task>" [--verify CMD] [--plan]`. The state-fold and the draw
+  are pure/headless-tested (ratatui `TestBackend`); the sink also feeds future
+  `--json` / session-log consumers.
 
 - **M4 planning & recovery** (`dc-core`) — the agent survives multi-step tasks and
   its own mistakes (spec 03). A **planner** decomposes the task into a short,

@@ -8,6 +8,7 @@ members = [
     "crates/dc-index",
     "crates/dc-verify",
     "crates/dc-core",
+    "crates/dc-tui",
     "crates/dc-cli",
     "crates/dc-eval",
     "crates/dc-android",

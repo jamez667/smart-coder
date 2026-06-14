@@ -20,13 +20,58 @@ fn main() -> ExitCode {
         }
     };
 
-    match cli.command {
+    match &cli.command {
         Command::Help => {
             println!("{}", usage());
             ExitCode::SUCCESS
         }
         Command::Doctor => run_doctor(&cli),
         Command::Chat => run_chat(&cli),
+        Command::Run { task } => run_task(&cli, task.clone()),
+    }
+}
+
+/// Drive a coding task in the current directory with the live TUI.
+fn run_task(cli: &Cli, task: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let backend = cli.backend();
+    let registry = dc_tools::default_registry();
+    let strategy = dc_core::select_strategy(&backend.capabilities());
+
+    let spec = dc_tui::TuiRun {
+        backend,
+        // No separate advisor profile yet (M4 escalation is wired but the CLI
+        // doesn't expose a second model); the senior is None for now.
+        advisor: Option::<dc_model::OpenAiBackend>::None,
+        registry,
+        strategy,
+        instruction: task,
+        workspace,
+        config: cli.agent_config(),
+    };
+
+    match dc_tui::run(spec) {
+        Ok(Some(report)) => {
+            // Honest stop line on the normal terminal after the TUI restores it.
+            println!("{:?} — {}", report.stop_reason, report.change_summary);
+            if report.finished {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(None) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: TUI failed: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

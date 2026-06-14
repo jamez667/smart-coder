@@ -24,6 +24,8 @@ pub enum Command {
     Doctor,
     /// Interactive chat REPL (the default with no subcommand).
     Chat,
+    /// Run a coding task in the workspace with the live TUI (spec 06).
+    Run { task: String },
     /// Print usage.
     Help,
 }
@@ -47,6 +49,10 @@ pub struct Cli {
     pub base_url: String,
     pub model: String,
     pub tool_calling: ToolCallingArg,
+    /// The project's test command for `run` (enables the TDD whole-suite gate).
+    pub verify_command: Option<String>,
+    /// Ask the planner to decompose the task before running (`run` only).
+    pub plan_first: bool,
 }
 
 impl Cli {
@@ -64,13 +70,39 @@ impl Cli {
         let mut base_url = DEFAULT_BASE_URL.to_string();
         let mut model = DEFAULT_MODEL.to_string();
         let mut tool_calling = ToolCallingArg::None;
+        let mut verify_command = None;
+        let mut plan_first = false;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
+                // `run <task...>`: the remaining args form the task description.
+                "run" if command.is_none() => {
+                    let task: Vec<String> = it.by_ref().collect();
+                    if task.is_empty() {
+                        return Err(DcError::Eval(
+                            "run requires a task, e.g. `dumb-coder run \"add a test for parse\"`"
+                                .to_string(),
+                        ));
+                    }
+                    // Pull flags back out of the collected task (so `run "x" --verify`
+                    // works); simplest is to re-scan for our known flags.
+                    let (t, v, p) = split_run_args(task)?;
+                    command = Some(Command::Run { task: t });
+                    if v.is_some() {
+                        verify_command = v;
+                    }
+                    plan_first = p || plan_first;
+                }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
+                "--verify" => {
+                    verify_command = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--verify requires a command argument".to_string())
+                    })?);
+                }
+                "--plan" => plan_first = true,
                 "--base-url" => {
                     base_url = it.next().ok_or_else(|| {
                         DcError::Eval("--base-url requires a URL argument".to_string())
@@ -109,6 +141,8 @@ impl Cli {
             base_url,
             model,
             tool_calling,
+            verify_command,
+            plan_first,
         })
     }
 
@@ -126,6 +160,28 @@ impl Cli {
     }
 }
 
+/// Split the args collected after `run` into (task, verify_command, plan_first).
+/// `run` consumes the rest of argv, so trailing `--verify X` / `--plan` are
+/// peeled back out here. The task is everything that isn't one of those flags.
+fn split_run_args(args: Vec<String>) -> Result<(String, Option<String>, bool)> {
+    let mut task_words = Vec::new();
+    let mut verify = None;
+    let mut plan = false;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--verify" => {
+                verify = Some(it.next().ok_or_else(|| {
+                    DcError::Eval("--verify requires a command argument".to_string())
+                })?);
+            }
+            "--plan" => plan = true,
+            _ => task_words.push(a),
+        }
+    }
+    Ok((task_words.join(" "), verify, plan))
+}
+
 /// Usage text (spec 06 — invocation modes, trimmed to the M0 surface).
 pub fn usage() -> &'static str {
     "\
@@ -136,6 +192,7 @@ USAGE:
 
 COMMANDS:
     chat            Interactive chat with the model (default)
+    run <task>      Run a coding task in the current dir with a live TUI
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -144,11 +201,25 @@ OPTIONS:
     --model NAME          Model to use                [default: gemma4:e4b]
     --tool-calling MODE   none | native | gbnf — how the backend enforces tool
                           calls (spec 02)             [default: none]
+    --verify CMD          Test command for `run` (enables the TDD whole-suite gate)
+    --plan                Decompose the task into a plan before running (`run`)
 
 EXAMPLES:
     dumb-coder doctor
-    dumb-coder --model gemma4:e4b --tool-calling native
-    dumb-coder doctor --base-url http://localhost:8080/v1 --tool-calling gbnf"
+    dumb-coder run \"make the failing test in is_even pass\" --verify \"sh test.sh\"
+    dumb-coder run \"add input validation to parse_config\" --plan
+    dumb-coder --model gemma4:e4b --tool-calling native"
+}
+
+impl Cli {
+    /// Build the agent config from the parsed flags (used by `run`).
+    pub fn agent_config(&self) -> dc_core::AgentConfig {
+        dc_core::AgentConfig {
+            verify_command: self.verify_command.clone(),
+            plan_first: self.plan_first,
+            ..Default::default()
+        }
+    }
 }
 
 /// Render the `doctor` report. `reachable` carries the probe result so the
@@ -220,6 +291,36 @@ mod tests {
         );
 
         assert!(Cli::parse(["--tool-calling", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_run_with_task_verify_and_plan() {
+        let cli = Cli::parse([
+            "run",
+            "make",
+            "the",
+            "test",
+            "pass",
+            "--verify",
+            "sh test.sh",
+            "--plan",
+        ])
+        .unwrap();
+        match &cli.command {
+            Command::Run { task } => assert_eq!(task, "make the test pass"),
+            other => panic!("expected Run, got {other:?}"),
+        }
+        assert_eq!(cli.verify_command.as_deref(), Some("sh test.sh"));
+        assert!(cli.plan_first);
+        // The config reflects the flags.
+        let cfg = cli.agent_config();
+        assert_eq!(cfg.verify_command.as_deref(), Some("sh test.sh"));
+        assert!(cfg.plan_first);
+    }
+
+    #[test]
+    fn run_requires_a_task() {
+        assert!(Cli::parse(["run"]).is_err());
     }
 
     #[test]

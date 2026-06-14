@@ -13,3 +13,6 @@ path = "src/main.rs"
 [dependencies]
 dc-proto = { path = "../dc-proto" }
 dc-model = { path = "../dc-model" }
+dc-core = { path = "../dc-core" }
+dc-tools = { path = "../dc-tools" }
+dc-tui = { path = "../dc-tui" }

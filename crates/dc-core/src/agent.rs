@@ -21,6 +21,7 @@ use dc_proto::Result;
 use dc_tools::{execute, Journal, PermissionPolicy, ToolOutcome, ToolRegistry};
 
 use crate::advisor::{advice_observation, consult, Predicament};
+use crate::event::{AgentEvent, EventSink, NullSink};
 use crate::metrics::ToolCallMetrics;
 use crate::plan::PlanState;
 use crate::planner::make_plan;
@@ -172,6 +173,32 @@ pub fn run_agent_recovering(
     workspace: &Path,
     cfg: &AgentConfig,
 ) -> Result<AgentReport> {
+    run_agent_observed(
+        backend,
+        advisor,
+        registry,
+        strategy,
+        instruction,
+        workspace,
+        cfg,
+        &NullSink,
+    )
+}
+
+/// Like [`run_agent_recovering`] but streams typed [`AgentEvent`]s to `sink` as
+/// the run unfolds (spec 01) — the seam a live TUI, `--json`, or a session log
+/// consumes. The behavior is identical; only observation is added.
+#[allow(clippy::too_many_arguments)]
+pub fn run_agent_observed(
+    backend: &dyn ModelBackend,
+    advisor: Option<&dyn ModelBackend>,
+    registry: &ToolRegistry,
+    strategy: &dyn ToolCallStrategy,
+    instruction: &str,
+    workspace: &Path,
+    cfg: &AgentConfig,
+    sink: &dyn EventSink,
+) -> Result<AgentReport> {
     let system = format!("{TASK_PREFIX}{}", strategy.system_preamble(registry));
 
     // Token accounting + hard budget (spec 05).
@@ -194,6 +221,11 @@ pub fn run_agent_recovering(
         cfg.repo_map_top_k,
     );
 
+    sink.record(&AgentEvent::RunStarted {
+        task: instruction.to_string(),
+        prompt_budget: budget,
+    });
+
     // PLAN (spec 03): decompose the task up front, grounded in the repo map. The
     // harness owns the plan; the model only ever sees a compact rendering.
     let mut plan = if cfg.plan_first {
@@ -201,6 +233,11 @@ pub fn run_agent_recovering(
     } else {
         PlanState::default()
     };
+    if !plan.is_empty() {
+        sink.record(&AgentEvent::Planned {
+            steps: plan.steps().iter().map(|s| s.description.clone()).collect(),
+        });
+    }
 
     let mut metrics = ToolCallMetrics::default();
     let mut history: Vec<TurnRecord> = Vec::new();
@@ -243,6 +280,10 @@ pub fn run_agent_recovering(
 
         let built = builder.build(segments);
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
+        sink.record(&AgentEvent::ModelTurn {
+            step: step + 1,
+            prompt_tokens: built.tokens_used,
+        });
 
         let mut req = GenerateRequest::new(built.messages);
         strategy.prepare_request(&mut req, registry);
@@ -255,6 +296,10 @@ pub fn run_agent_recovering(
                 let arg = key_arg(&call);
                 let action = action_hash(&call.name, &arg);
                 let tool = call.name.clone();
+                sink.record(&AgentEvent::ToolCall {
+                    tool: tool.clone(),
+                    arg: arg.clone(),
+                });
 
                 // Meta-tools the harness owns (spec 03/04) — never hit fs/exec.
                 if call.name == "update_plan" {
@@ -263,6 +308,9 @@ pub fn run_agent_recovering(
                         "update_plan: could not parse a step array; plan unchanged".to_string()
                     } else {
                         plan = PlanState::from_descriptions(steps);
+                        sink.record(&AgentEvent::PlanRevised {
+                            steps: plan.steps().iter().map(|s| s.description.clone()).collect(),
+                        });
                         format!("update_plan: ok\n{}", plan.render())
                     };
                     (obs, action, false, tool, arg)
@@ -273,11 +321,18 @@ pub fn run_agent_recovering(
                         Some(advice) => {
                             interventions += 1;
                             stall.reset();
+                            sink.record(&AgentEvent::Advice {
+                                advice: advice.clone(),
+                            });
                             (advice, action, false, tool, arg)
                         }
                         None => {
+                            let reason = StopReason::Escalated(question.to_string());
+                            sink.record(&AgentEvent::Stopped {
+                                reason: reason.clone(),
+                            });
                             return Ok(stopped(
-                                StopReason::Escalated(question.to_string()),
+                                reason,
                                 step + 1,
                                 &cfg.verify_command,
                                 workspace,
@@ -313,6 +368,15 @@ pub fn run_agent_recovering(
                         ToolOutcome::Finished => {
                             match gate_finish(&cfg.verify_command, workspace) {
                                 FinishGate::Allow(verified) => {
+                                    if let Some(v) = verified {
+                                        sink.record(&AgentEvent::Verification {
+                                            green: v,
+                                            summary: "whole-suite gate passed".to_string(),
+                                        });
+                                    }
+                                    sink.record(&AgentEvent::Stopped {
+                                        reason: StopReason::Finished,
+                                    });
                                     return Ok(AgentReport {
                                         finished: true,
                                         steps: step + 1,
@@ -326,6 +390,10 @@ pub fn run_agent_recovering(
                                     });
                                 }
                                 FinishGate::Refuse(o) => {
+                                    sink.record(&AgentEvent::Verification {
+                                        green: false,
+                                        summary: "finish refused — suite still red".to_string(),
+                                    });
                                     // Tests red — a failed attempt on the active step.
                                     if plan.record_attempt() > cfg.step_retry_budget {
                                         plan.fail_active();
@@ -334,15 +402,27 @@ pub fn run_agent_recovering(
                                 }
                             }
                         }
-                        ToolOutcome::Observation(o) => (o, action, changed, tool, arg),
+                        ToolOutcome::Observation(o) => {
+                            if tool == "run_verification" {
+                                sink.record(&AgentEvent::Verification {
+                                    green: !looks_like_failure(&o),
+                                    summary: first_line(&o),
+                                });
+                            }
+                            (o, action, changed, tool, arg)
+                        }
                     }
                 }
             }
             // Repair loop (spec 03): feed back the exact error; never execute.
             Err(e) => {
                 metrics.record_invalid();
+                let detail = e.repair_prompt();
+                sink.record(&AgentEvent::RepairTriggered {
+                    detail: first_line(&detail),
+                });
                 (
-                    e.repair_prompt(),
+                    detail,
                     action_hash("(malformed)", ""),
                     false,
                     "(malformed)".to_string(),
@@ -353,6 +433,10 @@ pub fn run_agent_recovering(
 
         // Record the turn and detect stalls (spec 03 — VERIFY, cheap every turn).
         let was_error = looks_like_failure(&obs);
+        sink.record(&AgentEvent::ToolResult {
+            summary: first_line(&obs),
+            is_error: was_error,
+        });
         history.push(TurnRecord::new(tool, arg, was_error));
         let trimmed = truncate_observation(&obs, cfg.observation_line_cap, true);
         push_recent(&mut recent, &resp.content, &trimmed, cfg.keep_recent_turns);
@@ -364,16 +448,26 @@ pub fn run_agent_recovering(
                     Progress::Looping => "repeating the same action without progress",
                     _ => "many turns with no change to the workspace",
                 };
+                sink.record(&AgentEvent::Stalled {
+                    trigger: trigger.to_string(),
+                });
                 // Junior asks senior for a nudge (spec 02). No advisor → stop.
                 match escalate(advisor, instruction, &plan, &history, trigger) {
                     Some(advice) => {
                         interventions += 1;
                         stall.reset();
+                        sink.record(&AgentEvent::Advice {
+                            advice: advice.clone(),
+                        });
                         push_recent(&mut recent, "(harness)", &advice, cfg.keep_recent_turns);
                     }
                     None => {
+                        let reason = StopReason::Stalled(trigger.to_string());
+                        sink.record(&AgentEvent::Stopped {
+                            reason: reason.clone(),
+                        });
                         return Ok(stopped(
-                            StopReason::Stalled(trigger.to_string()),
+                            reason,
                             step + 1,
                             &cfg.verify_command,
                             workspace,
@@ -389,6 +483,9 @@ pub fn run_agent_recovering(
         }
     }
 
+    sink.record(&AgentEvent::Stopped {
+        reason: StopReason::BudgetExhausted,
+    });
     Ok(stopped(
         StopReason::BudgetExhausted,
         cfg.max_steps,
@@ -553,6 +650,15 @@ fn mutating_path(call: &dc_tools::ValidatedCall, registry: &ToolRegistry) -> Opt
         return None;
     }
     call.str("path").map(|s| s.to_string())
+}
+
+/// The first non-empty line of an observation, for a tight one-line event.
+fn first_line(s: &str) -> String {
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// The key argument of a call, for the history record (path or query/name).

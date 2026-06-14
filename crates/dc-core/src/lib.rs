@@ -13,6 +13,7 @@
 
 pub mod advisor;
 pub mod agent;
+pub mod event;
 pub mod metrics;
 pub mod plan;
 pub mod planner;
@@ -20,7 +21,10 @@ pub mod recovery;
 pub mod strategy;
 
 pub use advisor::{advice_observation, consult, Predicament};
-pub use agent::{run_agent, run_agent_recovering, run_agent_with, AgentConfig, AgentReport};
+pub use agent::{
+    run_agent, run_agent_observed, run_agent_recovering, run_agent_with, AgentConfig, AgentReport,
+};
+pub use event::{AgentEvent, EventSink, FnSink, NullSink};
 pub use metrics::ToolCallMetrics;
 pub use plan::{PlanState, Step, StepStatus};
 pub use planner::{make_plan, parse_plan};
