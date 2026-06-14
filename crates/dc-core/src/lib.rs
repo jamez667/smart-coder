@@ -1,16 +1,29 @@
-//! `dc-core` — the `dumb-coder` agent loop (M0).
+//! `dc-core` — the `dumb-coder` agent loop (M0–M1).
 //!
 //! Drives a `dc_model::ModelBackend` through a bounded act→observe cycle (spec 03),
 //! issuing one tool call per turn against a sandboxed workspace (spec 04). It is
-//! backend-agnostic: the same loop runs on a `MockBackend` in tests, an Ollama/
-//! OpenAI backend on the desktop, or the Android-core `CallbackBackend` on a
-//! device.
+//! backend-agnostic and tool-surface-agnostic: the loop is parameterized over a
+//! [`dc_tools::ToolRegistry`] and a [`ToolCallStrategy`], so the same loop runs on
+//! a `MockBackend` in tests, an Ollama/OpenAI backend on the desktop, or the
+//! Android-core `CallbackBackend` on a device — with native function-calling,
+//! GBNF-constrained, or plain parse+repair tool decoding (spec 02).
 //!
 //! `dc-eval` wraps this as a `Solver` so the eval harness can score the real
-//! agent on red→green tasks.
+//! agent on red→green tasks and report its tool-call validity rate.
 
 pub mod agent;
-pub mod tool;
+pub mod metrics;
+pub mod strategy;
 
-pub use agent::{run_agent, AgentConfig, AgentReport};
-pub use tool::{execute, parse_tool_call, Tool, ToolOutcome};
+pub use agent::{run_agent, run_agent_with, AgentConfig, AgentReport};
+pub use metrics::ToolCallMetrics;
+pub use strategy::{
+    extract_json_object, select_strategy, Grammar, NativeTools, ParseRepair, RepairError,
+    ToolCallStrategy,
+};
+
+// Re-export the tool surface so downstream crates (dc-eval) get it via dc-core.
+pub use dc_tools::{
+    default_registry, execute, Permission, SideEffect, ToolOutcome, ToolRegistry, ToolSpec,
+    ValidatedCall, ValidationError,
+};

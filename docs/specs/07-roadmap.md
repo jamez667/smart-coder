@@ -137,5 +137,17 @@ backends ([12](12-platform-clients.md)).
 - A **fixed task suite** (sample repos + graded tasks) as the regression
   benchmark; tracked from M1 so harness changes are measured against real
   small-model behavior.
+  - **SWE-bench is the post-M3 feasibility check, not a current target.** Our
+    `dc-eval` red→green machinery already mirrors SWE-bench's
+    `FAIL_TO_PASS`/`PASS_TO_PASS` split, but three preconditions must land first
+    or a run measures missing infrastructure, not the model: **(1)** per-task
+    environment isolation (Docker images with pinned deps); **(2)** the retrieval
+    index + context budgeter (M2 / `dc-index`) so a 4B model can navigate a large
+    unfamiliar repo; **(3)** structured `run_verification` with pytest parsing
+    (M3, [04](04-tools.md)). Sequence: a `dc-eval` SWE-bench *adapter* + a tiny
+    pure-Python Docker subset once M2/M3 are in, then **SWE-bench Lite/Verified**
+    as the real benchmark. Expect low absolute scores — purpose-built 7B coders
+    sit ~18–23% ([10](10-prior-art.md)); the value is the *relative* signal across
+    harness changes, not the headline number.
 - Determinism/replay maintained at every milestone for debuggability
   ([03](03-agent-loop.md)).

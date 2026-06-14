@@ -3,6 +3,8 @@
 
 use std::fmt::Write as _;
 
+use dc_core::ToolCallMetrics;
+
 use crate::runner::{Outcome, TaskResult};
 
 /// A scored suite run.
@@ -36,6 +38,20 @@ impl Report {
         !self.results.is_empty() && self.passed() == self.total()
     }
 
+    /// Tool-call metrics summed across every model-driven task in the suite. This
+    /// is the source for the M1 ≥95% valid-call rate (spec 07). Tasks with no
+    /// metrics (non-agent solvers, or runs that never reached solving) contribute
+    /// nothing.
+    pub fn tool_call_metrics(&self) -> ToolCallMetrics {
+        let mut agg = ToolCallMetrics::default();
+        for r in &self.results {
+            if let Some(m) = &r.metrics {
+                agg.merge(m);
+            }
+        }
+        agg
+    }
+
     /// A multi-line human summary.
     pub fn summary(&self) -> String {
         let mut s = String::new();
@@ -54,6 +70,17 @@ impl Report {
             self.total(),
             self.pass_rate() * 100.0
         );
+        // Surface the M1 tool-call validity rate when there's anything to report.
+        let m = self.tool_call_metrics();
+        if m.total() > 0 {
+            let _ = write!(
+                s,
+                "\ntool calls: {}/{} valid ({:.1}%)",
+                m.valid,
+                m.total(),
+                m.valid_rate() * 100.0
+            );
+        }
         s
     }
 }
@@ -67,6 +94,16 @@ mod tests {
             id: id.into(),
             solver: "t".into(),
             outcome,
+            metrics: None,
+        }
+    }
+
+    fn res_with(id: &str, outcome: Outcome, metrics: ToolCallMetrics) -> TaskResult {
+        TaskResult {
+            id: id.into(),
+            solver: "agent".into(),
+            outcome,
+            metrics: Some(metrics),
         }
     }
 
@@ -83,6 +120,34 @@ mod tests {
     fn all_passed_requires_nonempty_and_full() {
         assert!(!Report::new(vec![]).all_passed());
         assert!(Report::new(vec![res("a", Outcome::Pass)]).all_passed());
+    }
+
+    #[test]
+    fn aggregates_tool_call_metrics_across_the_suite() {
+        let report = Report::new(vec![
+            res_with(
+                "a",
+                Outcome::Pass,
+                ToolCallMetrics {
+                    valid: 9,
+                    invalid: 1,
+                },
+            ),
+            res_with(
+                "b",
+                Outcome::Pass,
+                ToolCallMetrics {
+                    valid: 10,
+                    invalid: 0,
+                },
+            ),
+            res("c", Outcome::StillRed), // no metrics — contributes nothing
+        ]);
+        let m = report.tool_call_metrics();
+        assert_eq!(m.total(), 20);
+        assert_eq!(m.valid, 19);
+        assert!((m.valid_rate() - 0.95).abs() < f64::EPSILON);
+        assert!(report.summary().contains("19/20 valid"));
     }
 
     #[test]

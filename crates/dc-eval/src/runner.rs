@@ -60,6 +60,8 @@ pub struct TaskResult {
     pub id: String,
     pub solver: String,
     pub outcome: Outcome,
+    /// Tool-call validity metrics, when the solver is model-driven (spec 07).
+    pub metrics: Option<dc_core::ToolCallMetrics>,
 }
 
 /// Run `verify_cmd` inside `workspace`. `Ok(true)` == exit 0 == green.
@@ -89,6 +91,14 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
         id: task.id.clone(),
         solver: solver.name().to_string(),
         outcome,
+        metrics: None,
+    };
+    // Like `result`, but attaches the solver's tool-call metrics (post-solve).
+    let result_with_metrics = |outcome| TaskResult {
+        id: task.id.clone(),
+        solver: solver.name().to_string(),
+        outcome,
+        metrics: solver.last_metrics(),
     };
 
     // Materialize the fixture into an isolated, self-cleaning workspace.
@@ -126,15 +136,15 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     let after = snapshot_contracts(ws.path(), &task.contract_tests);
     for (path, before_hash) in &before {
         if after.get(path) != Some(before_hash) {
-            return result(Outcome::ContractTampered(path.clone()));
+            return result_with_metrics(Outcome::ContractTampered(path.clone()));
         }
     }
 
     // (3) green after solve.
     match verify(ws.path(), &task.verify_cmd) {
-        Ok(true) => result(Outcome::Pass),
-        Ok(false) => result(Outcome::StillRed),
-        Err(e) => result(Outcome::HarnessError(format!(
+        Ok(true) => result_with_metrics(Outcome::Pass),
+        Ok(false) => result_with_metrics(Outcome::StillRed),
+        Err(e) => result_with_metrics(Outcome::HarnessError(format!(
             "running verifier (green check): {e}"
         ))),
     }

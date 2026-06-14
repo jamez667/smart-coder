@@ -3,7 +3,9 @@ resolver = "2"
 members = [
     "crates/dc-proto",
     "crates/dc-model",
+    "crates/dc-tools",
     "crates/dc-core",
+    "crates/dc-cli",
     "crates/dc-eval",
     "crates/dc-android",
 ]

@@ -14,9 +14,17 @@
 //!   rather than pretending.
 //! * [`MockBackend`] — a scriptable stand-in so the harness and tests run in
 //!   CI / on a dev box where no device is present.
+//! * [`OpenAiBackend`] — the **primary off-device path** (spec 02): any
+//!   OpenAI-compatible HTTP server (Ollama compat, llama.cpp `--api`, vLLM, LM
+//!   Studio). This is what lets the harness drive a real small model today.
 //!
 //! The trait is synchronous for now; streaming/async land with the real HTTP and
 //! on-device adapters (M0/M8). The shape (capabilities, generate) matches spec 02.
+
+mod constraint;
+mod openai;
+pub use constraint::{OutputConstraint, ToolCalling, ToolSchema};
+pub use openai::OpenAiBackend;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -66,6 +74,10 @@ pub struct GenerateRequest {
     pub messages: Vec<Message>,
     pub max_tokens: usize,
     pub temperature: f32,
+    /// Optional structural enforcement on the output (spec 02). A capability-aware
+    /// strategy sets this; a backend applies the variant it supports and ignores
+    /// the rest. `None` means plain completion (prompt + parse + repair).
+    pub constraint: Option<OutputConstraint>,
 }
 
 impl GenerateRequest {
@@ -74,7 +86,14 @@ impl GenerateRequest {
             messages,
             max_tokens: 1024,
             temperature: 0.2,
+            constraint: None,
         }
+    }
+
+    /// Attach an output constraint (builder style).
+    pub fn with_constraint(mut self, constraint: OutputConstraint) -> Self {
+        self.constraint = Some(constraint);
+        self
     }
 }
 
@@ -88,7 +107,9 @@ pub struct GenerateResponse {
 #[derive(Debug, Clone)]
 pub struct Capabilities {
     pub max_context_tokens: usize,
-    pub native_tool_calling: bool,
+    /// How (if at all) the backend can *enforce* a well-formed tool call — the
+    /// single most important capability for small-model reliability (spec 02).
+    pub tool_calling: ToolCalling,
     pub on_device: bool,
 }
 
@@ -163,7 +184,8 @@ impl ModelBackend for AndroidCoreBackend {
             // Gemma 4 E4B advertises 128K; we budget against an effective
             // fraction elsewhere (spec 05).
             max_context_tokens: 128_000,
-            native_tool_calling: true,
+            // Gemma 4 has native function-calling (spec 02).
+            tool_calling: ToolCalling::OpenAiStyle,
             on_device: true,
         }
     }
@@ -207,7 +229,7 @@ impl MockBackend {
             responses: RefCell::new(responses.into_iter().map(Into::into).collect()),
             caps: Capabilities {
                 max_context_tokens: 8_192,
-                native_tool_calling: false,
+                tool_calling: ToolCalling::None,
                 on_device: false,
             },
         }
@@ -274,7 +296,7 @@ where
             "android-core",
             Capabilities {
                 max_context_tokens: 128_000,
-                native_tool_calling: true,
+                tool_calling: ToolCalling::OpenAiStyle,
                 on_device: true,
             },
             generate,
@@ -337,7 +359,7 @@ mod tests {
     fn android_core_advertises_on_device_and_large_context() {
         let caps = AndroidCoreBackend::new().capabilities();
         assert!(caps.on_device);
-        assert!(caps.native_tool_calling);
+        assert_eq!(caps.tool_calling, ToolCalling::OpenAiStyle);
         assert_eq!(caps.max_context_tokens, 128_000);
     }
 

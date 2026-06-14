@@ -8,3 +8,6 @@ description = "Model Gateway: the pluggable ModelBackend trait and adapters."
 
 [dependencies]
 dc-proto = { path = "../dc-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { version = "3", features = ["json"] }

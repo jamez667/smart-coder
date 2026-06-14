@@ -41,16 +41,32 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 30 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 83 tests):
 
+- **M1 tool registry** (`dc-tools`) — strict, strongly-typed tool schemas with
+  structured validation (bad calls are rejected *before* execution, with a
+  precise reason), the narrow v1 tool surface (`read_file`, `list_dir`,
+  `search_code`, `write_file`, `finish`), and producers that emit a JSON-Schema
+  or a **GBNF grammar** from the same specs so a constraint can never drift from
+  validation.
+- **M1 tool-call strategies** (`dc-core`) — the capability-driven matrix from
+  spec 02: **GBNF-constrained** → **native function-calling** → **parse+repair**,
+  selected from the backend's advertised capabilities. Every strategy yields a
+  registry-validated call or a structured repair error; malformed output is fed
+  back, never executed. A deterministic suite asserts the M1 **≥95% valid-call**
+  target, and `dc-eval` reports the live rate against a real backend.
+- **Model gateway** (`dc-model`) — the `ModelBackend` trait + `OpenAiBackend`
+  (any OpenAI-compatible server: Ollama compat, vLLM, LM Studio — with native
+  `tools`/`tool_choice`), `OpenAiBackend::llama_cpp` (GBNF `grammar`),
+  `MockBackend`, and `CallbackBackend` (the Android/AICore seam). Requests carry
+  an optional output constraint (tool schemas / grammar).
+- **M0 CLI** (`dc-cli`, the `dumb-coder` binary) — `doctor` and a chat REPL
+  against a real model, with `--backend`/`--model`/`--tool-calling` selection.
+- **M0 agent loop** (`dc-core`) — a bounded act→observe loop over the registry +
+  strategy; plugs into the harness as `AgentSolver`, tested end-to-end red→green.
 - **M1 eval harness** (`dc-eval`) — a TDD-enforcing, backend-agnostic scoreboard
-  for red→green tasks (verify-red-first, frozen contract tests, green-after-solve).
-- **M0 agent loop** (`dc-core`) — a bounded act→observe loop that drives any
-  `ModelBackend` through tool calls to edit files; plugs into the harness as
-  `AgentSolver`. The full pipeline (model output → tool calls → edits → scored
-  red→green) is tested end-to-end with a scripted backend.
-- **Model gateway** (`dc-model`) — the `ModelBackend` trait + `MockBackend` and
-  `CallbackBackend` (the Android/AICore seam).
+  for red→green tasks (verify-red-first, frozen contract tests, green-after-solve),
+  now also reporting the aggregate tool-call validity rate.
 
 See the [roadmap](docs/specs/07-roadmap.md).
 

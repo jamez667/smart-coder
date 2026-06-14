@@ -5,9 +5,10 @@
 //! `dc_model::ModelBackend` (the Android-core target, or a stand-in). The simpler
 //! [`FileSolver`]/[`NoopSolver`] keep the harness testable without a model.
 
+use std::cell::Cell;
 use std::path::Path;
 
-use dc_core::{run_agent, AgentConfig};
+use dc_core::{run_agent, AgentConfig, ToolCallMetrics};
 use dc_model::ModelBackend;
 use dc_proto::{DcError, Result};
 
@@ -21,6 +22,13 @@ pub trait Solver {
     /// Apply changes into `workspace` to satisfy `task`. The harness scores the
     /// result; a solver should not run the verification itself.
     fn solve(&self, task: &EvalTask, workspace: &Path) -> Result<()>;
+    /// Tool-call validity metrics from the most recent [`Solver::solve`], if the
+    /// solver is model-driven. The runner reports these so the suite measures the
+    /// M1 ≥95% valid-call target on a *real* backend (spec 07). Non-agent solvers
+    /// have nothing to report.
+    fn last_metrics(&self) -> Option<ToolCallMetrics> {
+        None
+    }
 }
 
 /// Applies a task's known-good `solution` directory over the workspace.
@@ -99,6 +107,8 @@ where
 pub struct AgentSolver<'a> {
     backend: &'a dyn ModelBackend,
     cfg: AgentConfig,
+    /// Metrics from the most recent solve, for the runner to report.
+    last: Cell<Option<ToolCallMetrics>>,
 }
 
 impl<'a> AgentSolver<'a> {
@@ -106,11 +116,16 @@ impl<'a> AgentSolver<'a> {
         Self {
             backend,
             cfg: AgentConfig::default(),
+            last: Cell::new(None),
         }
     }
 
     pub fn with_config(backend: &'a dyn ModelBackend, cfg: AgentConfig) -> Self {
-        Self { backend, cfg }
+        Self {
+            backend,
+            cfg,
+            last: Cell::new(None),
+        }
     }
 }
 
@@ -128,8 +143,13 @@ impl Solver for AgentSolver<'_> {
             task.description, task.verify_cmd
         );
         // Backend errors (e.g. model unavailable) surface as a SolverError outcome.
-        run_agent(self.backend, &instruction, workspace, &self.cfg)?;
+        let report = run_agent(self.backend, &instruction, workspace, &self.cfg)?;
+        self.last.set(Some(report.metrics));
         Ok(())
+    }
+
+    fn last_metrics(&self) -> Option<ToolCallMetrics> {
+        self.last.get()
     }
 }
 
@@ -138,8 +158,8 @@ mod tests {
     use super::*;
     use crate::fsutil::TempWorkspace;
     use crate::runner::run_task;
-    use dc_core::Tool;
     use dc_model::MockBackend;
+    use serde_json::json;
 
     /// A model that drives the even-parity task to green purely via tool calls,
     /// then finishes. This is the full pipeline: model output -> tool calls ->
@@ -164,13 +184,14 @@ mod tests {
         };
 
         // Script the "model": write the correct impl, then finish.
-        let fix = Tool::WriteFile {
-            path: "impl.sh".into(),
-            content: "is_even() { [ $(( $1 % 2 )) -eq 0 ]; }\n".into(),
-        };
         let backend = MockBackend::new([
-            serde_json::to_string(&fix).unwrap(),
-            serde_json::to_string(&Tool::Finish).unwrap(),
+            json!({
+                "tool": "write_file",
+                "path": "impl.sh",
+                "content": "is_even() { [ $(( $1 % 2 )) -eq 0 ]; }\n"
+            })
+            .to_string(),
+            json!({"tool": "finish"}).to_string(),
         ]);
 
         let solver = AgentSolver::new(&backend);
@@ -202,13 +223,9 @@ mod tests {
             solution: None,
         };
 
-        let cheat = Tool::WriteFile {
-            path: "test.sh".into(),
-            content: "exit 0\n".into(),
-        };
         let backend = MockBackend::new([
-            serde_json::to_string(&cheat).unwrap(),
-            serde_json::to_string(&Tool::Finish).unwrap(),
+            json!({"tool": "write_file", "path": "test.sh", "content": "exit 0\n"}).to_string(),
+            json!({"tool": "finish"}).to_string(),
         ]);
 
         let result = run_task(&task, &AgentSolver::new(&backend));

@@ -1,0 +1,349 @@
+//! The built-in v1 tool surface and its execution (spec 04 — built-in tool set).
+//!
+//! Deliberately tiny and narrow: a few sharply-scoped tools beat a broad,
+//! ambiguous surface for a small model (spec 04). M1 ships the read-only
+//! navigation tools plus `write_file`/`finish`; richer editing/exec tools are M3.
+//!
+//! Every path is sandboxed to the workspace root; traversal outside it is
+//! rejected. Execution never panics — tool errors become structured observations
+//! the model can react to.
+
+use std::path::{Component, Path, PathBuf};
+
+use dc_proto::{DcError, Result};
+
+use crate::spec::{
+    ParamSpec, ParamType, Permission, SideEffect, ToolRegistry, ToolSpec, ValidatedCall,
+};
+
+/// The default registry: the v1 built-in tools, in a stable order.
+pub fn default_registry() -> ToolRegistry {
+    ToolRegistry::new(vec![
+        ToolSpec {
+            name: "read_file",
+            description: "Read a UTF-8 text file's contents.",
+            params: vec![ParamSpec::new(
+                "path",
+                ParamType::String,
+                "file path relative to the project root",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "list_dir",
+            description: "List the entries of a directory (non-recursive).",
+            params: vec![ParamSpec::new(
+                "path",
+                ParamType::String,
+                "directory path relative to the project root ('.' for root)",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "search_code",
+            description: "Search files for a literal substring; returns file:line hits.",
+            params: vec![ParamSpec::new(
+                "query",
+                ParamType::String,
+                "the literal text to search for",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "write_file",
+            description: "Create or overwrite a file with the given full contents.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new("content", ParamType::String, "the full new file contents"),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "finish",
+            description: "Declare the task complete.",
+            params: vec![],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+    ])
+}
+
+/// The result of executing a validated tool call.
+pub enum ToolOutcome {
+    /// Text fed back to the model as the next observation.
+    Observation(String),
+    /// The model called `finish`.
+    Finished,
+}
+
+/// Execute a *validated* call against `workspace`.
+///
+/// Because the call already passed [`ToolRegistry::validate`], the arguments are
+/// known to be present and well-typed. Runtime failures (missing file, bad path)
+/// still become observations, never panics.
+pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
+    match call.name.as_str() {
+        "finish" => ToolOutcome::Finished,
+        "read_file" => ToolOutcome::Observation(read_file(workspace, arg(call, "path"))),
+        "list_dir" => ToolOutcome::Observation(list_dir(workspace, arg(call, "path"))),
+        "search_code" => ToolOutcome::Observation(search_code(workspace, arg(call, "query"))),
+        "write_file" => ToolOutcome::Observation(write_file(
+            workspace,
+            arg(call, "path"),
+            arg(call, "content"),
+        )),
+        // The registry only dispatches names it knows; an unknown name here means
+        // a tool was registered without a matching arm. Surface it loudly.
+        other => ToolOutcome::Observation(format!("internal: no executor for tool {other:?}")),
+    }
+}
+
+/// Pull a validated string arg. Safe to unwrap-with-default because validation
+/// guaranteed required strings are present; optional/absent yields "".
+fn arg<'a>(call: &'a ValidatedCall, name: &str) -> &'a str {
+    call.str(name).unwrap_or_default()
+}
+
+fn read_file(workspace: &Path, path: &str) -> String {
+    match safe_join(workspace, path) {
+        Ok(p) => match std::fs::read_to_string(&p) {
+            Ok(c) => format!("read_file {path}:\n{c}"),
+            Err(e) => format!("read_file {path} error: {e}"),
+        },
+        Err(e) => format!("read_file {path} rejected: {e}"),
+    }
+}
+
+fn list_dir(workspace: &Path, path: &str) -> String {
+    let joined = match safe_join(workspace, path) {
+        Ok(p) => p,
+        Err(e) => return format!("list_dir {path} rejected: {e}"),
+    };
+    let mut entries = match std::fs::read_dir(&joined) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.path().is_dir() {
+                    format!("{name}/")
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => return format!("list_dir {path} error: {e}"),
+    };
+    entries.sort();
+    if entries.is_empty() {
+        format!("list_dir {path}: (empty)")
+    } else {
+        format!("list_dir {path}:\n{}", entries.join("\n"))
+    }
+}
+
+/// A small literal-substring search over the workspace's text files. Skips the
+/// usual noise dirs and anything that isn't valid UTF-8. Caps hits so the result
+/// fits a small context window.
+fn search_code(workspace: &Path, query: &str) -> String {
+    const MAX_HITS: usize = 50;
+    if query.is_empty() {
+        return "search_code: empty query".to_string();
+    }
+    let mut hits = Vec::new();
+    let mut walk = vec![workspace.to_path_buf()];
+    while let Some(dir) = walk.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in rd.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                    continue;
+                }
+                walk.push(path);
+            } else if let Ok(content) = std::fs::read_to_string(&path) {
+                let rel = path
+                    .strip_prefix(workspace)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                for (i, line) in content.lines().enumerate() {
+                    if line.contains(query) {
+                        hits.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                        if hits.len() >= MAX_HITS {
+                            hits.sort();
+                            return format!(
+                                "search_code {query:?}: {MAX_HITS}+ hits (truncated):\n{}",
+                                hits.join("\n")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if hits.is_empty() {
+        format!("search_code {query:?}: no matches")
+    } else {
+        hits.sort();
+        format!(
+            "search_code {query:?}: {} hit(s):\n{}",
+            hits.len(),
+            hits.join("\n")
+        )
+    }
+}
+
+fn write_file(workspace: &Path, path: &str, content: &str) -> String {
+    match safe_join(workspace, path) {
+        Ok(p) => {
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&p, content) {
+                Ok(()) => format!("write_file {path} ok ({} bytes)", content.len()),
+                Err(e) => format!("write_file {path} error: {e}"),
+            }
+        }
+        Err(e) => format!("write_file {path} rejected: {e}"),
+    }
+}
+
+/// Join `rel` onto `workspace`, rejecting absolute paths and `..` traversal
+/// (spec 04 — sandboxed to the workspace root).
+pub fn safe_join(workspace: &Path, rel: &str) -> Result<PathBuf> {
+    let rp = Path::new(rel);
+    if rp.is_absolute() {
+        return Err(DcError::Eval(format!("absolute paths not allowed: {rel}")));
+    }
+    for c in rp.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => return Err(DcError::Eval(format!("path escapes workspace: {rel}"))),
+        }
+    }
+    Ok(workspace.join(rp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "dc-tools-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn call(v: serde_json::Value) -> ValidatedCall {
+        default_registry().validate(&v).unwrap()
+    }
+
+    #[test]
+    fn default_registry_has_the_v1_tools() {
+        let names: Vec<_> = default_registry().specs().iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "read_file",
+                "list_dir",
+                "search_code",
+                "write_file",
+                "finish"
+            ]
+        );
+    }
+
+    #[test]
+    fn write_then_read_roundtrips() {
+        let ws = temp_dir("rw");
+        let w = call(json!({"tool":"write_file","path":"sub/f.txt","content":"hello"}));
+        assert!(matches!(execute(&w, &ws), ToolOutcome::Observation(_)));
+
+        let r = call(json!({"tool":"read_file","path":"sub/f.txt"}));
+        match execute(&r, &ws) {
+            ToolOutcome::Observation(o) => assert!(o.contains("hello"), "got: {o}"),
+            _ => panic!("expected observation"),
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn list_dir_sorts_and_marks_directories() {
+        let ws = temp_dir("ls");
+        std::fs::create_dir(ws.join("zdir")).unwrap();
+        std::fs::write(ws.join("a.txt"), "x").unwrap();
+        let o = match execute(&call(json!({"tool":"list_dir","path":"."})), &ws) {
+            ToolOutcome::Observation(o) => o,
+            _ => panic!(),
+        };
+        let body = o.split_once('\n').unwrap().1;
+        assert_eq!(body, "a.txt\nzdir/");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn search_code_finds_literal_hits_with_line_numbers() {
+        let ws = temp_dir("search");
+        std::fs::write(ws.join("a.rs"), "fn one() {}\nfn target() {}\n").unwrap();
+        std::fs::write(ws.join("b.rs"), "nothing here\n").unwrap();
+        let o = match execute(&call(json!({"tool":"search_code","query":"target"})), &ws) {
+            ToolOutcome::Observation(o) => o,
+            _ => panic!(),
+        };
+        assert!(o.contains("a.rs:2"), "got: {o}");
+        assert!(!o.contains("b.rs"), "got: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn search_code_reports_no_matches() {
+        let ws = temp_dir("search-none");
+        std::fs::write(ws.join("a.rs"), "x\n").unwrap();
+        let o = match execute(&call(json!({"tool":"search_code","query":"zzz"})), &ws) {
+            ToolOutcome::Observation(o) => o,
+            _ => panic!(),
+        };
+        assert!(o.contains("no matches"), "got: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn finish_is_finished() {
+        let ws = temp_dir("fin");
+        assert!(matches!(
+            execute(&call(json!({"tool":"finish"})), &ws),
+            ToolOutcome::Finished
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn rejects_path_traversal() {
+        let ws = temp_dir("trav");
+        match execute(&call(json!({"tool":"read_file","path":"../secret"})), &ws) {
+            ToolOutcome::Observation(o) => assert!(o.contains("rejected"), "got: {o}"),
+            _ => panic!(),
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
