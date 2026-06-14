@@ -27,6 +27,13 @@ pub fn phase_messages(phase: Phase, state: &WorkflowState, think: ThinkPolicy) -
             ));
         }
     }
+    // A send-back carried feedback for this phase — surface it so the regeneration
+    // addresses what the human flagged (spec 09).
+    if let Some(notes) = state.feedback(phase) {
+        user.push_str(&format!(
+            "\n=== Reviewer feedback (address this) ===\n{notes}\n"
+        ));
+    }
     user.push_str(&format!("\n{}", phase_instruction(phase)));
 
     let mut system = system_for(phase);

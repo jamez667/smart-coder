@@ -32,9 +32,10 @@ pub enum Command {
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
     /// Run the staged planning workflow (specs→…→work decomposition) on a task,
-    /// writing the plan artifacts to `.dumb-coder/plan/` (spec 09). Autonomous:
-    /// every gate is auto-approved.
-    Plan { task: String },
+    /// writing the plan artifacts to `.dumb-coder/plan/` (spec 09). When
+    /// `interactive` is set, halt at each phase boundary for a human
+    /// approve/revise/send-back/abort decision; otherwise auto-approve every gate.
+    Plan { task: String, interactive: bool },
     /// Print usage.
     Help,
 }
@@ -83,6 +84,12 @@ pub struct Cli {
     /// `plan` per-phase thinking overrides: `(phase-slug, suppress)` applied in
     /// order over the base, so individual steps can be flipped.
     pub think_steps: Vec<(String, bool)>,
+    /// `plan` ceremony tier (spec 09 — "Scaling the ceremony"): which named set of
+    /// phases stops at a human gate. `None` = no tier flag given.
+    pub ceremony: Option<dc_workflow::Ceremony>,
+    /// `plan` explicit gate set: a precise list of phases to gate, overriding
+    /// `ceremony`. `None` = no `--gates` flag given.
+    pub gates: Option<dc_workflow::PhaseSet>,
 }
 
 impl Cli {
@@ -104,6 +111,8 @@ impl Cli {
         let mut plan_first = false;
         let mut think_base: Option<bool> = None;
         let mut think_steps: Vec<(String, bool)> = Vec::new();
+        let mut ceremony: Option<dc_workflow::Ceremony> = None;
+        let mut gates: Option<dc_workflow::PhaseSet> = None;
         let mut advisor_model = None;
         let mut advisor_url = None;
         let mut system_suffix: Option<String> = None;
@@ -131,7 +140,10 @@ impl Cli {
                     command = Some(match kind.as_str() {
                         "serve" => Command::Serve { task: parsed.task },
                         "swarm" => Command::Swarm { task: parsed.task },
-                        "plan" => Command::Plan { task: parsed.task },
+                        "plan" => Command::Plan {
+                            task: parsed.task,
+                            interactive: parsed.interactive,
+                        },
                         _ => Command::Run { task: parsed.task },
                     });
                     if parsed.verify.is_some() {
@@ -166,6 +178,8 @@ impl Cli {
                     }
                     think_base = parsed.think_base;
                     think_steps = parsed.think_steps;
+                    ceremony = parsed.ceremony;
+                    gates = parsed.gates;
                     plan_first = parsed.plan || plan_first;
                 }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
@@ -260,6 +274,8 @@ impl Cli {
             max_workers,
             think_base,
             think_steps,
+            ceremony,
+            gates,
         })
     }
 
@@ -279,6 +295,27 @@ impl Cli {
             }
         }
         policy
+    }
+
+    /// Resolve the set of phases that stop at a human gate for `plan` (spec 09 —
+    /// "Scaling the ceremony"):
+    /// 1. an explicit `--gates` list wins (precise control);
+    /// 2. else the `--ceremony` tier's set;
+    /// 3. else `Full` — so bare `--interactive` still gates every phase (the
+    ///    behavior before adaptive ceremony existed).
+    pub fn ceremony_gates(&self) -> dc_workflow::PhaseSet {
+        if let Some(gates) = self.gates {
+            gates
+        } else {
+            self.ceremony.unwrap_or(dc_workflow::Ceremony::Full).gates()
+        }
+    }
+
+    /// Whether `plan` should put a human at the gates at all. A run is gated if the
+    /// user asked for `--interactive`/`--gate` *or* named any ceremony policy
+    /// (`--ceremony`/`--gates`) — naming a policy implies wanting the gates.
+    pub fn plan_is_gated(&self, interactive: bool) -> bool {
+        interactive || self.ceremony.is_some() || self.gates.is_some()
     }
 
     /// Build the orchestrator (decomposer) backend for `swarm`: its own
@@ -334,11 +371,17 @@ struct RunArgs {
     max_workers: Option<usize>,
     no_think: bool,
     plan: bool,
+    /// Halt at each `plan` phase boundary for a human checkpoint (spec 09).
+    interactive: bool,
     /// Per-phase thinking overrides for `plan` (spec 09): `--think-all` /
     /// `--no-think-all` set a base; `--think <phase>` / `--nothink <phase>` flip a
     /// single step. Applied in order over the default policy.
     think_base: Option<bool>, // Some(false)=think all, Some(true)=no_think all
     think_steps: Vec<(String, bool)>, // (phase-slug, suppress)
+    /// `plan` ceremony tier (spec 09): `--ceremony minimal|standard|full`.
+    ceremony: Option<dc_workflow::Ceremony>,
+    /// `plan` explicit gate set: `--gates specs,architecture,…` (overrides tier).
+    gates: Option<dc_workflow::PhaseSet>,
     // Global flags may also follow the task; capture them so they aren't swept
     // into the task string.
     base_url: Option<String>,
@@ -358,8 +401,11 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut max_workers = None;
     let mut no_think = false;
     let mut plan = false;
+    let mut interactive = false;
     let mut think_base: Option<bool> = None;
     let mut think_steps: Vec<(String, bool)> = Vec::new();
+    let mut ceremony: Option<dc_workflow::Ceremony> = None;
+    let mut gates: Option<dc_workflow::PhaseSet> = None;
     let mut base_url = None;
     let mut model = None;
     let mut tool_calling = None;
@@ -402,10 +448,23 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                 });
             }
             "--no-think" => no_think = true,
+            "--interactive" | "--gate" => interactive = true,
             "--think-all" => think_base = Some(false),
             "--no-think-all" => think_base = Some(true),
             "--think" => think_steps.push((need(&mut it, "--think")?, false)),
             "--nothink" => think_steps.push((need(&mut it, "--nothink")?, true)),
+            "--ceremony" => {
+                let tier = need(&mut it, "--ceremony")?;
+                ceremony = Some(dc_workflow::Ceremony::parse(&tier).ok_or_else(|| {
+                    DcError::Eval(format!(
+                        "--ceremony must be minimal|standard|full, got {tier:?}"
+                    ))
+                })?);
+            }
+            "--gates" => {
+                let list = need(&mut it, "--gates")?;
+                gates = Some(parse_gate_set(&list)?);
+            }
             "--plan" => plan = true,
             _ => task_words.push(a),
         }
@@ -420,12 +479,39 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         max_workers,
         no_think,
         plan,
+        interactive,
         think_base,
         think_steps,
+        ceremony,
+        gates,
         base_url,
         model,
         tool_calling,
     })
+}
+
+/// Parse a `--gates` value: a comma-separated list of phase slugs into a
+/// [`dc_workflow::PhaseSet`]. An unknown slug is an error (fail loud, spec 00).
+fn parse_gate_set(list: &str) -> Result<dc_workflow::PhaseSet> {
+    let mut phases = Vec::new();
+    for raw in list.split(',') {
+        let slug = raw.trim();
+        if slug.is_empty() {
+            continue;
+        }
+        let phase = dc_workflow::Phase::from_slug(slug).ok_or_else(|| {
+            DcError::Eval(format!(
+                "--gates: unknown phase {slug:?} (expected one of: {})",
+                dc_workflow::Phase::ALL
+                    .iter()
+                    .map(|p| p.slug())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        phases.push(phase);
+    }
+    Ok(dc_workflow::PhaseSet::of(phases))
 }
 
 /// Usage text (spec 06 — invocation modes, trimmed to the M0 surface).
@@ -462,6 +548,16 @@ OPTIONS:
     --orchestrator MODEL  The model that decomposes/plans         [default: --model]
     --orchestrator-url U  Endpoint for the orchestrator           [default: --base-url]
     --max-workers N       Max parallel workers                    [default: 2]
+    --interactive, --gate Halt at each `plan` phase boundary for a human checkpoint:
+                          approve / revise / send-back / abort (spec 09). Default is
+                          autonomous (auto-approve every gate).
+    --ceremony TIER       Scale the ceremony to the task (spec 09): which phases stop
+                          at a gate. minimal (final sign-off only) | standard (specs,
+                          tests, decomposition) | full (every phase). Implies
+                          --interactive.
+    --gates PHASES        Precise gate set: a comma-separated list of phase slugs to
+                          gate (e.g. specs,stage-breakdown). Overrides --ceremony;
+                          implies --interactive.
   plan only — per-phase thinking (spec 09; default: think on the JSON phases,
   /no_think on the prose phases):
     --think-all           Think on every phase
@@ -754,6 +850,92 @@ mod tests {
         assert_eq!(cli.command, Command::Doctor);
         assert_eq!(cli.model, "qwen2:1.5b");
         assert_eq!(cli.base_url, "http://host:8000/v1");
+    }
+
+    #[test]
+    fn plan_is_autonomous_by_default_and_gated_with_interactive() {
+        let auto = Cli::parse(["plan", "build a parser"]).unwrap();
+        assert_eq!(
+            auto.command,
+            Command::Plan {
+                task: "build a parser".to_string(),
+                interactive: false,
+            }
+        );
+        // Both spellings turn on the human checkpoints; the flag is peeled out of
+        // the greedily-collected task.
+        for flag in ["--interactive", "--gate"] {
+            let gated = Cli::parse(["plan", "build a parser", flag]).unwrap();
+            assert_eq!(
+                gated.command,
+                Command::Plan {
+                    task: "build a parser".to_string(),
+                    interactive: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn ceremony_tier_resolves_to_its_gate_set() {
+        use dc_workflow::Ceremony;
+        let cli = Cli::parse(["plan", "fix a typo", "--ceremony", "standard"]).unwrap();
+        assert_eq!(cli.ceremony, Some(Ceremony::Standard));
+        assert_eq!(cli.ceremony_gates(), Ceremony::Standard.gates());
+        // A bad tier is a loud error.
+        assert!(Cli::parse(["plan", "t", "--ceremony", "lavish"]).is_err());
+    }
+
+    #[test]
+    fn explicit_gates_override_the_tier_and_parse_slugs() {
+        use dc_workflow::{Phase, PhaseSet};
+        let cli = Cli::parse([
+            "plan",
+            "do it",
+            "--ceremony",
+            "minimal",
+            "--gates",
+            "specs,stage-breakdown",
+        ])
+        .unwrap();
+        // --gates wins over --ceremony.
+        assert_eq!(
+            cli.ceremony_gates(),
+            PhaseSet::of([Phase::Specs, Phase::StageBreakdown])
+        );
+    }
+
+    #[test]
+    fn gates_with_unknown_slug_is_an_error() {
+        let err = Cli::parse(["plan", "t", "--gates", "specs,frobnicate"]).unwrap_err();
+        assert!(err.to_string().contains("unknown phase"), "got: {err}");
+    }
+
+    #[test]
+    fn bare_interactive_gates_every_phase() {
+        use dc_workflow::Ceremony;
+        // No ceremony/gates flag → ceremony_gates() defaults to Full (today's
+        // behavior preserved), and the run is gated.
+        let cli = Cli::parse(["plan", "t", "--interactive"]).unwrap();
+        assert!(cli.ceremony.is_none() && cli.gates.is_none());
+        assert_eq!(cli.ceremony_gates(), Ceremony::Full.gates());
+        assert!(cli.plan_is_gated(true));
+    }
+
+    #[test]
+    fn no_ceremony_flags_runs_autonomously() {
+        let cli = Cli::parse(["plan", "t"]).unwrap();
+        // interactive=false and no policy → not gated.
+        assert!(!cli.plan_is_gated(false));
+    }
+
+    #[test]
+    fn ceremony_and_gates_imply_interactive() {
+        // Naming a policy turns the gates on even without --interactive.
+        let tier = Cli::parse(["plan", "t", "--ceremony", "minimal"]).unwrap();
+        assert!(tier.plan_is_gated(false));
+        let explicit = Cli::parse(["plan", "t", "--gates", "specs"]).unwrap();
+        assert!(explicit.plan_is_gated(false));
     }
 
     #[test]

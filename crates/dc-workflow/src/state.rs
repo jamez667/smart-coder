@@ -48,6 +48,12 @@ pub struct WorkflowState {
     pub task: String,
     /// Artifacts in pipeline order (at most one per phase).
     artifacts: Vec<Artifact>,
+    /// Send-back feedback notes keyed by phase: when a checkpoint bounces back to a
+    /// phase with notes, they're stored here so the *next* regeneration of that
+    /// phase can ground on them (spec 09 — "return … with feedback notes"). Cleared
+    /// once that phase is approved again.
+    #[serde(default)]
+    feedback: Vec<(Phase, String)>,
 }
 
 impl WorkflowState {
@@ -55,6 +61,7 @@ impl WorkflowState {
         Self {
             task: task.into(),
             artifacts: Vec::new(),
+            feedback: Vec::new(),
         }
     }
 
@@ -94,11 +101,28 @@ impl WorkflowState {
         }
     }
 
-    /// Approve `phase`'s draft (no-op if absent).
+    /// Approve `phase`'s draft (no-op if absent). Clears any send-back feedback for
+    /// the phase — once it's approved, the note has served its purpose.
     pub fn approve(&mut self, phase: Phase) {
         if let Some(a) = self.artifacts.iter_mut().find(|a| a.phase == phase) {
             a.status = Status::Approved;
         }
+        self.feedback.retain(|(p, _)| *p != phase);
+    }
+
+    /// Record send-back feedback for `phase` — grounding for its next regeneration
+    /// (spec 09). Replaces any prior note for the phase.
+    pub fn set_feedback(&mut self, phase: Phase, notes: impl Into<String>) {
+        self.feedback.retain(|(p, _)| *p != phase);
+        self.feedback.push((phase, notes.into()));
+    }
+
+    /// The send-back feedback recorded for `phase`, if any.
+    pub fn feedback(&self, phase: Phase) -> Option<&str> {
+        self.feedback
+            .iter()
+            .find(|(p, _)| *p == phase)
+            .map(|(_, n)| n.as_str())
     }
 
     /// Drop every artifact at or after `phase` — used when sending back to an
@@ -222,6 +246,31 @@ mod tests {
 
         let loaded = load(&ws).unwrap().unwrap();
         assert_eq!(loaded, s);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn feedback_is_set_persisted_and_cleared_on_approve() {
+        let ws = temp("feedback");
+        let mut s = WorkflowState::new("t");
+        s.set(Artifact::draft(Phase::Architecture, "draft"));
+        s.set_feedback(Phase::Architecture, "make it event-driven");
+        assert_eq!(
+            s.feedback(Phase::Architecture),
+            Some("make it event-driven")
+        );
+
+        // Survives a save/load round-trip.
+        save(&ws, &s).unwrap();
+        let loaded = load(&ws).unwrap().unwrap();
+        assert_eq!(
+            loaded.feedback(Phase::Architecture),
+            Some("make it event-driven")
+        );
+
+        // Approving the phase clears its feedback — the note has done its job.
+        s.approve(Phase::Architecture);
+        assert_eq!(s.feedback(Phase::Architecture), None);
         let _ = std::fs::remove_dir_all(&ws);
     }
 

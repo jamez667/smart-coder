@@ -69,6 +69,12 @@ impl Phase {
         }
     }
 
+    /// The phase named by `slug`, if any — the inverse of [`Phase::slug`]. Used by
+    /// the CLI to resolve a phase from user input (send-back target, `--gates`).
+    pub fn from_slug(slug: &str) -> Option<Phase> {
+        Phase::ALL.iter().copied().find(|p| p.slug() == slug)
+    }
+
     /// The on-disk filename for this phase's artifact, e.g. `01-specs.md`.
     pub fn filename(self) -> String {
         format!("{:02}-{}.md", self.index() + 1, self.slug())
@@ -83,6 +89,95 @@ impl Phase {
             Phase::StageBreakdown => "Stage breakdown (test-first)",
             Phase::ImplementationPlan => "Implementation plan",
             Phase::WorkDecomposition => "Work decomposition",
+        }
+    }
+}
+
+/// A set of phases that require a human gate (spec 09 — "Scaling the ceremony").
+/// Everything *not* in the set auto-approves, so this is the policy that scales the
+/// ceremony to the task. Backed by a fixed-size bitmask over the six phases — order
+/// doesn't matter and membership is the only operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PhaseSet {
+    /// Bit `i` set ⇔ `Phase::ALL[i]` is in the set.
+    bits: u8,
+}
+
+impl PhaseSet {
+    /// The set containing exactly `phases`.
+    pub fn of(phases: impl IntoIterator<Item = Phase>) -> Self {
+        let mut set = PhaseSet::default();
+        for p in phases {
+            set.bits |= 1 << p.index();
+        }
+        set
+    }
+
+    /// Whether `phase` is in the set.
+    pub fn contains(&self, phase: Phase) -> bool {
+        self.bits & (1 << phase.index()) != 0
+    }
+
+    /// Whether no phase is gated (a fully autonomous policy).
+    pub fn is_empty(&self) -> bool {
+        self.bits == 0
+    }
+
+    /// The gated phases, in pipeline order — for display.
+    pub fn phases(&self) -> Vec<Phase> {
+        Phase::ALL
+            .iter()
+            .copied()
+            .filter(|p| self.contains(*p))
+            .collect()
+    }
+}
+
+/// Named ceremony tiers (spec 09 — "more gates for broader/destructive scope, fewer
+/// for narrow edits"). Each tier names the phases that stop at a human checkpoint;
+/// the rest auto-approve. All tiers still run all six phases — only *which* phases
+/// gate changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ceremony {
+    /// Narrow edits: one final sign-off before the swarm runs.
+    Minimal,
+    /// The middle ground: confirm the *what* (specs), the frozen *tests*, and the
+    /// *decomposition* — skip the prose design gates.
+    Standard,
+    /// Broad/destructive: gate every phase (equivalent to bare `--interactive`).
+    Full,
+}
+
+impl Ceremony {
+    /// Parse a tier name (`minimal` | `standard` | `full`).
+    pub fn parse(s: &str) -> Option<Ceremony> {
+        match s {
+            "minimal" => Some(Ceremony::Minimal),
+            "standard" => Some(Ceremony::Standard),
+            "full" => Some(Ceremony::Full),
+            _ => None,
+        }
+    }
+
+    /// A human label for the tier.
+    pub fn label(self) -> &'static str {
+        match self {
+            Ceremony::Minimal => "minimal",
+            Ceremony::Standard => "standard",
+            Ceremony::Full => "full",
+        }
+    }
+
+    /// The phases that stop at a human gate for this tier.
+    pub fn gates(self) -> PhaseSet {
+        match self {
+            Ceremony::Minimal => PhaseSet::of([Phase::WorkDecomposition]),
+            Ceremony::Standard => PhaseSet::of([
+                Phase::Specs,
+                Phase::StageBreakdown,
+                Phase::WorkDecomposition,
+            ]),
+            Ceremony::Full => PhaseSet::of(Phase::ALL),
         }
     }
 }
@@ -105,6 +200,55 @@ mod tests {
             p = cur.next();
         }
         assert_eq!(seen, Phase::ALL.to_vec());
+    }
+
+    #[test]
+    fn from_slug_round_trips_and_rejects_garbage() {
+        for p in Phase::ALL {
+            assert_eq!(Phase::from_slug(p.slug()), Some(p));
+        }
+        assert_eq!(Phase::from_slug("nonsense"), None);
+        assert_eq!(Phase::from_slug(""), None);
+    }
+
+    #[test]
+    fn phase_set_membership() {
+        let s = PhaseSet::of([Phase::Specs, Phase::WorkDecomposition]);
+        assert!(s.contains(Phase::Specs));
+        assert!(s.contains(Phase::WorkDecomposition));
+        assert!(!s.contains(Phase::Architecture));
+        assert!(!s.is_empty());
+        // `phases()` lists members in pipeline order.
+        assert_eq!(s.phases(), vec![Phase::Specs, Phase::WorkDecomposition]);
+        assert!(PhaseSet::default().is_empty());
+    }
+
+    #[test]
+    fn ceremony_tiers_gate_the_expected_phases() {
+        // Minimal: only the final sign-off.
+        assert_eq!(
+            Ceremony::Minimal.gates().phases(),
+            vec![Phase::WorkDecomposition]
+        );
+        // Standard: the what, the tests, the decomposition.
+        assert_eq!(
+            Ceremony::Standard.gates().phases(),
+            vec![
+                Phase::Specs,
+                Phase::StageBreakdown,
+                Phase::WorkDecomposition
+            ]
+        );
+        // Full: every phase.
+        assert_eq!(Ceremony::Full.gates().phases(), Phase::ALL.to_vec());
+    }
+
+    #[test]
+    fn ceremony_parses_and_rejects() {
+        assert_eq!(Ceremony::parse("minimal"), Some(Ceremony::Minimal));
+        assert_eq!(Ceremony::parse("standard"), Some(Ceremony::Standard));
+        assert_eq!(Ceremony::parse("full"), Some(Ceremony::Full));
+        assert_eq!(Ceremony::parse("bogus"), None);
     }
 
     #[test]
