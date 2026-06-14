@@ -110,31 +110,66 @@ fn attach_cargo_failure_messages(output: &str, cases: &mut [TestCase]) {
     }
 }
 
-/// Parse pytest output. We use the per-test verbose lines when present
-/// (`tests/test_x.py::test_y PASSED`), else the summary line counts.
+/// Parse pytest output, handling both verbose and quiet (`-q`) modes:
+///
+/// * **verbose** (`-v`): per-test lines `path::test_name PASSED|FAILED|ERROR`.
+/// * **quiet** (`-q`, the common case): only the `short test summary info` lines
+///   `FAILED path::test - reason` / `ERROR path::test - reason` for failures, plus
+///   a final `N passed, M failed` count. We surface every failing case with its
+///   reason and synthesize placeholder passes so the count is right.
 fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
     let mut cases = Vec::new();
+
+    // Verbose per-test lines.
     for line in output.lines() {
         let line = line.trim();
-        // Verbose form: "path::test_name PASSED" / "FAILED" / "ERROR".
         for status in ["PASSED", "FAILED", "ERROR"] {
             if let Some(name) = line.strip_suffix(status).map(str::trim) {
                 if !name.is_empty() && (name.contains("::") || name.contains(".py")) {
                     cases.push(TestCase {
                         name: name.to_string(),
                         passed: status == "PASSED",
-                        message: if status == "PASSED" {
-                            None
-                        } else {
-                            Some(status.to_string())
-                        },
+                        message: (status != "PASSED").then(|| status.to_string()),
                     });
                 }
             }
         }
     }
+
+    // Quiet-mode summary lines: `FAILED path::test - message` / `ERROR ... - ...`.
     if cases.is_empty() {
-        // No verbose lines — fall back to the summary so we at least know red/green.
+        for line in output.lines() {
+            let line = line.trim();
+            for kind in ["FAILED ", "ERROR "] {
+                if let Some(rest) = line.strip_prefix(kind) {
+                    let (name, msg) = match rest.split_once(" - ") {
+                        Some((n, m)) => (n.trim(), Some(m.trim().to_string())),
+                        None => (rest.trim(), Some(kind.trim().to_string())),
+                    };
+                    if name.contains("::") || name.contains(".py") {
+                        cases.push(TestCase {
+                            name: name.to_string(),
+                            passed: false,
+                            message: msg,
+                        });
+                    }
+                }
+            }
+        }
+        // Add placeholder passes from the summary so passed/total is meaningful
+        // (e.g. "2 failed, 1 passed in 0.05s").
+        if let Some(passed) = pytest_summary_passed(output) {
+            for i in 0..passed {
+                cases.push(TestCase {
+                    name: format!("(passed #{})", i + 1),
+                    passed: true,
+                    message: None,
+                });
+            }
+        }
+    }
+
+    if cases.is_empty() {
         return TestReport::generic(command_ok);
     }
     TestReport {
@@ -142,6 +177,22 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
         command_ok,
         generic: false,
     }
+}
+
+/// Pull the "N passed" count from pytest's final summary line, if present
+/// (e.g. "2 failed, 1 passed in 0.05s" → 1).
+fn pytest_summary_passed(output: &str) -> Option<usize> {
+    for line in output.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for (i, t) in toks.iter().enumerate() {
+            if *t == "passed" && i > 0 {
+                if let Ok(n) = toks[i - 1].parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -220,6 +271,32 @@ tests/test_core.py::test_mul PASSED
         assert_eq!(report.passed_count(), 2);
         assert_eq!(report.failed().len(), 1);
         assert_eq!(report.failed()[0].name, "tests/test_core.py::test_sub");
+    }
+
+    #[test]
+    fn parses_pytest_quiet_mode_summary() {
+        // `pytest -q` output: dots, then short-summary FAILED lines + counts.
+        let out = "\
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+=========================== short test summary info ===========================
+FAILED test_calc.py::test_four_is_even - assert False is True
+FAILED test_calc.py::test_ten_is_even - assert False is True
+2 failed, 1 passed in 0.05s
+";
+        let report = parse("python -m pytest -q", out, false);
+        assert!(
+            !report.generic,
+            "quiet mode should parse, not fall to generic"
+        );
+        assert_eq!(report.failed().len(), 2);
+        assert_eq!(report.passed_count(), 1); // from the "1 passed" summary
+        assert!(report.failed()[0].name.contains("test_four_is_even"));
+        assert!(report
+            .failed()
+            .iter()
+            .any(|c| c.message.as_deref() == Some("assert False is True")));
+        assert!(!report.all_green());
     }
 
     #[test]

@@ -118,7 +118,13 @@ pub struct AgentReport {
 }
 
 const TASK_PREFIX: &str = "You are a coding agent working in a project directory. \
-Make the failing test pass.\n\n";
+Make the failing test pass. Follow this loop: \
+1) read_file the file you need to change (don't just search repeatedly); \
+2) edit_file it with a precise change; \
+3) run_verification to run the tests (use run_verification, NOT run_command — \
+shell is blocked); read which tests still fail and fix them; \
+4) finish only when the tests pass. \
+Take a concrete action every turn — prefer editing over searching.\n\n";
 
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
@@ -602,6 +608,16 @@ fn dispatch(
     // Permission gate — the harness decides, outside the model's control (spec 04).
     if let Some(spec) = registry.get(&call.name) {
         if let dc_tools::Decision::Deny(reason) = policy.check(call, spec.side_effect) {
+            // A small model often reaches for `run_command "pytest"/"cargo test"`;
+            // redirect it to the allowed run_verification tool instead of just
+            // denying (spec 04 — structured, actionable feedback).
+            if call.name == "run_command" && looks_like_test_command(call.str("command")) {
+                return ToolOutcome::Observation(
+                    "run_command denied (shell is blocked). To run the tests, use \
+                     {\"tool\":\"run_verification\"} instead."
+                        .to_string(),
+                );
+            }
             return ToolOutcome::Observation(format!("{} denied: {reason}", call.name));
         }
     }
@@ -682,12 +698,31 @@ fn key_arg(call: &dc_tools::ValidatedCall) -> String {
 }
 
 /// Does an observation read like a failure the model must react to?
+/// Does a shell command look like an attempt to run the test suite? Used to
+/// redirect a denied `run_command` to `run_verification`.
+fn looks_like_test_command(cmd: Option<&str>) -> bool {
+    let c = cmd.unwrap_or_default().to_ascii_lowercase();
+    c.contains("pytest")
+        || c.contains("cargo test")
+        || c.contains("npm test")
+        || c.contains("go test")
+        || (c.contains("test") && c.contains("python"))
+}
+
 fn looks_like_failure(obs: &str) -> bool {
     let l = obs.to_ascii_lowercase();
+    // A green verification says "all N passed ✓"; a red one says "K failed".
+    // "passed" with no "failed" must NOT read as a failure, so check failure
+    // markers but exclude the all-passed phrasing.
+    if l.contains("passed") && !l.contains("failed") && !l.contains("error") {
+        return false;
+    }
     l.contains("error")
         || l.contains("rejected")
         || l.contains("not found")
         || l.contains("no match")
+        || l.contains("failed")
+        || l.contains("exited non-zero")
 }
 
 /// Crude identifier extraction from the task text, to boost the repo map toward

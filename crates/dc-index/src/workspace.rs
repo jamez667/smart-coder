@@ -62,8 +62,20 @@ pub fn find_symbol(root: &Path, name: &str) -> String {
     if name.is_empty() {
         return "find_symbol: empty name".to_string();
     }
+    let sources = collect_sources(root);
+    // Be honest about *why* a symbol can't be found: this index only parses
+    // Rust/Python. With no indexable files, find_symbol can't help — steer the
+    // model to read_file/list_dir/search_code instead of looping (spec 04 —
+    // structured, actionable feedback).
+    if sources.is_empty() {
+        return format!(
+            "find_symbol {name:?}: this project has no Rust/Python files to index \
+             (find_symbol only supports those). Use list_dir, then read_file or \
+             search_code instead."
+        );
+    }
     let mut hits = Vec::new();
-    for f in collect_sources(root) {
+    for f in &sources {
         let lang = match Language::from_path(&f.path) {
             Some(l) => l,
             None => continue,
@@ -75,7 +87,10 @@ pub fn find_symbol(root: &Path, name: &str) -> String {
         }
     }
     if hits.is_empty() {
-        format!("find_symbol {name:?}: no definition found")
+        format!(
+            "find_symbol {name:?}: no definition found in the indexed Rust/Python \
+             files. Try search_code for a text match, or read_file directly."
+        )
     } else {
         hits.sort();
         format!("find_symbol {name:?}: {}", hits.join(", "))
@@ -126,7 +141,28 @@ mod tests {
     fn find_symbol_reports_not_found() {
         let root = temp_repo("notfound");
         std::fs::write(root.join("a.rs"), "fn a() {}").unwrap();
-        assert!(find_symbol(&root, "ghost").contains("no definition found"));
+        let out = find_symbol(&root, "ghost");
+        assert!(out.contains("no definition found"), "{out}");
+        // And points the model at a fallback rather than dead-ending.
+        assert!(
+            out.contains("search_code") || out.contains("read_file"),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_symbol_explains_when_no_indexable_files() {
+        // A workspace with only shell scripts: find_symbol can't index it, and
+        // must SAY so (not falsely claim "not found") so the model pivots.
+        let root = temp_repo("noindex");
+        std::fs::write(root.join("impl.sh"), "is_even() { return 1; }\n").unwrap();
+        let out = find_symbol(&root, "is_even");
+        assert!(out.contains("no Rust/Python files"), "{out}");
+        assert!(
+            out.contains("list_dir") || out.contains("read_file"),
+            "{out}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
