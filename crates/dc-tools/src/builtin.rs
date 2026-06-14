@@ -132,6 +132,28 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "update_plan",
+            description: "Replace your step plan with a new ordered list of short steps.",
+            params: vec![ParamSpec::new(
+                "steps",
+                ParamType::String,
+                "the new plan as a JSON array of short step strings",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "ask_user",
+            description: "Escalate a genuine blocker for advice instead of guessing.",
+            params: vec![ParamSpec::new(
+                "question",
+                ParamType::String,
+                "the specific question or blocker",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "finish",
             description: "Declare the task complete.",
             params: vec![],
@@ -402,6 +424,8 @@ mod tests {
                 "edit_file",
                 "run_command",
                 "run_verification",
+                "update_plan",
+                "ask_user",
                 "finish"
             ]
         );

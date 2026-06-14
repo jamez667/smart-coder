@@ -74,13 +74,21 @@ fn multi_turn_run_stays_under_the_8k_budget() {
 
     let backend = EightKReader::new(8); // 8 big reads, then finish
     let registry = default_registry();
+    // This test stresses the *budget*, not loop detection: the scripted backend
+    // deliberately re-reads the same file, so raise the stall thresholds above the
+    // turn count to keep that degenerate-but-intentional pattern alive.
+    let cfg = AgentConfig {
+        repeat_limit: 100,
+        no_progress_limit: 100,
+        ..Default::default()
+    };
     let report = run_agent_with(
         &backend,
         &registry,
         &ParseRepair,
         "investigate func_1234 in the project",
         &ws,
-        &AgentConfig::default(),
+        &cfg,
     )
     .unwrap();
 

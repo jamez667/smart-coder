@@ -63,13 +63,23 @@ under control. Everything else builds on a working, reliable single-step loop.
   (CLI/M5); verify-red-*first* as an explicit harness-run pre-check (the loop lets
   the model run it); more test-framework parsers (jest, go test, …).
 
-## M4 — Planning & recovery
+## M4 — Planning & recovery ✅
 **Goal:** survive multi-step tasks and the model's own mistakes.
-- Planner: decompose into small steps; harness-owned plan state.
-- Re-planning triggers; loop/stall detection; per-step + global budgets.
-- `update_plan`, `ask_user`, `finish` meta-tools.
-- **Exit criteria:** recovers from induced failures (bad edit, failing test,
-  repeated action) without human rescue, or escalates cleanly.
+- ✅ Planner: decompose into a short ordered step list; harness-owned `PlanState`
+  (status per step, retry counter), rendered as compact structured state.
+- ✅ Loop/stall detection (action-hash repeats + no-progress counter) + per-step
+  retry budget + global step budget; structured `StopReason`.
+- ✅ `update_plan` + `ask_user` meta-tools (+ existing `finish`).
+- ✅ **Escalation = "junior asks senior"** (spec 02): on a stall or `ask_user`,
+  consult a larger *advisor* backend for a one-line nudge (advice, not the fix);
+  the junior keeps doing the work. No advisor → clean `Escalated`/`Stalled` stop.
+- **Exit criteria:** ✅ recovers from induced failures (bad edit, repeated action)
+  without human rescue, breaks loops via an advisor nudge, and escalates cleanly
+  with no advisor (`dc-core` `recovery_loop` integration test).
+- *Deferred:* automatic step-completion detection (the harness renders the plan
+  and runs the retry budget, but advances steps only via the model's
+  `update_plan` / on retry-exhaustion, not by inferring which call satisfied a
+  step); per-step token/wall-clock budgets; re-running the planner mid-task.
 
 ## M5 — UX, replay & polish
 **Goal:** pleasant, inspectable, scriptable.

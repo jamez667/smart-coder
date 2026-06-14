@@ -20,7 +20,11 @@ use dc_model::{GenerateRequest, Message, ModelBackend};
 use dc_proto::Result;
 use dc_tools::{execute, Journal, PermissionPolicy, ToolOutcome, ToolRegistry};
 
+use crate::advisor::{advice_observation, consult, Predicament};
 use crate::metrics::ToolCallMetrics;
+use crate::plan::PlanState;
+use crate::planner::make_plan;
+use crate::recovery::{action_hash, Progress, StallDetector, StopReason};
 use crate::strategy::ToolCallStrategy;
 
 /// Loop configuration, including the Context Manager's budget knobs (spec 05).
@@ -47,6 +51,17 @@ pub struct AgentConfig {
     /// The project's test command. When set, the loop runs verify-red-first and
     /// gates `finish` on a green whole suite (spec 11). `run_verification` uses it.
     pub verify_command: Option<String>,
+    /// Ask the planner for a step plan before the loop (spec 03 — PLAN). When
+    /// false, the agent runs plan-free (M0–M3 behavior).
+    pub plan_first: bool,
+    /// Consecutive identical actions before the harness intervenes (spec 03 — loop
+    /// detection).
+    pub repeat_limit: usize,
+    /// Consecutive turns with no workspace change before intervening (stall).
+    pub no_progress_limit: usize,
+    /// Per-step retry budget: failed attempts on the active step before the
+    /// harness gives up on it and moves on (spec 03).
+    pub step_retry_budget: usize,
 }
 
 impl Default for AgentConfig {
@@ -60,6 +75,10 @@ impl Default for AgentConfig {
             repo_map_top_k: 30,
             permission: PermissionPolicy::default(),
             verify_command: None,
+            plan_first: false,
+            repeat_limit: 3,
+            no_progress_limit: 4,
+            step_retry_budget: 3,
         }
     }
 }
@@ -83,6 +102,12 @@ pub struct AgentReport {
     /// A compact summary of files changed over the run (spec 04/06 — the journal's
     /// diff overview).
     pub change_summary: String,
+    /// Why the run stopped (spec 06 — honest stop lines). `finished` is a
+    /// convenience alias for `stop_reason == Finished`.
+    pub stop_reason: StopReason,
+    /// How many times the harness intervened (re-plan / advisor nudge) to recover
+    /// the agent from a stall (spec 03).
+    pub interventions: usize,
 }
 
 const TASK_PREFIX: &str = "You are a coding agent working in a project directory. \
@@ -108,10 +133,9 @@ pub fn run_agent(
     )
 }
 
-/// Run the agent with an explicit registry and tool-call strategy.
-///
-/// Returns once the model calls `finish` or the step budget is exhausted. A
-/// backend error (e.g. the model being unavailable) propagates as `Err`.
+/// Run the agent with an explicit registry and tool-call strategy, no planner or
+/// advisor (the M0–M3 behavior). For planning + recovery, use
+/// [`run_agent_recovering`].
 pub fn run_agent_with(
     backend: &dyn ModelBackend,
     registry: &ToolRegistry,
@@ -120,10 +144,37 @@ pub fn run_agent_with(
     workspace: &Path,
     cfg: &AgentConfig,
 ) -> Result<AgentReport> {
+    run_agent_recovering(
+        backend,
+        None,
+        registry,
+        strategy,
+        instruction,
+        workspace,
+        cfg,
+    )
+}
+
+/// Run the agent with planning and recovery (spec 03 — M4).
+///
+/// * `backend` is the coder (T2). If `cfg.plan_first`, it is also asked to plan.
+/// * `advisor` is the optional senior model (T1) consulted when the agent stalls
+///   — "junior asks senior" (spec 02). It gives a *hint*, not the fix.
+///
+/// The harness owns the plan, detects loops/stalls, and decides when to re-plan,
+/// nudge via the advisor, or stop — the model never has to.
+pub fn run_agent_recovering(
+    backend: &dyn ModelBackend,
+    advisor: Option<&dyn ModelBackend>,
+    registry: &ToolRegistry,
+    strategy: &dyn ToolCallStrategy,
+    instruction: &str,
+    workspace: &Path,
+    cfg: &AgentConfig,
+) -> Result<AgentReport> {
     let system = format!("{TASK_PREFIX}{}", strategy.system_preamble(registry));
 
-    // Token accounting + hard budget (spec 05). Budget against an effective
-    // fraction of the advertised window, minus the response reserve.
+    // Token accounting + hard budget (spec 05).
     let counter = TokenCounter::new(backend);
     let caps = backend.capabilities();
     let budget = prompt_budget(
@@ -133,8 +184,7 @@ pub fn run_agent_with(
     );
     let builder = ContextBuilder::new(&counter, budget);
 
-    // The repo map is retrieval that's stable across the run; boost symbols the
-    // task names so the map's top is relevant to *this* task (spec 05, aider).
+    // The repo map is stable retrieval; boost task-named symbols (spec 05, aider).
     let repo_map = dc_index::repo_map(
         workspace,
         &Boosts {
@@ -144,38 +194,49 @@ pub fn run_agent_with(
         cfg.repo_map_top_k,
     );
 
+    // PLAN (spec 03): decompose the task up front, grounded in the repo map. The
+    // harness owns the plan; the model only ever sees a compact rendering.
+    let mut plan = if cfg.plan_first {
+        make_plan(backend, instruction, &repo_map)?
+    } else {
+        PlanState::default()
+    };
+
     let mut metrics = ToolCallMetrics::default();
     let mut history: Vec<TurnRecord> = Vec::new();
-    // Recent verbatim turns: the assistant's last action and the observation it
-    // produced, kept as raw messages for the prompt's recent zone.
     let mut recent: Vec<Message> = Vec::new();
     let mut peak_prompt_tokens = 0usize;
-    // Records every mutation for the diff overview + rollback (spec 04).
     let mut journal = Journal::new();
+    let mut stall = StallDetector::default();
+    let mut interventions = 0usize;
 
     for step in 0..cfg.max_steps {
-        // Compact older turns into a rolling summary; keep the recent ones.
+        // Compact older turns; keep the recent ones verbatim.
         let (older, _recent_records) =
             dc_context::split_for_compaction(&history, cfg.keep_recent_turns);
         let summary = summarize_history(older);
 
-        // Assemble the budgeted, zoned prompt (spec 05).
+        // Assemble the budgeted, zoned prompt (spec 05). The plan rides in the
+        // retrieved zone as compact structured state (spec 05).
         let mut segments = vec![
             Segment::system(Zone::System, system.clone()),
             Segment::user(Zone::TaskAnchor, instruction.to_string()),
         ];
+        let plan_render = plan.render();
+        if !plan_render.is_empty() {
+            segments.push(Segment::user(Zone::Retrieved, plan_render));
+        }
         if !repo_map.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, repo_map.clone()));
         }
         if !summary.is_empty() {
             segments.push(Segment::user(Zone::HistorySummary, summary));
         }
-        // The most-recent turns are the sacred RecentObservation zone.
         for (i, m) in recent.iter().enumerate() {
             let zone = if i + 1 == recent.len() {
                 Zone::RecentObservation
             } else {
-                Zone::HistorySummary // older-but-still-verbatim degrades first
+                Zone::HistorySummary
             };
             segments.push(seg_from_message(zone, m));
         }
@@ -188,82 +249,209 @@ pub fn run_agent_with(
         let resp = backend.generate(&req)?;
 
         // Decode the tool call.
-        match strategy.extract(&resp.content, registry) {
+        let (obs, action, changed, tool, arg) = match strategy.extract(&resp.content, registry) {
             Ok(call) => {
                 metrics.record_valid();
                 let arg = key_arg(&call);
-                // Snapshot before a mutating, path-bearing call so the journal can
-                // record the change (and roll back) after it runs (spec 04).
-                let pre = mutating_path(&call, registry)
-                    .map(|p| (p.clone(), Journal::snapshot(workspace, &p)));
-                let outcome = dispatch(
-                    &call,
-                    registry,
-                    &cfg.permission,
-                    &cfg.verify_command,
-                    workspace,
-                );
-                if let Some((path, before)) = pre {
-                    journal.record(workspace, &path, before);
-                }
-                match outcome {
-                    ToolOutcome::Finished => {
-                        // Whole-suite gate (spec 11): if a verification command is
-                        // configured, `finish` is only honored when it's green.
-                        match gate_finish(&cfg.verify_command, workspace) {
-                            FinishGate::Allow(verified) => {
-                                return Ok(AgentReport {
-                                    finished: true,
-                                    steps: step + 1,
-                                    metrics,
-                                    peak_prompt_tokens,
-                                    prompt_budget: budget,
-                                    verified,
-                                    change_summary: journal.change_summary(),
-                                })
-                            }
-                            // Tests still red — refuse finish, feed failures back.
-                            FinishGate::Refuse(obs) => {
-                                history.push(TurnRecord::new("finish (refused)", "", true));
-                                push_recent(
-                                    &mut recent,
-                                    &resp.content,
-                                    &truncate_observation(&obs, cfg.observation_line_cap, true),
-                                    cfg.keep_recent_turns,
-                                );
-                            }
+                let action = action_hash(&call.name, &arg);
+                let tool = call.name.clone();
+
+                // Meta-tools the harness owns (spec 03/04) — never hit fs/exec.
+                if call.name == "update_plan" {
+                    let steps = crate::planner::parse_plan(call.str("steps").unwrap_or_default());
+                    let obs = if steps.is_empty() {
+                        "update_plan: could not parse a step array; plan unchanged".to_string()
+                    } else {
+                        plan = PlanState::from_descriptions(steps);
+                        format!("update_plan: ok\n{}", plan.render())
+                    };
+                    (obs, action, false, tool, arg)
+                } else if call.name == "ask_user" {
+                    // Junior asks senior (spec 02). Consult the advisor for a nudge.
+                    let question = call.str("question").unwrap_or_default();
+                    match escalate(advisor, instruction, &plan, &history, question) {
+                        Some(advice) => {
+                            interventions += 1;
+                            stall.reset();
+                            (advice, action, false, tool, arg)
+                        }
+                        None => {
+                            return Ok(stopped(
+                                StopReason::Escalated(question.to_string()),
+                                step + 1,
+                                &cfg.verify_command,
+                                workspace,
+                                &journal,
+                                metrics,
+                                peak_prompt_tokens,
+                                budget,
+                                interventions,
+                            ));
                         }
                     }
-                    ToolOutcome::Observation(o) => {
-                        let was_error = looks_like_failure(&o);
-                        let obs = truncate_observation(&o, cfg.observation_line_cap, true);
-                        history.push(TurnRecord::new(call.name.clone(), arg, was_error));
-                        push_recent(&mut recent, &resp.content, &obs, cfg.keep_recent_turns);
+                } else {
+                    // A normal tool call. Snapshot for the journal, then dispatch.
+                    let pre = mutating_path(&call, registry)
+                        .map(|p| (p.clone(), Journal::snapshot(workspace, &p)));
+                    let outcome = dispatch(
+                        &call,
+                        registry,
+                        &cfg.permission,
+                        &cfg.verify_command,
+                        workspace,
+                    );
+                    let changed = pre
+                        .map(|(path, before)| {
+                            let after = Journal::snapshot(workspace, &path);
+                            let did_change = before != after;
+                            journal.record(workspace, &path, before);
+                            did_change
+                        })
+                        .unwrap_or(false);
+
+                    match outcome {
+                        ToolOutcome::Finished => {
+                            match gate_finish(&cfg.verify_command, workspace) {
+                                FinishGate::Allow(verified) => {
+                                    return Ok(AgentReport {
+                                        finished: true,
+                                        steps: step + 1,
+                                        metrics,
+                                        peak_prompt_tokens,
+                                        prompt_budget: budget,
+                                        verified,
+                                        change_summary: journal.change_summary(),
+                                        stop_reason: StopReason::Finished,
+                                        interventions,
+                                    });
+                                }
+                                FinishGate::Refuse(o) => {
+                                    // Tests red — a failed attempt on the active step.
+                                    if plan.record_attempt() > cfg.step_retry_budget {
+                                        plan.fail_active();
+                                    }
+                                    (o, action, false, tool, arg)
+                                }
+                            }
+                        }
+                        ToolOutcome::Observation(o) => (o, action, changed, tool, arg),
                     }
                 }
             }
-            // Repair loop: feed back the exact error; never execute a bad call.
+            // Repair loop (spec 03): feed back the exact error; never execute.
             Err(e) => {
                 metrics.record_invalid();
-                let obs = e.repair_prompt();
-                history.push(TurnRecord::new("(malformed)", "", true));
-                push_recent(&mut recent, &resp.content, &obs, cfg.keep_recent_turns);
+                (
+                    e.repair_prompt(),
+                    action_hash("(malformed)", ""),
+                    false,
+                    "(malformed)".to_string(),
+                    String::new(),
+                )
+            }
+        };
+
+        // Record the turn and detect stalls (spec 03 — VERIFY, cheap every turn).
+        let was_error = looks_like_failure(&obs);
+        history.push(TurnRecord::new(tool, arg, was_error));
+        let trimmed = truncate_observation(&obs, cfg.observation_line_cap, true);
+        push_recent(&mut recent, &resp.content, &trimmed, cfg.keep_recent_turns);
+
+        match stall.observe(action, changed, cfg.repeat_limit, cfg.no_progress_limit) {
+            Progress::Ok => {}
+            stuck @ (Progress::Looping | Progress::Stuck) => {
+                let trigger = match stuck {
+                    Progress::Looping => "repeating the same action without progress",
+                    _ => "many turns with no change to the workspace",
+                };
+                // Junior asks senior for a nudge (spec 02). No advisor → stop.
+                match escalate(advisor, instruction, &plan, &history, trigger) {
+                    Some(advice) => {
+                        interventions += 1;
+                        stall.reset();
+                        push_recent(&mut recent, "(harness)", &advice, cfg.keep_recent_turns);
+                    }
+                    None => {
+                        return Ok(stopped(
+                            StopReason::Stalled(trigger.to_string()),
+                            step + 1,
+                            &cfg.verify_command,
+                            workspace,
+                            &journal,
+                            metrics,
+                            peak_prompt_tokens,
+                            budget,
+                            interventions,
+                        ));
+                    }
+                }
             }
         }
     }
 
-    Ok(AgentReport {
-        finished: false,
-        steps: cfg.max_steps,
+    Ok(stopped(
+        StopReason::BudgetExhausted,
+        cfg.max_steps,
+        &cfg.verify_command,
+        workspace,
+        &journal,
         metrics,
         peak_prompt_tokens,
-        prompt_budget: budget,
-        verified: cfg
-            .verify_command
+        budget,
+        interventions,
+    ))
+}
+
+/// Consult the advisor (senior) for a hint, formatted as guidance to inject.
+/// `None` when there's no advisor or it couldn't help — the caller then stops.
+fn escalate(
+    advisor: Option<&dyn ModelBackend>,
+    task: &str,
+    plan: &PlanState,
+    history: &[TurnRecord],
+    trigger: &str,
+) -> Option<String> {
+    let advisor = advisor?;
+    let recent = summarize_history(history);
+    let plan_render = plan.render();
+    let advice = consult(
+        advisor,
+        &Predicament {
+            task,
+            plan: &plan_render,
+            recent: &recent,
+            trigger,
+        },
+    )?;
+    Some(advice_observation(&advice))
+}
+
+/// Build a non-finished stop report, computing `verified` if a command is set.
+#[allow(clippy::too_many_arguments)]
+fn stopped(
+    reason: StopReason,
+    steps: usize,
+    verify_command: &Option<String>,
+    workspace: &Path,
+    journal: &Journal,
+    metrics: ToolCallMetrics,
+    peak_prompt_tokens: usize,
+    prompt_budget: usize,
+    interventions: usize,
+) -> AgentReport {
+    AgentReport {
+        finished: false,
+        steps,
+        metrics,
+        peak_prompt_tokens,
+        prompt_budget,
+        verified: verify_command
             .as_ref()
             .map(|c| dc_verify::run_verification(workspace, c).all_green()),
         change_summary: journal.change_summary(),
-    })
+        stop_reason: reason,
+        interventions,
+    }
 }
 
 /// Outcome of the whole-suite gate at `finish`.

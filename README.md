@@ -41,7 +41,20 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 153 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 182 tests):
+
+- **M4 planning & recovery** (`dc-core`) — the agent survives multi-step tasks and
+  its own mistakes (spec 03). A **planner** decomposes the task into a short,
+  harness-owned step plan (`PlanState`), rendered as compact structured state. The
+  harness detects **loops/stalls** (action-hashing + a no-progress counter) and a
+  per-step retry budget, and decides when to intervene — the model never has to.
+  `update_plan` / `ask_user` meta-tools let the model revise the plan or escalate.
+  Escalation is **"junior asks senior"** (spec 02 tiered models): a stuck small
+  coder consults a larger *advisor* model for a one-line *nudge* — advice, not the
+  implementation — and keeps doing the work itself; with no advisor it stops
+  cleanly with a structured `StopReason` (Finished / BudgetExhausted / Stalled /
+  Escalated). Proven: recovers from a bad edit, breaks loops via an advisor nudge,
+  and escalates cleanly when there's no senior to ask.
 
 - **M3 editing & TDD verification** — the agent now changes code and *proves* it
   via tests (spec 04/11). Anchored `edit_file` (exact `old_str`→`new_str`, refused

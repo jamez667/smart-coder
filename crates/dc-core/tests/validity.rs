@@ -114,9 +114,14 @@ fn end_to_end_run_clears_the_95_percent_bar() {
     script.push(r#"{"tool":"finish"}"#.to_string());
 
     // MockBackend advertises ToolCalling::None, so run_agent selects ParseRepair.
+    // This test measures the valid-call rate over a deliberately repetitive script,
+    // so raise the stall thresholds above the turn count (loop detection is its own
+    // test, in tdd_loop / the recovery integration test).
     let backend = MockBackend::new(script);
     let cfg = AgentConfig {
         max_steps: 30,
+        repeat_limit: 100,
+        no_progress_limit: 100,
         ..Default::default()
     };
     let report = run_agent(&backend, "read repeatedly", &ws, &cfg).unwrap();

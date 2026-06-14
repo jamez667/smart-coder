@@ -197,8 +197,20 @@ pub fn select_strategy(caps: &Capabilities) -> Box<dyn ToolCallStrategy> {
 /// Find the first balanced `{...}` block, ignoring braces inside JSON strings.
 /// Tolerates the surrounding prose a small model tends to emit around its call.
 pub fn extract_json_object(text: &str) -> Option<&str> {
+    extract_balanced(text, '{', '}')
+}
+
+/// Find the first balanced `[...]` block, ignoring brackets inside JSON strings.
+/// Used by the planner to pull a step array out of a small model's noisy reply.
+pub fn extract_json_array(text: &str) -> Option<&str> {
+    extract_balanced(text, '[', ']')
+}
+
+/// Find the first balanced `open..close` block, ignoring delimiters inside JSON
+/// strings (with escape handling).
+fn extract_balanced(text: &str, open: char, close: char) -> Option<&str> {
     let bytes = text.as_bytes();
-    let start = text.find('{')?;
+    let start = text.find(open)?;
     let mut depth = 0usize;
     let mut in_str = false;
     let mut escaped = false;
@@ -214,17 +226,14 @@ pub fn extract_json_object(text: &str) -> Option<&str> {
             } else if ch == '"' {
                 in_str = false;
             }
-        } else {
-            match ch {
-                '"' => in_str = true,
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&text[start..=i]);
-                    }
-                }
-                _ => {}
+        } else if ch == '"' {
+            in_str = true;
+        } else if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&text[start..=i]);
             }
         }
     }

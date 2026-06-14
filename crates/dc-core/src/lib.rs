@@ -11,15 +11,23 @@
 //! `dc-eval` wraps this as a `Solver` so the eval harness can score the real
 //! agent on red→green tasks and report its tool-call validity rate.
 
+pub mod advisor;
 pub mod agent;
 pub mod metrics;
+pub mod plan;
+pub mod planner;
+pub mod recovery;
 pub mod strategy;
 
-pub use agent::{run_agent, run_agent_with, AgentConfig, AgentReport};
+pub use advisor::{advice_observation, consult, Predicament};
+pub use agent::{run_agent, run_agent_recovering, run_agent_with, AgentConfig, AgentReport};
 pub use metrics::ToolCallMetrics;
+pub use plan::{PlanState, Step, StepStatus};
+pub use planner::{make_plan, parse_plan};
+pub use recovery::{action_hash, Progress, StallDetector, StopReason};
 pub use strategy::{
-    extract_json_object, select_strategy, Grammar, NativeTools, ParseRepair, RepairError,
-    ToolCallStrategy,
+    extract_json_array, extract_json_object, select_strategy, Grammar, NativeTools, ParseRepair,
+    RepairError, ToolCallStrategy,
 };
 
 // Re-export the tool surface so downstream crates (dc-eval) get it via dc-core.
