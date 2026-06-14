@@ -41,8 +41,18 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 207 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 232 tests):
 
+- **M7 worker swarm core** (`dc-swarm`) — the "scale out, not up" thesis (spec 08):
+  a larger **orchestrator** model decomposes a task into a dependency-DAG **task
+  board** of independent subtasks; a **bounded pool of tiny workers** runs the
+  ready ones in parallel — each worker is the unchanged M0–M4 agent loop in an
+  isolated scratch copy, returning a *proposed* diff. The orchestrator then
+  **integrates proposals one at a time**, re-running verification after each
+  (parallel intelligence, serialized writes); a change that breaks the suite is
+  reverted and the subtask failed. A derailed worker damages only its own copy.
+  Proven: multiple subtasks (incl. a dependency) run by parallel workers and
+  integrated green; a suite-breaker is rejected.
 - **Event stream + two live UIs** (`dc-core` event hub → `dc-tui` *and* `dc-web`).
   Every phase of a run emits a typed `AgentEvent` (RunStarted / Planned / ToolCall
   / ToolResult / Verification / Stalled / Advice / Stopped) through an `EventSink`

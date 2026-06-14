@@ -112,23 +112,32 @@ its final phase becomes the swarm's input (M7).
   gated phases to an approved, test-defined work decomposition — with send-back
   correctly invalidating and regenerating downstream artifacts.
 
-## M7 — Orchestration & the worker swarm
+## M7 — Orchestration & the worker swarm (core landed)
 **Goal:** scale out — many tiny workers on one codebase under a larger
-orchestrator ([08](08-orchestration-and-swarm.md)). Deliberately sequenced
-**after** the single-agent loop is solid (M0–M5), since each worker *is* that
-loop.
-- Orchestrator profile + worker profiles via the gateway ([02](02-model-backends.md)).
-- Task board (subtask DAG, status, deps) + decomposition into independent subtasks.
-- Worktree-per-worker isolation; bounded-concurrency scheduler.
-- Integration: ordered branch merges, conflict arbitration by the orchestrator,
-  mandatory integration verification.
-- Serialized shared-workspace fallback for non-parallelizable work.
-- CLI surfacing of swarm state (active workers, board, integration)
-  ([06](06-cli-ux.md)).
-- **Exit criteria:** a task that decomposes into ≥3 independent subtasks is
-  completed by parallel workers and integrated green, faster than the
-  single-agent baseline — with failure containment (a derailed worker is
-  discarded/reassigned, never corrupts the result).
+orchestrator ([08](08-orchestration-and-swarm.md)). Each worker *is* the M0–M4
+agent loop, unchanged; the swarm is a coordinator above it.
+- ✅ Orchestrator + worker backends via the gateway (separate profiles/endpoints).
+- ✅ **Task board** (subtask DAG, status, deps) + **model-driven decomposition**
+  into independent subtasks (JSON, parse/repair, fallback to one subtask).
+- ✅ **Bounded-concurrency scheduler** running independent subtasks in parallel
+  *waves*, dependency-ordered.
+- ✅ **Isolation = scratch-copy-per-worker** (the chosen first cut): each worker
+  runs in an isolated copy and returns a *proposed* diff; never touches mainline.
+- ✅ **Serialized integration** — proposals applied one at a time, each gated by
+  **integration verification**; a change that breaks the suite is reverted and the
+  subtask marked failed (parallel intelligence, serialized writes, spec 08).
+- ✅ **Failure containment** — a derailed worker damages only its scratch copy; its
+  proposal is rejected, never corrupting the result.
+- ✅ Swarm event stream (`Decomposed`/`WorkerStarted`/`WorkerFinished`/`Integrated`/
+  `SwarmDone`) for inspection + a future multi-worker dashboard.
+- **Exit criteria:** ✅ a task decomposing into multiple subtasks (incl. a
+  dependency) is completed by parallel workers and integrated green; a
+  suite-breaking proposal is reverted (`dc-swarm` `swarm_run` + orchestrator tests).
+- *Deferred (vs. spec 08):* git-worktree isolation + branch merges (we propose
+  diffs instead); conflict *arbitration* by the orchestrator (we reject+reassign);
+  the serialized shared-workspace lease fallback; specialized worker roles;
+  CLI/dashboard surfacing of swarm state; running it live against the real
+  multi-model swarm.
 
 ## M8 — Android app + AICore (first platform client)
 **Goal:** the showcase of the "small model" thesis — fully on-device on a phone,

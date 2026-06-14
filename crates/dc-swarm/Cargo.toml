@@ -1,0 +1,16 @@
+[package]
+name = "dc-swarm"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The worker swarm: an orchestrator over many agent-loop workers (spec 08)."
+
+[dependencies]
+dc-proto = { path = "../dc-proto" }
+dc-model = { path = "../dc-model" }
+dc-core = { path = "../dc-core" }
+dc-tools = { path = "../dc-tools" }
+dc-verify = { path = "../dc-verify" }
+serde = { workspace = true }
+serde_json = { workspace = true }
