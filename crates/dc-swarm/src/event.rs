@@ -32,6 +32,10 @@ pub enum SwarmEvent {
         max: usize,
         failing_tests: Vec<String>,
     },
+    /// The orchestrator escalated to the advisor ("junior asks senior", spec 02/08)
+    /// before a subtask's **final** retry, and got a one-line nudge folded into the
+    /// next worker prompt. Advice, not the fix — the worker still does the work.
+    AdvisorConsulted { subtask: String, advice: String },
     /// A worker's proposal was integrated (accepted) or rejected. On accept,
     /// `files` are the changed paths; on reject, `files[0]` is the reason.
     Integrated {
@@ -114,6 +118,10 @@ mod tests {
                 attempt: 1,
                 max: 2,
                 failing_tests: vec!["test_upper_bound".into(), "test_clamp".into()],
+            },
+            SwarmEvent::AdvisorConsulted {
+                subtask: "s1".into(),
+                advice: "clamp the upper bound too: min(hi, max(lo, x))".into(),
             },
             SwarmEvent::Integrated {
                 subtask: "s1".into(),

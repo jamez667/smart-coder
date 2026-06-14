@@ -296,7 +296,33 @@ fn integrate_with_retry(
                     max: cfg.max_subtask_retries,
                     failing_tests: failing.clone(),
                 });
-                let feedback = feedback_text(&residual);
+                let mut feedback = feedback_text(&residual);
+
+                // Before the FINAL retry, escalate to the advisor for a one-line nudge
+                // ("junior asks senior", spec 02/08) — advice, not the fix. We fold the
+                // hint into this last attempt's prompt. Only on the final attempt (so a
+                // cheap subtask that recovers early never pays the senior call), and only
+                // if an advisor is configured.
+                let is_final = attempt == cfg.max_subtask_retries;
+                if is_final {
+                    if let Some(adv) = advisor {
+                        let predicament = dc_core::Predicament {
+                            task: &st.goal,
+                            plan: &format!("subtask {id}: {}", st.goal),
+                            recent: &result.report_summary,
+                            trigger: &format!("scoped tests still failing: {}", failing.join(", ")),
+                        };
+                        if let Some(advice) = dc_core::consult(adv, &predicament) {
+                            sink.record(&SwarmEvent::AdvisorConsulted {
+                                subtask: id.clone(),
+                                advice: advice.clone(),
+                            });
+                            feedback.push('\n');
+                            feedback.push_str(&dc_core::advice_observation(&advice));
+                        }
+                    }
+                }
+
                 let adv: Option<&dyn ModelBackend> = advisor.map(|a| a as &dyn ModelBackend);
                 let wb: &dyn ModelBackend = worker_backend;
                 result = crate::worker::run_worker_with_feedback(

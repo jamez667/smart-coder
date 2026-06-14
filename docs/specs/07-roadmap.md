@@ -178,11 +178,16 @@ agent loop, unchanged; the swarm is a coordinator above it.
   live): the over-verbose decomposer that returned empty, missing `/no_think` on
   propose/merge (Qwen3 wrote its reasoning into the file), and the decomposer creating
   test-editing subtasks.
+- ✅ **Advisor escalation before the final retry** (spec 08 / spec 02 "junior asks
+  senior") — when a subtask's last retry is about to run, the orchestrator consults
+  the configured advisor via `dc_core::consult` for a one-line nudge (advice, not the
+  fix) and folds it into that attempt's worker prompt. Once per subtask, only on the
+  final attempt (a subtask that recovers earlier never pays the senior call), and
+  strictly optional (no advisor → clean no-op, the retry still runs). Visible as
+  `SwarmEvent::AdvisorConsulted { subtask, advice }` ("⚑ asked senior — …").
 - *Deferred (vs. spec 08):* git-worktree isolation + branch merges (we propose
   diffs instead); conflict *arbitration* by the orchestrator (we reject+reassign);
-  the serialized shared-workspace lease fallback; specialized worker roles;
-  advisor escalation before a subtask's final retry (the hook is threaded but the
-  one-shot proposer doesn't yet consult it).
+  the serialized shared-workspace lease fallback; specialized worker roles.
 
 ## M8 — Android app + AICore (first platform client)
 **Goal:** the showcase of the "small model" thesis — fully on-device on a phone,

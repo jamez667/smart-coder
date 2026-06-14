@@ -277,6 +277,142 @@ fn zero_retries_restores_no_retry_behaviour() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// Advisor escalation before the FINAL retry (spec 08 — "the orchestrator *may*
+/// escalate to the advisor for a one-line nudge before the final attempt"). With
+/// max_subtask_retries=1, attempt 1 lands a partial fix; before the single (final)
+/// retry the orchestrator consults the advisor, folds its one-line hint into the
+/// worker's prompt, and the final attempt — now nudged — passes. Proves: the
+/// AdvisorConsulted event fires exactly once, the advice reaches the worker, and the
+/// subtask recovers.
+#[test]
+fn advisor_is_consulted_before_the_final_retry() {
+    let ws = temp("advisor");
+    std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
+    std::fs::write(
+        ws.join("test_target.py").as_path(),
+        "from target import X\n\n\ndef test_x_is_two():\n    assert X == 2\n",
+    )
+    .unwrap();
+
+    // Worker/orchestrator: attempt 1 → X=1 (partial), attempt 2 → X=2 (green). The
+    // proposer/merge queues pop in order across the two attempts.
+    let backend = Scripted::new(vec![
+        (
+            "Break the coding task",
+            vec![
+                r#"[{"id":"t","goal":"set X to 2 in target.py","files":["target.py"],"deps":[]}]"#,
+            ],
+        ),
+        ("File: target.py", vec!["X = 1\n", "X = 2\n"]),
+        ("set X to 2", vec!["X = 1\n", "X = 2\n"]),
+    ]);
+    // A SEPARATE advisor backend, keyed on its own system-prompt phrase so it never
+    // collides with the worker/orchestrator routing. It returns a terse hint.
+    let advisor = Scripted::new(vec![(
+        "senior engineer",
+        vec!["The literal must be 2, not 1 — set X = 2."],
+    )]);
+
+    let events = Mutex::new(Vec::new());
+    let sink = FnSwarmSink(|e: &SwarmEvent| events.lock().unwrap().push(e.clone()));
+
+    let cfg = SwarmConfig {
+        verify_command: Some("python -m pytest -q".to_string()),
+        frozen_paths: vec!["test_target.py".to_string()],
+        max_subtask_retries: 1, // a single retry → that retry IS the final one
+        ..SwarmConfig::default()
+    };
+    let report = run_swarm(
+        &backend,
+        &backend,
+        Some(&advisor),
+        "fix target",
+        "",
+        &ws,
+        &cfg,
+        &sink,
+    );
+
+    assert!(report.all_done, "nudged final retry recovers: {report:?}");
+    assert_eq!(report.done, 1);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("target.py")).unwrap(),
+        "X = 2\n"
+    );
+
+    // The advisor was consulted exactly once, before the final retry, carrying the hint.
+    let ev = events.into_inner().unwrap();
+    let consults: Vec<&SwarmEvent> = ev
+        .iter()
+        .filter(|e| matches!(e, SwarmEvent::AdvisorConsulted { .. }))
+        .collect();
+    assert_eq!(consults.len(), 1, "one advisor consult expected: {ev:?}");
+    match consults[0] {
+        SwarmEvent::AdvisorConsulted { subtask, advice } => {
+            assert_eq!(subtask, "t");
+            assert!(advice.contains("set X = 2"), "advice carried: {advice}");
+        }
+        _ => unreachable!(),
+    }
+    // The consult happened AFTER the retry was announced and BEFORE integration.
+    let retry_pos = ev
+        .iter()
+        .position(|e| matches!(e, SwarmEvent::SubtaskRetry { .. }))
+        .unwrap();
+    let consult_pos = ev
+        .iter()
+        .position(|e| matches!(e, SwarmEvent::AdvisorConsulted { .. }))
+        .unwrap();
+    assert!(
+        retry_pos < consult_pos,
+        "consult follows the retry announce"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// No advisor configured → no consult, but the retry loop still runs (degrades to a
+/// clean "no senior to ask", mirroring dc_core::advisor). Guards that escalation is
+/// strictly optional.
+#[test]
+fn no_advisor_means_no_consult_but_retry_still_runs() {
+    let ws = temp("no-advisor");
+    std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
+    std::fs::write(
+        ws.join("test_target.py").as_path(),
+        "from target import X\n\n\ndef test_x_is_two():\n    assert X == 2\n",
+    )
+    .unwrap();
+    let backend = Scripted::new(vec![
+        (
+            "Break the coding task",
+            vec![
+                r#"[{"id":"t","goal":"set X to 2 in target.py","files":["target.py"],"deps":[]}]"#,
+            ],
+        ),
+        ("File: target.py", vec!["X = 1\n", "X = 2\n"]),
+        ("set X to 2", vec!["X = 1\n", "X = 2\n"]),
+    ]);
+    let events = Mutex::new(Vec::new());
+    let sink = FnSwarmSink(|e: &SwarmEvent| events.lock().unwrap().push(e.clone()));
+    let cfg = SwarmConfig {
+        verify_command: Some("python -m pytest -q".to_string()),
+        frozen_paths: vec!["test_target.py".to_string()],
+        max_subtask_retries: 1,
+        ..SwarmConfig::default()
+    };
+    let report = run_swarm(&backend, &backend, None, "fix target", "", &ws, &cfg, &sink);
+
+    assert!(report.all_done, "recovers without an advisor: {report:?}");
+    let ev = events.into_inner().unwrap();
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, SwarmEvent::AdvisorConsulted { .. })),
+        "no consult without an advisor"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// Regression for a real bug found live (2026-06-14): a worker can land a
 /// **partial** fix that the per-merge "didn't make it worse" gate accepts (failing
 /// count unchanged), so every subtask integrates and the board is all-done — yet

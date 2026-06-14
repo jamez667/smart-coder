@@ -467,6 +467,9 @@ fn print_swarm_event(ev: &dc_swarm::SwarmEvent) {
             let plural = if n == 1 { "" } else { "s" };
             println!("  ↻ [{subtask}] retry {attempt}/{max} — {n} test{plural} still red");
         }
+        AdvisorConsulted { subtask, advice } => {
+            println!("  ⚑ [{subtask}] asked senior — {advice}");
+        }
         Integrated {
             subtask,
             accepted,
@@ -1001,6 +1004,10 @@ mod tests {
                 attempt: 1,
                 max: 2,
                 failing_tests: vec!["test_upper_bound".into()],
+            },
+            AdvisorConsulted {
+                subtask: "s1".into(),
+                advice: "also clamp the upper bound".into(),
             },
             Integrated {
                 subtask: "s1".into(),
