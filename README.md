@@ -41,8 +41,18 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 124 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 153 tests):
 
+- **M3 editing & TDD verification** — the agent now changes code and *proves* it
+  via tests (spec 04/11). Anchored `edit_file` (exact `old_str`→`new_str`, refused
+  on 0 or >1 matches) + `create_file`; `run_command` / `run_verification` with
+  **structured per-test results** (`dc-verify` parses cargo / pytest, generic
+  exit-code fallback). An enforced **permission layer** (`PermissionPolicy`): edits
+  auto within the workspace, shell denied-by-default, and approved **contract
+  tests frozen** — a cheat-edit is denied at the tool layer. The loop runs the
+  TDD whole-suite gate (`finish` is refused while the suite is red) and journals
+  every mutation for a diff overview + rollback. End-to-end: a scripted run drives
+  a failing test red→green without breaking the suite or weakening the test.
 - **M2 context manager** (`dc-context`) — the window as a hard-budgeted resource
   (spec 05): a zoned prompt assembler that fits each turn under an *effective*
   fraction of the advertised window (evicting lowest-priority zones first, never

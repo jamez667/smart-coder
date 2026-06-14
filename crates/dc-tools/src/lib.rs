@@ -14,10 +14,14 @@
 
 mod builtin;
 mod grammar;
+mod journal;
+mod permission;
 mod spec;
 
 pub use builtin::{default_registry, execute, safe_join, ToolOutcome};
 pub use grammar::{params_json_schema, registry_gbnf};
+pub use journal::{EditRecord, Journal};
+pub use permission::{Decision, PermissionPolicy};
 pub use spec::{
     ParamSpec, ParamType, Permission, SideEffect, ToolRegistry, ToolSpec, ValidatedCall,
     ValidationError,

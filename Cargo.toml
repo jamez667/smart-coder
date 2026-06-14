@@ -6,6 +6,7 @@ members = [
     "crates/dc-tools",
     "crates/dc-context",
     "crates/dc-index",
+    "crates/dc-verify",
     "crates/dc-core",
     "crates/dc-cli",
     "crates/dc-eval",

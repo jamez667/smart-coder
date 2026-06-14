@@ -42,17 +42,26 @@ under control. Everything else builds on a working, reliable single-step loop.
   retrieval; lexical chunk search beyond `search_code`; more tree-sitter
   grammars.
 
-## M3 — Editing & TDD verification (closing the loop)
+## M3 — Editing & TDD verification (closing the loop) ✅
 **Goal:** the agent actually changes code and *proves* it via tests.
-- Mutating tools: anchored `edit_file`, `create_file`, atomic apply+record.
-- `run_command` + `run_verification` with **structured per-test results**, behind
-  the permission layer ([04](04-tools.md)).
-- **TDD loop:** verify-red-first → implement → green → whole-suite gate
-  ([11](11-testing-and-tdd.md)); test feedback re-enters the loop ([03](03-agent-loop.md)).
-- Frozen contract-test protection + permission prompts + workspace sandboxing
-  ([04](04-tools.md), [06](06-cli-ux.md)).
-- **Exit criteria:** given a failing unit test, the agent drives it red→green
-  without breaking the suite or weakening the test — on a sample repo.
+- ✅ Mutating tools: anchored `edit_file` (exact `old_str`→`new_str`, refused on
+  0/>1 matches), `create_file`; an edit journal records before/after for diff +
+  rollback (the single apply-and-record path).
+- ✅ `run_command` + `run_verification` with **structured per-test results**
+  (`dc-verify`: cargo + pytest parsers, generic exit-code fallback), behind the
+  permission layer ([04](04-tools.md)).
+- ✅ **TDD loop:** the whole-suite gate refuses `finish` while the suite is red,
+  feeding the failing cases back ([11](11-testing-and-tdd.md), [03](03-agent-loop.md)).
+- ✅ Frozen contract-test protection (`PermissionPolicy` denies edits to approved
+  test paths at the tool layer) + shell denied-by-default + workspace sandboxing
+  ([04](04-tools.md)).
+- **Exit criteria:** ✅ a scripted run drives a failing `sh` test red→green on a
+  sample repo without breaking the suite or weakening the frozen test
+  (`dc-core` `tdd_loop` integration test); cheat-edits and red-suite finishes are
+  both rejected.
+- *Deferred:* interactive `[y/n]` confirmation prompt for `Confirm`-gated calls
+  (CLI/M5); verify-red-*first* as an explicit harness-run pre-check (the loop lets
+  the model run it); more test-framework parsers (jest, go test, …).
 
 ## M4 — Planning & recovery
 **Goal:** survive multi-step tasks and the model's own mistakes.

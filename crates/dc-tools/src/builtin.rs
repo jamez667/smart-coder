@@ -1,8 +1,11 @@
 //! The built-in v1 tool surface and its execution (spec 04 — built-in tool set).
 //!
 //! Deliberately tiny and narrow: a few sharply-scoped tools beat a broad,
-//! ambiguous surface for a small model (spec 04). M1 ships the read-only
-//! navigation tools plus `write_file`/`finish`; richer editing/exec tools are M3.
+//! ambiguous surface for a small model (spec 04). The surface spans read-only
+//! navigation (`read_file`/`list_dir`/`search_code`/`find_symbol`), mutation
+//! (`write_file`/`create_file`/anchored `edit_file`), and execution
+//! (`run_command`/`run_verification`) — the latter two run processes, so the
+//! agent loop executes them; this module is the pure-filesystem half.
 //!
 //! Every path is sandboxed to the workspace root; traversal outside it is
 //! rejected. Execution never panics — tool errors become structured observations
@@ -78,6 +81,57 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "create_file",
+            description: "Create a NEW file with the given contents; fails if it already exists.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new("content", ParamType::String, "the full file contents"),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "edit_file",
+            description: "Replace an EXACT snippet in a file: old_str must occur exactly once.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new(
+                    "old_str",
+                    ParamType::String,
+                    "the exact text to replace (must appear exactly once)",
+                ),
+                ParamSpec::new("new_str", ParamType::String, "the replacement text"),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "run_command",
+            description: "Run a shell command in the workspace; returns exit code + output.",
+            params: vec![ParamSpec::new(
+                "command",
+                ParamType::String,
+                "the shell command line to run",
+            )],
+            side_effect: SideEffect::Destructive,
+            permission: Permission::Confirm,
+        },
+        ToolSpec {
+            name: "run_verification",
+            description: "Run the project's configured test command; returns per-test results.",
+            params: vec![],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "finish",
             description: "Declare the task complete.",
             params: vec![],
@@ -111,6 +165,19 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
             arg(call, "path"),
             arg(call, "content"),
         )),
+        "create_file" => ToolOutcome::Observation(create_file(
+            workspace,
+            arg(call, "path"),
+            arg(call, "content"),
+        )),
+        "edit_file" => ToolOutcome::Observation(edit_file(
+            workspace,
+            arg(call, "path"),
+            arg(call, "old_str"),
+            arg(call, "new_str"),
+        )),
+        // run_command / run_verification execute processes and need run config, so
+        // the agent loop (dc-core) handles them; they never reach this fs executor.
         // The registry only dispatches names it knows; an unknown name here means
         // a tool was registered without a matching arm. Surface it loudly.
         other => ToolOutcome::Observation(format!("internal: no executor for tool {other:?}")),
@@ -231,6 +298,57 @@ fn write_file(workspace: &Path, path: &str, content: &str) -> String {
     }
 }
 
+fn create_file(workspace: &Path, path: &str, content: &str) -> String {
+    match safe_join(workspace, path) {
+        Ok(p) => {
+            if p.exists() {
+                return format!(
+                    "create_file {path} error: already exists (use edit_file or write_file)"
+                );
+            }
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&p, content) {
+                Ok(()) => format!("create_file {path} ok ({} bytes)", content.len()),
+                Err(e) => format!("create_file {path} error: {e}"),
+            }
+        }
+        Err(e) => format!("create_file {path} rejected: {e}"),
+    }
+}
+
+/// Anchored edit: replace the single exact occurrence of `old_str` with `new_str`.
+/// The "exactly once" rule is the small-model safety net (spec 04): an ambiguous
+/// anchor (0 or >1 matches) is rejected with a precise count instead of guessing.
+fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> String {
+    let p = match safe_join(workspace, path) {
+        Ok(p) => p,
+        Err(e) => return format!("edit_file {path} rejected: {e}"),
+    };
+    let content = match std::fs::read_to_string(&p) {
+        Ok(c) => c,
+        Err(e) => return format!("edit_file {path} error: {e}"),
+    };
+    if old_str.is_empty() {
+        return format!("edit_file {path} error: old_str must not be empty");
+    }
+    let count = content.matches(old_str).count();
+    if count == 0 {
+        return format!("edit_file {path} error: old_str not found (0 matches)");
+    }
+    if count > 1 {
+        return format!(
+            "edit_file {path} error: old_str is ambiguous ({count} matches); include more surrounding context to make it unique"
+        );
+    }
+    let updated = content.replacen(old_str, new_str, 1);
+    match std::fs::write(&p, &updated) {
+        Ok(()) => format!("edit_file {path} ok (1 replacement)"),
+        Err(e) => format!("edit_file {path} error: {e}"),
+    }
+}
+
 /// Join `rel` onto `workspace`, rejecting absolute paths and `..` traversal
 /// (spec 04 — sandboxed to the workspace root).
 pub fn safe_join(workspace: &Path, rel: &str) -> Result<PathBuf> {
@@ -280,6 +398,10 @@ mod tests {
                 "search_code",
                 "find_symbol",
                 "write_file",
+                "create_file",
+                "edit_file",
+                "run_command",
+                "run_verification",
                 "finish"
             ]
         );
@@ -296,6 +418,73 @@ mod tests {
             ToolOutcome::Observation(o) => assert!(o.contains("hello"), "got: {o}"),
             _ => panic!("expected observation"),
         }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    fn obs(out: ToolOutcome) -> String {
+        match out {
+            ToolOutcome::Observation(o) => o,
+            _ => panic!("expected observation"),
+        }
+    }
+
+    #[test]
+    fn create_file_writes_new_but_refuses_existing() {
+        let ws = temp_dir("create");
+        let c = call(json!({"tool":"create_file","path":"n.txt","content":"hi"}));
+        assert!(obs(execute(&c, &ws)).contains("ok"));
+        assert_eq!(std::fs::read_to_string(ws.join("n.txt")).unwrap(), "hi");
+        // Second create on the same path is refused, not silently overwritten.
+        let again = obs(execute(&c, &ws));
+        assert!(again.contains("already exists"), "got: {again}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_replaces_a_unique_anchor() {
+        let ws = temp_dir("edit-ok");
+        std::fs::write(ws.join("a.rs"), "fn f() { return 1; }\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_file","path":"a.rs",
+            "old_str":"return 1;","new_str":"return 2;"
+        }));
+        assert!(obs(execute(&e, &ws)).contains("1 replacement"));
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "fn f() { return 2; }\n"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_rejects_missing_anchor() {
+        let ws = temp_dir("edit-miss");
+        std::fs::write(ws.join("a.rs"), "fn f() {}\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_file","path":"a.rs","old_str":"nope","new_str":"x"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("0 matches"), "got: {o}");
+        // File untouched.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "fn f() {}\n"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_rejects_ambiguous_anchor() {
+        let ws = temp_dir("edit-amb");
+        std::fs::write(ws.join("a.rs"), "x\nx\n").unwrap();
+        let e = call(json!({"tool":"edit_file","path":"a.rs","old_str":"x","new_str":"y"}));
+        let o = obs(execute(&e, &ws));
+        assert!(
+            o.contains("ambiguous") && o.contains("2 matches"),
+            "got: {o}"
+        );
+        // Untouched — never edits on ambiguity.
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "x\nx\n");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

@@ -18,7 +18,7 @@ use dc_context::{
 use dc_index::Boosts;
 use dc_model::{GenerateRequest, Message, ModelBackend};
 use dc_proto::Result;
-use dc_tools::{execute, ToolOutcome, ToolRegistry};
+use dc_tools::{execute, Journal, PermissionPolicy, ToolOutcome, ToolRegistry};
 
 use crate::metrics::ToolCallMetrics;
 use crate::strategy::ToolCallStrategy;
@@ -40,6 +40,13 @@ pub struct AgentConfig {
     pub keep_recent_turns: usize,
     /// How many top-ranked symbols the repo map injects into the retrieved zone.
     pub repo_map_top_k: usize,
+    /// The permission gate consulted before every mutating/destructive call
+    /// (spec 04). Defaults conservatively: edits auto, shell denied, frozen tests
+    /// untouchable.
+    pub permission: PermissionPolicy,
+    /// The project's test command. When set, the loop runs verify-red-first and
+    /// gates `finish` on a green whole suite (spec 11). `run_verification` uses it.
+    pub verify_command: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -51,6 +58,8 @@ impl Default for AgentConfig {
             observation_line_cap: 40,
             keep_recent_turns: 3,
             repo_map_top_k: 30,
+            permission: PermissionPolicy::default(),
+            verify_command: None,
         }
     }
 }
@@ -68,6 +77,12 @@ pub struct AgentReport {
     /// it was kept under (spec 05 — the window is a hard-budgeted resource).
     pub peak_prompt_tokens: usize,
     pub prompt_budget: usize,
+    /// Whether the configured verification command was green at `finish` (spec 11
+    /// — the whole-suite gate). `None` if no `verify_command` was configured.
+    pub verified: Option<bool>,
+    /// A compact summary of files changed over the run (spec 04/06 — the journal's
+    /// diff overview).
+    pub change_summary: String,
 }
 
 const TASK_PREFIX: &str = "You are a coding agent working in a project directory. \
@@ -135,6 +150,8 @@ pub fn run_agent_with(
     // produced, kept as raw messages for the prompt's recent zone.
     let mut recent: Vec<Message> = Vec::new();
     let mut peak_prompt_tokens = 0usize;
+    // Records every mutation for the diff overview + rollback (spec 04).
+    let mut journal = Journal::new();
 
     for step in 0..cfg.max_steps {
         // Compact older turns into a rolling summary; keep the recent ones.
@@ -175,15 +192,47 @@ pub fn run_agent_with(
             Ok(call) => {
                 metrics.record_valid();
                 let arg = key_arg(&call);
-                match dispatch(&call, workspace) {
+                // Snapshot before a mutating, path-bearing call so the journal can
+                // record the change (and roll back) after it runs (spec 04).
+                let pre = mutating_path(&call, registry)
+                    .map(|p| (p.clone(), Journal::snapshot(workspace, &p)));
+                let outcome = dispatch(
+                    &call,
+                    registry,
+                    &cfg.permission,
+                    &cfg.verify_command,
+                    workspace,
+                );
+                if let Some((path, before)) = pre {
+                    journal.record(workspace, &path, before);
+                }
+                match outcome {
                     ToolOutcome::Finished => {
-                        return Ok(AgentReport {
-                            finished: true,
-                            steps: step + 1,
-                            metrics,
-                            peak_prompt_tokens,
-                            prompt_budget: budget,
-                        })
+                        // Whole-suite gate (spec 11): if a verification command is
+                        // configured, `finish` is only honored when it's green.
+                        match gate_finish(&cfg.verify_command, workspace) {
+                            FinishGate::Allow(verified) => {
+                                return Ok(AgentReport {
+                                    finished: true,
+                                    steps: step + 1,
+                                    metrics,
+                                    peak_prompt_tokens,
+                                    prompt_budget: budget,
+                                    verified,
+                                    change_summary: journal.change_summary(),
+                                })
+                            }
+                            // Tests still red — refuse finish, feed failures back.
+                            FinishGate::Refuse(obs) => {
+                                history.push(TurnRecord::new("finish (refused)", "", true));
+                                push_recent(
+                                    &mut recent,
+                                    &resp.content,
+                                    &truncate_observation(&obs, cfg.observation_line_cap, true),
+                                    cfg.keep_recent_turns,
+                                );
+                            }
+                        }
                     }
                     ToolOutcome::Observation(o) => {
                         let was_error = looks_like_failure(&o);
@@ -209,17 +258,83 @@ pub fn run_agent_with(
         metrics,
         peak_prompt_tokens,
         prompt_budget: budget,
+        verified: cfg
+            .verify_command
+            .as_ref()
+            .map(|c| dc_verify::run_verification(workspace, c).all_green()),
+        change_summary: journal.change_summary(),
     })
 }
 
-/// Execute a validated call, routing `find_symbol` to the retrieval index (which
-/// the tool registry can't execute without depending on tree-sitter).
-fn dispatch(call: &dc_tools::ValidatedCall, workspace: &Path) -> ToolOutcome {
-    if call.name == "find_symbol" {
-        let name = call.str("name").unwrap_or_default();
-        return ToolOutcome::Observation(dc_index::find_symbol(workspace, name));
+/// Outcome of the whole-suite gate at `finish`.
+enum FinishGate {
+    /// Finish is honored; the bool is the verified state (None → no verify cmd).
+    Allow(Option<bool>),
+    /// Finish is refused with an observation the model must react to.
+    Refuse(String),
+}
+
+/// Run the configured verification before honoring `finish` (spec 11). With no
+/// command configured, finish is always allowed (verified = None).
+fn gate_finish(verify_command: &Option<String>, workspace: &Path) -> FinishGate {
+    match verify_command {
+        None => FinishGate::Allow(None),
+        Some(cmd) => {
+            let report = dc_verify::run_verification(workspace, cmd);
+            if report.all_green() {
+                FinishGate::Allow(Some(true))
+            } else {
+                FinishGate::Refuse(format!(
+                    "cannot finish yet — the suite is not green:\n{}",
+                    report.observation()
+                ))
+            }
+        }
     }
-    execute(call, workspace)
+}
+
+/// Execute a validated call: enforce the permission gate (spec 04), then route
+/// to the right executor. `find_symbol` goes to the retrieval index and
+/// `run_command`/`run_verification` to dc-verify (neither belongs in the pure-fs
+/// tool registry); everything else is the registry's `execute`.
+fn dispatch(
+    call: &dc_tools::ValidatedCall,
+    registry: &ToolRegistry,
+    policy: &PermissionPolicy,
+    verify_command: &Option<String>,
+    workspace: &Path,
+) -> ToolOutcome {
+    // Permission gate — the harness decides, outside the model's control (spec 04).
+    if let Some(spec) = registry.get(&call.name) {
+        if let dc_tools::Decision::Deny(reason) = policy.check(call, spec.side_effect) {
+            return ToolOutcome::Observation(format!("{} denied: {reason}", call.name));
+        }
+    }
+
+    match call.name.as_str() {
+        "find_symbol" => {
+            let name = call.str("name").unwrap_or_default();
+            ToolOutcome::Observation(dc_index::find_symbol(workspace, name))
+        }
+        "run_command" => {
+            let cmd = call.str("command").unwrap_or_default();
+            let r = dc_verify::run_command(workspace, cmd);
+            ToolOutcome::Observation(format!(
+                "run_command {cmd:?} exited {}:\n{}",
+                r.code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+                r.output.trim()
+            ))
+        }
+        "run_verification" => match verify_command {
+            Some(cmd) => {
+                ToolOutcome::Observation(dc_verify::run_verification(workspace, cmd).observation())
+            }
+            None => ToolOutcome::Observation(
+                "run_verification: no verification command is configured for this project".into(),
+            ),
+        },
+        _ => execute(call, workspace),
+    }
 }
 
 /// Append the assistant action + its observation, capping the verbatim window to
@@ -239,6 +354,17 @@ fn seg_from_message(zone: Zone, m: &Message) -> Segment {
         dc_model::Role::User => Segment::user(zone, m.content.clone()),
         dc_model::Role::Assistant => Segment::assistant(zone, m.content.clone()),
     }
+}
+
+/// If `call` is a mutating, path-bearing tool, return its workspace-relative
+/// path (so the journal can snapshot it). `run_verification`/`run_command` are
+/// mutating-ish but have no single file to record.
+fn mutating_path(call: &dc_tools::ValidatedCall, registry: &ToolRegistry) -> Option<String> {
+    let spec = registry.get(&call.name)?;
+    if spec.side_effect != dc_tools::SideEffect::Mutating {
+        return None;
+    }
+    call.str("path").map(|s| s.to_string())
 }
 
 /// The key argument of a call, for the history record (path or query/name).
