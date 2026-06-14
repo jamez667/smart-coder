@@ -123,6 +123,32 @@ fn agent_drives_a_failing_test_red_to_green() {
 }
 
 #[test]
+fn auto_finishes_when_verification_passes_without_a_finish_call() {
+    // A small model often fixes the code and runs the tests green, then keeps
+    // going (or stalls) instead of calling `finish`. The harness should honor the
+    // win: a green run_verification ends the run as Finished on its own.
+    let ws = red_repo();
+    let backend = Scripted::new(vec![
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 1;","new_str":"[ $(( $1 % 2 )) -eq 0 ];"}"#,
+        r#"{"tool":"run_verification"}"#,
+        // No finish — and the script would otherwise loop on read_file forever.
+        r#"{"tool":"read_file","path":"impl.sh"}"#,
+    ]);
+
+    let report = run(&backend, &ws, &config_with_verify());
+
+    assert!(report.finished, "green verification should auto-finish");
+    assert_eq!(report.verified, Some(true));
+    // It stopped right at the green verification, not at the step budget.
+    assert!(
+        report.steps <= 2,
+        "should finish promptly, took {}",
+        report.steps
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn finish_is_refused_while_the_suite_is_red() {
     let ws = red_repo();
     // The model tries to finish without fixing anything. The gate refuses, so the

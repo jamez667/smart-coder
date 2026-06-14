@@ -426,11 +426,35 @@ pub fn run_agent_observed(
                         }
                         ToolOutcome::Observation(o) => {
                             if tool == "run_verification" {
+                                // Only a *configured* verification with real test
+                                // detail counts as green (the "no command" message
+                                // isn't a pass).
+                                let configured = cfg.verify_command.is_some();
+                                let green = configured && !looks_like_failure(&o);
                                 sink.record(&AgentEvent::Verification {
-                                    green: !looks_like_failure(&o),
+                                    green,
                                     summary: first_line(&o),
                                     full: o.clone(),
                                 });
+                                // Auto-finish: if the suite is green, the task is
+                                // done — a small model that forgets to call `finish`
+                                // shouldn't lose a win it already earned (spec 11).
+                                if green {
+                                    sink.record(&AgentEvent::Stopped {
+                                        reason: StopReason::Finished,
+                                    });
+                                    return Ok(AgentReport {
+                                        finished: true,
+                                        steps: step + 1,
+                                        metrics,
+                                        peak_prompt_tokens,
+                                        prompt_budget: budget,
+                                        verified: Some(true),
+                                        change_summary: journal.change_summary(),
+                                        stop_reason: StopReason::Finished,
+                                        interventions,
+                                    });
+                                }
                             }
                             (o, action, changed, tool, arg)
                         }
@@ -464,6 +488,51 @@ pub fn run_agent_observed(
         history.push(TurnRecord::new(tool, arg, was_error));
         let trimmed = truncate_observation(&obs, cfg.observation_line_cap, true);
         push_recent(&mut recent, &resp.content, &trimmed, cfg.keep_recent_turns);
+
+        // Auto test-repair (spec 03): the moment an edit lands, the harness runs
+        // the suite itself — the model shouldn't have to remember to verify. If
+        // it's green the task is done (auto-finish); if not, the failures re-enter
+        // the loop as a fresh observation the model reacts to.
+        if changed {
+            if let Some(cmd) = &cfg.verify_command {
+                let report = dc_verify::run_verification(workspace, cmd);
+                sink.record(&AgentEvent::Verification {
+                    green: report.all_green(),
+                    summary: first_line(&report.observation()),
+                    full: report.observation(),
+                });
+                if report.all_green() {
+                    sink.record(&AgentEvent::Stopped {
+                        reason: StopReason::Finished,
+                    });
+                    return Ok(AgentReport {
+                        finished: true,
+                        steps: step + 1,
+                        metrics,
+                        peak_prompt_tokens,
+                        prompt_budget: budget,
+                        verified: Some(true),
+                        change_summary: journal.change_summary(),
+                        stop_reason: StopReason::Finished,
+                        interventions,
+                    });
+                } else {
+                    // Surface the failing tests so the next turn is grounded.
+                    let fb = format!(
+                        "(harness ran the tests after your edit)\n{}",
+                        report.observation()
+                    );
+                    push_observation(
+                        &mut recent,
+                        &truncate_observation(&fb, cfg.observation_line_cap, true),
+                        cfg.keep_recent_turns,
+                    );
+                    // A failed auto-verify resets the stall streak: real progress
+                    // was attempted, so don't count the edit+verify as "stuck".
+                    stall.reset();
+                }
+            }
+        }
 
         match stall.observe(action, changed, cfg.repeat_limit, cfg.no_progress_limit) {
             Progress::Ok => {}
