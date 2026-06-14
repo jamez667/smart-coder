@@ -50,6 +50,14 @@ fn plan_task(cli: &Cli, task: String) -> ExitCode {
 
     let orchestrator = cli.orchestrator();
     let worker = cli.backend();
+
+    // Preflight: a dead/crashed backend would otherwise silently produce empty
+    // plan artifacts mid-run. Fail fast with a clear message instead.
+    if let Err(e) = dc_cli::preflight(&[("orchestrator", &orchestrator), ("worker", &worker)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+
     let on_phase = |phase: dc_workflow::Phase, content: &str| {
         let preview: String = content.lines().take(8).collect::<Vec<_>>().join("\n");
         println!("\n=== {} ===\n{preview}\n…", phase.title());
@@ -128,6 +136,18 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
         }
     };
 
+    // Preflight the backends before serving — a crashed server otherwise looks
+    // like silent worker failures on the dashboard.
+    let (orchestrator, worker, advisor) = (cli.orchestrator(), cli.backend(), cli.swarm_advisor());
+    if let Err(e) = dc_cli::preflight(&[
+        ("orchestrator", &orchestrator),
+        ("worker", &worker),
+        ("advisor", &advisor),
+    ]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+
     // Workers use --base-url/--model; the orchestrator decomposes; advisor is the
     // optional senior. All three are OpenAI-compatible backends (spec 02/08).
     let spec = dc_web::WebSwarm {
@@ -179,6 +199,10 @@ fn serve_task(cli: &Cli, task: String) -> ExitCode {
     };
 
     let backend = cli.backend();
+    if let Err(e) = dc_cli::preflight(&[("model", &backend)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
     let registry = dc_tools::default_registry();
     let strategy = dc_core::select_strategy(&backend.capabilities());
 
@@ -226,6 +250,10 @@ fn run_task(cli: &Cli, task: String) -> ExitCode {
     };
 
     let backend = cli.backend();
+    if let Err(e) = dc_cli::preflight(&[("model", &backend)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
     let registry = dc_tools::default_registry();
     let strategy = dc_core::select_strategy(&backend.capabilities());
 

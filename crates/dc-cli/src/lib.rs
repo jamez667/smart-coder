@@ -558,9 +558,64 @@ pub fn probe(backend: &dyn ModelBackend) -> Result<()> {
     backend.generate(&req).map(|_| ())
 }
 
+/// Preflight every backend a run needs, by `(label, backend)`. Returns a clear
+/// error naming the first unreachable one, so a dead/crashed server fails fast at
+/// the start with a useful message instead of producing empty artifacts mid-run.
+/// Backends sharing a `name()` (same model+endpoint) are only probed once.
+pub fn preflight(backends: &[(&str, &dyn ModelBackend)]) -> Result<()> {
+    let mut seen: Vec<String> = Vec::new();
+    for (label, backend) in backends {
+        // On-device backends have no endpoint to probe.
+        if backend.capabilities().on_device {
+            continue;
+        }
+        let key = backend.name().to_string();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        if let Err(e) = probe(*backend) {
+            return Err(DcError::Eval(format!(
+                "preflight: the {label} backend ({}) isn't responding ({e}). \
+                 Is the server up and the model loaded?",
+                backend.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preflight_names_the_unreachable_backend() {
+        use dc_model::MockBackend;
+        // An exhausted mock errors on generate → stands in for a down server.
+        let down = MockBackend::new(Vec::<String>::new());
+        let err = preflight(&[("orchestrator", &down)]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("orchestrator"), "{msg}");
+        assert!(msg.contains("isn't responding"), "{msg}");
+    }
+
+    #[test]
+    fn preflight_passes_when_reachable() {
+        use dc_model::MockBackend;
+        // Two pings for the single distinct backend (probe consumes one).
+        let a = MockBackend::new(["pong", "pong"]);
+        assert!(preflight(&[("orchestrator", &a)]).is_ok());
+    }
+
+    #[test]
+    fn preflight_probes_a_shared_endpoint_once() {
+        use dc_model::MockBackend;
+        // Orchestrator and advisor are the SAME model (e.g. advisor-e4b on one
+        // server): one scripted ping is enough because the duplicate is skipped.
+        let shared = MockBackend::new(["pong"]);
+        assert!(preflight(&[("orchestrator", &shared), ("advisor", &shared)]).is_ok());
+    }
 
     #[test]
     fn defaults_to_chat_with_default_backend() {
