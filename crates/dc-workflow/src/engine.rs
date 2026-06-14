@@ -38,20 +38,38 @@ pub fn phase_messages(phase: Phase, state: &WorkflowState, think: ThinkPolicy) -
 
 /// Produce `phase`'s artifact via the orchestrator. The returned [`Artifact`] is a
 /// draft; the runner/checkpoint decides whether to approve it.
+///
+/// Robustness (spec 00 — degrade, don't silently corrupt): a thinking model
+/// occasionally spends its whole budget in the reasoning block and returns empty
+/// visible content, and a backend can blip. So we retry an empty/failed
+/// generation a couple of times — and, after the first empty try, force
+/// `/no_think` for this phase so the model spends tokens on the answer, not
+/// deliberation. A persistently empty artifact is left empty for the runner to
+/// reject loudly rather than chaining a broken plan downstream.
 pub fn generate_phase(
     orchestrator: &dyn ModelBackend,
     phase: Phase,
     state: &WorkflowState,
     think: ThinkPolicy,
 ) -> Artifact {
-    let mut req = GenerateRequest::new(phase_messages(phase, state, think));
-    // Planning documents need more room than a single tool call.
-    req.max_tokens = 1536;
-    let content = orchestrator
-        .generate(&req)
-        .map(|r| r.content.trim().to_string())
-        .unwrap_or_default();
-    Artifact::draft(phase, content)
+    for attempt in 0..3 {
+        // After a first empty result, drop thinking for this phase: the likeliest
+        // cause is the budget vanishing into reasoning_content.
+        let effective = if attempt == 0 {
+            think
+        } else {
+            think.with(phase, true)
+        };
+        let mut req = GenerateRequest::new(phase_messages(phase, state, effective));
+        req.max_tokens = 1536;
+        if let Ok(resp) = orchestrator.generate(&req) {
+            let content = resp.content.trim().to_string();
+            if !content.is_empty() {
+                return Artifact::draft(phase, content);
+            }
+        }
+    }
+    Artifact::draft(phase, String::new())
 }
 
 fn system_for(phase: Phase) -> String {
@@ -94,10 +112,16 @@ fn phase_instruction(phase: Phase) -> String {
         }
         Phase::WorkDecomposition => {
             // The swarm's decomposition parser expects exactly this JSON shape.
-            "Output ONLY a JSON array of subtasks; each item: \
-             {\"id\":\"t1\",\"goal\":\"...\",\"files\":[\"path\"],\"deps\":[\"id\"]}. \
-             Each subtask owns a DISJOINT set of files; use deps only when one must \
-             finish before another. No prose, just the JSON array."
+            // Crucially: the test files are ALREADY WRITTEN and frozen — decompose
+            // only the IMPLEMENTATION work that makes them pass, never test-writing
+            // or a 'run the tests' step (the harness verifies; tests aren't a task).
+            "The test files already exist and are FROZEN — do not include any subtask \
+             that writes, edits, or runs tests. Decompose only the IMPLEMENTATION work \
+             that makes the existing tests pass. Output ONLY a JSON array of subtasks; \
+             each item: {\"id\":\"t1\",\"goal\":\"...\",\"files\":[\"path\"],\"deps\":[\"id\"]}. \
+             Every `files` entry is a non-test source file, and each subtask owns a \
+             DISJOINT set of files; use deps only when one must finish before another. \
+             No prose, just the JSON array."
                 .to_string()
         }
         _ => format!(
@@ -171,5 +195,25 @@ mod tests {
         assert_eq!(a.phase, Phase::Specs);
         assert!(a.content.contains("Goals"));
         assert!(!a.is_approved());
+    }
+
+    #[test]
+    fn generate_phase_retries_past_an_empty_reply() {
+        // A thinking model can return empty visible content (budget spent in
+        // reasoning); the engine retries and recovers.
+        let backend = MockBackend::new(["", "  ", "# Specs\nrecovered"]);
+        let s = WorkflowState::new("t");
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        assert!(a.content.contains("recovered"), "got: {:?}", a.content);
+    }
+
+    #[test]
+    fn generate_phase_gives_up_empty_after_retries() {
+        // Persistently empty (e.g. dead backend) → empty artifact; the runner turns
+        // that into a loud error.
+        let backend = MockBackend::new(["", "", "", ""]);
+        let s = WorkflowState::new("t");
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        assert!(a.content.is_empty());
     }
 }

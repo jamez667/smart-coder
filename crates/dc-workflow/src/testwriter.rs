@@ -22,10 +22,11 @@ pub struct WrittenTest {
 
 const TEST_WRITER_SYSTEM: &str = "You write a runnable unit-test file. You are given the test \
 file name and the behaviors it must cover. Reply with ONLY the file body — no fences, no prose, \
-and do NOT repeat the filename. The very first line MUST be the import of the functions under \
-test from their module (the module is the test filename without the leading 'test_' and the \
-'.py'; e.g. test_mathlib.py → `from mathlib import ...`). Then one test function per behavior. \
-The implementation does not exist yet, so the tests must FAIL until it is written correctly.";
+no explanation, and do NOT repeat the filename. The very first line MUST be the import of the \
+functions under test from their module (the module is the test filename without the leading \
+'test_' and the '.py'; e.g. test_mathlib.py → `from mathlib import ...`). Then one test function \
+per behavior. The implementation does not exist yet, so the tests must FAIL until it is written \
+correctly. /no_think";
 
 /// Ask `worker` to write each test file named by the coverage plan. One model call
 /// per file (the cheapest path); the file's coverage items are the worker's brief.
@@ -38,10 +39,19 @@ pub fn write_tests(worker: &dyn ModelBackend, coverage: &[CoverageItem]) -> Vec<
             Message::system(TEST_WRITER_SYSTEM),
             Message::user(prompt),
         ]);
-        if let Ok(resp) = worker.generate(&req) {
+        // Retry a few times: a tiny thinking model can leak reasoning (rejected by
+        // clean_test) or blip. Take the first reply that cleans to real code.
+        for _ in 0..3 {
+            let Ok(resp) = worker.generate(&req) else {
+                continue;
+            };
             let content = clean_test(&file, &resp.content);
             if !content.trim().is_empty() {
-                out.push(WrittenTest { file, content });
+                out.push(WrittenTest {
+                    file: file.clone(),
+                    content,
+                });
+                break;
             }
         }
     }
@@ -75,25 +85,45 @@ fn test_prompt(file: &str, covers: &[String]) -> String {
     s
 }
 
-/// Clean a worker's test output: strip a surrounding ``` fence and a leaked
-/// leading line that is just the filename (a small model often echoes the prompt's
-/// "Test file: <name>" as the first line of the body).
+/// Clean a worker's test output into a runnable file, or return empty if it isn't
+/// one. Strips a ``` fence and any leaked preamble (a thinking model dumps its
+/// reasoning — "Okay, let's understand the requirements…" — before/instead of
+/// code), then keeps from the first real Python line onward. If no code line
+/// exists (pure prose), returns empty so the workflow rejects it loudly rather
+/// than writing a file that won't even parse.
 fn clean_test(file: &str, s: &str) -> String {
     let body = strip_fence(s);
+    // Drop leading blanks and an echoed filename line.
     let mut lines: Vec<&str> = body.lines().collect();
     while let Some(first) = lines.first() {
-        let f = first.trim();
-        if f.is_empty()
-            || f == file
-            || f == format!("# {file}")
-            || f == format!("Test file: {file}")
-        {
+        let t = first.trim();
+        if t.is_empty() || t == file || t == format!("# {file}") {
             lines.remove(0);
         } else {
             break;
         }
     }
-    lines.join("\n").trim_end().to_string()
+    // The first real line must look like Python (import/from/def/class/@/comment).
+    // If it's a prose sentence, the model leaked its reasoning instead of code —
+    // reject the whole thing (empty → the workflow retries / fails loudly) rather
+    // than salvage code buried in a monologue.
+    let looks_like_code = lines
+        .first()
+        .map(|l| {
+            let t = l.trim();
+            t.starts_with("import ")
+                || t.starts_with("from ")
+                || t.starts_with("def ")
+                || t.starts_with("class ")
+                || t.starts_with('@')
+                || t.starts_with('#')
+        })
+        .unwrap_or(false);
+    if looks_like_code {
+        lines.join("\n").trim_end().to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Strip a surrounding ``` fence (optional language tag) a model may add.
@@ -156,6 +186,31 @@ mod tests {
         assert!(cleaned.starts_with("from m import f"), "got: {cleaned}");
         assert!(!cleaned.contains("```"));
         assert!(!cleaned.lines().next().unwrap().contains("test_m.py"));
+    }
+
+    #[test]
+    fn clean_test_rejects_leaked_reasoning() {
+        // A thinking model dumps its monologue instead of code → rejected (empty),
+        // even though a `def` appears later inside the prose.
+        let raw = "Okay, let's understand the requirements. The user wants tests.\n\
+                   def test_x():\n    assert f()";
+        assert_eq!(clean_test("test_x.py", raw), "");
+    }
+
+    #[test]
+    fn write_tests_retries_past_a_leaked_reasoning_reply() {
+        // First reply is leaked prose (rejected), second is real code → recovered.
+        let backend = MockBackend::new([
+            "Okay so I need to think about this carefully and write some tests...",
+            "from m import f\ndef test_f():\n    assert f()",
+        ]);
+        let coverage = vec![CoverageItem {
+            file: "test_m.py".into(),
+            covers: "f works".into(),
+        }];
+        let written = write_tests(&backend, &coverage);
+        assert_eq!(written.len(), 1);
+        assert!(written[0].content.starts_with("from m import f"));
     }
 
     #[test]

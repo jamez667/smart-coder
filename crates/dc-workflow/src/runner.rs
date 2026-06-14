@@ -50,6 +50,15 @@ pub fn run_workflow(
 
     while let Some(phase) = state.next_phase() {
         let artifact = generate_phase(orchestrator, phase, &state, think);
+        // Fail loudly on an empty artifact (after the engine's retries) rather than
+        // chaining a broken plan downstream — the usual cause is a dead/unreachable
+        // orchestrator backend (spec 00 — fail clearly, don't corrupt silently).
+        if artifact.content.trim().is_empty() {
+            return Err(dc_proto::DcError::Eval(format!(
+                "workflow: the {} phase produced no content — is the orchestrator backend up?",
+                phase.title()
+            )));
+        }
         on_phase(phase, &artifact.content);
         state.set(artifact);
         // Autonomous: approve immediately so the next phase can ground on it.
@@ -65,7 +74,7 @@ pub fn run_workflow(
         }
     }
 
-    let board = board_from(&state);
+    let board = board_from(&state, &test_files);
     Ok(WorkflowOutcome {
         state,
         board,
@@ -81,13 +90,22 @@ fn artifact_content(state: &WorkflowState, phase: Phase) -> String {
 }
 
 /// Parse the work-decomposition artifact into the swarm's [`TaskBoard`] (spec 09
-/// → spec 08 input contract). The same tolerant parser the orchestrator uses, so
-/// the workflow's decomposition and a direct swarm decomposition agree.
-fn board_from(state: &WorkflowState) -> TaskBoard {
-    let subtasks = state
+/// → spec 08 input contract), then drop any non-implementation subtasks the model
+/// slipped in: ones that target a frozen test file, or that name no files at all
+/// (e.g. a "run the tests" step — the harness verifies, that's not worker work).
+/// Tests are already written and frozen; the swarm only implements.
+fn board_from(state: &WorkflowState, test_files: &[String]) -> TaskBoard {
+    let is_test = |f: &str| {
+        let n = f.replace('\\', "/");
+        test_files.iter().any(|t| t.replace('\\', "/") == n)
+    };
+    let subtasks: Vec<_> = state
         .artifact(Phase::WorkDecomposition)
         .map(|a| parse_subtasks(&a.content))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.files.is_empty() && !s.files.iter().all(|f| is_test(f)))
+        .collect();
     TaskBoard::new(subtasks)
 }
 
