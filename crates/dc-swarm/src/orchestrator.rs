@@ -169,6 +169,18 @@ enum Integration {
     Rejected(String),
 }
 
+/// How "bad" a verification result is, comparable before vs after a change. For a
+/// parsed report it's the number of failing tests; for a generic (exit-code-only)
+/// report it's 0 if the command passed, else 1. This lets the cumulative gate
+/// ("don't make it worse") work for both pytest-style and bare-shell suites.
+fn badness(report: &dc_verify::TestReport) -> usize {
+    if report.generic {
+        usize::from(!report.command_ok)
+    } else {
+        report.failed().len()
+    }
+}
+
 /// Merge a worker's *text* proposal into the real workspace, then verify (spec 08
 /// — parallel reasoning, serialized & reviewed writes).
 ///
@@ -217,18 +229,30 @@ fn integrate(
         })
         .collect();
 
-    apply_changes(workspace, &changes);
-
-    let green = match verify_command {
-        None => true,
-        Some(cmd) => dc_verify::run_verification(workspace, cmd).all_green(),
+    // No verify command: nothing to gate on, just apply.
+    let Some(cmd) = verify_command else {
+        apply_changes(workspace, &changes);
+        return Integration::Accepted(changes.iter().map(|c| c.path.clone()).collect());
     };
 
-    if green {
+    // Baseline failure count BEFORE applying, so a multi-file task can land its
+    // pieces cumulatively. A subtask that fixes only its own file leaves the whole
+    // suite red (other files still broken) — but it must not be reverted for that.
+    // The gate is "didn't make things worse": accept if the failing-test count goes
+    // down or stays equal; reject only a change that increases failures. The run is
+    // "done" only when every subtask lands and the board is all-done — by which
+    // point, for genuine fixes, the suite is actually green.
+    let before = badness(&dc_verify::run_verification(workspace, cmd));
+    apply_changes(workspace, &changes);
+    let after = badness(&dc_verify::run_verification(workspace, cmd));
+
+    if after <= before {
         Integration::Accepted(changes.iter().map(|c| c.path.clone()).collect())
     } else {
         revert(workspace, &backup);
-        Integration::Rejected("broke the suite at integration".to_string())
+        Integration::Rejected(format!(
+            "broke the suite at integration ({before} -> {after} failing)"
+        ))
     }
 }
 
