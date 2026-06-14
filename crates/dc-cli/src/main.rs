@@ -311,8 +311,8 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
         advisor: Some(cli.swarm_advisor()),
         task,
         repo_overview: String::new(),
+        config: swarm_config_with_frozen(cli, &workspace),
         workspace,
-        config: cli.swarm_config(),
     };
 
     let result = dc_web::serve_swarm(spec, "127.0.0.1:0", |url| {
@@ -340,6 +340,19 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
     }
 }
 
+/// Build the swarm config, filling `frozen_paths` from the workspace when the user
+/// didn't pass `--frozen` (spec 08/11). Freezing the test oracle enables the precise
+/// per-subtask scoped completion check and stops a worker from rewriting a test to
+/// make it "pass"; without it the swarm falls back to the coarse whole-suite-delta
+/// check. An explicit `--frozen` list always wins.
+fn swarm_config_with_frozen(cli: &Cli, workspace: &std::path::Path) -> dc_swarm::SwarmConfig {
+    let mut cfg = cli.swarm_config();
+    if cfg.frozen_paths.is_empty() {
+        cfg.frozen_paths = dc_cli::detect_test_files(workspace);
+    }
+    cfg
+}
+
 /// Drive the swarm and render its event stream to the terminal — the line-oriented
 /// counterpart of the web dashboard (spec 06 "swarm rendering (later)"). With
 /// `--json` the stream is NDJSON on stdout (one `SwarmEvent` per line, re-parseable),
@@ -352,7 +365,7 @@ fn swarm_task_cli(
     advisor: &dc_model::OpenAiBackend,
     workspace: &std::path::Path,
 ) -> ExitCode {
-    let cfg = cli.swarm_config();
+    let cfg = swarm_config_with_frozen(cli, workspace);
     if cli.json {
         eprintln!("swarm: {task}");
     } else {

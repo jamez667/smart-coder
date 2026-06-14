@@ -168,6 +168,16 @@ agent loop, unchanged; the swarm is a coordinator above it.
   via quiescence. Visible as `SwarmEvent::SubtaskRetry { attempt, max, failing_tests }`
   ("↻ retry 1/2 — N tests still red"). The swarm now *recovers* a partial fix instead
   of stopping honestly-but-red; M4's per-step retry is the single-agent precedent.
+- ✅ **CLI reaches the precise scoped check** — a free-text `swarm <task>` run now
+  freezes the test oracle too: `--frozen a.py,b.py` sets the contract-test paths
+  explicitly, and when omitted the CLI **auto-detects** them (`test_*.py`, `*_test.py`,
+  anything under `tests/`). This drives the per-subtask scoped completion check (vs. the
+  coarse whole-suite-delta fallback) and stops a worker from rewriting a test to make it
+  "pass" — previously only the staged-workflow path (which knows its Phase-4 tests) got
+  this; the ad-hoc path silently fell back. Three swarm prompts were also fixed (found
+  live): the over-verbose decomposer that returned empty, missing `/no_think` on
+  propose/merge (Qwen3 wrote its reasoning into the file), and the decomposer creating
+  test-editing subtasks.
 - *Deferred (vs. spec 08):* git-worktree isolation + branch merges (we propose
   diffs instead); conflict *arbitration* by the orchestrator (we reject+reassign);
   the serialized shared-workspace lease fallback; specialized worker roles;

@@ -83,6 +83,11 @@ pub struct Cli {
     pub max_workers: usize,
     /// Per-subtask retry cap for `swarm` (spec 08 — subtask retry). Default 2.
     pub max_subtask_retries: usize,
+    /// Frozen contract-test paths for `swarm` (`--frozen a.py,b.py`, spec 08/11):
+    /// the integration merge never overwrites these, and they drive the precise
+    /// per-subtask scoped completion check. Empty = auto-detect test files in the
+    /// workspace; an explicit list overrides the auto-detection.
+    pub frozen_paths: Vec<String>,
     /// `plan` per-phase thinking base: `Some(false)` = think on every phase,
     /// `Some(true)` = `/no_think` every phase, `None` = the smart default (spec 09).
     pub think_base: Option<bool>,
@@ -147,6 +152,7 @@ impl Cli {
         let mut orchestrator_url = None;
         let mut max_workers = 2usize;
         let mut max_subtask_retries = 2usize;
+        let mut frozen_paths: Vec<String> = Vec::new();
         let mut json = false;
         let mut log: Option<String> = None;
         let mut yolo = false;
@@ -211,6 +217,9 @@ impl Cli {
                     }
                     if let Some(n) = parsed.max_subtask_retries {
                         max_subtask_retries = n;
+                    }
+                    if let Some(f) = parsed.frozen_paths {
+                        frozen_paths = f;
                     }
                     if let Some(u) = parsed.base_url {
                         base_url = u;
@@ -294,6 +303,12 @@ impl Cli {
                             )
                         })?;
                 }
+                "--frozen" => {
+                    let list = it.next().ok_or_else(|| {
+                        DcError::Eval("--frozen requires a comma-separated path list".to_string())
+                    })?;
+                    frozen_paths = parse_frozen_list(&list);
+                }
                 "--no-think" => system_suffix = Some("/no_think".to_string()),
                 "--json" => json = true,
                 "--log" => {
@@ -365,6 +380,7 @@ impl Cli {
             orchestrator_url,
             max_workers,
             max_subtask_retries,
+            frozen_paths,
             think_base,
             think_steps,
             ceremony,
@@ -471,6 +487,8 @@ struct RunArgs {
     max_workers: Option<usize>,
     /// `--max-retries N` — per-subtask retry cap for `swarm` (spec 08).
     max_subtask_retries: Option<usize>,
+    /// `--frozen a.py,b.py` — frozen contract-test paths for `swarm` (spec 08/11).
+    frozen_paths: Option<Vec<String>>,
     no_think: bool,
     plan: bool,
     /// Halt at each `plan` phase boundary for a human checkpoint (spec 09).
@@ -516,6 +534,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut orchestrator_url = None;
     let mut max_workers = None;
     let mut max_subtask_retries = None;
+    let mut frozen_paths = None;
     let mut no_think = false;
     let mut plan = false;
     let mut interactive = false;
@@ -562,6 +581,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                         DcError::Eval("--max-retries requires a non-negative integer".to_string())
                     })?);
             }
+            "--frozen" => frozen_paths = Some(parse_frozen_list(&need(&mut it, "--frozen")?)),
             "--base-url" => base_url = Some(need(&mut it, "--base-url")?),
             "--model" => model = Some(need(&mut it, "--model")?),
             "--tool-calling" => {
@@ -615,6 +635,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         orchestrator_url,
         max_workers,
         max_subtask_retries,
+        frozen_paths,
         no_think,
         plan,
         interactive,
@@ -657,6 +678,62 @@ fn parse_gate_set(list: &str) -> Result<dc_workflow::PhaseSet> {
         phases.push(phase);
     }
     Ok(dc_workflow::PhaseSet::of(phases))
+}
+
+/// Parse a `--frozen a.py,b.py` list into trimmed, non-empty, slash-normalized
+/// paths (so `tests\a.py` and `tests/a.py` compare equal downstream, matching
+/// `dc_swarm`'s `is_frozen`).
+fn parse_frozen_list(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(|s| s.trim().replace('\\', "/"))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Looks like a test file by the usual Python/pytest convention: `test_*.py`,
+/// `*_test.py`, or anything under a `tests/` directory. Used to auto-freeze the
+/// test oracle for a free-text `swarm <task>` run when `--frozen` wasn't given.
+fn looks_like_test_file(rel: &str) -> bool {
+    let norm = rel.replace('\\', "/");
+    let name = norm.rsplit('/').next().unwrap_or(&norm);
+    let is_py = name.ends_with(".py");
+    let by_name = is_py && (name.starts_with("test_") || name.ends_with("_test.py"));
+    let by_dir = norm.split('/').any(|seg| seg == "tests" || seg == "test");
+    by_name || (by_dir && is_py)
+}
+
+/// Auto-detect the workspace's test files (one directory level deep plus a top-level
+/// `tests/`), so a free-text `swarm` run gets the precise per-subtask scoped check
+/// and test-oracle protection without the user listing files by hand (spec 08/11).
+/// Best-effort: an unreadable workspace yields an empty list (the swarm then falls
+/// back to the whole-suite-delta check, as before).
+pub fn detect_test_files(workspace: &std::path::Path) -> Vec<String> {
+    fn scan(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>, depth: usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Recurse one level (and into any `tests/` dir) — deep trees are rare
+                // for the small tasks the swarm targets, and we avoid walking the world.
+                let name = entry.file_name();
+                let is_tests = name.to_str() == Some("tests") || name.to_str() == Some("test");
+                if depth == 0 || is_tests {
+                    scan(&path, base, out, depth + 1);
+                }
+            } else if let Ok(rel) = path.strip_prefix(base) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if looks_like_test_file(&rel) && !out.contains(&rel) {
+                    out.push(rel);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    scan(workspace, workspace, &mut out, 0);
+    out.sort();
+    out
 }
 
 /// Resolve where a run's session log is written (spec 06). An explicit `--log`
@@ -822,7 +899,10 @@ impl Cli {
             max_workers: self.max_workers,
             worker,
             verify_command: self.verify_command.clone(),
-            frozen_paths: Vec::new(),
+            // The explicit `--frozen` list, if given. When empty, the caller
+            // (`main`) auto-detects test files from the workspace — done there
+            // because it needs filesystem access this `&self` method lacks.
+            frozen_paths: self.frozen_paths.clone(),
             max_subtask_retries: self.max_subtask_retries,
         }
     }
@@ -1009,6 +1089,8 @@ mod tests {
             "3",
             "--max-retries",
             "4",
+            "--frozen",
+            "tests/test_a.py, tests\\test_b.py",
             "--verify",
             "pytest -q",
         ])
@@ -1027,11 +1109,61 @@ mod tests {
         );
         assert_eq!(cli.max_workers, 3);
         assert_eq!(cli.max_subtask_retries, 4);
+        // `--frozen` parses + normalizes separators, and survives the task-peel.
+        assert_eq!(cli.frozen_paths, vec!["tests/test_a.py", "tests/test_b.py"]);
         // The swarm config carries the verify command (gates integration) + workers.
         let sc = cli.swarm_config();
         assert_eq!(sc.max_workers, 3);
         assert_eq!(sc.max_subtask_retries, 4);
+        assert_eq!(sc.frozen_paths, vec!["tests/test_a.py", "tests/test_b.py"]);
         assert_eq!(sc.verify_command.as_deref(), Some("pytest -q"));
+    }
+
+    #[test]
+    fn frozen_list_trims_normalizes_and_drops_empties() {
+        assert_eq!(
+            parse_frozen_list("a.py, b.py ,,c\\d.py"),
+            vec!["a.py", "b.py", "c/d.py"]
+        );
+        assert!(parse_frozen_list("   ").is_empty());
+    }
+
+    #[test]
+    fn test_file_heuristic_matches_pytest_conventions() {
+        assert!(looks_like_test_file("test_clamp.py"));
+        assert!(looks_like_test_file("clamp_test.py"));
+        assert!(looks_like_test_file("tests/anything.py"));
+        assert!(looks_like_test_file("pkg/tests/util.py"));
+        // Not tests.
+        assert!(!looks_like_test_file("clamp.py"));
+        assert!(!looks_like_test_file("contest.py")); // not test_/_test
+        assert!(!looks_like_test_file("tests/data.json")); // under tests/ but not .py
+    }
+
+    #[test]
+    fn detect_test_files_finds_tests_one_level_and_in_tests_dir() {
+        let ws = std::env::temp_dir().join(format!(
+            "dc-cli-detect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(ws.join("tests")).unwrap();
+        std::fs::write(ws.join("clamp.py"), "x=1\n").unwrap();
+        std::fs::write(ws.join("test_clamp.py"), "x=1\n").unwrap();
+        std::fs::write(ws.join("tests").join("test_more.py"), "x=1\n").unwrap();
+        std::fs::write(ws.join("tests").join("helpers.py"), "x=1\n").unwrap(); // under tests/
+
+        let mut found = detect_test_files(&ws);
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["test_clamp.py", "tests/helpers.py", "tests/test_more.py"],
+            "should freeze test_*.py and everything under tests/, not clamp.py"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
