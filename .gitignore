@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 Cargo.lock
+
+# Workflow plan artifacts written by `dumb-coder plan` (spec 09) — run output,
+# not source.
+.dumb-coder/
