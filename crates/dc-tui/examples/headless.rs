@@ -87,6 +87,13 @@ fn fmt_event(e: &AgentEvent) -> String {
         }
         AgentEvent::Planned { steps } => format!("● plan: {}", steps.join(" | ")),
         AgentEvent::PlanRevised { steps } => format!("● re-plan: {}", steps.join(" | ")),
+        AgentEvent::PromptAssembled {
+            step,
+            tokens,
+            messages,
+        } => {
+            format!("⌖ prompt[{step}]: {} msgs, {tokens} tok", messages.len())
+        }
         AgentEvent::ModelTurn {
             step,
             prompt_tokens,

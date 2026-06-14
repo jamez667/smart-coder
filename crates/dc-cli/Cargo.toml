@@ -19,3 +19,4 @@ dc-swarm = { path = "../dc-swarm" }
 dc-workflow = { path = "../dc-workflow" }
 dc-tui = { path = "../dc-tui" }
 dc-web = { path = "../dc-web" }
+serde_json = { workspace = true }

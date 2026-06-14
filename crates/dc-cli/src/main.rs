@@ -27,10 +27,12 @@ fn main() -> ExitCode {
         }
         Command::Doctor => run_doctor(&cli),
         Command::Chat => run_chat(&cli),
+        Command::Run { task } if cli.json => run_task_json(&cli, task.clone()),
         Command::Run { task } => run_task(&cli, task.clone()),
         Command::Serve { task } => serve_task(&cli, task.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
+        Command::Replay { session } => replay(session.clone()),
     }
 }
 
@@ -397,6 +399,10 @@ fn run_task(cli: &Cli, task: String) -> ExitCode {
     let registry = dc_tools::default_registry();
     let strategy = dc_core::select_strategy(&backend.capabilities());
 
+    // Every run is logged for later `replay` (spec 06). The TUI worker tees events
+    // into this file alongside the live channel sink.
+    let (log_path, session_id) = dc_cli::session_log_path(&workspace, cli.log.as_deref());
+
     let spec = dc_tui::TuiRun {
         backend,
         // "Junior asks senior" (spec 02): the optional larger advisor model.
@@ -406,12 +412,14 @@ fn run_task(cli: &Cli, task: String) -> ExitCode {
         instruction: task,
         workspace,
         config: cli.agent_config(),
+        log: Some(log_path.clone()),
     };
 
     match dc_tui::run(spec) {
         Ok(Some(report)) => {
             // Honest stop line on the normal terminal after the TUI restores it.
             println!("{:?} — {}", report.stop_reason, report.change_summary);
+            println!("session {session_id} logged to {}", log_path.display());
             if report.finished {
                 ExitCode::SUCCESS
             } else {
@@ -422,6 +430,217 @@ fn run_task(cli: &Cli, task: String) -> ExitCode {
         Err(e) => {
             eprintln!("error: TUI failed: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Drive a coding task headless, emitting the event stream as JSON lines on stdout
+/// (`run --json`, spec 06). The same stream is teed to the session log so the run
+/// is replayable. No TUI — this is the machine-readable / scriptable surface.
+fn run_task_json(cli: &Cli, task: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let backend = cli.backend();
+    if let Err(e) = dc_cli::preflight(&[("model", &backend)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    let advisor = cli.advisor();
+    let registry = dc_tools::default_registry();
+    let strategy = dc_core::select_strategy(&backend.capabilities());
+    let config = cli.agent_config();
+
+    // stdout: the machine-readable JSON-lines stream.
+    let stdout_sink = dc_core::JsonLinesSink::new(io::stdout().lock());
+
+    // log file: the same stream, persisted for `replay`. A failure to open the log
+    // is a warning, not fatal — the run (and its stdout stream) still proceed.
+    let (log_path, session_id) = dc_cli::session_log_path(&workspace, cli.log.as_deref());
+    let log_file = open_log(&log_path);
+    let log_sink = log_file.map(dc_core::JsonLinesSink::new);
+
+    let mut sinks: Vec<&dyn dc_core::EventSink> = vec![&stdout_sink];
+    if let Some(ref s) = log_sink {
+        sinks.push(s);
+    }
+    let tee = dc_core::TeeSink::new(sinks);
+
+    let result = dc_core::run_agent_observed(
+        &backend,
+        advisor.as_ref().map(|a| a as &dyn dc_model::ModelBackend),
+        &registry,
+        strategy.as_ref(),
+        &task,
+        &workspace,
+        &config,
+        &tee,
+    );
+
+    match result {
+        Ok(report) => {
+            // The structured stream is on stdout; the human note goes to stderr so
+            // it never pollutes the JSON a consumer is parsing.
+            if log_sink.is_some() {
+                eprintln!("session {session_id} logged to {}", log_path.display());
+            }
+            if report.finished {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("error: run failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Re-render a recorded session (`replay <id>`, spec 06): read the JSON-lines log,
+/// deserialize each event, and print it with the same line-oriented formatter used
+/// live. A bare id resolves under `.dumb-coder/sessions/`; a path is used directly.
+fn replay(session: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let path = dc_cli::resolve_replay_path(&workspace, &session);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "error: cannot read session log {}: {e}\n  \
+                 (looked for a session id under .dumb-coder/sessions/ or a path)",
+                path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("▶ replay {} ({})\n", session, path.display());
+    let mut n = 0usize;
+    let mut bad = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<dc_core::AgentEvent>(line) {
+            Ok(ev) => {
+                print_event(&ev);
+                n += 1;
+            }
+            Err(e) => {
+                eprintln!("  ! line {}: not a valid event ({e})", i + 1);
+                bad += 1;
+            }
+        }
+    }
+    println!(
+        "\n— end of replay: {n} events{}",
+        if bad > 0 {
+            format!(", {bad} unreadable")
+        } else {
+            String::new()
+        }
+    );
+    ExitCode::SUCCESS
+}
+
+/// Print one event in the line-oriented style of spec 06 (the static surface for
+/// replay; the live TUI/web renderers consume the same events differently).
+fn print_event(ev: &dc_core::AgentEvent) {
+    use dc_core::AgentEvent::*;
+    match ev {
+        RunStarted {
+            task,
+            prompt_budget,
+        } => {
+            println!("● run  {task}   (budget {prompt_budget} tok)");
+        }
+        Planned { steps } => {
+            println!("● plan");
+            for (i, s) in steps.iter().enumerate() {
+                println!("  {}. {s}", i + 1);
+            }
+        }
+        PlanRevised { steps } => {
+            println!("● plan revised");
+            for (i, s) in steps.iter().enumerate() {
+                println!("  {}. {s}", i + 1);
+            }
+        }
+        PromptAssembled {
+            step,
+            tokens,
+            messages,
+        } => {
+            // Verbose: the full prompt the model saw (spec 06). Print every message
+            // verbatim so replay reproduces exactly what was sent.
+            println!("⌖ prompt[{step}]  ({} msgs, {tokens} tok)", messages.len());
+            for m in messages {
+                println!("  ┌─ {} ─────────", m.role);
+                for line in m.content.lines() {
+                    println!("  │ {line}");
+                }
+            }
+        }
+        ModelTurn {
+            step,
+            prompt_tokens,
+            ..
+        } => {
+            println!("· turn {step}   ({prompt_tokens} tok)");
+        }
+        ToolCall { tool, arg } => {
+            println!("▸ {tool}  {arg}");
+        }
+        ToolResult {
+            summary, is_error, ..
+        } => {
+            let mark = if *is_error { "✗" } else { "└" };
+            println!("  {mark} {summary}");
+        }
+        RepairTriggered { detail } => {
+            println!("  ↻ repair: {detail}");
+        }
+        Verification { green, summary, .. } => {
+            println!("▸ verify  {} {summary}", if *green { "✓" } else { "✗" });
+        }
+        Stalled { trigger } => {
+            println!("  ⚠ stalled: {trigger}");
+        }
+        Advice { trigger, advice } => {
+            println!("  ☎ advisor ({trigger}): {advice}");
+        }
+        Stopped { reason } => {
+            println!("■ stopped — {reason:?}");
+        }
+    }
+}
+
+/// Open (create/truncate) a session log file, creating the parent dir. Returns
+/// `None` on failure (logging is best-effort — never break a run over it).
+fn open_log(path: &std::path::Path) -> Option<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("warning: cannot create log dir {}: {e}", parent.display());
+            return None;
+        }
+    }
+    match std::fs::File::create(path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("warning: cannot open log {}: {e}", path.display());
+            None
         }
     }
 }

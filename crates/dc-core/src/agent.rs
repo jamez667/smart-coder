@@ -75,6 +75,16 @@ pub struct AgentConfig {
     /// Empty = no focus (the model navigates with read_file as usual). Set by the
     /// swarm, which scopes each worker to a disjoint set of files.
     pub focus_files: Vec<String>,
+    /// Plan/preview only: when set, the loop runs read-only tools for real (so the
+    /// model still sees true context) but **never** executes a side-effecting tool —
+    /// edits, file creation, and shell/verification commands are short-circuited to
+    /// a `[dry-run]` note instead of running (spec 06 `--dry-run`). The workspace is
+    /// left untouched.
+    pub dry_run: bool,
+    /// Emit the fully-assembled prompt each turn as an [`AgentEvent::PromptAssembled`]
+    /// — *what the model actually saw* (spec 06 `--verbose`, spec 05). Off by
+    /// default because the payload is large; renderers/logs only get it when asked.
+    pub verbose: bool,
 }
 
 impl Default for AgentConfig {
@@ -94,6 +104,8 @@ impl Default for AgentConfig {
             step_retry_budget: 3,
             system_suffix: None,
             focus_files: Vec::new(),
+            dry_run: false,
+            verbose: false,
         }
     }
 }
@@ -341,6 +353,24 @@ pub fn run_agent_observed(
         let built = builder.build(segments);
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
 
+        // Verbose (spec 06): surface the exact assembled prompt before it's sent, so
+        // a renderer/log can show what the model actually saw. Gated — the payload
+        // is large, so normal runs never carry it.
+        if cfg.verbose {
+            sink.record(&AgentEvent::PromptAssembled {
+                step: step + 1,
+                tokens: built.tokens_used,
+                messages: built
+                    .messages
+                    .iter()
+                    .map(|m| crate::event::PromptMessage {
+                        role: role_word(m.role).to_string(),
+                        content: m.content.clone(),
+                    })
+                    .collect(),
+            });
+        }
+
         let mut req = GenerateRequest::new(built.messages);
         strategy.prepare_request(&mut req, registry);
         let resp = backend.generate(&req)?;
@@ -417,6 +447,7 @@ pub fn run_agent_observed(
                         registry,
                         &cfg.permission,
                         &cfg.verify_command,
+                        cfg.dry_run,
                         workspace,
                     );
                     let changed = pre
@@ -778,6 +809,7 @@ fn dispatch(
     registry: &ToolRegistry,
     policy: &PermissionPolicy,
     verify_command: &Option<String>,
+    dry_run: bool,
     workspace: &Path,
 ) -> ToolOutcome {
     // Permission gate — the harness decides, outside the model's control (spec 04).
@@ -794,6 +826,23 @@ fn dispatch(
                 );
             }
             return ToolOutcome::Observation(format!("{} denied: {reason}", call.name));
+        }
+
+        // Dry-run (spec 06): preview only. Read-only tools still run for real (the
+        // model needs true context to reason); any side-effecting tool — edits,
+        // create_file, run_command, run_verification — is short-circuited to a note
+        // so the workspace is never touched and no process is spawned.
+        if dry_run && spec.side_effect != dc_tools::SideEffect::ReadOnly {
+            let arg = key_arg(call);
+            let target = if arg.is_empty() {
+                String::new()
+            } else {
+                format!(" {arg}")
+            };
+            return ToolOutcome::Observation(format!(
+                "[dry-run] would {}{target}; no changes written",
+                call.name
+            ));
         }
     }
 
@@ -843,6 +892,15 @@ fn trim_recent(recent: &mut Vec<Message>, keep_recent: usize) {
     let max_msgs = keep_recent.saturating_mul(2).max(2);
     while recent.len() > max_msgs {
         recent.remove(0);
+    }
+}
+
+/// The lowercase role word for the verbose prompt dump (`PromptAssembled`).
+fn role_word(role: dc_model::Role) -> &'static str {
+    match role {
+        dc_model::Role::System => "system",
+        dc_model::Role::User => "user",
+        dc_model::Role::Assistant => "assistant",
     }
 }
 
@@ -1009,6 +1067,124 @@ mod tests {
         assert_eq!(report.metrics.valid, 2);
         assert_eq!(report.metrics.invalid, 0);
         assert_eq!(std::fs::read_to_string(ws.join("out.txt")).unwrap(), "hi");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn verbose_emits_the_assembled_prompt_only_when_enabled() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let registry = dc_tools::default_registry();
+
+        let run = |verbose: bool| -> Vec<AgentEvent> {
+            let ws = temp_dir(if verbose { "verbose-on" } else { "verbose-off" });
+            let backend = MockBackend::new([json!({"tool":"finish"}).to_string()]);
+            let strategy = crate::strategy::select_strategy(&backend.capabilities());
+            let evs: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+            let sink = crate::event::FnSink(|e: &AgentEvent| evs.lock().unwrap().push(e.clone()));
+            let cfg = AgentConfig {
+                verbose,
+                ..Default::default()
+            };
+            run_agent_observed(
+                &backend,
+                None,
+                &registry,
+                strategy.as_ref(),
+                "x",
+                &ws,
+                &cfg,
+                &sink,
+            )
+            .unwrap();
+            let _ = std::fs::remove_dir_all(&ws);
+            evs.into_inner().unwrap()
+        };
+
+        // Verbose on: a PromptAssembled event carries the real system prompt content.
+        let on = run(true);
+        let prompt = on.iter().find_map(|e| match e {
+            AgentEvent::PromptAssembled { messages, .. } => Some(messages.clone()),
+            _ => None,
+        });
+        let messages = prompt.expect("verbose run should emit PromptAssembled");
+        assert!(
+            messages.iter().any(|m| m.role == "system"),
+            "the assembled prompt includes the system message: {messages:?}"
+        );
+
+        // Verbose off (default): no PromptAssembled events at all.
+        let off = run(false);
+        assert!(
+            !off.iter()
+                .any(|e| matches!(e, AgentEvent::PromptAssembled { .. })),
+            "no prompt dump without --verbose"
+        );
+    }
+
+    #[test]
+    fn dry_run_previews_mutations_without_touching_the_workspace() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("dry-run");
+        std::fs::write(ws.join("f.txt"), "ORIGINAL").unwrap();
+
+        // Turn 1: read the file (read-only — must run for real so the model sees it).
+        // Turn 2: try to overwrite it (mutating — must be previewed, not applied).
+        // Turn 3: finish.
+        let backend = MockBackend::new([
+            json!({"tool":"read_file","path":"f.txt"}).to_string(),
+            json!({"tool":"write_file","path":"f.txt","content":"CLOBBERED"}).to_string(),
+            json!({"tool":"finish"}).to_string(),
+        ]);
+
+        let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+        let sink = crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let cfg = AgentConfig {
+            dry_run: true,
+            ..Default::default()
+        };
+        let report = run_agent_observed(
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "edit f.txt",
+            &ws,
+            &cfg,
+            &sink,
+        )
+        .unwrap();
+        assert!(report.finished);
+
+        // The mutating tool never wrote: the file is byte-for-byte the original.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("f.txt")).unwrap(),
+            "ORIGINAL"
+        );
+
+        let evs = events.lock().unwrap();
+        // The read returned the *real* content (read-only tools still run).
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { full, .. } if full.contains("ORIGINAL")
+            )),
+            "read_file should return the real file body in dry-run: {evs:?}"
+        );
+        // The write produced a [dry-run] preview note instead of applying.
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { summary, .. } if summary.contains("[dry-run]")
+            )),
+            "write_file should be previewed with a [dry-run] note: {evs:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&ws);
     }

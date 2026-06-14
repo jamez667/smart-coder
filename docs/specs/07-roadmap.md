@@ -81,7 +81,7 @@ under control. Everything else builds on a working, reliable single-step loop.
   `update_plan` / on retry-exhaustion, not by inferring which call satisfied a
   step); per-step token/wall-clock budgets; re-running the planner mid-task.
 
-## M5 — UX, replay & polish (partially landed)
+## M5 — UX, replay & polish ✅
 **Goal:** pleasant, inspectable, scriptable.
 - ✅ **Event-stream architecture** ([01](01-architecture.md)): typed `AgentEvent`s
   emitted through an `EventSink` at every phase — the hub all observers consume.
@@ -92,11 +92,25 @@ under control. Everything else builds on a working, reliable single-step loop.
   daemon-mode-out-of-scope note ([06](06-cli-ux.md)) — pragmatic given the event
   stream made a second renderer cheap. Both verified driving real Gemma 4 E4B.
 - ✅ One-shot `run` mode (`run <task> [--verify CMD] [--plan]`).
-- *Remaining:* `--verbose` prompt inspection, session logging + `replay`, `--json`
-  line output (the event stream makes these mechanical now), `--dry-run`,
-  `--yolo`/allowlist permission flags wired to `PermissionPolicy`.
-- **Exit criteria:** a newcomer can install, `doctor`, and run a task guided only
-  by CLI output. *(The TUI covers the live-run guidance; logging/replay pending.)*
+- ✅ **`--json` line output** — a `JsonLinesSink` over the event stream; headless
+  `run --json` emits NDJSON on stdout (human notes to stderr), scriptable.
+- ✅ **Session logging + `replay`** — every `run` tees its event stream to
+  `.dumb-coder/sessions/<id>.jsonl` (override with `--log`); `replay <id>`
+  re-renders a past run from the log (`AgentEvent` round-trips Serialize↔Deserialize).
+- ✅ **`--dry-run`** — preview only: read-only tools run for real, every
+  side-effecting tool (edit/create/run_command/run_verification) is short-circuited
+  to a `[dry-run]` note; the workspace is never touched.
+- ✅ **`--yolo` / `--allow <prefix>`** — wired into `AgentConfig.permission`
+  (`PermissionPolicy.allow_shell` / `shell_allowlist`).
+- ✅ **`--verbose` / `-v`** — emits the fully-assembled, budgeted prompt each turn
+  as `AgentEvent::PromptAssembled` (gated; large payload off by default), so a
+  renderer/log/replay shows *exactly* what the model saw (spec 05/06). The TUI
+  shows a compact marker live; `--json`/`replay` carry the verbatim text.
+- **Exit criteria:** ✅ a newcomer can install, `doctor`, and run a task guided only
+  by CLI output; live runs are logged and replayable. Proven live against the
+  containers: `run --json` emits valid NDJSON ending in `Stopped`, `replay`
+  reconstructs the run (incl. advisor exchanges and, with `--verbose`, the exact
+  per-turn prompt), and `--dry-run` leaves the workspace byte-for-byte unchanged.
 
 ## M6 — Staged workflow & human checkpoints
 **Goal:** drive tasks through the gated pipeline ([09](09-workflow-and-checkpoints.md))

@@ -91,6 +91,21 @@ impl TuiState {
                     format!("● plan revised ({} steps)", steps.len()),
                 );
             }
+            AgentEvent::PromptAssembled {
+                step,
+                tokens,
+                messages,
+            } => {
+                // The full prompt is large; in the live log show a compact marker
+                // (the JSON/session log carries the verbatim text for inspection).
+                self.push(
+                    LineKind::Info,
+                    format!(
+                        "⌖ prompt[{step}]: {} msgs, {tokens} tok (see --json/log for full text)",
+                        messages.len()
+                    ),
+                );
+            }
             AgentEvent::ModelTurn {
                 step,
                 prompt_tokens,

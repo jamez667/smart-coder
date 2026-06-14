@@ -36,6 +36,9 @@ pub enum Command {
     /// `interactive` is set, halt at each phase boundary for a human
     /// approve/revise/send-back/abort decision; otherwise auto-approve every gate.
     Plan { task: String, interactive: bool },
+    /// Re-render a recorded session from its JSON-lines log (spec 06). `session`
+    /// is a session id (resolved under `.dumb-coder/sessions/`) or a path to a log.
+    Replay { session: String },
     /// Print usage.
     Help,
 }
@@ -90,6 +93,24 @@ pub struct Cli {
     /// `plan` explicit gate set: a precise list of phases to gate, overriding
     /// `ceremony`. `None` = no `--gates` flag given.
     pub gates: Option<dc_workflow::PhaseSet>,
+    /// Emit the event stream as JSON lines on stdout instead of the live TUI
+    /// (`run --json`, spec 06 — machine-readable output).
+    pub json: bool,
+    /// Where to write the session log (JSON lines). `None` = the per-session
+    /// default under `.dumb-coder/sessions/`; `Some` overrides it (`--log`).
+    pub log: Option<String>,
+    /// Pre-approve all `run_command` shell calls (`--yolo`); wired into the agent's
+    /// `PermissionPolicy` (spec 04/06).
+    pub yolo: bool,
+    /// Shell-command prefixes to auto-approve (`--allow`, repeatable); appended to
+    /// the policy's allowlist.
+    pub allow: Vec<String>,
+    /// Plan/preview only — run read-only tools but never apply a mutation or run a
+    /// command (`--dry-run`, spec 06). Threaded into `AgentConfig.dry_run`.
+    pub dry_run: bool,
+    /// Show the full assembled prompt each turn — what the model actually saw
+    /// (`--verbose`/`-v`, spec 06). Threaded into `AgentConfig.verbose`.
+    pub verbose: bool,
 }
 
 impl Cli {
@@ -119,12 +140,28 @@ impl Cli {
         let mut orchestrator_model = None;
         let mut orchestrator_url = None;
         let mut max_workers = 2usize;
+        let mut json = false;
+        let mut log: Option<String> = None;
+        let mut yolo = false;
+        let mut allow: Vec<String> = Vec::new();
+        let mut dry_run = false;
+        let mut verbose = false;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
+                "replay" if command.is_none() => {
+                    let session = it.next().ok_or_else(|| {
+                        DcError::Eval(
+                            "replay requires a session id or log path, e.g. \
+                             `dumb-coder replay 1718000000000`"
+                                .to_string(),
+                        )
+                    })?;
+                    command = Some(Command::Replay { session });
+                }
                 // `run`/`serve`/`swarm`/`plan <task...>`: the rest forms the task + flags.
                 "run" | "serve" | "swarm" | "plan" if command.is_none() => {
                     let kind = arg.clone();
@@ -180,6 +217,24 @@ impl Cli {
                     think_steps = parsed.think_steps;
                     ceremony = parsed.ceremony;
                     gates = parsed.gates;
+                    if parsed.json {
+                        json = true;
+                    }
+                    if parsed.log.is_some() {
+                        log = parsed.log;
+                    }
+                    if parsed.yolo {
+                        yolo = true;
+                    }
+                    if !parsed.allow.is_empty() {
+                        allow.extend(parsed.allow);
+                    }
+                    if parsed.dry_run {
+                        dry_run = true;
+                    }
+                    if parsed.verbose {
+                        verbose = true;
+                    }
                     plan_first = parsed.plan || plan_first;
                 }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
@@ -218,6 +273,20 @@ impl Cli {
                         })?;
                 }
                 "--no-think" => system_suffix = Some("/no_think".to_string()),
+                "--json" => json = true,
+                "--log" => {
+                    log = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--log requires a path argument".to_string())
+                    })?);
+                }
+                "--yolo" => yolo = true,
+                "--allow" => {
+                    allow.push(it.next().ok_or_else(|| {
+                        DcError::Eval("--allow requires a command prefix".to_string())
+                    })?);
+                }
+                "--dry-run" => dry_run = true,
+                "--verbose" | "-v" => verbose = true,
                 "--plan" => plan_first = true,
                 "--base-url" => {
                     base_url = it.next().ok_or_else(|| {
@@ -276,6 +345,12 @@ impl Cli {
             think_steps,
             ceremony,
             gates,
+            json,
+            log,
+            yolo,
+            allow,
+            dry_run,
+            verbose,
         })
     }
 
@@ -387,6 +462,18 @@ struct RunArgs {
     base_url: Option<String>,
     model: Option<String>,
     tool_calling: Option<ToolCallingArg>,
+    /// `--json` — emit the event stream as JSON lines instead of the TUI.
+    json: bool,
+    /// `--log <path>` — override the session-log destination.
+    log: Option<String>,
+    /// `--yolo` — pre-approve all shell commands.
+    yolo: bool,
+    /// `--allow <prefix>` (repeatable) — shell-command prefixes to auto-approve.
+    allow: Vec<String>,
+    /// `--dry-run` — preview only; never apply a mutation or run a command.
+    dry_run: bool,
+    /// `--verbose`/`-v` — show the full assembled prompt each turn.
+    verbose: bool,
 }
 
 /// Split the args collected after `run`/`serve` into the task plus its trailing
@@ -409,6 +496,12 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut base_url = None;
     let mut model = None;
     let mut tool_calling = None;
+    let mut json = false;
+    let mut log = None;
+    let mut yolo = false;
+    let mut allow: Vec<String> = Vec::new();
+    let mut dry_run = false;
+    let mut verbose = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let need = |it: &mut std::vec::IntoIter<String>, flag: &str| {
@@ -448,6 +541,12 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                 });
             }
             "--no-think" => no_think = true,
+            "--json" => json = true,
+            "--log" => log = Some(need(&mut it, "--log")?),
+            "--yolo" => yolo = true,
+            "--allow" => allow.push(need(&mut it, "--allow")?),
+            "--dry-run" => dry_run = true,
+            "--verbose" | "-v" => verbose = true,
             "--interactive" | "--gate" => interactive = true,
             "--think-all" => think_base = Some(false),
             "--no-think-all" => think_base = Some(true),
@@ -487,6 +586,12 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         base_url,
         model,
         tool_calling,
+        json,
+        log,
+        yolo,
+        allow,
+        dry_run,
+        verbose,
     })
 }
 
@@ -514,6 +619,49 @@ fn parse_gate_set(list: &str) -> Result<dc_workflow::PhaseSet> {
     Ok(dc_workflow::PhaseSet::of(phases))
 }
 
+/// Resolve where a run's session log is written (spec 06). An explicit `--log`
+/// path wins; otherwise default to `<workspace>/.dumb-coder/sessions/<id>.jsonl`,
+/// where `<id>` is a millisecond timestamp — sortable, unique enough for one
+/// user, and std-only (no extra crate). Returns the path and its session id.
+pub fn session_log_path(
+    workspace: &std::path::Path,
+    log_override: Option<&str>,
+) -> (std::path::PathBuf, String) {
+    if let Some(p) = log_override {
+        let path = std::path::PathBuf::from(p);
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session")
+            .to_string();
+        return (path, id);
+    }
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "session".to_string());
+    let path = sessions_dir(workspace).join(format!("{id}.jsonl"));
+    (path, id)
+}
+
+/// Where session logs live: `<workspace>/.dumb-coder/sessions/` — alongside the
+/// planning workflow's `.dumb-coder/plan/` (the dir is already gitignored).
+pub fn sessions_dir(workspace: &std::path::Path) -> std::path::PathBuf {
+    workspace.join(".dumb-coder").join("sessions")
+}
+
+/// Resolve a `replay` argument to a log file (spec 06): a path is used as-is; a
+/// bare id resolves to `<workspace>/.dumb-coder/sessions/<id>.jsonl`.
+pub fn resolve_replay_path(workspace: &std::path::Path, session: &str) -> std::path::PathBuf {
+    let direct = std::path::Path::new(session);
+    if direct.is_file() {
+        return direct.to_path_buf();
+    }
+    // A bare id (with or without the .jsonl suffix).
+    let id = session.strip_suffix(".jsonl").unwrap_or(session);
+    sessions_dir(workspace).join(format!("{id}.jsonl"))
+}
+
 /// Usage text (spec 06 — invocation modes, trimmed to the M0 surface).
 pub fn usage() -> &'static str {
     "\
@@ -528,6 +676,7 @@ COMMANDS:
     serve <task>    Run a task and watch it in your browser (web dashboard)
     swarm <task>    Decompose + run with parallel workers (swarm dashboard)
     plan <task>     Staged planning workflow → .dumb-coder/plan/ (spec 09)
+    replay <id>     Re-render a recorded session from its log (spec 06)
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -544,6 +693,17 @@ OPTIONS:
     --no-think            Append /no_think to the prompt (needed for Qwen3 models;
                           auto-applied when the model name contains 'qwen3').
     --plan                Decompose the task into a plan before running (`run`)
+  run output, logging & safety (spec 06):
+    --json                Emit the event stream as JSON lines on stdout (no TUI)
+    --log PATH            Write the session log here  [default:
+                          .dumb-coder/sessions/<id>.jsonl]
+    --dry-run             Preview only: run read-only tools but never apply an edit
+                          or run a command; the workspace is left untouched
+    --verbose, -v         Show the full assembled prompt each turn (what the model
+                          actually saw); full text in --json / the session log
+    --yolo                Pre-approve all run_command shell calls
+    --allow PREFIX        Auto-approve shell commands starting with PREFIX
+                          (repeatable, e.g. --allow \"cargo test\")
   swarm / plan (workers use --base-url/--model):
     --orchestrator MODEL  The model that decomposes/plans         [default: --model]
     --orchestrator-url U  Endpoint for the orchestrator           [default: --base-url]
@@ -568,6 +728,9 @@ OPTIONS:
 EXAMPLES:
     dumb-coder doctor
     dumb-coder run \"make the failing test in is_even pass\" --verify \"sh test.sh\"
+    dumb-coder run \"fix parse_config\" --json --verify \"cargo test\" > run.jsonl
+    dumb-coder run \"refactor the parser\" --dry-run
+    dumb-coder replay 1718000000000
     dumb-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
     dumb-coder swarm \"add validation and a test\" --verify \"python -m pytest -q\" \\
         --base-url http://localhost:11435/v1 --model coder-0 --max-workers 2 \\
@@ -582,6 +745,20 @@ impl Cli {
             verify_command: self.verify_command.clone(),
             plan_first: self.plan_first,
             system_suffix: self.system_suffix.clone(),
+            permission: self.permission_policy(),
+            dry_run: self.dry_run,
+            verbose: self.verbose,
+            ..Default::default()
+        }
+    }
+
+    /// The permission policy from the safety flags (spec 04/06): `--yolo`
+    /// pre-approves all shell, `--allow <prefix>` extends the allowlist. Frozen
+    /// paths stay empty here — the swarm sets those separately.
+    pub fn permission_policy(&self) -> dc_tools::PermissionPolicy {
+        dc_tools::PermissionPolicy {
+            allow_shell: self.yolo,
+            shell_allowlist: self.allow.clone(),
             ..Default::default()
         }
     }
@@ -936,6 +1113,119 @@ mod tests {
         assert!(tier.plan_is_gated(false));
         let explicit = Cli::parse(["plan", "t", "--gates", "specs"]).unwrap();
         assert!(explicit.plan_is_gated(false));
+    }
+
+    #[test]
+    fn parses_json_log_yolo_allow_dry_run_top_level_and_in_run_tail() {
+        // Top-level (before the subcommand).
+        let top = Cli::parse([
+            "--json",
+            "--dry-run",
+            "--yolo",
+            "--allow",
+            "cargo test",
+            "--log",
+            "out.jsonl",
+            "run",
+            "do it",
+        ])
+        .unwrap();
+        assert!(top.json && top.dry_run && top.yolo);
+        assert_eq!(top.allow, vec!["cargo test".to_string()]);
+        assert_eq!(top.log.as_deref(), Some("out.jsonl"));
+
+        // In the run tail (after the task) — and --allow repeats.
+        let tail = Cli::parse([
+            "run",
+            "do it",
+            "--json",
+            "--dry-run",
+            "--yolo",
+            "--allow",
+            "git status",
+            "--allow",
+            "ls",
+            "--log",
+            "x.jsonl",
+        ])
+        .unwrap();
+        assert!(tail.json && tail.dry_run && tail.yolo);
+        assert_eq!(tail.allow, vec!["git status".to_string(), "ls".to_string()]);
+        assert_eq!(tail.log.as_deref(), Some("x.jsonl"));
+        match &tail.command {
+            Command::Run { task } => assert_eq!(task, "do it"),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn safety_flags_populate_the_permission_policy_and_dry_run() {
+        let cli = Cli::parse(["run", "x", "--yolo", "--allow", "cargo test", "--dry-run"]).unwrap();
+        let cfg = cli.agent_config();
+        assert!(cfg.permission.allow_shell, "--yolo → allow_shell");
+        assert_eq!(
+            cfg.permission.shell_allowlist,
+            vec!["cargo test".to_string()]
+        );
+        assert!(cfg.dry_run, "--dry-run → dry_run");
+
+        // Defaults: no flags → conservative policy, no dry-run, no verbose.
+        let plain = Cli::parse(["run", "x"]).unwrap().agent_config();
+        assert!(!plain.permission.allow_shell);
+        assert!(plain.permission.shell_allowlist.is_empty());
+        assert!(!plain.dry_run);
+        assert!(!plain.verbose);
+    }
+
+    #[test]
+    fn verbose_flag_parses_both_spellings_and_positions_and_wires_config() {
+        for flag in ["--verbose", "-v"] {
+            // Top-level and in the run tail.
+            let top = Cli::parse([flag, "run", "x"]).unwrap();
+            assert!(top.verbose, "top-level {flag}");
+            let tail = Cli::parse(["run", "x", flag]).unwrap();
+            assert!(tail.verbose, "run-tail {flag}");
+            assert!(tail.agent_config().verbose, "{flag} → AgentConfig.verbose");
+        }
+        assert!(!Cli::parse(["run", "x"]).unwrap().verbose);
+    }
+
+    #[test]
+    fn parses_replay_and_requires_an_id() {
+        let cli = Cli::parse(["replay", "1718000000000"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Replay {
+                session: "1718000000000".to_string()
+            }
+        );
+        assert!(Cli::parse(["replay"]).is_err());
+    }
+
+    #[test]
+    fn session_log_path_defaults_under_dot_dir_and_honors_override() {
+        let ws = std::path::Path::new("/tmp/ws");
+        // Default: .dumb-coder/sessions/<millis>.jsonl, id is the numeric stem.
+        let (path, id) = session_log_path(ws, None);
+        assert!(path.ends_with(format!("{id}.jsonl")), "{path:?}");
+        assert!(path.to_string_lossy().contains("sessions"), "{path:?}");
+        assert!(id.chars().all(|c| c.is_ascii_digit()), "id={id}");
+        // Override wins; id is derived from the file stem.
+        let (p2, id2) = session_log_path(ws, Some("logs/my-run.jsonl"));
+        assert_eq!(p2, std::path::PathBuf::from("logs/my-run.jsonl"));
+        assert_eq!(id2, "my-run");
+    }
+
+    #[test]
+    fn resolve_replay_path_handles_bare_id_and_suffix() {
+        let ws = std::path::Path::new("/tmp/ws");
+        let from_id = resolve_replay_path(ws, "123");
+        assert!(
+            from_id.ends_with("sessions/123.jsonl") || from_id.ends_with("sessions\\123.jsonl")
+        );
+        // A .jsonl-suffixed bare id resolves to the same place (not doubled).
+        let from_suffixed = resolve_replay_path(ws, "123.jsonl");
+        assert_eq!(from_id, from_suffixed);
     }
 
     #[test]

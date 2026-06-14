@@ -41,6 +41,10 @@ where
     pub instruction: String,
     pub workspace: std::path::PathBuf,
     pub config: AgentConfig,
+    /// Optional session log: when set, the worker tees every event into this file
+    /// as JSON lines (alongside the live channel) so the run is replayable (spec
+    /// 06). `None` disables logging.
+    pub log: Option<std::path::PathBuf>,
 }
 
 /// Run a task with the live TUI. Returns the agent's report once the run ends and
@@ -54,10 +58,21 @@ where
 
     // Drive the agent on a worker thread; it streams events through the channel.
     let worker = thread::spawn(move || {
-        let sink = FnSink(move |e: &AgentEvent| {
+        let channel_sink = FnSink(move |e: &AgentEvent| {
             // If the UI is gone, the send fails — that's fine, the run can finish.
             let _ = tx.send(e.clone());
         });
+        // Optionally tee the same stream into a JSON-lines session log for replay
+        // (spec 06). Opening it here keeps the non-Send file on the worker thread.
+        let log_sink = spec
+            .log
+            .as_ref()
+            .and_then(|path| open_log(path).map(dc_core::JsonLinesSink::new));
+        let mut sinks: Vec<&dyn dc_core::EventSink> = vec![&channel_sink];
+        if let Some(ref s) = log_sink {
+            sinks.push(s);
+        }
+        let sink = dc_core::TeeSink::new(sinks);
         run_agent_observed(
             &spec.backend,
             spec.advisor.as_ref().map(|a| a as &dyn ModelBackend),
@@ -120,6 +135,16 @@ fn render_loop(rx: Receiver<AgentEvent>) -> io::Result<Option<AgentReport>> {
     // prefers the worker's report.
     let _ = result;
     Ok(None)
+}
+
+/// Open (create/truncate) the session log, creating its parent dir. Best-effort:
+/// returns `None` on failure (and stays silent — the TUI owns the alt-screen, so
+/// printing here would corrupt the display; a failed log must never break a run).
+fn open_log(path: &std::path::Path) -> Option<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::File::create(path).ok()
 }
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
