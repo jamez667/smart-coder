@@ -17,5 +17,5 @@ mod worker;
 pub use board::{Status, Subtask, TaskBoard};
 pub use decompose::{decompose, parse_subtasks};
 pub use event::{FnSwarmSink, NullSwarmSink, SwarmEvent, SwarmSink};
-pub use orchestrator::{run_swarm, SwarmConfig, SwarmReport};
+pub use orchestrator::{run_swarm, run_swarm_board, SwarmConfig, SwarmReport};
 pub use worker::{run_worker, ProposedChange, WorkerResult};

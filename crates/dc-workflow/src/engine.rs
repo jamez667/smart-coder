@@ -55,8 +55,9 @@ fn system_for(phase: Phase) -> String {
             "You define the concrete project layout: directories, modules/files, and each one's responsibility."
         }
         Phase::StageBreakdown => {
-            "You break the work into small incremental stages. For EACH stage, write the unit tests \
-             FIRST that define 'done' — the stage is complete when those tests pass."
+            "You plan the TESTS first (TDD). You don't write test code yourself — you list the \
+             coverage each test file must hit; small worker models will write the actual tests \
+             from your coverage list. The stages are 'make these tests pass'."
         }
         Phase::ImplementationPlan => {
             "For each stage, you write the concrete, ordered plan to make its tests pass (red → green)."
@@ -73,6 +74,15 @@ fn system_for(phase: Phase) -> String {
 
 fn phase_instruction(phase: Phase) -> String {
     match phase {
+        Phase::StageBreakdown => {
+            // A coverage test-plan, not test code. Each item names a test file and
+            // the behavior it must cover; a worker writes the actual test from this.
+            "Output ONLY a JSON array of coverage items; each item: \
+             {\"file\":\"test_x.py\",\"covers\":\"one specific behavior the test must check\"}. \
+             Group related behaviors under the same test file. Cover the happy path and the \
+             important edge cases. No prose, just the JSON array."
+                .to_string()
+        }
         Phase::WorkDecomposition => {
             // The swarm's decomposition parser expects exactly this JSON shape.
             "Output ONLY a JSON array of subtasks; each item: \

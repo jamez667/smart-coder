@@ -34,8 +34,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Run the staged planning workflow (spec 09) autonomously, writing the plan
-/// artifacts to `.dumb-coder/plan/` and printing each phase as it lands.
+/// Run the staged planning workflow (spec 09) autonomously: the orchestrator (T1)
+/// plans each phase, workers (T2) write the tests from the Phase-4 coverage plan,
+/// and — when a `--verify` command is given — the swarm implements the work
+/// decomposition against those tests until the suite is green. Plan artifacts land
+/// in `.dumb-coder/plan/`.
 fn plan_task(cli: &Cli, task: String) -> ExitCode {
     let workspace = match std::env::current_dir() {
         Ok(d) => d,
@@ -45,30 +48,67 @@ fn plan_task(cli: &Cli, task: String) -> ExitCode {
         }
     };
 
-    // The reasoning phases run on the orchestrator (T1) model — the same backend
-    // the swarm uses to decompose.
     let orchestrator = cli.orchestrator();
+    let worker = cli.backend();
     let on_phase = |phase: dc_workflow::Phase, content: &str| {
         let preview: String = content.lines().take(8).collect::<Vec<_>>().join("\n");
         println!("\n=== {} ===\n{preview}\n…", phase.title());
     };
 
-    match dc_workflow::run_workflow(&orchestrator, &task, &workspace, &on_phase) {
-        Ok(outcome) => {
-            println!(
-                "\nplan complete — {} phase artifacts in .dumb-coder/plan/, {} subtask(s) for the swarm",
-                6,
-                outcome.board.len()
-            );
-            if outcome.board.is_empty() {
-                eprintln!("warning: work decomposition produced no parseable subtasks");
+    let outcome =
+        match dc_workflow::run_workflow(&orchestrator, &worker, &task, &workspace, &on_phase) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("error: workflow failed: {e}");
+                return ExitCode::FAILURE;
             }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("error: workflow failed: {e}");
-            ExitCode::FAILURE
-        }
+        };
+
+    println!(
+        "\nplan complete — 6 phase artifacts in .dumb-coder/plan/\n  tests written: {}\n  subtasks for the swarm: {}",
+        if outcome.test_files.is_empty() {
+            "(none)".to_string()
+        } else {
+            outcome.test_files.join(", ")
+        },
+        outcome.board.len()
+    );
+
+    // Without a verify command there's nothing to drive the implementation against;
+    // stop at the approved plan + frozen tests.
+    let Some(_) = cli.verify_command.clone() else {
+        println!("(no --verify given; stopping at the plan + tests. Add --verify to build it.)");
+        return ExitCode::SUCCESS;
+    };
+    if outcome.board.is_empty() {
+        eprintln!("warning: work decomposition produced no subtasks; nothing to implement");
+        return ExitCode::FAILURE;
+    }
+
+    // Implement: run the swarm against the workflow's own board, gated by the
+    // frozen tests the workers just wrote (the merge may never overwrite them).
+    println!("\n=== implementing against the written tests ===");
+    let advisor = cli.swarm_advisor();
+    let mut swarm_cfg = cli.swarm_config();
+    swarm_cfg.frozen_paths = outcome.test_files.clone();
+    let sink = dc_swarm::NullSwarmSink;
+    let report = dc_swarm::run_swarm_board(
+        &orchestrator,
+        &worker,
+        Some(&advisor as &(dyn dc_model::ModelBackend + Sync)),
+        outcome.board,
+        &workspace,
+        &swarm_cfg,
+        &sink,
+    );
+    println!(
+        "\nswarm: {} integrated, {} rejected, {} pending",
+        report.done, report.failed, report.pending
+    );
+    if report.all_done {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

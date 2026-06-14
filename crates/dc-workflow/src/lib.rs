@@ -11,12 +11,16 @@
 //! self-approve or skip a phase. This crate currently runs the pipeline
 //! autonomously (every gate auto-approved); human checkpoints layer on top later.
 
+mod coverage;
 mod engine;
 mod phase;
 mod runner;
 mod state;
+mod testwriter;
 
+pub use coverage::{group_by_file, parse_coverage, CoverageItem};
 pub use engine::{generate_phase, phase_messages};
 pub use phase::Phase;
 pub use runner::{run_workflow, WorkflowOutcome};
 pub use state::{load, plan_dir, save, Artifact, Status, WorkflowState};
+pub use testwriter::{persist_tests, write_tests, WrittenTest};

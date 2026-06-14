@@ -28,6 +28,10 @@ pub struct SwarmConfig {
     /// The verification command run after each integration (whole-suite gate). If
     /// `None`, proposals are accepted without an integration check.
     pub verify_command: Option<String>,
+    /// Frozen contract-test paths (spec 11): the integration merge will NEVER write
+    /// to these, so workers make the tests pass instead of weakening them. Set by
+    /// the staged workflow from the tests it wrote in Phase 4.
+    pub frozen_paths: Vec<String>,
 }
 
 impl Default for SwarmConfig {
@@ -36,6 +40,7 @@ impl Default for SwarmConfig {
             max_workers: 2,
             worker: AgentConfig::default(),
             verify_command: None,
+            frozen_paths: Vec::new(),
         }
     }
 }
@@ -66,7 +71,31 @@ pub fn run_swarm(
     cfg: &SwarmConfig,
     sink: &dyn SwarmSink,
 ) -> SwarmReport {
-    let mut board = decompose(orchestrator, task, repo_overview).unwrap_or_default();
+    let board = decompose(orchestrator, task, repo_overview).unwrap_or_default();
+    run_swarm_board(
+        orchestrator,
+        worker_backend,
+        advisor,
+        board,
+        workspace,
+        cfg,
+        sink,
+    )
+}
+
+/// Run the swarm against a **pre-built** task board (spec 09 → 08): when the
+/// staged workflow already decomposed the work, the swarm executes that board
+/// directly instead of re-decomposing from a task string.
+#[allow(clippy::too_many_arguments)]
+pub fn run_swarm_board(
+    orchestrator: &dyn ModelBackend,
+    worker_backend: &(dyn ModelBackend + Sync),
+    advisor: Option<&(dyn ModelBackend + Sync)>,
+    mut board: crate::board::TaskBoard,
+    workspace: &Path,
+    cfg: &SwarmConfig,
+    sink: &dyn SwarmSink,
+) -> SwarmReport {
     sink.record(&SwarmEvent::Decomposed {
         subtasks: board.subtasks().iter().map(|s| s.goal.clone()).collect(),
     });
@@ -122,7 +151,7 @@ pub fn run_swarm(
                 subtask: result.subtask_id.clone(),
                 summary: result.report_summary.clone(),
             });
-            match integrate(orchestrator, workspace, &result, &cfg.verify_command) {
+            match integrate(orchestrator, workspace, &result, cfg) {
                 Integration::Accepted(files) => {
                     board.complete(&result.subtask_id);
                     for f in &files {
@@ -170,15 +199,29 @@ enum Integration {
 }
 
 /// How "bad" a verification result is, comparable before vs after a change. For a
-/// parsed report it's the number of failing tests; for a generic (exit-code-only)
-/// report it's 0 if the command passed, else 1. This lets the cumulative gate
-/// ("don't make it worse") work for both pytest-style and bare-shell suites.
+/// parsed report it's the number of failing tests, plus one if the command itself
+/// errored with no failures parsed (e.g. a pytest *collection* error from a broken
+/// import — green-looking to a naive failed-count but actually a hard failure). For
+/// a generic (exit-code-only) report it's 0 if the command passed, else 1. This
+/// lets the cumulative gate ("don't make it worse") work for both pytest-style and
+/// bare-shell suites and never mistake a collection error for success.
 fn badness(report: &dc_verify::TestReport) -> usize {
     if report.generic {
         usize::from(!report.command_ok)
     } else {
-        report.failed().len()
+        let failures = report.failed().len();
+        // A non-zero exit with zero parsed failures means the suite didn't even run
+        // (import/collection error) — count it as bad so the gate won't accept it.
+        failures + usize::from(failures == 0 && !report.command_ok)
     }
+}
+
+/// Is `path` one of the frozen contract-test paths? Compared with normalized
+/// separators so `tests/a.py` and `tests\a.py` match.
+fn is_frozen(path: &str, frozen: &[String]) -> bool {
+    let norm = |s: &str| s.replace('\\', "/");
+    let p = norm(path);
+    frozen.iter().any(|f| norm(f) == p)
 }
 
 /// Merge a worker's *text* proposal into the real workspace, then verify (spec 08
@@ -193,7 +236,7 @@ fn integrate(
     orchestrator: &dyn ModelBackend,
     workspace: &Path,
     result: &WorkerResult,
-    verify_command: &Option<String>,
+    cfg: &SwarmConfig,
 ) -> Integration {
     if !result.has_proposal() {
         return Integration::Rejected("no proposal from worker".to_string());
@@ -201,10 +244,19 @@ fn integrate(
     if result.files.is_empty() {
         return Integration::Rejected("proposal has no target file".to_string());
     }
+    // A subtask that targets ONLY frozen contract tests has nothing to do — workers
+    // make the tests pass, they don't rewrite them (spec 11).
+    if result.files.iter().all(|f| is_frozen(f, &cfg.frozen_paths)) {
+        return Integration::Rejected("subtask targets only frozen contract tests".to_string());
+    }
 
-    // Ask the orchestrator to turn the proposal into the corrected file(s).
+    // Ask the orchestrator to turn the proposal into the corrected file(s). Frozen
+    // contract tests are skipped — the merge may never overwrite them.
     let mut changes = Vec::new();
     for file in &result.files {
+        if is_frozen(file, &cfg.frozen_paths) {
+            continue;
+        }
         let current = std::fs::read_to_string(workspace.join(file))
             .unwrap_or_default()
             .replace("\r\n", "\n");
@@ -230,7 +282,7 @@ fn integrate(
         .collect();
 
     // No verify command: nothing to gate on, just apply.
-    let Some(cmd) = verify_command else {
+    let Some(cmd) = &cfg.verify_command else {
         apply_changes(workspace, &changes);
         return Integration::Accepted(changes.iter().map(|c| c.path.clone()).collect());
     };
@@ -503,6 +555,47 @@ mod tests {
         assert!(
             impl_after.contains("% 2"),
             "should be reverted: {impl_after}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn the_merge_never_overwrites_a_frozen_contract_test() {
+        let ws = temp("frozen");
+        std::fs::write(ws.join("test_it.py"), "FROZEN CONTRACT\n").unwrap();
+        std::fs::write(ws.join("impl.py"), "old\n").unwrap();
+
+        // One subtask whose worker proposes to rewrite BOTH impl.py and the frozen
+        // test. The merge applies impl.py but must leave the test untouched.
+        let backend = ScriptedSwarm::new(vec![
+            (
+                "orchestrator for a swarm",
+                vec![r#"[{"id":"x","goal":"do it","files":["impl.py","test_it.py"]}]"#],
+            ),
+            ("do it", vec!["new impl"]),
+            ("File: impl.py", vec!["new\n"]),
+            ("File: test_it.py", vec!["HACKED\n"]),
+        ]);
+
+        let cfg = SwarmConfig {
+            frozen_paths: vec!["test_it.py".to_string()],
+            ..Default::default()
+        };
+        let _ = run_swarm_board(
+            &backend,
+            &backend,
+            None,
+            crate::board::TaskBoard::new(vec![crate::board::Subtask::new("x", "do it")
+                .with_files(vec!["impl.py".into(), "test_it.py".into()])]),
+            &ws,
+            &cfg,
+            &NullSwarmSink,
+        );
+
+        // The frozen test is byte-for-byte intact; impl.py got the merge.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("test_it.py")).unwrap(),
+            "FROZEN CONTRACT\n"
         );
         let _ = std::fs::remove_dir_all(&ws);
     }

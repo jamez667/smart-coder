@@ -457,6 +457,7 @@ impl Cli {
             max_workers: self.max_workers,
             worker,
             verify_command: self.verify_command.clone(),
+            frozen_paths: Vec::new(),
         }
     }
 
