@@ -121,6 +121,13 @@ pub trait ModelBackend {
     fn capabilities(&self) -> Capabilities;
     /// Produce a single assistant turn for the request.
     fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse>;
+    /// Exact token count for `text`, when the backend has a tokenizer (spec 02).
+    /// `None` means "no exact count available" — the Context Manager then falls
+    /// back to a heuristic estimator with a safety margin (spec 05). Defaulted so
+    /// existing backends opt in only when they truly have a tokenizer.
+    fn count_tokens(&self, _text: &str) -> Option<usize> {
+        None
+    }
 }
 
 /// The primary on-device target: Android AICore (Gemma 4 as Gemini Nano 4) with

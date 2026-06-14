@@ -4,6 +4,8 @@ members = [
     "crates/dc-proto",
     "crates/dc-model",
     "crates/dc-tools",
+    "crates/dc-context",
+    "crates/dc-index",
     "crates/dc-core",
     "crates/dc-cli",
     "crates/dc-eval",

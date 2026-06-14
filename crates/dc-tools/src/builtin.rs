@@ -53,6 +53,17 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "find_symbol",
+            description: "Locate where a function/type/class is defined; returns path:line.",
+            params: vec![ParamSpec::new(
+                "name",
+                ParamType::String,
+                "the symbol name to locate (exact)",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "write_file",
             description: "Create or overwrite a file with the given full contents.",
             params: vec![
@@ -267,6 +278,7 @@ mod tests {
                 "read_file",
                 "list_dir",
                 "search_code",
+                "find_symbol",
                 "write_file",
                 "finish"
             ]

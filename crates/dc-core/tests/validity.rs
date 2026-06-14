@@ -115,7 +115,10 @@ fn end_to_end_run_clears_the_95_percent_bar() {
 
     // MockBackend advertises ToolCalling::None, so run_agent selects ParseRepair.
     let backend = MockBackend::new(script);
-    let cfg = AgentConfig { max_steps: 30 };
+    let cfg = AgentConfig {
+        max_steps: 30,
+        ..Default::default()
+    };
     let report = run_agent(&backend, "read repeatedly", &ws, &cfg).unwrap();
 
     assert!(report.finished);

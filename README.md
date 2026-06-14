@@ -41,8 +41,21 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 83 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 124 tests):
 
+- **M2 context manager** (`dc-context`) — the window as a hard-budgeted resource
+  (spec 05): a zoned prompt assembler that fits each turn under an *effective*
+  fraction of the advertised window (evicting lowest-priority zones first, never
+  the sacred task anchor / current step / latest observation), aggressive
+  observation truncation (head+tail, error-prioritized, flagged), a rolling
+  extractive history summary, and token accounting (backend tokenizer → estimator
+  fallback). A multi-turn run on an 8k window provably stays under budget even
+  with whole-file observations every turn.
+- **M2 retrieval index** (`dc-index`) — the aider-style **PageRank repo map**: a
+  tree-sitter (Rust + Python) symbol definition/reference graph scored by
+  hand-rolled personalized PageRank, with boosts for symbols the task names and
+  files in play, rendered as a token-budgeted map of the most-central symbols.
+  Plus workspace symbol lookup surfaced to the agent as the `find_symbol` tool.
 - **M1 tool registry** (`dc-tools`) — strict, strongly-typed tool schemas with
   structured validation (bad calls are rejected *before* execution, with a
   precise reason), the narrow v1 tool surface (`read_file`, `list_dir`,

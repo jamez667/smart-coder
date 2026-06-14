@@ -10,5 +10,7 @@ description = "The dumb-coder agent loop: drive a ModelBackend through tool call
 dc-proto = { path = "../dc-proto" }
 dc-model = { path = "../dc-model" }
 dc-tools = { path = "../dc-tools" }
+dc-context = { path = "../dc-context" }
+dc-index = { path = "../dc-index" }
 serde = { workspace = true }
 serde_json = { workspace = true }

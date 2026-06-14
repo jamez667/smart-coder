@@ -24,14 +24,23 @@ under control. Everything else builds on a working, reliable single-step loop.
 - **Exit criteria:** ≥95% valid tool calls on a small fixed task suite; malformed
   calls always recovered or escalated, never acted on.
 
-## M2 — Context discipline
+## M2 — Context discipline ✅
 **Goal:** keep a tiny window useful across many turns.
-- Context Manager with hard budget + zones ([05](05-context-management.md)).
-- Retrieval index (`dc-index`): lexical search + symbol lookup; `find_symbol`.
-- Observation truncation + rolling history summary.
-- Accurate token accounting via the gateway tokenizer.
-- **Exit criteria:** multi-turn tasks stay coherent on an 8k window without
-  blowing the budget; logged prompts show only relevant context.
+- ✅ Context Manager (`dc-context`) with hard budget + prioritized zones, eviction
+  lowest-first, sacred zones never dropped ([05](05-context-management.md)).
+- ✅ Retrieval index (`dc-index`): tree-sitter (Rust + Python) symbol graph +
+  **PageRank repo map** with task/in-play boosts; `find_symbol` tool.
+- ✅ Observation truncation (head+tail, error-prioritized, flagged) + rolling
+  extractive history summary.
+- ✅ Token accounting via the gateway tokenizer (`count_tokens`) with a heuristic
+  estimator fallback.
+- ✅ Wired into the agent loop, replacing the clone-everything prompt.
+- **Exit criteria:** ✅ a multi-turn run with whole-file observations every turn
+  provably stays under an 8k budget (`dc-core` integration test); the assembled
+  prompt is inspectable via `BuiltContext`.
+- *Deferred to a follow-up:* per-step (vs. per-run) repo-map refresh; embedding
+  retrieval; lexical chunk search beyond `search_code`; more tree-sitter
+  grammars.
 
 ## M3 — Editing & TDD verification (closing the loop)
 **Goal:** the agent actually changes code and *proves* it via tests.
