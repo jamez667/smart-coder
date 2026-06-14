@@ -56,8 +56,14 @@ pub struct Cli {
     /// Ask the planner to decompose the task before running (`run` only).
     pub plan_first: bool,
     /// A larger "senior" model consulted when the coder stalls — "junior asks
-    /// senior" (spec 02). Same endpoint, different model. None = no advisor.
+    /// senior" (spec 02). None = no advisor.
     pub advisor_model: Option<String>,
+    /// The advisor's endpoint, when it runs on a *different* server than the coder
+    /// (e.g. a swarm: coder on :11435, advisor on :11434). Defaults to `base_url`.
+    pub advisor_url: Option<String>,
+    /// A system-prompt suffix passed to the agent — a model-quirk hook (e.g.
+    /// `/no_think` for Qwen3). Auto-set from the model name unless overridden.
+    pub system_suffix: Option<String>,
 }
 
 impl Cli {
@@ -78,6 +84,8 @@ impl Cli {
         let mut verify_command = None;
         let mut plan_first = false;
         let mut advisor_model = None;
+        let mut advisor_url = None;
+        let mut system_suffix: Option<String> = None;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
@@ -107,6 +115,12 @@ impl Cli {
                     if parsed.advisor.is_some() {
                         advisor_model = parsed.advisor;
                     }
+                    if parsed.advisor_url.is_some() {
+                        advisor_url = parsed.advisor_url;
+                    }
+                    if parsed.no_think {
+                        system_suffix = Some("/no_think".to_string());
+                    }
                     plan_first = parsed.plan || plan_first;
                 }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
@@ -120,6 +134,12 @@ impl Cli {
                         DcError::Eval("--advisor requires a model name".to_string())
                     })?);
                 }
+                "--advisor-url" => {
+                    advisor_url = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--advisor-url requires a URL".to_string())
+                    })?);
+                }
+                "--no-think" => system_suffix = Some("/no_think".to_string()),
                 "--plan" => plan_first = true,
                 "--base-url" => {
                     base_url = it.next().ok_or_else(|| {
@@ -154,6 +174,13 @@ impl Cli {
             }
         }
 
+        // Qwen3 models default to a reasoning mode that eats the token budget and
+        // returns empty content; `/no_think` disables it. Auto-apply unless the
+        // user set a suffix explicitly.
+        if system_suffix.is_none() && model.to_ascii_lowercase().contains("qwen3") {
+            system_suffix = Some("/no_think".to_string());
+        }
+
         Ok(Cli {
             command: command.unwrap_or(Command::Chat),
             base_url,
@@ -162,15 +189,22 @@ impl Cli {
             verify_command,
             plan_first,
             advisor_model,
+            advisor_url,
+            system_suffix,
         })
     }
 
-    /// Build the advisor (senior) backend, if `--advisor` was given. Same endpoint
-    /// as the coder, a different model — "junior asks senior" (spec 02).
+    /// Build the advisor (senior) backend, if `--advisor` was given — on its own
+    /// `--advisor-url` if set, else the coder's endpoint ("junior asks senior",
+    /// spec 02; a different *server* lets the swarm run both co-resident).
     pub fn advisor(&self) -> Option<OpenAiBackend> {
+        let url = self
+            .advisor_url
+            .clone()
+            .unwrap_or_else(|| self.base_url.clone());
         self.advisor_model
             .as_ref()
-            .map(|m| OpenAiBackend::new(self.base_url.clone(), m.clone()))
+            .map(|m| OpenAiBackend::new(url.clone(), m.clone()))
     }
 
     /// Build the configured backend, applying the requested enforcement (spec 02).
@@ -193,6 +227,8 @@ struct RunArgs {
     task: String,
     verify: Option<String>,
     advisor: Option<String>,
+    advisor_url: Option<String>,
+    no_think: bool,
     plan: bool,
 }
 
@@ -202,6 +238,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut task_words = Vec::new();
     let mut verify = None;
     let mut advisor = None;
+    let mut advisor_url = None;
+    let mut no_think = false;
     let mut plan = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -217,6 +255,13 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                         DcError::Eval("--advisor requires a model name".to_string())
                     })?);
             }
+            "--advisor-url" => {
+                advisor_url =
+                    Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--advisor-url requires a URL".to_string())
+                    })?);
+            }
+            "--no-think" => no_think = true,
             "--plan" => plan = true,
             _ => task_words.push(a),
         }
@@ -225,6 +270,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         task: task_words.join(" "),
         verify,
         advisor,
+        advisor_url,
+        no_think,
         plan,
     })
 }
@@ -251,14 +298,20 @@ OPTIONS:
                           calls (spec 02)             [default: none]
     --verify CMD          Test command for `run` (enables the TDD whole-suite gate)
     --advisor MODEL       A larger model consulted when the coder stalls
-                          (\"junior asks senior\", spec 02). Same endpoint.
+                          (\"junior asks senior\", spec 02).
+    --advisor-url URL     Endpoint for the advisor when it runs on a different
+                          server than the coder (a swarm). [default: --base-url]
+    --no-think            Append /no_think to the prompt (needed for Qwen3 models;
+                          auto-applied when the model name contains 'qwen3').
     --plan                Decompose the task into a plan before running (`run`)
 
 EXAMPLES:
     dumb-coder doctor
     dumb-coder run \"make the failing test in is_even pass\" --verify \"sh test.sh\"
     dumb-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
-    dumb-coder run \"fix is_even\" --model gemma4:e2b --advisor gemma4:e4b --verify \"sh test.sh\"
+    dumb-coder run \"fix is_even\" --verify \"sh test.sh\" \\
+        --base-url http://localhost:11435/v1 --model coder-0 \\
+        --advisor-url http://localhost:11434/v1 --advisor advisor-e4b
     dumb-coder run \"add input validation to parse_config\" --plan
     dumb-coder --model gemma4:e4b --tool-calling native"
 }
@@ -269,6 +322,7 @@ impl Cli {
         dc_core::AgentConfig {
             verify_command: self.verify_command.clone(),
             plan_first: self.plan_first,
+            system_suffix: self.system_suffix.clone(),
             ..Default::default()
         }
     }

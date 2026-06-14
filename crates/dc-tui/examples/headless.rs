@@ -19,19 +19,31 @@ fn main() {
     let model = args.get(1).cloned().unwrap_or_else(|| "gemma4:e4b".into());
     let workspace = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| ".".into()));
     let verify = args.get(3).cloned().filter(|s| !s.is_empty());
-    // arg 4 is an optional advisor model ("-" / "" = none); the rest is the task.
-    let advisor_model = args.get(4).cloned().filter(|s| !s.is_empty() && s != "-");
+    // arg 4 is the optional advisor as `url@model` (or `model` to reuse the coder
+    // url, or "-"/"" for none); the rest is the task.
+    let advisor_spec = args.get(4).cloned().filter(|s| !s.is_empty() && s != "-");
     let task = args[5.min(args.len())..].join(" ");
 
-    let backend = OpenAiBackend::new(base_url.clone(), model);
-    let advisor = advisor_model
-        .as_ref()
-        .map(|m| OpenAiBackend::new(base_url, m.clone()));
+    let backend = OpenAiBackend::new(base_url.clone(), model.clone());
+    let advisor = advisor_spec.as_ref().map(|spec| {
+        let (url, m) = match spec.split_once('@') {
+            Some((u, m)) => (u.to_string(), m.to_string()),
+            None => (base_url.clone(), spec.clone()),
+        };
+        OpenAiBackend::new(url, m)
+    });
     let registry = default_registry();
     let strategy = dc_core::select_strategy(&backend.capabilities());
+    // Qwen3 coders need /no_think or they return empty content.
+    let suffix = if model.to_ascii_lowercase().contains("qwen3") {
+        Some("/no_think".to_string())
+    } else {
+        None
+    };
     let cfg = AgentConfig {
         verify_command: verify,
         max_steps: 15,
+        system_suffix: suffix,
         ..Default::default()
     };
 

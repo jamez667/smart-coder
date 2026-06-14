@@ -63,6 +63,11 @@ pub struct AgentConfig {
     /// Per-step retry budget: failed attempts on the active step before the
     /// harness gives up on it and moves on (spec 03).
     pub step_retry_budget: usize,
+    /// An optional string appended to the system prompt — a model-quirk hook. Some
+    /// small models need a directive to behave (e.g. Qwen3 needs `/no_think` or it
+    /// burns its budget in a reasoning block and returns empty). Kept generic so
+    /// the harness stays model-agnostic; the CLI sets it per model.
+    pub system_suffix: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -80,6 +85,7 @@ impl Default for AgentConfig {
             repeat_limit: 3,
             no_progress_limit: 4,
             step_retry_budget: 3,
+            system_suffix: None,
         }
     }
 }
@@ -199,7 +205,11 @@ pub fn run_agent_observed(
     cfg: &AgentConfig,
     sink: &dyn EventSink,
 ) -> Result<AgentReport> {
-    let system = format!("{TASK_PREFIX}{}", strategy.system_preamble(registry));
+    let mut system = format!("{TASK_PREFIX}{}", strategy.system_preamble(registry));
+    if let Some(suffix) = &cfg.system_suffix {
+        system.push('\n');
+        system.push_str(suffix);
+    }
 
     // Token accounting + hard budget (spec 05).
     let counter = TokenCounter::new(backend);
