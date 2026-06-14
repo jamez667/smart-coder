@@ -29,6 +29,54 @@ fn main() -> ExitCode {
         Command::Chat => run_chat(&cli),
         Command::Run { task } => run_task(&cli, task.clone()),
         Command::Serve { task } => serve_task(&cli, task.clone()),
+        Command::Swarm { task } => swarm_task(&cli, task.clone()),
+    }
+}
+
+/// Drive a task with the worker swarm and serve the swarm dashboard.
+fn swarm_task(cli: &Cli, task: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Workers use --base-url/--model; the orchestrator decomposes; advisor is the
+    // optional senior. All three are OpenAI-compatible backends (spec 02/08).
+    let spec = dc_web::WebSwarm {
+        orchestrator: cli.orchestrator(),
+        worker: cli.backend(),
+        advisor: cli.advisor(),
+        task,
+        repo_overview: String::new(),
+        workspace,
+        config: cli.swarm_config(),
+    };
+
+    let result = dc_web::serve_swarm(spec, "127.0.0.1:0", |url| {
+        println!("dumb-coder swarm dashboard live at {url}");
+        println!("open it in your browser to watch the swarm (Ctrl-C to stop)");
+    });
+
+    match result {
+        Ok(Some(report)) => {
+            println!(
+                "\nswarm: {} integrated, {} rejected, {} pending",
+                report.done, report.failed, report.pending
+            );
+            if report.all_done {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(None) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: swarm server failed: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

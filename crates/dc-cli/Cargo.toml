@@ -15,5 +15,6 @@ dc-proto = { path = "../dc-proto" }
 dc-model = { path = "../dc-model" }
 dc-core = { path = "../dc-core" }
 dc-tools = { path = "../dc-tools" }
+dc-swarm = { path = "../dc-swarm" }
 dc-tui = { path = "../dc-tui" }
 dc-web = { path = "../dc-web" }

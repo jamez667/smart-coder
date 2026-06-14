@@ -9,6 +9,8 @@
 
 mod hub;
 mod server;
+mod swarm_server;
 
 pub use hub::{sse_frame, Hub, HubSink};
 pub use server::{events_body, parse_from, serve, WebRun};
+pub use swarm_server::{serve_swarm, SwarmHub, WebSwarm};

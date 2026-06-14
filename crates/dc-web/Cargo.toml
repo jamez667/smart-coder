@@ -11,6 +11,7 @@ dc-core = { path = "../dc-core" }
 dc-model = { path = "../dc-model" }
 dc-tools = { path = "../dc-tools" }
 dc-proto = { path = "../dc-proto" }
+dc-swarm = { path = "../dc-swarm" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = "0.12"

@@ -28,6 +28,9 @@ pub enum Command {
     Run { task: String },
     /// Run a task and serve a live web dashboard in the browser (spec 06).
     Serve { task: String },
+    /// Run a task with the worker swarm (orchestrator + parallel workers) and
+    /// serve the swarm dashboard (spec 08).
+    Swarm { task: String },
     /// Print usage.
     Help,
 }
@@ -64,6 +67,12 @@ pub struct Cli {
     /// A system-prompt suffix passed to the agent — a model-quirk hook (e.g.
     /// `/no_think` for Qwen3). Auto-set from the model name unless overridden.
     pub system_suffix: Option<String>,
+    /// The orchestrator (decomposer) model for `swarm`. Defaults to `model`.
+    pub orchestrator_model: Option<String>,
+    /// The orchestrator's endpoint for `swarm`. Defaults to `base_url`.
+    pub orchestrator_url: Option<String>,
+    /// Max workers running at once for `swarm` (spec 08).
+    pub max_workers: usize,
 }
 
 impl Cli {
@@ -86,28 +95,31 @@ impl Cli {
         let mut advisor_model = None;
         let mut advisor_url = None;
         let mut system_suffix: Option<String> = None;
+        let mut orchestrator_model = None;
+        let mut orchestrator_url = None;
+        let mut max_workers = 2usize;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
-                // `run <task...>` / `serve <task...>`: the rest forms the task.
-                "run" | "serve" if command.is_none() => {
-                    let is_serve = arg == "serve";
+                // `run`/`serve`/`swarm <task...>`: the rest forms the task + flags.
+                "run" | "serve" | "swarm" if command.is_none() => {
+                    let kind = arg.clone();
                     let rest: Vec<String> = it.by_ref().collect();
                     if rest.is_empty() {
                         return Err(DcError::Eval(format!(
-                            "{arg} requires a task, e.g. `dumb-coder {arg} \"add a test for parse\"`"
+                            "{kind} requires a task, e.g. `dumb-coder {kind} \"add a test\"`"
                         )));
                     }
                     // Pull flags back out of the collected task (so `run "x" --verify`
                     // works); simplest is to re-scan for our known flags.
                     let parsed = split_run_args(rest)?;
-                    command = Some(if is_serve {
-                        Command::Serve { task: parsed.task }
-                    } else {
-                        Command::Run { task: parsed.task }
+                    command = Some(match kind.as_str() {
+                        "serve" => Command::Serve { task: parsed.task },
+                        "swarm" => Command::Swarm { task: parsed.task },
+                        _ => Command::Run { task: parsed.task },
                     });
                     if parsed.verify.is_some() {
                         verify_command = parsed.verify;
@@ -117,6 +129,24 @@ impl Cli {
                     }
                     if parsed.advisor_url.is_some() {
                         advisor_url = parsed.advisor_url;
+                    }
+                    if parsed.orchestrator.is_some() {
+                        orchestrator_model = parsed.orchestrator;
+                    }
+                    if parsed.orchestrator_url.is_some() {
+                        orchestrator_url = parsed.orchestrator_url;
+                    }
+                    if let Some(n) = parsed.max_workers {
+                        max_workers = n;
+                    }
+                    if let Some(u) = parsed.base_url {
+                        base_url = u;
+                    }
+                    if let Some(m) = parsed.model {
+                        model = m;
+                    }
+                    if let Some(tc) = parsed.tool_calling {
+                        tool_calling = tc;
                     }
                     if parsed.no_think {
                         system_suffix = Some("/no_think".to_string());
@@ -138,6 +168,25 @@ impl Cli {
                     advisor_url = Some(it.next().ok_or_else(|| {
                         DcError::Eval("--advisor-url requires a URL".to_string())
                     })?);
+                }
+                "--orchestrator" => {
+                    orchestrator_model = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--orchestrator requires a model name".to_string())
+                    })?);
+                }
+                "--orchestrator-url" => {
+                    orchestrator_url = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--orchestrator-url requires a URL".to_string())
+                    })?);
+                }
+                "--max-workers" => {
+                    max_workers = it
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| {
+                            DcError::Eval("--max-workers requires a positive integer".to_string())
+                        })?;
                 }
                 "--no-think" => system_suffix = Some("/no_think".to_string()),
                 "--plan" => plan_first = true,
@@ -191,7 +240,24 @@ impl Cli {
             advisor_model,
             advisor_url,
             system_suffix,
+            orchestrator_model,
+            orchestrator_url,
+            max_workers,
         })
+    }
+
+    /// Build the orchestrator (decomposer) backend for `swarm`: its own
+    /// `--orchestrator-url`/`--orchestrator` if set, else the worker endpoint/model.
+    pub fn orchestrator(&self) -> OpenAiBackend {
+        let url = self
+            .orchestrator_url
+            .clone()
+            .unwrap_or_else(|| self.base_url.clone());
+        let model = self
+            .orchestrator_model
+            .clone()
+            .unwrap_or_else(|| self.model.clone());
+        OpenAiBackend::new(url, model)
     }
 
     /// Build the advisor (senior) backend, if `--advisor` was given — on its own
@@ -228,8 +294,16 @@ struct RunArgs {
     verify: Option<String>,
     advisor: Option<String>,
     advisor_url: Option<String>,
+    orchestrator: Option<String>,
+    orchestrator_url: Option<String>,
+    max_workers: Option<usize>,
     no_think: bool,
     plan: bool,
+    // Global flags may also follow the task; capture them so they aren't swept
+    // into the task string.
+    base_url: Option<String>,
+    model: Option<String>,
+    tool_calling: Option<ToolCallingArg>,
 }
 
 /// Split the args collected after `run`/`serve` into the task plus its trailing
@@ -239,27 +313,51 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut verify = None;
     let mut advisor = None;
     let mut advisor_url = None;
+    let mut orchestrator = None;
+    let mut orchestrator_url = None;
+    let mut max_workers = None;
     let mut no_think = false;
     let mut plan = false;
+    let mut base_url = None;
+    let mut model = None;
+    let mut tool_calling = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
+        let need = |it: &mut std::vec::IntoIter<String>, flag: &str| {
+            it.next()
+                .ok_or_else(|| DcError::Eval(format!("{flag} requires an argument")))
+        };
         match a.as_str() {
-            "--verify" => {
-                verify = Some(it.next().ok_or_else(|| {
-                    DcError::Eval("--verify requires a command argument".to_string())
-                })?);
+            "--verify" => verify = Some(need(&mut it, "--verify")?),
+            "--advisor" => advisor = Some(need(&mut it, "--advisor")?),
+            "--advisor-url" => advisor_url = Some(need(&mut it, "--advisor-url")?),
+            "--orchestrator" => orchestrator = Some(need(&mut it, "--orchestrator")?),
+            "--orchestrator-url" => orchestrator_url = Some(need(&mut it, "--orchestrator-url")?),
+            "--max-workers" => {
+                max_workers = Some(
+                    need(&mut it, "--max-workers")?
+                        .parse()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| {
+                            DcError::Eval("--max-workers requires a positive integer".to_string())
+                        })?,
+                );
             }
-            "--advisor" => {
-                advisor =
-                    Some(it.next().ok_or_else(|| {
-                        DcError::Eval("--advisor requires a model name".to_string())
-                    })?);
-            }
-            "--advisor-url" => {
-                advisor_url =
-                    Some(it.next().ok_or_else(|| {
-                        DcError::Eval("--advisor-url requires a URL".to_string())
-                    })?);
+            "--base-url" => base_url = Some(need(&mut it, "--base-url")?),
+            "--model" => model = Some(need(&mut it, "--model")?),
+            "--tool-calling" => {
+                let v = need(&mut it, "--tool-calling")?;
+                tool_calling = Some(match v.as_str() {
+                    "none" => ToolCallingArg::None,
+                    "native" => ToolCallingArg::Native,
+                    "gbnf" => ToolCallingArg::Gbnf,
+                    other => {
+                        return Err(DcError::Eval(format!(
+                            "--tool-calling must be none|native|gbnf, got {other:?}"
+                        )))
+                    }
+                });
             }
             "--no-think" => no_think = true,
             "--plan" => plan = true,
@@ -271,8 +369,14 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         verify,
         advisor,
         advisor_url,
+        orchestrator,
+        orchestrator_url,
+        max_workers,
         no_think,
         plan,
+        base_url,
+        model,
+        tool_calling,
     })
 }
 
@@ -288,6 +392,7 @@ COMMANDS:
     chat            Interactive chat with the model (default)
     run <task>      Run a coding task in the current dir with a live TUI
     serve <task>    Run a task and watch it in your browser (web dashboard)
+    swarm <task>    Decompose + run with parallel workers (swarm dashboard)
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -304,15 +409,18 @@ OPTIONS:
     --no-think            Append /no_think to the prompt (needed for Qwen3 models;
                           auto-applied when the model name contains 'qwen3').
     --plan                Decompose the task into a plan before running (`run`)
+  swarm only (workers use --base-url/--model):
+    --orchestrator MODEL  The model that decomposes the task    [default: --model]
+    --orchestrator-url U  Endpoint for the orchestrator         [default: --base-url]
+    --max-workers N       Max parallel workers                  [default: 2]
 
 EXAMPLES:
     dumb-coder doctor
     dumb-coder run \"make the failing test in is_even pass\" --verify \"sh test.sh\"
     dumb-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
-    dumb-coder run \"fix is_even\" --verify \"sh test.sh\" \\
-        --base-url http://localhost:11435/v1 --model coder-0 \\
-        --advisor-url http://localhost:11434/v1 --advisor advisor-e4b
-    dumb-coder run \"add input validation to parse_config\" --plan
+    dumb-coder swarm \"add validation and a test\" --verify \"python -m pytest -q\" \\
+        --base-url http://localhost:11435/v1 --model coder-0 --max-workers 2 \\
+        --orchestrator-url http://localhost:11434/v1 --orchestrator advisor-e4b
     dumb-coder --model gemma4:e4b --tool-calling native"
 }
 
@@ -324,6 +432,16 @@ impl Cli {
             plan_first: self.plan_first,
             system_suffix: self.system_suffix.clone(),
             ..Default::default()
+        }
+    }
+
+    /// Build the swarm config from the parsed flags (used by `swarm`). Workers run
+    /// the per-worker agent config; the verify command also gates integration.
+    pub fn swarm_config(&self) -> dc_swarm::SwarmConfig {
+        dc_swarm::SwarmConfig {
+            max_workers: self.max_workers,
+            worker: self.agent_config(),
+            verify_command: self.verify_command.clone(),
         }
     }
 }
@@ -427,6 +545,52 @@ mod tests {
     #[test]
     fn run_requires_a_task() {
         assert!(Cli::parse(["run"]).is_err());
+    }
+
+    #[test]
+    fn parses_swarm_with_orchestrator_and_workers() {
+        let cli = Cli::parse([
+            "swarm",
+            "add validation",
+            "--base-url",
+            "http://localhost:11435/v1",
+            "--model",
+            "coder-0",
+            "--orchestrator-url",
+            "http://localhost:11434/v1",
+            "--orchestrator",
+            "advisor-e4b",
+            "--max-workers",
+            "3",
+            "--verify",
+            "pytest -q",
+        ])
+        .unwrap();
+        match &cli.command {
+            Command::Swarm { task } => assert_eq!(task, "add validation"),
+            other => panic!("expected Swarm, got {other:?}"),
+        }
+        assert_eq!(cli.model, "coder-0"); // workers
+        assert_eq!(cli.orchestrator_model.as_deref(), Some("advisor-e4b"));
+        assert_eq!(
+            cli.orchestrator_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(cli.max_workers, 3);
+        // The swarm config carries the verify command (gates integration) + workers.
+        let sc = cli.swarm_config();
+        assert_eq!(sc.max_workers, 3);
+        assert_eq!(sc.verify_command.as_deref(), Some("pytest -q"));
+    }
+
+    #[test]
+    fn swarm_orchestrator_defaults_to_worker_endpoint() {
+        let cli =
+            Cli::parse(["swarm", "task", "--model", "m", "--base-url", "http://x/v1"]).unwrap();
+        assert_eq!(cli.max_workers, 2); // default
+                                        // No --orchestrator-* → orchestrator() reuses base_url/model (built ok).
+        let _ = cli.orchestrator();
+        assert!(cli.orchestrator_model.is_none());
     }
 
     #[test]
