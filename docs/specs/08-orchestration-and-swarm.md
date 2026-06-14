@@ -157,6 +157,114 @@ Integration is where multi-writer risk is actually paid down:
    conflicts). A failure here feeds back: re-split, reassign, or fix.
 5. Only after integration verification passes does the orchestrator `finish`.
 
+## Subtask retry on partial or rejected integration
+
+Step 4 above says a failure "feeds back: re-split, reassign, or fix" — this
+section makes that loop concrete. It exists because of a gap proven live: a tiny
+worker often lands a **partial** fix — its proposal is *closer* but doesn't make
+its scoped tests fully pass.
+
+### The gap
+
+Integration uses a **cumulative "didn't make it worse" gate**: a proposal is
+accepted when the suite's failing-test count after the merge is `≤` the count
+before. This is deliberate — it lets a multi-file task land its pieces one wave at
+a time, each piece leaving the *whole* suite red while other files are still
+unfixed, without reverting good partial progress (a worker that fixes only its own
+file shouldn't be punished for the files it wasn't asked to touch).
+
+But the same leniency accepts a *non-improving or partially-improving* change to a
+subtask's **own** files. Concretely, observed live (2026-06-14): a `clamp` worker
+proposed `max(lo, x)` — fixing the lower-bound test, leaving the upper-bound test
+red. Failing count went `2 → 1`, so the gate **accepted** it and the board marked
+the subtask `Done`. Every subtask "integrated", the board read all-done — yet the
+subtask's contract was not met. Today the only backstop is the **final
+integration verification** (step 5), which correctly reports the run *not done*
+(honest stop, [06](06-cli-ux.md)) — but the swarm never gives the subtask another
+attempt. It stops with a red suite and a `Done` subtask that isn't.
+
+### The retry loop
+
+A subtask is **objectively done only when its own scoped tests are green**, not
+when it merely didn't worsen the suite. When an accepted-but-incomplete (or
+outright rejected) proposal leaves a subtask's tests failing, the orchestrator
+**re-dispatches that subtask to a worker, with feedback**, up to a bounded retry
+budget — mirroring the single-agent per-step retry budget of M4
+([07](07-roadmap.md), [03](03-agent-loop.md)).
+
+Per subtask, after integration:
+
+1. **Decide the subtask's true status** from a *scoped* verification, not the
+   whole-suite delta. The orchestrator knows the subtask's frozen test files
+   (`SwarmConfig.frozen_paths`, handed down from the staged workflow's Phase 4,
+   [09](09-workflow-and-checkpoints.md)); it runs the verification command
+   filtered to those tests (e.g. `pytest <the subtask's test files>`). Green →
+   the subtask is genuinely `Done`. Still red → it's **incomplete**, regardless
+   of whether the cumulative gate accepted the bytes.
+   - *When the subtask's tests aren't individually known* — e.g. a free-text
+     `swarm <task>` run that decomposes on the fly, where `frozen_paths` is empty
+     and the decomposer's per-subtask `files` name source, not tests — the scoped
+     check degrades to the **whole-suite delta vs. this subtask's own baseline**:
+     incomplete iff the suite is still red *and* this subtask's merge didn't clear
+     it. Coarser (it can't attribute a residual failure to a specific subtask), so
+     the staged-workflow path with frozen per-subtask tests is the precise one;
+     this fallback at least stops the swarm from declaring a red run done.
+2. **On incomplete (or a hard reject), retry** if the subtask's retry counter is
+   below `max_subtask_retries` (default **2**; `0` restores today's
+   no-retry behaviour). Re-dispatch the *same* subtask to a worker with a
+   **feedback-augmented prompt**: the still-failing test names and their assertion
+   messages (`dc_verify::TestReport::failed()` already carries `name` +
+   `message`), plus the current (already-merged) file contents. This is the
+   swarm-level analogue of the agent loop feeding a failing case back to the model
+   ([11](11-testing-and-tdd.md)) — "here's what's still wrong, try again", not a
+   blind re-run.
+3. **Each retry is gated and serialized exactly like the first attempt** — propose
+   in a scratch copy, merge one-at-a-time, integration-verify. A retry that
+   *regresses* the suite is reverted (the cumulative gate still applies on top of
+   the scoped check); the prior best state is never lost. A retry that improves
+   but still isn't green consumes one attempt and feeds back again.
+4. **On retry-budget exhaustion**, mark the subtask `Failed` (not `Done`) with the
+   residual failing tests as the reason, and surface it. A dependent subtask whose
+   dependency `Failed` stays blocked and the board goes quiescent (the task
+   board's existing quiescence rule) — the run stops honestly rather than
+   building on a broken base. The orchestrator *may* escalate to the advisor for
+   a one-line nudge before the final attempt ("junior asks senior",
+   [02](02-model-backends.md), M4) — advice, not the fix.
+
+### What stays the same
+
+- The **cumulative whole-suite gate** is unchanged and still runs — it's the
+  cross-file safety net (semantic-conflict containment). The scoped check is an
+  *additional, per-subtask* completion criterion layered on top, not a
+  replacement: a proposal must both (a) not worsen the whole suite **and** (b)
+  make its own subtask's tests pass to be `Done`.
+- The **final integration verification** (step 5) remains the last word on the
+  run's honesty. With the retry loop, reaching it green is the *expected* outcome
+  rather than a lucky one; it stays as the backstop for residual semantic
+  conflicts the per-subtask checks can't see.
+- **Failure containment** ([below](#why-this-is-worth-the-complexity)) is
+  preserved: retries run in fresh scratch copies, so a worse retry never corrupts
+  the accepted state.
+
+### Events & inspection
+
+The retry loop is visible in the swarm event stream
+([determinism & inspection](#determinism--inspection), [06](06-cli-ux.md)): a new
+`SwarmEvent::SubtaskRetry { subtask, attempt, max, failing_tests }` is emitted
+before each re-dispatch, so the CLI/dashboard renders "↻ retry 1/2 — N tests still
+red" and `replay` reconstructs exactly how many attempts each subtask took. A
+subtask that exhausts its budget ends in the existing
+`Integrated { accepted: false, .. }` with the residual failures as the reason.
+
+### Bounds (so a tiny model can't spin forever)
+
+- `max_subtask_retries` — per-subtask attempt cap (default 2). Total worker
+  invocations for a subtask is `1 + retries`.
+- Retries reuse the existing per-worker step/token budgets ([05](05-context-management.md));
+  a retry is a fresh, equally-bounded worker run.
+- The whole-run global step budget still bounds the swarm overall — retries draw
+  from it, so a pathological board can't multiply work without limit.
+
 ## Specialized worker roles (optional)
 
 Workers can be homogeneous (all the same model, generic) or **specialized** by

@@ -147,11 +147,24 @@ agent loop, unchanged; the swarm is a coordinator above it.
 - **Exit criteria:** ✅ a task decomposing into multiple subtasks (incl. a
   dependency) is completed by parallel workers and integrated green; a
   suite-breaking proposal is reverted (`dc-swarm` `swarm_run` + orchestrator tests).
+- ✅ **CLI/dashboard surfacing of swarm state** — the `SwarmEvent` stream renders
+  two ways over one source: the `dc-web` swarm dashboard *and* a line-oriented CLI
+  view (`swarm --cli`: task board · which worker on which subtask · integration
+  accept/reject), plus `swarm --json` NDJSON parity (`SwarmEvent` round-trips
+  Serialize↔Deserialize) — mirroring M5's `print_event` ([06](06-cli-ux.md)).
+- ✅ **Driven live against the real multi-model swarm** (orchestrator + two E4B
+  workers): parallel workers complete and integrate green; the run is reported
+  done **only after a final whole-suite integration verification** passes (spec 08
+  step 5) — closing a live-found gap where a partial fix could be reported done
+  over a red suite (honest stop, [06](06-cli-ux.md)).
 - *Deferred (vs. spec 08):* git-worktree isolation + branch merges (we propose
   diffs instead); conflict *arbitration* by the orchestrator (we reject+reassign);
   the serialized shared-workspace lease fallback; specialized worker roles;
-  CLI/dashboard surfacing of swarm state; running it live against the real
-  multi-model swarm.
+  **subtask retry on partial/rejected integration** — re-dispatch an incomplete
+  subtask to a worker with failing-test feedback under a bounded retry budget
+  (spec 08 "Subtask retry"), so the swarm *recovers* a partial fix instead of
+  stopping honestly-but-red; today the final verify reports it, M4's per-step
+  retry is the single-agent precedent.
 
 ## M8 — Android app + AICore (first platform client)
 **Goal:** the showcase of the "small model" thesis — fully on-device on a phone,
