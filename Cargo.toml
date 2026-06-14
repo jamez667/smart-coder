@@ -9,6 +9,7 @@ members = [
     "crates/dc-verify",
     "crates/dc-core",
     "crates/dc-swarm",
+    "crates/dc-workflow",
     "crates/dc-tui",
     "crates/dc-web",
     "crates/dc-cli",

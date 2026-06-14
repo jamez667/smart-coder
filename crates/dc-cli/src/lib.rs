@@ -31,6 +31,10 @@ pub enum Command {
     /// Run a task with the worker swarm (orchestrator + parallel workers) and
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
+    /// Run the staged planning workflow (specs→…→work decomposition) on a task,
+    /// writing the plan artifacts to `.dumb-coder/plan/` (spec 09). Autonomous:
+    /// every gate is auto-approved.
+    Plan { task: String },
     /// Print usage.
     Help,
 }
@@ -104,8 +108,8 @@ impl Cli {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
-                // `run`/`serve`/`swarm <task...>`: the rest forms the task + flags.
-                "run" | "serve" | "swarm" if command.is_none() => {
+                // `run`/`serve`/`swarm`/`plan <task...>`: the rest forms the task + flags.
+                "run" | "serve" | "swarm" | "plan" if command.is_none() => {
                     let kind = arg.clone();
                     let rest: Vec<String> = it.by_ref().collect();
                     if rest.is_empty() {
@@ -119,6 +123,7 @@ impl Cli {
                     command = Some(match kind.as_str() {
                         "serve" => Command::Serve { task: parsed.task },
                         "swarm" => Command::Swarm { task: parsed.task },
+                        "plan" => Command::Plan { task: parsed.task },
                         _ => Command::Run { task: parsed.task },
                     });
                     if parsed.verify.is_some() {
@@ -393,6 +398,7 @@ COMMANDS:
     run <task>      Run a coding task in the current dir with a live TUI
     serve <task>    Run a task and watch it in your browser (web dashboard)
     swarm <task>    Decompose + run with parallel workers (swarm dashboard)
+    plan <task>     Staged planning workflow → .dumb-coder/plan/ (spec 09)
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 

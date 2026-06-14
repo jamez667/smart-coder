@@ -30,6 +30,45 @@ fn main() -> ExitCode {
         Command::Run { task } => run_task(&cli, task.clone()),
         Command::Serve { task } => serve_task(&cli, task.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
+        Command::Plan { task } => plan_task(&cli, task.clone()),
+    }
+}
+
+/// Run the staged planning workflow (spec 09) autonomously, writing the plan
+/// artifacts to `.dumb-coder/plan/` and printing each phase as it lands.
+fn plan_task(cli: &Cli, task: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The reasoning phases run on the orchestrator (T1) model — the same backend
+    // the swarm uses to decompose.
+    let orchestrator = cli.orchestrator();
+    let on_phase = |phase: dc_workflow::Phase, content: &str| {
+        let preview: String = content.lines().take(8).collect::<Vec<_>>().join("\n");
+        println!("\n=== {} ===\n{preview}\n…", phase.title());
+    };
+
+    match dc_workflow::run_workflow(&orchestrator, &task, &workspace, &on_phase) {
+        Ok(outcome) => {
+            println!(
+                "\nplan complete — {} phase artifacts in .dumb-coder/plan/, {} subtask(s) for the swarm",
+                6,
+                outcome.board.len()
+            );
+            if outcome.board.is_empty() {
+                eprintln!("warning: work decomposition produced no parseable subtasks");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: workflow failed: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
