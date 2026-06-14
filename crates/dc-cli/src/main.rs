@@ -55,14 +55,20 @@ fn plan_task(cli: &Cli, task: String) -> ExitCode {
         println!("\n=== {} ===\n{preview}\n…", phase.title());
     };
 
-    let outcome =
-        match dc_workflow::run_workflow(&orchestrator, &worker, &task, &workspace, &on_phase) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("error: workflow failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let outcome = match dc_workflow::run_workflow(
+        &orchestrator,
+        &worker,
+        &task,
+        &workspace,
+        cli.think_policy(),
+        &on_phase,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: workflow failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     println!(
         "\nplan complete — 6 phase artifacts in .dumb-coder/plan/\n  tests written: {}\n  subtasks for the swarm: {}",

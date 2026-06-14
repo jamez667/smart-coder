@@ -46,6 +46,16 @@ impl Phase {
         Phase::ALL.iter().position(|&p| p == self).unwrap()
     }
 
+    /// Whether this phase benefits from chain-of-thought reasoning. The two phases
+    /// that emit *structured* output — the coverage test-plan and the work
+    /// decomposition — reason about edge cases and dependencies before emitting
+    /// JSON; the prose document phases (spec/architecture/layout/impl-plan) the
+    /// model can write directly. Used by [`crate::ThinkPolicy`] to decide whether to
+    /// suppress thinking per phase.
+    pub fn is_reasoning(self) -> bool {
+        matches!(self, Phase::StageBreakdown | Phase::WorkDecomposition)
+    }
+
     /// A short kebab slug used in artifact filenames (`01-specs.md`, …). The
     /// numeric prefix keeps the plan directory ordered on disk.
     pub fn slug(self) -> &'static str {

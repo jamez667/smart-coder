@@ -9,11 +9,14 @@
 use dc_model::{GenerateRequest, Message, ModelBackend};
 
 use crate::phase::Phase;
+use crate::policy::ThinkPolicy;
 use crate::state::{Artifact, WorkflowState};
 
 /// Build the messages for producing `phase`: a phase-specific system prompt, the
-/// original task, and every approved upstream artifact as grounding context.
-pub fn phase_messages(phase: Phase, state: &WorkflowState) -> Vec<Message> {
+/// original task, and every approved upstream artifact as grounding context. When
+/// `think` suppresses this phase, a `/no_think` suffix is appended to the system
+/// prompt (a thinking model then skips its chain-of-thought).
+pub fn phase_messages(phase: Phase, state: &WorkflowState, think: ThinkPolicy) -> Vec<Message> {
     let mut user = format!("Task: {}\n", state.task);
     for a in state.approved() {
         if a.phase.index() < phase.index() {
@@ -25,7 +28,12 @@ pub fn phase_messages(phase: Phase, state: &WorkflowState) -> Vec<Message> {
         }
     }
     user.push_str(&format!("\n{}", phase_instruction(phase)));
-    vec![Message::system(system_for(phase)), Message::user(user)]
+
+    let mut system = system_for(phase);
+    if think.suppress(phase) {
+        system.push_str(" /no_think");
+    }
+    vec![Message::system(system), Message::user(user)]
 }
 
 /// Produce `phase`'s artifact via the orchestrator. The returned [`Artifact`] is a
@@ -34,8 +42,9 @@ pub fn generate_phase(
     orchestrator: &dyn ModelBackend,
     phase: Phase,
     state: &WorkflowState,
+    think: ThinkPolicy,
 ) -> Artifact {
-    let mut req = GenerateRequest::new(phase_messages(phase, state));
+    let mut req = GenerateRequest::new(phase_messages(phase, state, think));
     // Planning documents need more room than a single tool call.
     req.max_tokens = 1536;
     let content = orchestrator
@@ -109,7 +118,7 @@ mod tests {
         let mut s = WorkflowState::new("build a CLI");
         s.set(Artifact::draft(Phase::Specs, "the spec text"));
         s.approve(Phase::Specs);
-        let msgs = phase_messages(Phase::Architecture, &s);
+        let msgs = phase_messages(Phase::Architecture, &s, ThinkPolicy::default());
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("build a CLI"));
         assert!(joined.contains("the spec text"));
@@ -122,7 +131,7 @@ mod tests {
         // A later-phase artifact and an unapproved one must not leak into an
         // earlier phase's context.
         s.set(Artifact::draft(Phase::Architecture, "ARCH_DRAFT")); // unapproved
-        let msgs = phase_messages(Phase::Specs, &s);
+        let msgs = phase_messages(Phase::Specs, &s, ThinkPolicy::default());
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(!joined.contains("ARCH_DRAFT"));
     }
@@ -130,17 +139,35 @@ mod tests {
     #[test]
     fn decomposition_phase_asks_for_json() {
         let s = WorkflowState::new("t");
-        let msgs = phase_messages(Phase::WorkDecomposition, &s);
+        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default());
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("JSON array"));
         assert!(joined.contains("\"files\""));
     }
 
     #[test]
+    fn think_policy_appends_no_think_per_phase() {
+        let s = WorkflowState::new("t");
+        // Default: a doc phase gets /no_think; a JSON reasoning phase doesn't.
+        let spec_sys = phase_messages(Phase::Specs, &s, ThinkPolicy::default())[0]
+            .content
+            .clone();
+        assert!(spec_sys.contains("/no_think"), "{spec_sys}");
+        let cov_sys = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default())[0]
+            .content
+            .clone();
+        assert!(!cov_sys.contains("/no_think"), "{cov_sys}");
+        // A per-step override flips just that phase.
+        let forced = ThinkPolicy::always_think().with(Phase::Specs, true);
+        let spec2 = phase_messages(Phase::Specs, &s, forced)[0].content.clone();
+        assert!(spec2.contains("/no_think"));
+    }
+
+    #[test]
     fn generate_phase_returns_a_draft() {
         let backend = MockBackend::new(["# Specs\nGoals: ship it"]);
         let s = WorkflowState::new("ship it");
-        let a = generate_phase(&backend, Phase::Specs, &s);
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
         assert_eq!(a.phase, Phase::Specs);
         assert!(a.content.contains("Goals"));
         assert!(!a.is_approved());

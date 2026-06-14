@@ -77,6 +77,12 @@ pub struct Cli {
     pub orchestrator_url: Option<String>,
     /// Max workers running at once for `swarm` (spec 08).
     pub max_workers: usize,
+    /// `plan` per-phase thinking base: `Some(false)` = think on every phase,
+    /// `Some(true)` = `/no_think` every phase, `None` = the smart default (spec 09).
+    pub think_base: Option<bool>,
+    /// `plan` per-phase thinking overrides: `(phase-slug, suppress)` applied in
+    /// order over the base, so individual steps can be flipped.
+    pub think_steps: Vec<(String, bool)>,
 }
 
 impl Cli {
@@ -96,6 +102,8 @@ impl Cli {
         let mut tool_calling = ToolCallingArg::None;
         let mut verify_command = None;
         let mut plan_first = false;
+        let mut think_base: Option<bool> = None;
+        let mut think_steps: Vec<(String, bool)> = Vec::new();
         let mut advisor_model = None;
         let mut advisor_url = None;
         let mut system_suffix: Option<String> = None;
@@ -156,6 +164,8 @@ impl Cli {
                     if parsed.no_think {
                         system_suffix = Some("/no_think".to_string());
                     }
+                    think_base = parsed.think_base;
+                    think_steps = parsed.think_steps;
                     plan_first = parsed.plan || plan_first;
                 }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
@@ -248,7 +258,27 @@ impl Cli {
             orchestrator_model,
             orchestrator_url,
             max_workers,
+            think_base,
+            think_steps,
         })
+    }
+
+    /// Build the per-phase thinking policy for `plan` (spec 09) from the flags:
+    /// start from `--think-all`/`--no-think-all` (or the smart default), then apply
+    /// each `--think <phase>` / `--nothink <phase>` override.
+    pub fn think_policy(&self) -> dc_workflow::ThinkPolicy {
+        use dc_workflow::{Phase, ThinkPolicy};
+        let mut policy = match self.think_base {
+            Some(false) => ThinkPolicy::always_think(),
+            Some(true) => ThinkPolicy::never_think(),
+            None => ThinkPolicy::default(),
+        };
+        for (slug, suppress) in &self.think_steps {
+            if let Some(phase) = Phase::ALL.iter().copied().find(|p| p.slug() == slug) {
+                policy = policy.with(phase, *suppress);
+            }
+        }
+        policy
     }
 
     /// Build the orchestrator (decomposer) backend for `swarm`: its own
@@ -304,6 +334,11 @@ struct RunArgs {
     max_workers: Option<usize>,
     no_think: bool,
     plan: bool,
+    /// Per-phase thinking overrides for `plan` (spec 09): `--think-all` /
+    /// `--no-think-all` set a base; `--think <phase>` / `--nothink <phase>` flip a
+    /// single step. Applied in order over the default policy.
+    think_base: Option<bool>, // Some(false)=think all, Some(true)=no_think all
+    think_steps: Vec<(String, bool)>, // (phase-slug, suppress)
     // Global flags may also follow the task; capture them so they aren't swept
     // into the task string.
     base_url: Option<String>,
@@ -323,6 +358,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut max_workers = None;
     let mut no_think = false;
     let mut plan = false;
+    let mut think_base: Option<bool> = None;
+    let mut think_steps: Vec<(String, bool)> = Vec::new();
     let mut base_url = None;
     let mut model = None;
     let mut tool_calling = None;
@@ -365,6 +402,10 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                 });
             }
             "--no-think" => no_think = true,
+            "--think-all" => think_base = Some(false),
+            "--no-think-all" => think_base = Some(true),
+            "--think" => think_steps.push((need(&mut it, "--think")?, false)),
+            "--nothink" => think_steps.push((need(&mut it, "--nothink")?, true)),
             "--plan" => plan = true,
             _ => task_words.push(a),
         }
@@ -379,6 +420,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         max_workers,
         no_think,
         plan,
+        think_base,
+        think_steps,
         base_url,
         model,
         tool_calling,
@@ -415,10 +458,16 @@ OPTIONS:
     --no-think            Append /no_think to the prompt (needed for Qwen3 models;
                           auto-applied when the model name contains 'qwen3').
     --plan                Decompose the task into a plan before running (`run`)
-  swarm only (workers use --base-url/--model):
-    --orchestrator MODEL  The model that decomposes the task    [default: --model]
-    --orchestrator-url U  Endpoint for the orchestrator         [default: --base-url]
-    --max-workers N       Max parallel workers                  [default: 2]
+  swarm / plan (workers use --base-url/--model):
+    --orchestrator MODEL  The model that decomposes/plans         [default: --model]
+    --orchestrator-url U  Endpoint for the orchestrator           [default: --base-url]
+    --max-workers N       Max parallel workers                    [default: 2]
+  plan only — per-phase thinking (spec 09; default: think on the JSON phases,
+  /no_think on the prose phases):
+    --think-all           Think on every phase
+    --no-think-all        /no_think on every phase
+    --think PHASE         Force thinking on one phase (slug, e.g. layout)
+    --nothink PHASE       Force /no_think on one phase
 
 EXAMPLES:
     dumb-coder doctor

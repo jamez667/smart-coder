@@ -14,6 +14,7 @@ use dc_swarm::{parse_subtasks, TaskBoard};
 
 use crate::engine::generate_phase;
 use crate::phase::Phase;
+use crate::policy::ThinkPolicy;
 use crate::state::{save, WorkflowState};
 
 /// What a completed workflow yields.
@@ -41,13 +42,14 @@ pub fn run_workflow(
     worker: &dyn ModelBackend,
     task: &str,
     workspace: &Path,
+    think: ThinkPolicy,
     on_phase: &dyn Fn(Phase, &str),
 ) -> Result<WorkflowOutcome> {
     let mut state = WorkflowState::new(task);
     let mut test_files = Vec::new();
 
     while let Some(phase) = state.next_phase() {
-        let artifact = generate_phase(orchestrator, phase, &state);
+        let artifact = generate_phase(orchestrator, phase, &state, think);
         on_phase(phase, &artifact.content);
         state.set(artifact);
         // Autonomous: approve immediately so the next phase can ground on it.
@@ -168,9 +170,14 @@ mod tests {
         let ws = temp("all");
         let seen = std::cell::RefCell::new(Vec::new());
         // Same backend stands in for both orchestrator and worker here.
-        let outcome = run_workflow(&backend, &backend, "build it", &ws, &|p, _| {
-            seen.borrow_mut().push(p)
-        })
+        let outcome = run_workflow(
+            &backend,
+            &backend,
+            "build it",
+            &ws,
+            ThinkPolicy::default(),
+            &|p, _| seen.borrow_mut().push(p),
+        )
         .unwrap();
 
         // All six phases ran, in order, and the workflow is complete.
