@@ -87,20 +87,13 @@ fn decomposes_runs_in_dependency_order_and_integrates_all() {
             ]"#,
             ],
         ),
-        (
-            "set VALUE to 1",
-            vec![
-                r#"{"tool":"edit_file","path":"mod_a.py","old_str":"VALUE = 0","new_str":"VALUE = 1"}"#,
-                r#"{"tool":"finish"}"#,
-            ],
-        ),
-        (
-            "set RESULT to 2",
-            vec![
-                r#"{"tool":"edit_file","path":"mod_b.py","old_str":"RESULT = 0","new_str":"RESULT = 2"}"#,
-                r#"{"tool":"finish"}"#,
-            ],
-        ),
+        // Merge calls (orchestrator) — keyed on "File: <path>" — return the full
+        // corrected file. Proposer calls (worker) — keyed on the goal — return the
+        // worker's text proposal (also the corrected file here).
+        ("File: mod_a.py", vec!["VALUE = 1\n"]),
+        ("File: mod_b.py", vec!["import mod_a\nRESULT = 2\n"]),
+        ("set VALUE to 1", vec!["VALUE = 1\n"]),
+        ("set RESULT to 2", vec!["import mod_a\nRESULT = 2\n"]),
     ]);
 
     let events = Mutex::new(Vec::new());

@@ -122,7 +122,7 @@ pub fn run_swarm(
                 subtask: result.subtask_id.clone(),
                 summary: result.report_summary.clone(),
             });
-            match integrate(workspace, &result, &cfg.verify_command) {
+            match integrate(orchestrator, workspace, &result, &cfg.verify_command) {
                 Integration::Accepted(files) => {
                     board.complete(&result.subtask_id);
                     for f in &files {
@@ -169,21 +169,47 @@ enum Integration {
     Rejected(String),
 }
 
-/// Apply a worker's proposal to the real workspace, then verify. If verification
-/// fails (or applying breaks the suite), revert and reject — serialized writes
-/// keep the mainline coherent (spec 08).
+/// Merge a worker's *text* proposal into the real workspace, then verify (spec 08
+/// — parallel reasoning, serialized & reviewed writes).
+///
+/// The tiny worker handed back its fix as text; the smarter `orchestrator` turns
+/// that into the actual file. For each focused file it asks the orchestrator to
+/// produce the complete corrected file (reviewing the worker's proposal against
+/// the real current contents), writes it, then runs the whole suite. A merge that
+/// breaks the suite is reverted and rejected — the mainline stays coherent.
 fn integrate(
+    orchestrator: &dyn ModelBackend,
     workspace: &Path,
     result: &WorkerResult,
     verify_command: &Option<String>,
 ) -> Integration {
-    if result.changes.is_empty() {
-        return Integration::Rejected("no changes proposed".to_string());
+    if !result.has_proposal() {
+        return Integration::Rejected("no proposal from worker".to_string());
+    }
+    if result.files.is_empty() {
+        return Integration::Rejected("proposal has no target file".to_string());
+    }
+
+    // Ask the orchestrator to turn the proposal into the corrected file(s).
+    let mut changes = Vec::new();
+    for file in &result.files {
+        let current = std::fs::read_to_string(workspace.join(file))
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        match merge_file(orchestrator, file, &current, &result.proposal) {
+            Some(merged) if merged != current => changes.push(ProposedChange {
+                path: file.clone(),
+                after: Some(merged),
+            }),
+            _ => {}
+        }
+    }
+    if changes.is_empty() {
+        return Integration::Rejected("orchestrator produced no change".to_string());
     }
 
     // Snapshot the files we're about to touch so we can revert on rejection.
-    let backup: Vec<(String, Option<String>)> = result
-        .changes
+    let backup: Vec<(String, Option<String>)> = changes
         .iter()
         .map(|c| {
             let p = workspace.join(&c.path);
@@ -191,21 +217,61 @@ fn integrate(
         })
         .collect();
 
-    apply_changes(workspace, &result.changes);
+    apply_changes(workspace, &changes);
 
-    // Integration verification: independently-correct changes can still break in
-    // combination (semantic conflicts), so re-run the whole suite.
     let green = match verify_command {
         None => true,
         Some(cmd) => dc_verify::run_verification(workspace, cmd).all_green(),
     };
 
     if green {
-        Integration::Accepted(result.changes.iter().map(|c| c.path.clone()).collect())
+        Integration::Accepted(changes.iter().map(|c| c.path.clone()).collect())
     } else {
         revert(workspace, &backup);
         Integration::Rejected("broke the suite at integration".to_string())
     }
+}
+
+/// Ask the orchestrator to apply `proposal` to `current`, returning the complete
+/// corrected file. A single call (the fastest merge) — the capable model handles
+/// the exact reproduction the tiny worker couldn't. `None` if it errored.
+fn merge_file(
+    orchestrator: &dyn ModelBackend,
+    path: &str,
+    current: &str,
+    proposal: &str,
+) -> Option<String> {
+    use dc_model::{GenerateRequest, Message};
+    let system = "You apply a proposed fix to a file. You are given the CURRENT file \
+        and a worker's proposed corrected version. Output the complete, final file \
+        contents only — no markdown fences, no commentary. Keep everything the fix \
+        doesn't change; apply the fix exactly.";
+    let user = format!(
+        "File: {path}\n\n--- CURRENT ---\n{current}\n\n--- PROPOSED FIX ---\n{proposal}\n\n\
+         Output the complete corrected {path}:"
+    );
+    let req = GenerateRequest::new(vec![Message::system(system), Message::user(user)]);
+    let raw = orchestrator.generate(&req).ok()?.content;
+    Some(unfence(&raw))
+}
+
+/// Strip a surrounding ``` fence (optional language tag) the model may add, then
+/// ensure exactly one trailing newline (normal for a source file). Without a fence
+/// the body is preserved as-is (aside from the trailing newline).
+fn unfence(s: &str) -> String {
+    let trimmed = s.trim_start();
+    let body = if let Some(rest) = trimmed.strip_prefix("```") {
+        // Drop the ``` (or ```lang) line and a trailing ``` fence.
+        let rest = rest.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        rest.trim_end()
+            .strip_suffix("```")
+            .unwrap_or(rest)
+            .trim_end()
+            .to_string()
+    } else {
+        s.trim_end().to_string()
+    };
+    format!("{body}\n")
 }
 
 fn apply_changes(workspace: &Path, changes: &[ProposedChange]) {
@@ -311,37 +377,29 @@ mod tests {
     }
 
     #[test]
-    fn two_independent_subtasks_run_and_integrate() {
+    fn two_independent_subtasks_propose_and_merge() {
         let ws = temp("two");
         std::fs::write(ws.join("a.txt"), "old-a").unwrap();
         std::fs::write(ws.join("b.txt"), "old-b").unwrap();
 
-        // Orchestrator decomposes into two independent subtasks; each worker edits
-        // its own file then finishes.
+        // Flow per subtask: orchestrator decomposes -> tiny worker PROPOSES the
+        // corrected file as text -> orchestrator MERGES the proposal into the file.
+        // The merge prompt contains "--- CURRENT ---" (the proposer's doesn't), so we
+        // key the merge replies on that and the proposer replies on the goal.
         let backend = ScriptedSwarm::new(vec![
-            // decomposition (orchestrator system prompt mentions "orchestrator")
+            // decomposition
             (
                 "orchestrator for a swarm",
                 vec![
                     r#"[{"id":"a","goal":"set a.txt to new-a","files":["a.txt"]},{"id":"b","goal":"set b.txt to new-b","files":["b.txt"]}]"#,
                 ],
             ),
-            // worker A
-            (
-                "set a.txt to new-a",
-                vec![
-                    r#"{"tool":"write_file","path":"a.txt","content":"new-a"}"#,
-                    r#"{"tool":"finish"}"#,
-                ],
-            ),
-            // worker B
-            (
-                "set b.txt to new-b",
-                vec![
-                    r#"{"tool":"write_file","path":"b.txt","content":"new-b"}"#,
-                    r#"{"tool":"finish"}"#,
-                ],
-            ),
+            // Merge calls (orchestrator) — prompt contains "File: <path>"; key on that.
+            ("File: a.txt", vec!["new-a"]),
+            ("File: b.txt", vec!["new-b"]),
+            // Proposer calls (worker) — prompt contains the goal; key on that.
+            ("set a.txt to new-a", vec!["new-a"]),
+            ("set b.txt to new-b", vec!["new-b"]),
         ]);
 
         let report = run_swarm(
@@ -360,14 +418,20 @@ mod tests {
             "both subtasks should integrate: {report:?}"
         );
         assert_eq!(report.done, 2);
-        // Both files were updated in the REAL workspace.
-        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "new-a");
-        assert_eq!(std::fs::read_to_string(ws.join("b.txt")).unwrap(), "new-b");
+        // The merge normalizes to a single trailing newline.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+            "new-a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("b.txt")).unwrap(),
+            "new-b\n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
-    fn a_proposal_that_breaks_the_suite_is_rejected_and_reverted() {
+    fn a_merge_that_breaks_the_suite_is_rejected_and_reverted() {
         let ws = temp("reject");
         std::fs::write(
             ws.join("impl.sh"),
@@ -380,20 +444,17 @@ mod tests {
         )
         .unwrap();
 
-        // One subtask whose worker breaks impl.sh; integration verification fails,
-        // so the change is reverted.
+        // The worker proposes a broken impl; the orchestrator merges it; the suite
+        // goes red, so the merge is reverted and the subtask fails.
         let backend = ScriptedSwarm::new(vec![
             (
                 "orchestrator for a swarm",
                 vec![r#"[{"id":"x","goal":"break impl.sh badly","files":["impl.sh"]}]"#],
             ),
-            (
-                "break impl.sh badly",
-                vec![
-                    r#"{"tool":"write_file","path":"impl.sh","content":"is_even() { return 1; }\n"}"#,
-                    r#"{"tool":"finish"}"#,
-                ],
-            ),
+            // merge (keyed on "File: <path>") and proposer (keyed on goal) both yield
+            // the broken version.
+            ("File: impl.sh", vec!["is_even() { return 1; }\n"]),
+            ("break impl.sh badly", vec!["is_even() { return 1; }\n"]),
         ]);
 
         let cfg = SwarmConfig {

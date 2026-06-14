@@ -6,12 +6,10 @@
 //! per file). The orchestrator later applies accepted proposals to the real
 //! workspace one at a time (serialized writes, spec 08).
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use dc_core::{run_agent_recovering, AgentConfig, AgentReport, ParseRepair};
+use dc_core::AgentConfig;
 use dc_model::ModelBackend;
-use dc_tools::default_registry;
 
 use crate::board::Subtask;
 
@@ -23,308 +21,152 @@ pub struct ProposedChange {
 }
 
 /// The outcome of one worker running one subtask.
+///
+/// Division of labour (spec 08): a tiny worker is good at *reasoning* about the
+/// fix but bad at the mechanical exactness of applying it (exact `old_str`
+/// anchors, whitespace, merging). So the worker hands back its fix **as text** —
+/// the corrected file and/or a description — and the smarter orchestrator turns
+/// that into the actual file change. `proposal` is that text answer.
 #[derive(Debug, Clone)]
 pub struct WorkerResult {
     pub subtask_id: String,
-    /// Whether the worker's own loop reported success (finished / verified).
-    pub finished: bool,
-    pub verified: Option<bool>,
-    /// File changes the worker proposes, relative to the workspace it was given.
-    pub changes: Vec<ProposedChange>,
+    /// The files this subtask was scoped to (so the orchestrator knows what the
+    /// proposal applies to).
+    pub files: Vec<String>,
+    /// The worker's fix, in its own words/code — handed to the orchestrator to
+    /// merge. Empty if the worker produced nothing usable.
+    pub proposal: String,
     pub report_summary: String,
 }
 
 impl WorkerResult {
-    pub fn made_changes(&self) -> bool {
-        !self.changes.is_empty()
+    pub fn has_proposal(&self) -> bool {
+        !self.proposal.trim().is_empty()
     }
 }
 
-/// Run `subtask` on a worker `backend` (optionally with an `advisor`), against a
-/// scratch copy of `workspace`. Returns the proposed changes without modifying
-/// the real workspace.
+/// Run `subtask` on a worker `backend`: a SINGLE model call that returns the fix
+/// as text (the corrected file). The worker never touches the filesystem — it
+/// reasons, the orchestrator applies (spec 08). `advisor`/`cfg` are accepted for
+/// signature stability but a one-shot proposer doesn't use them.
 pub fn run_worker(
     backend: &dyn ModelBackend,
-    advisor: Option<&dyn ModelBackend>,
+    _advisor: Option<&dyn ModelBackend>,
     subtask: &Subtask,
     workspace: &Path,
-    cfg: &AgentConfig,
+    _cfg: &AgentConfig,
 ) -> WorkerResult {
-    // Scratch copy: an isolated workspace the worker can freely edit.
-    let scratch = match scratch_copy(workspace, &subtask.id) {
-        Ok(p) => p,
-        Err(e) => {
-            return WorkerResult {
-                subtask_id: subtask.id.clone(),
-                finished: false,
-                verified: None,
-                changes: Vec::new(),
-                report_summary: format!("worker setup failed: {e}"),
-            }
+    let prompt = propose_prompt(subtask, workspace);
+    let req = dc_model::GenerateRequest::new(vec![
+        dc_model::Message::system(PROPOSER_SYSTEM),
+        dc_model::Message::user(prompt),
+    ]);
+
+    let (proposal, summary) = match backend.generate(&req) {
+        Ok(resp) => {
+            let p = strip_code_fence(&resp.content);
+            let words = p.split_whitespace().count();
+            (p, format!("proposed a fix ({words} words)"))
         }
+        Err(e) => (String::new(), format!("worker errored: {e}")),
     };
-
-    let before = snapshot_tree(&scratch);
-
-    let instruction = worker_instruction(subtask);
-    let registry = default_registry();
-    // Scope the agent's "focus files" to this subtask's files, so the loop pins
-    // their live contents every turn — the small worker always has a fresh,
-    // correct view to anchor its edits on (spec 08 — workers own disjoint files).
-    let mut wcfg = cfg.clone();
-    if wcfg.focus_files.is_empty() {
-        wcfg.focus_files = subtask.files.clone();
-    }
-    let report: Option<AgentReport> = run_agent_recovering(
-        backend,
-        advisor,
-        &registry,
-        &ParseRepair,
-        &instruction,
-        &scratch,
-        &wcfg,
-    )
-    .ok();
-
-    let after = snapshot_tree(&scratch);
-    let changes = diff_trees(&before, &after);
-
-    let (finished, verified, summary) = match &report {
-        Some(r) => (
-            r.finished,
-            r.verified,
-            format!("{:?}, {} change(s)", r.stop_reason, changes.len()),
-        ),
-        None => (false, None, "worker errored".to_string()),
-    };
-
-    // Best-effort cleanup of the scratch dir.
-    let _ = std::fs::remove_dir_all(&scratch);
 
     WorkerResult {
         subtask_id: subtask.id.clone(),
-        finished,
-        verified,
-        changes,
+        files: subtask.files.clone(),
+        proposal,
         report_summary: summary,
     }
 }
 
-/// The tight, single-purpose instruction handed to a worker (spec 08 — scoped).
-///
-/// We deliberately do NOT inline file *contents* here: this instruction is pinned
-/// in the task anchor and shown verbatim every turn, so an inlined snapshot goes
-/// stale the moment the worker edits — a tiny model then keeps re-applying its
-/// first edit because the anchor still shows the original. Instead we name the
-/// files and tell the worker to `read_file` for the live contents (the read-dedup
-/// nudge in the loop stops it from re-reading in circles), so it always anchors
-/// its `edit_file` on the file's *current* state.
-fn worker_instruction(subtask: &Subtask) -> String {
-    let mut s = format!("Your subtask: {}", subtask.goal);
-    if !subtask.files.is_empty() {
-        s.push_str("\n\nFiles to change: ");
-        s.push_str(&subtask.files.join(", "));
-        // The loop pins the live contents of these files every turn (see the
-        // "Current contents" block), so the worker does NOT need to read first —
-        // telling a tiny model to read just makes it loop on read_file. Point it
-        // straight at the edit.
-        s.push_str(
-            "\n\nThe current contents of that file are shown to you each turn under \
-             \"Current contents of the file(s) you must edit\". Do NOT call read_file — \
-             you already have the file. Go straight to edit_file, copying old_str \
-             exactly (with indentation) from those numbered lines. Do not modify test \
-             files. After each edit call run_verification, read which test still \
-             fails, and edit again until all tests pass; then call finish.",
-        );
-    } else {
-        s.push_str(
-            "\n\nRead the file you must change with read_file, then edit_file it with a \
-             precise change. Do not modify test files. Then run_verification and fix \
-             what it reports until the tests pass, then finish.",
-        );
+/// System prompt for a worker: it's a reasoner, not an editor.
+const PROPOSER_SYSTEM: &str = "You fix code. You are shown a file and a task. \
+Reply with the COMPLETE corrected file and nothing else — no explanation, no \
+markdown fences, just the full file contents with your fix applied. Do not change \
+anything the task doesn't require.";
+
+/// Build the worker's single-shot prompt: the task plus the current contents of
+/// the files it must fix. Only the named files are shown (the subtask is scoped).
+fn propose_prompt(subtask: &Subtask, workspace: &Path) -> String {
+    let mut s = format!("Task: {}\n", subtask.goal);
+    for f in &subtask.files {
+        if let Ok(content) = std::fs::read_to_string(workspace.join(f)) {
+            let content = content.replace("\r\n", "\n");
+            s.push_str(&format!("\nFile {f}:\n{content}\n"));
+        }
     }
+    s.push_str("\nReply with the complete corrected file.");
     s
 }
 
-/// Copy `workspace` into a fresh scratch directory the worker owns.
-fn scratch_copy(workspace: &Path, tag: &str) -> std::io::Result<PathBuf> {
-    let dst = std::env::temp_dir().join(format!(
-        "dc-swarm-{}-{}-{}",
-        sanitize(tag),
-        std::process::id(),
-        unique()
-    ));
-    copy_dir(workspace, &dst)?;
-    Ok(dst)
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        // Skip noise that would bloat the copy / break isolation.
-        if matches!(
-            name.to_string_lossy().as_ref(),
-            ".git" | "target" | "node_modules" | "__pycache__" | ".venv" | ".pytest_cache"
-        ) {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        if entry.file_type()?.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Snapshot every UTF-8 text file under `root` as `relpath -> contents`.
-fn snapshot_tree(root: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in rd.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_dir() {
-                let n = entry.file_name().to_string_lossy().into_owned();
-                if !matches!(
-                    n.as_str(),
-                    ".git" | "target" | "node_modules" | "__pycache__" | ".pytest_cache" | ".venv"
-                ) {
-                    stack.push(path);
-                }
-            } else if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.insert(rel, content);
-            }
-        }
-    }
-    out
-}
-
-/// Files that differ between `before` and `after`: created, edited, or deleted.
-fn diff_trees(
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-) -> Vec<ProposedChange> {
-    let mut changes = Vec::new();
-    for (path, content) in after {
-        if before.get(path) != Some(content) {
-            changes.push(ProposedChange {
-                path: path.clone(),
-                after: Some(content.clone()),
-            });
-        }
-    }
-    for path in before.keys() {
-        if !after.contains_key(path) {
-            changes.push(ProposedChange {
-                path: path.clone(),
-                after: None, // deleted
-            });
-        }
-    }
-    changes.sort_by(|a, b| a.path.cmp(&b.path));
-    changes
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-fn unique() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+/// Strip a leading/trailing ``` fence (with optional language tag) a model often
+/// wraps code in, so the proposal is the raw file body.
+fn strip_code_fence(s: &str) -> String {
+    let t = s.trim();
+    let Some(rest) = t.strip_prefix("```") else {
+        return t.to_string();
+    };
+    // Drop the first line (``` or ```lang) and a trailing ``` if present.
+    let rest = rest.split_once('\n').map(|(_, r)| r).unwrap_or("");
+    rest.trim_end()
+        .strip_suffix("```")
+        .unwrap_or(rest)
+        .trim_end()
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dc_model::MockBackend;
 
-    fn temp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("dc-swarm-wt-{tag}-{}", unique()));
+    fn temp(tag: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let d = std::env::temp_dir().join(format!("dc-swarm-wt-{tag}-{n}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
     #[test]
-    fn diff_detects_edit_create_delete() {
-        let mut before = BTreeMap::new();
-        before.insert("keep.txt".to_string(), "same".to_string());
-        before.insert("edit.txt".to_string(), "v1".to_string());
-        before.insert("gone.txt".to_string(), "bye".to_string());
-        let mut after = BTreeMap::new();
-        after.insert("keep.txt".to_string(), "same".to_string());
-        after.insert("edit.txt".to_string(), "v2".to_string());
-        after.insert("new.txt".to_string(), "hi".to_string());
-
-        let changes = diff_trees(&before, &after);
-        let by: BTreeMap<_, _> = changes
-            .iter()
-            .map(|c| (c.path.as_str(), &c.after))
-            .collect();
-        assert!(!by.contains_key("keep.txt")); // unchanged
-        assert_eq!(by["edit.txt"], &Some("v2".to_string()));
-        assert_eq!(by["new.txt"], &Some("hi".to_string()));
-        assert_eq!(by["gone.txt"], &None); // deleted
-    }
-
-    #[test]
-    fn scratch_copy_is_isolated_and_snapshots() {
-        let ws = temp("iso");
-        std::fs::write(ws.join("a.txt"), "original").unwrap();
-        let scratch = scratch_copy(&ws, "s1").unwrap();
-        // Edit the scratch; the real workspace is untouched.
-        std::fs::write(scratch.join("a.txt"), "changed").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(ws.join("a.txt")).unwrap(),
-            "original"
-        );
-        let snap = snapshot_tree(&scratch);
-        assert_eq!(snap.get("a.txt").map(String::as_str), Some("changed"));
-        let _ = std::fs::remove_dir_all(&ws);
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    #[test]
-    fn worker_runs_the_loop_and_returns_a_proposed_change() {
-        use dc_model::MockBackend;
-        use serde_json::json;
-
-        let ws = temp("run");
-        std::fs::write(ws.join("impl.txt"), "old").unwrap();
-        // Scripted worker: write a file, then finish.
-        let backend = MockBackend::new([
-            json!({"tool":"write_file","path":"impl.txt","content":"new"}).to_string(),
-            json!({"tool":"finish"}).to_string(),
-        ]);
-        let subtask = Subtask::new("t1", "change impl.txt to new");
+    fn worker_returns_the_corrected_file_as_text() {
+        let ws = temp("propose");
+        std::fs::write(ws.join("m.py"), "def double(n):\n    return n\n").unwrap();
+        // The proposer returns the whole corrected file (wrapped in a fence, which
+        // we strip) — no tools, no filesystem writes.
+        let backend = MockBackend::new(["```python\ndef double(n):\n    return n * 2\n```"]);
+        let subtask = Subtask::new("t1", "fix double").with_files(vec!["m.py".into()]);
         let result = run_worker(&backend, None, &subtask, &ws, &AgentConfig::default());
 
-        assert!(result.finished);
-        assert!(result.made_changes());
-        let change = result
-            .changes
-            .iter()
-            .find(|c| c.path == "impl.txt")
-            .unwrap();
-        assert_eq!(change.after, Some("new".to_string()));
-        // The REAL workspace is unchanged — the worker only proposed.
-        assert_eq!(std::fs::read_to_string(ws.join("impl.txt")).unwrap(), "old");
+        assert!(result.has_proposal());
+        assert_eq!(result.proposal, "def double(n):\n    return n * 2");
+        assert_eq!(result.files, vec!["m.py"]);
+        // The REAL workspace is untouched — the worker only proposes.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("m.py")).unwrap(),
+            "def double(n):\n    return n\n"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn strip_code_fence_handles_plain_and_fenced() {
+        assert_eq!(strip_code_fence("just text"), "just text");
+        assert_eq!(strip_code_fence("```\ncode\n```"), "code");
+        assert_eq!(strip_code_fence("```py\na\nb\n```"), "a\nb");
+    }
+
+    #[test]
+    fn propose_prompt_inlines_the_named_file() {
+        let ws = temp("prompt");
+        std::fs::write(ws.join("a.py"), "x = 1\n").unwrap();
+        let subtask = Subtask::new("t", "do it").with_files(vec!["a.py".into()]);
+        let p = propose_prompt(&subtask, &ws);
+        assert!(p.contains("Task: do it"));
+        assert!(p.contains("File a.py:"));
+        assert!(p.contains("x = 1"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

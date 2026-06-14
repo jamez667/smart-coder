@@ -163,6 +163,45 @@ pub fn default_registry() -> ToolRegistry {
     ])
 }
 
+/// A deliberately tiny registry for a focus-scoped worker (spec 04/08): just the
+/// three tools it ever needs — `edit_file`, `run_verification`, `finish`. The
+/// worker is already shown the file's current contents every turn, so it never
+/// needs to read/search/list/plan/ask. Fewer choices = a dumb model that acts
+/// instead of dithering between twelve options.
+pub fn minimal_worker_registry() -> ToolRegistry {
+    ToolRegistry::new(vec![
+        ToolSpec {
+            name: "edit_file",
+            description: "Replace an exact snippet: old_str must match the shown file once.",
+            params: vec![
+                ParamSpec::new("path", ParamType::String, "the file to edit"),
+                ParamSpec::new(
+                    "old_str",
+                    ParamType::String,
+                    "exact text to replace, copied from the shown file",
+                ),
+                ParamSpec::new("new_str", ParamType::String, "the replacement text"),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "run_verification",
+            description: "Run the tests and see which pass or fail.",
+            params: vec![],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "finish",
+            description: "Stop — only once the tests pass.",
+            params: vec![],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+    ])
+}
+
 /// The result of executing a validated tool call.
 pub enum ToolOutcome {
     /// Text fed back to the model as the next observation.

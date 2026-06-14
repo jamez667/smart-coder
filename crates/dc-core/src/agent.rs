@@ -137,18 +137,12 @@ Take a concrete action every turn — prefer editing over searching.\n\n";
 /// System preamble for a focus-scoped run: the file you must edit is already shown
 /// to you every turn, so don't read it — edit it. Used by the swarm worker (and
 /// any caller that sets `focus_files`).
-const FOCUS_TASK_PREFIX: &str = "You are a coding agent. The exact file you must \
-change is shown to you every turn under \"Current contents of the file(s) you must \
-edit\", with line numbers. You ALREADY have the file — do NOT call read_file or \
-search_code. Follow this loop: \
-1) edit_file the file with a precise change, copying old_str verbatim (with \
-indentation, no line numbers) from the contents shown between the === markers; \
-2) run_verification to run the tests (use run_verification, NOT run_command — \
-shell is blocked); read which tests still fail; \
-3) edit again to fix them, always copying old_str from the CURRENT contents shown \
-(not from earlier in the chat — the file changes as you edit); \
-4) finish only when the tests pass. \
-Edit every turn — never read or search.\n\n";
+const FOCUS_TASK_PREFIX: &str = "You fix code. The file you must change is shown \
+below, between === markers. Each turn, do ONE of:\n\
+- edit_file: change the code. Copy old_str exactly from the file shown below.\n\
+- run_verification: run the tests to see what still fails.\n\
+- finish: stop, once the tests pass.\n\
+Edit, then verify, then edit again until the tests pass.\n\n";
 
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
@@ -318,7 +312,10 @@ pub fn run_agent_observed(
         if !plan_render.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, plan_render));
         }
-        if !repo_map.is_empty() {
+        // The repo map helps a model navigate to the right file — but a focus-scoped
+        // worker is already shown its exact file below, so the map is just noise that
+        // tempts a dumb model toward the wrong target. Skip it when focused.
+        if !repo_map.is_empty() && cfg.focus_files.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, repo_map.clone()));
         }
         // Pin the current contents of the focused files, re-read fresh every turn so
@@ -885,10 +882,8 @@ fn render_focus_files(workspace: &Path, files: &[String]) -> String {
         return String::new();
     }
     let mut s = String::from(
-        "Current contents of the file(s) you must edit, shown EXACTLY as stored (this \
-         updates after every edit — always copy old_str from here, character for \
-         character, not from earlier in the chat). The text between the === markers \
-         is the literal file; do not add line numbers or any other prefix to old_str:\n",
+        "The file to edit (copy old_str exactly from between the === markers; this \
+         updates after each edit):\n",
     );
     let mut any = false;
     for f in files {
