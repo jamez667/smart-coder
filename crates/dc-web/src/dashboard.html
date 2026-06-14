@@ -6,56 +6,59 @@
 <title>dumb-coder — live run</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #c9d1d9;
-    --dim: #8b949e; --cyan: #39c5cf; --green: #3fb950; --red: #f85149;
-    --magenta: #d2a8ff; --yellow: #d29922; --accent: #58a6ff;
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#30363d; --fg:#c9d1d9;
+    --dim:#8b949e; --cyan:#39c5cf; --green:#3fb950; --red:#f85149; --magenta:#d2a8ff;
+    --yellow:#d29922; --accent:#58a6ff;
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--fg);
-    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  header {
-    padding: 12px 18px; background: linear-gradient(90deg, #1f6feb22, transparent);
-    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px;
-  }
-  header .badge {
-    background: var(--cyan); color: #08111a; font-weight: 700;
-    padding: 3px 10px; border-radius: 5px;
-  }
-  header .task { color: var(--fg); }
-  header .status { margin-left: auto; font-weight: 700; }
-  main { display: grid; grid-template-columns: 320px 1fr; gap: 14px; padding: 14px; }
-  .panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    overflow: hidden; display: flex; flex-direction: column; min-height: 0;
-  }
-  .panel h2 {
-    margin: 0; padding: 8px 12px; font-size: 12px; letter-spacing: .08em;
-    text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--border);
-  }
-  .panel .body { padding: 10px 12px; overflow-y: auto; }
-  #activity { height: calc(100vh - 190px); }
-  #plan ol { margin: 0; padding-left: 22px; }
-  #plan li { margin: 4px 0; }
-  #plan .empty { color: var(--dim); }
-  .line { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
-  .line.tool { color: var(--cyan); }
-  .line.ok { color: var(--green); }
-  .line.err { color: var(--red); }
-  .line.advice { color: var(--magenta); }
-  .line.stall { color: var(--yellow); }
-  .line.info, .line.turn { color: var(--dim); }
-  .line.stop { color: var(--fg); font-weight: 700; }
-  footer {
-    display: flex; gap: 22px; padding: 10px 18px; border-top: 1px solid var(--border);
-    background: var(--panel); position: sticky; bottom: 0;
-  }
-  footer .metric b { color: var(--fg); }
-  footer .ok { color: var(--green); } footer .bad { color: var(--red); }
-  footer .mag { color: var(--magenta); }
-  .bar { height: 6px; background: #21262d; border-radius: 3px; width: 120px; overflow: hidden; }
-  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { padding:10px 16px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:12px;
+    background:linear-gradient(90deg,#1f6feb22,transparent); }
+  header .badge { background:var(--cyan); color:#08111a; font-weight:700;
+    padding:3px 10px; border-radius:5px; }
+  header .task { color:var(--fg); }
+  header .status { margin-left:auto; font-weight:700; }
+  main { padding:14px; display:flex; flex-direction:column; gap:14px; }
+  .box { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    display:flex; flex-direction:column; overflow:hidden; }
+  .box > h2 { margin:0; padding:8px 12px; font-size:12px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--dim); border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:8px; }
+  .box > h2 .who { color:var(--fg); text-transform:none; letter-spacing:0; font-weight:700; }
+  .box .body { padding:8px 12px; overflow-y:auto; }
+
+  /* Advisor box on top */
+  #advisor h2 .dot { color:var(--magenta); }
+  #advisor .body { max-height:30vh; }
+  #advisor .empty { color:var(--dim); }
+  .consult { border-left:3px solid var(--magenta); padding:4px 0 8px 10px; margin:6px 0; }
+  .consult .trigger { color:var(--yellow); }
+  .consult .hint { color:var(--magenta); white-space:pre-wrap; }
+
+  /* Coder box below */
+  #coder h2 .dot { color:var(--cyan); }
+  #coder .body { height:52vh; }
+  .turn { border-top:1px dashed #2a3140; padding:8px 0; }
+  .turn:first-child { border-top:0; }
+  .turn .head { color:var(--dim); }
+  .turn .raw { color:#9fb0c3; white-space:pre-wrap; background:var(--panel2);
+    border-radius:5px; padding:6px 8px; margin:4px 0; max-height:18em; overflow:auto; }
+  .call { color:var(--cyan); margin-top:4px; }
+  .result { white-space:pre-wrap; padding:4px 0 0 14px; max-height:16em; overflow:auto; }
+  .result.ok { color:var(--green); } .result.err { color:var(--red); }
+  .verify.ok { color:var(--green); } .verify.err { color:var(--red); }
+  .meta { color:var(--dim); }
+  .stall { color:var(--yellow); }
+  .stop { color:var(--fg); font-weight:700; }
+
+  footer { display:flex; gap:22px; padding:9px 16px; border-top:1px solid var(--border);
+    background:var(--panel); position:sticky; bottom:0; }
+  footer b { color:var(--fg); }
+  footer .ok { color:var(--green); } footer .bad { color:var(--red); } footer .mag { color:var(--magenta); }
+  .bar { height:6px; background:#21262d; border-radius:3px; width:120px; overflow:hidden; display:inline-block; vertical-align:middle; }
+  .bar > div { height:100%; background:var(--accent); width:0; transition:width .2s; }
 </style>
 </head>
 <body>
@@ -65,41 +68,59 @@
   <span class="status" id="status">●</span>
 </header>
 <main>
-  <section class="panel" id="plan">
-    <h2>plan</h2>
-    <div class="body"><div class="empty">(no plan yet)</div></div>
+  <section class="box" id="advisor">
+    <h2><span class="dot">●</span> advisor <span class="who" id="advisor-who">(senior — consulted on stalls)</span></h2>
+    <div class="body"><div class="empty">No consults yet. The advisor is asked only when the coder stalls.</div></div>
   </section>
-  <section class="panel">
-    <h2>activity</h2>
-    <div class="body" id="activity"></div>
+  <section class="box" id="coder">
+    <h2><span class="dot">●</span> coder <span class="who" id="coder-who"></span></h2>
+    <div class="body" id="coder-body"></div>
   </section>
 </main>
 <footer>
-  <span class="metric">step <b id="step">0</b></span>
-  <span class="metric">ctx <b id="ctx">0/0</b> <span class="bar"><div id="ctxbar"></div></span></span>
-  <span class="metric">calls <span class="ok" id="valid">0✓</span> <span class="bad" id="invalid">0✗</span></span>
-  <span class="metric mag">nudges <b id="nudges">0</b></span>
+  <span>step <b id="step">0</b></span>
+  <span>ctx <b id="ctx">0/0</b> <span class="bar"><div id="ctxbar"></div></span></span>
+  <span>calls <span class="ok" id="valid">0✓</span> <span class="bad" id="invalid">0✗</span></span>
+  <span class="mag">advisor nudges <b id="nudges">0</b></span>
 </footer>
 
 <script>
-const state = { step:0, budget:0, tokens:0, valid:0, invalid:0, nudges:0 };
 const $ = id => document.getElementById(id);
-const activity = $('activity');
+const state = { step:0, budget:0, tokens:0, valid:0, invalid:0, nudges:0 };
+const coderBody = $('coder-body');
+const advisorBody = $('advisor').querySelector('.body');
+let curTurn = null;           // the DOM node for the current turn
+let advisorStarted = false;
 
-function addLine(cls, text) {
-  const d = document.createElement('div');
-  d.className = 'line ' + cls;
-  d.textContent = text;
-  activity.appendChild(d);
-  activity.scrollTop = activity.scrollHeight;
+function el(cls, text) { const d=document.createElement('div'); if(cls)d.className=cls; if(text!=null)d.textContent=text; return d; }
+function atBottom(node){ return node.scrollHeight - node.scrollTop - node.clientHeight < 40; }
+function autoscroll(node){ if(atBottom(node)) node.scrollTop = node.scrollHeight; }
+
+function newTurn(step, raw) {
+  const t = el('turn');
+  t.appendChild(el('head', `turn ${step}`));
+  if (raw && raw.trim()) {
+    const r = el('raw', raw.trim());
+    t.appendChild(r);
+  }
+  coderBody.appendChild(t);
+  autoscroll(coderBody);
+  return t;
+}
+function coderLine(cls, text) {
+  const target = curTurn || coderBody;
+  const stick = atBottom(coderBody);
+  target.appendChild(el(cls, text));
+  if (stick) coderBody.scrollTop = coderBody.scrollHeight;
 }
 
-function renderPlan(steps) {
-  const body = document.querySelector('#plan .body');
-  if (!steps || !steps.length) { body.innerHTML = '<div class="empty">(running plan-free)</div>'; return; }
-  const ol = document.createElement('ol');
-  for (const s of steps) { const li = document.createElement('li'); li.textContent = s; ol.appendChild(li); }
-  body.innerHTML = ''; body.appendChild(ol);
+function addConsult(trigger, hint) {
+  if (!advisorStarted) { advisorBody.innerHTML=''; advisorStarted=true; }
+  const c = el('consult');
+  c.appendChild(el('trigger', '◂ junior stuck: ' + trigger));
+  c.appendChild(el('hint', '▸ senior advises:\n' + hint.replace(/^ADVICE[^:]*:\s*/, '')));
+  advisorBody.appendChild(c);
+  autoscroll(advisorBody);
 }
 
 function refreshFooter() {
@@ -110,31 +131,41 @@ function refreshFooter() {
   $('nudges').textContent = state.nudges;
   const pct = state.budget ? Math.min(100, Math.round(state.tokens*100/state.budget)) : 0;
   $('ctxbar').style.width = pct + '%';
-  $('ctxbar').style.background = pct > 90 ? 'var(--red)' : 'var(--accent)';
+  $('ctxbar').style.background = pct>90 ? 'var(--red)' : 'var(--accent)';
 }
 
 function apply(e) {
   switch (e.type) {
     case 'RunStarted':
-      $('task').textContent = e.task; state.budget = e.prompt_budget;
-      addLine('info', '▶ ' + e.task); break;
-    case 'Planned': renderPlan(e.steps); addLine('info', '● plan (' + e.steps.length + ' steps)'); break;
-    case 'PlanRevised': renderPlan(e.steps); addLine('info', '● plan revised'); break;
-    case 'ModelTurn': state.step = e.step; state.tokens = e.prompt_tokens; break;
-    case 'ToolCall': state.valid++; addLine('tool', '▸ ' + e.tool + (e.arg ? '  ' + e.arg : '')); break;
-    case 'ToolResult': addLine(e.is_error ? 'err' : 'ok', (e.is_error ? '  └ ✗ ' : '  └ ✓ ') + e.summary); break;
-    case 'RepairTriggered': state.invalid++; addLine('err', '  ↻ repair: ' + e.detail); break;
-    case 'Verification': addLine(e.green ? 'ok' : 'err', '  ⊨ verify: ' + e.summary); break;
-    case 'Stalled': addLine('stall', '  ⚠ stalled: ' + e.trigger); break;
-    case 'Advice': state.nudges++; addLine('advice', '  💡 ' + e.advice); break;
-    case 'Stopped':
+      $('task').textContent = e.task; state.budget = e.prompt_budget; break;
+    case 'Planned': coderLine('meta', '● plan: ' + e.steps.join('  |  ')); break;
+    case 'PlanRevised': coderLine('meta', '● plan revised: ' + e.steps.join('  |  ')); break;
+    case 'ModelTurn':
+      state.step = e.step; state.tokens = e.prompt_tokens;
+      curTurn = newTurn(e.step, e.raw); break;
+    case 'ToolCall':
+      state.valid++;
+      coderLine('call', '▸ ' + e.tool + (e.arg ? '  ' + e.arg : '')); break;
+    case 'ToolResult':
+      coderLine('result ' + (e.is_error?'err':'ok'), (e.is_error?'✗ ':'✓ ') + e.full); break;
+    case 'RepairTriggered':
+      state.invalid++; coderLine('result err', '↻ repair: ' + e.detail); break;
+    case 'Verification':
+      coderLine('verify ' + (e.green?'ok':'err'),
+        '⊨ verify [' + (e.green?'GREEN':'RED') + ']:\n' + e.full); break;
+    case 'Stalled': coderLine('stall', '⚠ stalled: ' + e.trigger); break;
+    case 'Advice':
+      state.nudges++; addConsult(e.trigger, e.advice); break;
+    case 'Stopped': {
       const r = e.reason;
-      const label = typeof r === 'string' ? r : Object.keys(r)[0] + ': ' + Object.values(r)[0];
-      addLine('stop', '■ ' + label);
+      const label = typeof r==='string' ? r : Object.keys(r)[0] + ': ' + Object.values(r)[0];
+      coderLine('stop', '■ ' + label);
       const st = $('status');
-      st.textContent = (typeof r === 'string' && r === 'Finished') ? '✔ finished' : '■ ' + label;
-      st.style.color = (typeof r === 'string' && r === 'Finished') ? 'var(--green)' : 'var(--yellow)';
+      const finished = (typeof r==='string' && r==='Finished');
+      st.textContent = finished ? '✔ finished' : '■ ' + label;
+      st.style.color = finished ? 'var(--green)' : 'var(--yellow)';
       break;
+    }
   }
   refreshFooter();
 }
@@ -145,9 +176,8 @@ async function poll() {
     const res = await fetch('/events?from=' + from);
     const data = await res.json();
     for (const e of data.events) apply(e);
-    from = data.next;
-    done = data.done;
-  } catch (_) { /* server gone — stop quietly */ done = true; }
+    from = data.next; done = data.done;
+  } catch (_) { done = true; }
   if (!done) setTimeout(poll, 250);
 }
 poll();

@@ -90,22 +90,25 @@ fn fmt_event(e: &AgentEvent) -> String {
         AgentEvent::ModelTurn {
             step,
             prompt_tokens,
+            ..
         } => {
             format!("· turn {step} ({prompt_tokens} tok)")
         }
         AgentEvent::ToolCall { tool, arg } => format!("  ▸ {tool} {arg}"),
-        AgentEvent::ToolResult { summary, is_error } => {
+        AgentEvent::ToolResult {
+            summary, is_error, ..
+        } => {
             format!("    {} {summary}", if *is_error { "✗" } else { "✓" })
         }
         AgentEvent::RepairTriggered { detail } => format!("  ↻ repair: {detail}"),
-        AgentEvent::Verification { green, summary } => {
+        AgentEvent::Verification { green, summary, .. } => {
             format!(
                 "  ⊨ verify [{}]: {summary}",
                 if *green { "GREEN" } else { "RED" }
             )
         }
         AgentEvent::Stalled { trigger } => format!("  ⚠ stalled: {trigger}"),
-        AgentEvent::Advice { advice } => format!("  💡 {advice}"),
+        AgentEvent::Advice { advice, .. } => format!("  💡 {advice}"),
         AgentEvent::Stopped { reason } => format!("■ stopped: {reason:?}"),
     }
 }

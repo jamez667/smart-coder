@@ -155,6 +155,7 @@ mod tests {
         sink.record(&AgentEvent::ModelTurn {
             step: 1,
             prompt_tokens: 50,
+            raw: String::new(),
         });
         assert_eq!(hub.len(), 1);
     }
@@ -165,6 +166,7 @@ mod tests {
         hub.push(AgentEvent::ModelTurn {
             step: 1,
             prompt_tokens: 1,
+            raw: String::new(),
         });
         // Asking from beyond the end returns empty, not a panic.
         let (batch, next, _) = hub.since(999);

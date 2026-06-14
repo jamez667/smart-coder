@@ -26,6 +26,7 @@ fn renders_a_live_run_frame() {
         AgentEvent::ModelTurn {
             step: 1,
             prompt_tokens: 800,
+            raw: "{\"tool\":\"read_file\",\"path\":\"impl.sh\"}".into(),
         },
         AgentEvent::ToolCall {
             tool: "read_file".into(),
@@ -33,6 +34,7 @@ fn renders_a_live_run_frame() {
         },
         AgentEvent::ToolResult {
             summary: "read 1 line".into(),
+            full: "read 1 line".into(),
             is_error: false,
         },
         AgentEvent::ToolCall {
@@ -41,11 +43,13 @@ fn renders_a_live_run_frame() {
         },
         AgentEvent::ToolResult {
             summary: "edit_file impl.sh ok".into(),
+            full: "edit_file impl.sh ok".into(),
             is_error: false,
         },
         AgentEvent::Verification {
             green: true,
             summary: "all 1 test(s) passed".into(),
+            full: "all 1 test(s) passed".into(),
         },
         AgentEvent::Stopped {
             reason: StopReason::Finished,

@@ -25,23 +25,39 @@ pub enum AgentEvent {
     RunStarted { task: String, prompt_budget: usize },
     /// The planner produced a step plan (the rendered, structured form).
     Planned { steps: Vec<String> },
-    /// A model turn produced raw output (before tool extraction). `tokens` is the
-    /// assembled-prompt size for this turn.
-    ModelTurn { step: usize, prompt_tokens: usize },
+    /// A model turn. `prompt_tokens` is the assembled-prompt size; `raw` is the
+    /// model's *full* raw output for that turn (before tool extraction) so a UI
+    /// can show exactly what the model said, reasoning and all.
+    ModelTurn {
+        step: usize,
+        prompt_tokens: usize,
+        raw: String,
+    },
     /// A valid tool call was decoded and is about to run (shown before it runs,
     /// spec 06). `arg` is the key argument (path/query/command), for a tight line.
     ToolCall { tool: String, arg: String },
-    /// A tool produced an observation (summarized). `is_error` flags failures so a
-    /// renderer can color them.
-    ToolResult { summary: String, is_error: bool },
+    /// A tool produced an observation. `summary` is the first line (for a tight
+    /// view); `full` is the complete result (for an expanded view). `is_error`
+    /// flags failures so a renderer can color them.
+    ToolResult {
+        summary: String,
+        full: String,
+        is_error: bool,
+    },
     /// The model emitted malformed output and the harness fed back a repair.
     RepairTriggered { detail: String },
-    /// A verification command ran; `green` is the whole-suite result.
-    Verification { green: bool, summary: String },
+    /// A verification command ran; `green` is the whole-suite result. `full` is
+    /// the complete structured report text.
+    Verification {
+        green: bool,
+        summary: String,
+        full: String,
+    },
     /// The harness detected a loop/stall.
     Stalled { trigger: String },
-    /// The advisor (senior) was consulted and returned a nudge.
-    Advice { advice: String },
+    /// The advisor (senior) was consulted. `trigger` is why it was asked; `advice`
+    /// is the full hint it returned — the complete junior↔senior exchange.
+    Advice { trigger: String, advice: String },
     /// The plan was revised mid-run (via `update_plan`).
     PlanRevised { steps: Vec<String> },
     /// The run ended. Carries the structured reason.
@@ -107,6 +123,7 @@ mod tests {
     fn events_are_cloneable_and_comparable() {
         // Renderers/loggers need to clone events off the loop's thread.
         let e = AgentEvent::Advice {
+            trigger: "looping".into(),
             advice: "try the modulo".into(),
         };
         assert_eq!(e.clone(), e);

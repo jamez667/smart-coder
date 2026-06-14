@@ -296,14 +296,17 @@ pub fn run_agent_observed(
 
         let built = builder.build(segments);
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
-        sink.record(&AgentEvent::ModelTurn {
-            step: step + 1,
-            prompt_tokens: built.tokens_used,
-        });
 
         let mut req = GenerateRequest::new(built.messages);
         strategy.prepare_request(&mut req, registry);
         let resp = backend.generate(&req)?;
+        // Emit the model's full raw output for this turn (spec 06 — show what the
+        // model actually said).
+        sink.record(&AgentEvent::ModelTurn {
+            step: step + 1,
+            prompt_tokens: built.tokens_used,
+            raw: resp.content.clone(),
+        });
 
         // Decode the tool call.
         let (obs, action, changed, tool, arg) = match strategy.extract(&resp.content, registry) {
@@ -338,6 +341,7 @@ pub fn run_agent_observed(
                             interventions += 1;
                             stall.reset();
                             sink.record(&AgentEvent::Advice {
+                                trigger: format!("ask_user: {question}"),
                                 advice: advice.clone(),
                             });
                             (advice, action, false, tool, arg)
@@ -388,6 +392,7 @@ pub fn run_agent_observed(
                                         sink.record(&AgentEvent::Verification {
                                             green: v,
                                             summary: "whole-suite gate passed".to_string(),
+                                            full: "whole-suite gate passed".to_string(),
                                         });
                                     }
                                     sink.record(&AgentEvent::Stopped {
@@ -409,6 +414,7 @@ pub fn run_agent_observed(
                                     sink.record(&AgentEvent::Verification {
                                         green: false,
                                         summary: "finish refused — suite still red".to_string(),
+                                        full: o.clone(),
                                     });
                                     // Tests red — a failed attempt on the active step.
                                     if plan.record_attempt() > cfg.step_retry_budget {
@@ -423,6 +429,7 @@ pub fn run_agent_observed(
                                 sink.record(&AgentEvent::Verification {
                                     green: !looks_like_failure(&o),
                                     summary: first_line(&o),
+                                    full: o.clone(),
                                 });
                             }
                             (o, action, changed, tool, arg)
@@ -451,6 +458,7 @@ pub fn run_agent_observed(
         let was_error = looks_like_failure(&obs);
         sink.record(&AgentEvent::ToolResult {
             summary: first_line(&obs),
+            full: obs.clone(),
             is_error: was_error,
         });
         history.push(TurnRecord::new(tool, arg, was_error));
@@ -473,6 +481,7 @@ pub fn run_agent_observed(
                         interventions += 1;
                         stall.reset();
                         sink.record(&AgentEvent::Advice {
+                            trigger: trigger.to_string(),
                             advice: advice.clone(),
                         });
                         push_recent(&mut recent, "(harness)", &advice, cfg.keep_recent_turns);

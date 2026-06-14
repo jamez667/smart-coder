@@ -94,6 +94,7 @@ impl TuiState {
             AgentEvent::ModelTurn {
                 step,
                 prompt_tokens,
+                ..
             } => {
                 self.step = *step;
                 self.prompt_tokens = *prompt_tokens;
@@ -107,7 +108,9 @@ impl TuiState {
                 };
                 self.push(LineKind::ToolCall, label);
             }
-            AgentEvent::ToolResult { summary, is_error } => {
+            AgentEvent::ToolResult {
+                summary, is_error, ..
+            } => {
                 let kind = if *is_error {
                     LineKind::Error
                 } else {
@@ -120,7 +123,7 @@ impl TuiState {
                 self.invalid_calls += 1;
                 self.push(LineKind::Error, format!("↻ repair: {detail}"));
             }
-            AgentEvent::Verification { green, summary } => {
+            AgentEvent::Verification { green, summary, .. } => {
                 let kind = if *green {
                     LineKind::Ok
                 } else {
@@ -131,7 +134,7 @@ impl TuiState {
             AgentEvent::Stalled { trigger } => {
                 self.push(LineKind::Stall, format!("⚠ stalled: {trigger}"));
             }
-            AgentEvent::Advice { advice } => {
+            AgentEvent::Advice { advice, .. } => {
                 self.interventions += 1;
                 self.push(LineKind::Advice, format!("💡 {advice}"));
             }
@@ -181,6 +184,7 @@ mod tests {
         });
         s.apply(&AgentEvent::ToolResult {
             summary: "read 10 lines".into(),
+            full: "read 10 lines".into(),
             is_error: false,
         });
         assert_eq!(s.valid_calls, 1);
@@ -198,6 +202,7 @@ mod tests {
         });
         s.apply(&AgentEvent::ToolResult {
             summary: "file not found".into(),
+            full: "file not found".into(),
             is_error: true,
         });
         assert_eq!(s.invalid_calls, 1);
@@ -222,6 +227,7 @@ mod tests {
     fn advice_counts_as_an_intervention() {
         let mut s = TuiState::new();
         s.apply(&AgentEvent::Advice {
+            trigger: "looping".into(),
             advice: "try modulo".into(),
         });
         assert_eq!(s.interventions, 1);
@@ -250,6 +256,7 @@ mod tests {
         for i in 0..(MAX_LOG + 50) {
             s.apply(&AgentEvent::ToolResult {
                 summary: format!("line {i}"),
+                full: format!("line {i}"),
                 is_error: false,
             });
         }
