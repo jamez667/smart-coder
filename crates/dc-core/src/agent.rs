@@ -73,7 +73,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_steps: 12,
+            max_steps: 25,
             effective_context_fraction: 0.75,
             response_reserve_tokens: 1024,
             observation_line_cap: 40,
@@ -484,7 +484,7 @@ pub fn run_agent_observed(
                             trigger: trigger.to_string(),
                             advice: advice.clone(),
                         });
-                        push_recent(&mut recent, "(harness)", &advice, cfg.keep_recent_turns);
+                        push_observation(&mut recent, &advice, cfg.keep_recent_turns);
                     }
                     None => {
                         let reason = StopReason::Stalled(trigger.to_string());
@@ -662,6 +662,18 @@ fn dispatch(
 fn push_recent(recent: &mut Vec<Message>, action: &str, observation: &str, keep_recent: usize) {
     recent.push(Message::assistant(action.to_string()));
     recent.push(Message::user(observation.to_string()));
+    trim_recent(recent, keep_recent);
+}
+
+/// Inject a harness-originated observation (e.g. advisor advice) as a plain user
+/// message — NOT a fake assistant turn, so the model never sees itself "saying"
+/// a harness label and parrots it back.
+fn push_observation(recent: &mut Vec<Message>, observation: &str, keep_recent: usize) {
+    recent.push(Message::user(observation.to_string()));
+    trim_recent(recent, keep_recent);
+}
+
+fn trim_recent(recent: &mut Vec<Message>, keep_recent: usize) {
     let max_msgs = keep_recent.saturating_mul(2).max(2);
     while recent.len() > max_msgs {
         recent.remove(0);

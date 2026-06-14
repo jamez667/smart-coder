@@ -32,14 +32,24 @@ pub enum RepairError {
 }
 
 impl RepairError {
-    /// Render the actionable repair instruction sent back to the model.
+    /// Render the actionable repair instruction sent back to the model. Includes
+    /// a concrete example, because a small model needs the *shape* — telling it
+    /// "you got it wrong" isn't enough; showing a valid call is (spec 04).
     pub fn repair_prompt(&self) -> String {
         let detail = match self {
             RepairError::NoJson => "no JSON tool object found in your reply".to_string(),
             RepairError::BadJson(e) => format!("the JSON was malformed: {e}"),
             RepairError::Invalid(v) => v.to_string(),
         };
-        format!("ERROR: {detail}. Reply with EXACTLY ONE JSON tool object and nothing else.")
+        format!(
+            "ERROR: {detail}.\n\
+             Every reply MUST be exactly one JSON object with a \"tool\" field — \
+             do NOT invent tool output or describe results. Examples:\n\
+             {{\"tool\":\"read_file\",\"path\":\"file.py\"}}\n\
+             {{\"tool\":\"edit_file\",\"path\":\"file.py\",\"old_str\":\"old\",\"new_str\":\"new\"}}\n\
+             {{\"tool\":\"run_verification\"}}\n\
+             Reply with ONE such object and nothing else."
+        )
     }
 }
 
@@ -268,7 +278,10 @@ mod tests {
         let reg = default_registry();
         let err = ParseRepair.extract("no json here", &reg).unwrap_err();
         assert_eq!(err, RepairError::NoJson);
-        assert!(err.repair_prompt().contains("EXACTLY ONE JSON"));
+        let prompt = err.repair_prompt();
+        // The repair shows the model a concrete valid example, not just "wrong".
+        assert!(prompt.contains("\"tool\""), "{prompt}");
+        assert!(prompt.contains("read_file"), "{prompt}");
     }
 
     #[test]

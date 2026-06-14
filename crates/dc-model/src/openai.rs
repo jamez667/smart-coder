@@ -129,6 +129,11 @@ struct WireResponseMessage {
     /// native-FC path may return only `tool_calls`.
     #[serde(default)]
     content: Option<String>,
+    /// Thinking models (e.g. Gemma 4, Qwen3) put their internal reasoning here;
+    /// if the reply was truncated mid-think, `content` is empty but the answer is
+    /// forming here, so we fall back to it rather than returning nothing.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     /// Native function-calling path: the structured call(s) the model chose.
     #[serde(default)]
     tool_calls: Vec<WireToolCall>,
@@ -266,12 +271,18 @@ impl ModelBackend for OpenAiBackend {
             .map(|c| c.message)
             .ok_or_else(|| DcError::Backend(format!("{} returned no choices", self.endpoint())))?;
 
-        // Prefer a native tool call (normalized to the uniform string shape); fall
-        // back to plain text content.
+        // Prefer a native tool call (normalized to the uniform string shape); else
+        // plain text content; else the reasoning block (thinking models that ran
+        // out of tokens mid-think leave content empty but reasoning populated).
         let content = if let Some(tc) = message.tool_calls.first() {
             tool_call_to_text(tc)
         } else {
-            message.content.unwrap_or_default()
+            let text = message.content.unwrap_or_default();
+            if text.trim().is_empty() {
+                message.reasoning_content.unwrap_or_default()
+            } else {
+                text
+            }
         };
 
         Ok(GenerateResponse { content })

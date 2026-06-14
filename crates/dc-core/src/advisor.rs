@@ -32,17 +32,20 @@ pub struct Predicament<'a> {
 /// The prompt deliberately forbids writing code: we want direction, not a
 /// solution the junior would just paste.
 pub fn consult(advisor: &dyn ModelBackend, p: &Predicament) -> Option<String> {
-    let system = "You are a senior engineer advising a junior coding agent that is \
-        stuck. Give ONE short, concrete next-step hint (1-3 sentences) — a nudge in \
-        the right direction. Do NOT write the code or the full solution; the junior \
-        will do the work. Point at what to check, reconsider, or try differently."
+    let system = "You are a senior engineer giving a stuck junior ONE terse hint. \
+        Reply with a SINGLE sentence, 25 words or fewer — the most useful next step. \
+        No preamble, no restating the problem, no code. Just the hint."
         .to_string();
     let user = format!(
-        "Task: {}\n\n{}\n\nWhat's been tried recently:\n{}\n\nThe junior is stuck: {}\n\n\
-         Give one short hint for what to try next.",
+        "Task: {}\n\n{}\n\nRecent attempts:\n{}\n\nStuck: {}\n\nOne-sentence hint:",
         p.task, p.plan, p.recent, p.trigger
     );
-    let req = GenerateRequest::new(vec![Message::system(system), Message::user(user)]);
+    // The prompt asks for one terse sentence. We must NOT starve the token budget,
+    // though: a thinking advisor (e.g. Gemma 4) spends tokens in an internal
+    // reasoning block first, so too low a cap returns empty content. Give it room
+    // to think *and* answer; terseness comes from the prompt, not the cap.
+    let mut req = GenerateRequest::new(vec![Message::system(system), Message::user(user)]);
+    req.max_tokens = 600;
     match advisor.generate(&req) {
         Ok(resp) => {
             let advice = resp.content.trim();
