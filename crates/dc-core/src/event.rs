@@ -10,10 +10,16 @@
 //! no-op, so adding the stream doesn't change the existing run API: callers that
 //! don't care pass nothing.
 
+use serde::Serialize;
+
 use crate::recovery::StopReason;
 
 /// One thing that happened during a run, in the order it happened.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializes to a tagged JSON object (`{"type":"ToolCall","tool":...}`) so the
+/// web dashboard can render structured events off the wire.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type")]
 pub enum AgentEvent {
     /// The run began. Carries the task and the resolved prompt budget.
     RunStarted { task: String, prompt_budget: usize },

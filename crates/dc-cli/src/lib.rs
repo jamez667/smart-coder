@@ -26,6 +26,8 @@ pub enum Command {
     Chat,
     /// Run a coding task in the workspace with the live TUI (spec 06).
     Run { task: String },
+    /// Run a task and serve a live web dashboard in the browser (spec 06).
+    Serve { task: String },
     /// Print usage.
     Help,
 }
@@ -78,19 +80,23 @@ impl Cli {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
-                // `run <task...>`: the remaining args form the task description.
-                "run" if command.is_none() => {
-                    let task: Vec<String> = it.by_ref().collect();
-                    if task.is_empty() {
-                        return Err(DcError::Eval(
-                            "run requires a task, e.g. `dumb-coder run \"add a test for parse\"`"
-                                .to_string(),
-                        ));
+                // `run <task...>` / `serve <task...>`: the rest forms the task.
+                "run" | "serve" if command.is_none() => {
+                    let is_serve = arg == "serve";
+                    let rest: Vec<String> = it.by_ref().collect();
+                    if rest.is_empty() {
+                        return Err(DcError::Eval(format!(
+                            "{arg} requires a task, e.g. `dumb-coder {arg} \"add a test for parse\"`"
+                        )));
                     }
                     // Pull flags back out of the collected task (so `run "x" --verify`
                     // works); simplest is to re-scan for our known flags.
-                    let (t, v, p) = split_run_args(task)?;
-                    command = Some(Command::Run { task: t });
+                    let (t, v, p) = split_run_args(rest)?;
+                    command = Some(if is_serve {
+                        Command::Serve { task: t }
+                    } else {
+                        Command::Run { task: t }
+                    });
                     if v.is_some() {
                         verify_command = v;
                     }
@@ -193,6 +199,7 @@ USAGE:
 COMMANDS:
     chat            Interactive chat with the model (default)
     run <task>      Run a coding task in the current dir with a live TUI
+    serve <task>    Run a task and watch it in your browser (web dashboard)
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -207,6 +214,7 @@ OPTIONS:
 EXAMPLES:
     dumb-coder doctor
     dumb-coder run \"make the failing test in is_even pass\" --verify \"sh test.sh\"
+    dumb-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
     dumb-coder run \"add input validation to parse_config\" --plan
     dumb-coder --model gemma4:e4b --tool-calling native"
 }

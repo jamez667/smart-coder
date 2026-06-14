@@ -9,6 +9,7 @@ members = [
     "crates/dc-verify",
     "crates/dc-core",
     "crates/dc-tui",
+    "crates/dc-web",
     "crates/dc-cli",
     "crates/dc-eval",
     "crates/dc-android",

@@ -9,9 +9,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use serde::Serialize;
+
 /// Why the run stopped — a structured outcome the CLI can render honestly
 /// (spec 06 — honest stop lines) instead of a bare bool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum StopReason {
     /// The model called `finish` and any whole-suite gate passed.
     Finished,

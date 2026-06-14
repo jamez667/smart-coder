@@ -85,9 +85,12 @@ under control. Everything else builds on a working, reliable single-step loop.
 **Goal:** pleasant, inspectable, scriptable.
 - ✅ **Event-stream architecture** ([01](01-architecture.md)): typed `AgentEvent`s
   emitted through an `EventSink` at every phase — the hub all observers consume.
-- ✅ Live event rendering + plan panel + honest stop lines — delivered as a
-  **full-screen TUI** (`dc-tui`, ratatui), ahead of the spec's line-oriented plan
-  (the v2 TUI, [06](06-cli-ux.md)/[07](07-roadmap.md)). `dumb-coder run "<task>"`.
+- ✅ Live event rendering + plan panel + honest stop lines — delivered as **two**
+  renderers over the one stream: a **full-screen TUI** (`dc-tui`, ratatui,
+  `dumb-coder run`) and a **local web dashboard** (`dc-web`, `tiny_http` + browser,
+  `dumb-coder serve`). Both are ahead of the spec's line-oriented plan / the
+  daemon-mode-out-of-scope note ([06](06-cli-ux.md)) — pragmatic given the event
+  stream made a second renderer cheap. Both verified driving real Gemma 4 E4B.
 - ✅ One-shot `run` mode (`run <task> [--verify CMD] [--plan]`).
 - *Remaining:* `--verbose` prompt inspection, session logging + `replay`, `--json`
   line output (the event stream makes these mechanical now), `--dry-run`,

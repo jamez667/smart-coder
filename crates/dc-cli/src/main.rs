@@ -28,6 +28,54 @@ fn main() -> ExitCode {
         Command::Doctor => run_doctor(&cli),
         Command::Chat => run_chat(&cli),
         Command::Run { task } => run_task(&cli, task.clone()),
+        Command::Serve { task } => serve_task(&cli, task.clone()),
+    }
+}
+
+/// Drive a task in the current directory and serve a live web dashboard.
+fn serve_task(cli: &Cli, task: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let backend = cli.backend();
+    let registry = dc_tools::default_registry();
+    let strategy = dc_core::select_strategy(&backend.capabilities());
+
+    let spec = dc_web::WebRun {
+        backend,
+        advisor: Option::<dc_model::OpenAiBackend>::None,
+        registry,
+        strategy,
+        instruction: task,
+        workspace,
+        config: cli.agent_config(),
+    };
+
+    // Bind a localhost port (0 = OS-assigned) and print the URL to open.
+    let result = dc_web::serve(spec, "127.0.0.1:0", |url| {
+        println!("dumb-coder dashboard live at {url}");
+        println!("open it in your browser to watch the run (Ctrl-C to stop)");
+    });
+
+    match result {
+        Ok(Some(report)) => {
+            println!("\n{:?} — {}", report.stop_reason, report.change_summary);
+            if report.finished {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(None) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: web server failed: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

@@ -41,18 +41,21 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 200 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 207 tests):
 
-- **Event stream + live TUI** (`dc-core` event hub + `dc-tui`) — every phase of a
-  run emits a typed `AgentEvent` (RunStarted / Planned / ToolCall / ToolResult /
-  Verification / Stalled / Advice / Stopped) through an `EventSink` (spec 01's
-  event-stream architecture). `dc-tui` is a full-screen [ratatui](https://ratatui.rs)
-  dashboard that consumes it: a plan panel, a color-coded live activity log, a
-  metrics/context-budget bar, and an honest stop line. The agent runs on a worker
-  thread streaming events to the render loop. Drive it with
-  `dumb-coder run "<task>" [--verify CMD] [--plan]`. The state-fold and the draw
-  are pure/headless-tested (ratatui `TestBackend`); the sink also feeds future
-  `--json` / session-log consumers.
+- **Event stream + two live UIs** (`dc-core` event hub → `dc-tui` *and* `dc-web`).
+  Every phase of a run emits a typed `AgentEvent` (RunStarted / Planned / ToolCall
+  / ToolResult / Verification / Stalled / Advice / Stopped) through an `EventSink`
+  (spec 01's event-stream architecture). Two renderers consume the same stream:
+  - **`dc-web`** — a **local web dashboard**: a small `tiny_http` server streams
+    the run to your browser (incremental JSON feed), rendered as a plan panel, a
+    color-coded live activity feed, and a metrics/context bar. No async runtime,
+    no frontend build — `dumb-coder serve "<task>"` prints a `localhost` URL.
+  - **`dc-tui`** — a full-screen [ratatui](https://ratatui.rs) terminal dashboard
+    with the same panes — `dumb-coder run "<task>"`.
+  - **Proven on real Gemma 4 E4B** (local Ollama): both drive a failing test
+    red→green in a handful of clean turns. The agent runs on a worker thread; the
+    JSON/state folds are headless-tested.
 
 - **M4 planning & recovery** (`dc-core`) — the agent survives multi-step tasks and
   its own mistakes (spec 03). A **planner** decomposes the task into a short,
