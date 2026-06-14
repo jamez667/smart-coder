@@ -18,9 +18,13 @@ use crate::board::{Subtask, TaskBoard};
 /// short list of independent, scoped subtasks as JSON.
 fn decompose_messages(task: &str, repo_overview: &str) -> Vec<Message> {
     let system = "You are the orchestrator for a swarm of small coding agents. \
-        Break the task into 2-5 INDEPENDENT subtasks that touch as few shared \
-        files as possible, so workers can run in parallel. Each subtask is a tight, \
-        single-purpose goal. Respond with ONLY a JSON array; each item: \
+        Break the task into INDEPENDENT subtasks so workers can run in parallel. \
+        Make each subtask as SMALL and narrowly-scoped as possible — the smaller the \
+        slice, the more reliably a tiny worker completes it — but each subtask owns a \
+        DISJOINT set of files: never give the same file to two subtasks; if two \
+        pieces of work touch one file, make them ONE subtask (the file is the unit of \
+        a worker's edits). Each subtask is a tight, single-purpose goal. Respond with \
+        ONLY a JSON array; each item: \
         {\"id\":\"t1\",\"goal\":\"...\",\"files\":[\"path\"],\"deps\":[\"id\"]}. \
         Use deps only when one subtask must finish before another. Keep it minimal."
         .to_string();
@@ -68,7 +72,130 @@ pub fn parse_subtasks(reply: &str) -> Vec<Subtask> {
         out.push(Subtask::new(id, goal).with_files(files).with_deps(deps));
     }
     drop_dangling_deps(&mut out);
+    coalesce_by_file(&mut out);
     out
+}
+
+/// Enforce **one file → one worker** (the unit of serialized writes is the file).
+///
+/// Two workers editing the same file independently each propose a whole-file
+/// snapshot; integrating either reverts the other's work, so both get rejected.
+/// We don't trust the small orchestrator to honour "touch as few shared files as
+/// possible", so the harness enforces it: any subtasks that share a file are
+/// merged into one subtask (its goal a union, its files/deps unioned). The merged
+/// subtask keeps the earliest id so deps pointing at any merged member still
+/// resolve.
+fn coalesce_by_file(subtasks: &mut Vec<Subtask>) {
+    use std::collections::HashMap;
+
+    // Union-find over subtask indices keyed by shared file.
+    let mut parent: Vec<usize> = (0..subtasks.len()).collect();
+    fn find(parent: &mut [usize], i: usize) -> usize {
+        let mut r = i;
+        while parent[r] != r {
+            r = parent[r];
+        }
+        // Path-compress.
+        let mut c = i;
+        while parent[c] != r {
+            let next = parent[c];
+            parent[c] = r;
+            c = next;
+        }
+        r
+    }
+
+    let mut owner: HashMap<String, usize> = HashMap::new();
+    // Collect (file, index) pairs first to avoid borrowing `subtasks` mutably and
+    // immutably at once.
+    let file_idx: Vec<(String, usize)> = subtasks
+        .iter()
+        .enumerate()
+        .flat_map(|(i, s)| s.files.iter().map(move |f| (f.clone(), i)))
+        .collect();
+    for (file, i) in file_idx {
+        match owner.get(&file) {
+            Some(&j) => {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri] = rj;
+                }
+            }
+            None => {
+                owner.insert(file, i);
+            }
+        }
+    }
+
+    // No shared files ⇒ nothing to merge.
+    if (0..subtasks.len()).all(|i| find(&mut parent, i) == i) {
+        return;
+    }
+
+    // Group members by their representative root, preserving original order.
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for i in 0..subtasks.len() {
+        let root = find(&mut parent, i);
+        match groups.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((root, vec![i])),
+        }
+    }
+
+    // Build merged subtasks. The merged id is the first member's id; record the
+    // map from every member id → merged id so deps can be rewritten.
+    let mut id_remap: HashMap<String, String> = HashMap::new();
+    let mut merged: Vec<Subtask> = Vec::with_capacity(groups.len());
+    for (_, members) in &groups {
+        let first = &subtasks[members[0]];
+        let merged_id = first.id.clone();
+
+        if members.len() == 1 {
+            merged.push(first.clone());
+            id_remap.insert(merged_id.clone(), merged_id);
+            continue;
+        }
+
+        let mut goals: Vec<String> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+        let mut deps: Vec<String> = Vec::new();
+        for &m in members {
+            let s = &subtasks[m];
+            id_remap.insert(s.id.clone(), merged_id.clone());
+            goals.push(s.goal.clone());
+            for f in &s.files {
+                if !files.contains(f) {
+                    files.push(f.clone());
+                }
+            }
+            for d in &s.deps {
+                if !deps.contains(d) {
+                    deps.push(d.clone());
+                }
+            }
+        }
+        merged.push(
+            Subtask::new(merged_id, goals.join("; "))
+                .with_files(files)
+                .with_deps(deps),
+        );
+    }
+
+    // Rewrite deps through the remap (a dep on a merged member now points at the
+    // merged id), then drop self/dangling deps the merge may have created.
+    for s in merged.iter_mut() {
+        let mut new_deps: Vec<String> = Vec::new();
+        for d in &s.deps {
+            let mapped = id_remap.get(d).cloned().unwrap_or_else(|| d.clone());
+            if mapped != s.id && !new_deps.contains(&mapped) {
+                new_deps.push(mapped);
+            }
+        }
+        s.deps = new_deps;
+    }
+    drop_dangling_deps(&mut merged);
+
+    *subtasks = merged;
 }
 
 /// Remove deps that point at ids not present (a small model may invent them),
@@ -174,5 +301,73 @@ mod tests {
         let backend = MockBackend::new(Vec::<String>::new());
         let board = decompose(&backend, "task", "").unwrap();
         assert_eq!(board.len(), 1);
+    }
+
+    #[test]
+    fn coalesces_subtasks_that_share_a_file() {
+        // Two subtasks both touch mathlib.py — they MUST merge into one, else two
+        // workers race on whole-file snapshots and both get rejected at integration.
+        let reply = r#"[
+            {"id":"a","goal":"fix is_even","files":["mathlib.py"],"deps":[]},
+            {"id":"b","goal":"fix double","files":["mathlib.py"],"deps":[]}
+        ]"#;
+        let subs = parse_subtasks(reply);
+        assert_eq!(subs.len(), 1, "shared-file subtasks merge: {subs:?}");
+        assert_eq!(subs[0].files, vec!["mathlib.py"]);
+        // The merged goal carries both pieces of work.
+        assert!(subs[0].goal.contains("is_even"));
+        assert!(subs[0].goal.contains("double"));
+    }
+
+    #[test]
+    fn keeps_subtasks_on_distinct_files_separate() {
+        let reply = r#"[
+            {"id":"a","goal":"edit a.py","files":["a.py"]},
+            {"id":"b","goal":"edit b.py","files":["b.py"]}
+        ]"#;
+        let subs = parse_subtasks(reply);
+        assert_eq!(subs.len(), 2, "distinct files stay parallel");
+    }
+
+    #[test]
+    fn merge_is_transitive_across_a_shared_file() {
+        // a&b share x.py; b&c share y.py ⇒ all three collapse into one.
+        let reply = r#"[
+            {"id":"a","goal":"A","files":["x.py"]},
+            {"id":"b","goal":"B","files":["x.py","y.py"]},
+            {"id":"c","goal":"C","files":["y.py"]}
+        ]"#;
+        let subs = parse_subtasks(reply);
+        assert_eq!(
+            subs.len(),
+            1,
+            "transitive file sharing merges all: {subs:?}"
+        );
+        let mut files = subs[0].files.clone();
+        files.sort();
+        assert_eq!(files, vec!["x.py", "y.py"]);
+    }
+
+    #[test]
+    fn merge_rewrites_deps_to_the_merged_id() {
+        // c depends on b; a&b merge (shared file) ⇒ c's dep retargets to the merged
+        // id "a" and is NOT dropped as dangling.
+        let reply = r#"[
+            {"id":"a","goal":"A","files":["shared.py"]},
+            {"id":"b","goal":"B","files":["shared.py"]},
+            {"id":"c","goal":"C","files":["c.py"],"deps":["b"]}
+        ]"#;
+        let subs = parse_subtasks(reply);
+        assert_eq!(subs.len(), 2);
+        let c = subs.iter().find(|s| s.id == "c").unwrap();
+        assert_eq!(c.deps, vec!["a"], "dep on merged member retargets: {c:?}");
+    }
+
+    #[test]
+    fn subtasks_without_files_are_never_merged() {
+        // No file info ⇒ we can't prove a conflict ⇒ leave them parallel.
+        let reply = r#"[{"id":"a","goal":"A"},{"id":"b","goal":"B"}]"#;
+        let subs = parse_subtasks(reply);
+        assert_eq!(subs.len(), 2);
     }
 }

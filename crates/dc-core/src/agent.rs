@@ -262,6 +262,13 @@ pub fn run_agent_observed(
     let mut journal = Journal::new();
     let mut stall = StallDetector::default();
     let mut interventions = 0usize;
+    // The previous turn's action hash, used to short-circuit a tiny model that
+    // re-reads a file it already has instead of editing (see repeat-dedup below).
+    let mut prev_action: Option<u64> = None;
+    // How many turns in a row we've had to nudge the model off an idempotent
+    // repeat. If a nudge doesn't land, escalate to the advisor rather than nudging
+    // forever (spec 02 — junior asks senior).
+    let mut nudge_streak = 0usize;
 
     for step in 0..cfg.max_steps {
         // Compact older turns; keep the recent ones verbatim.
@@ -477,6 +484,59 @@ pub fn run_agent_observed(
                 )
             }
         };
+
+        // Repeat-dedup (spec 03): a tiny model often re-issues the *same*
+        // idempotent call (`read_file mathlib.py`, or `run_verification` over and
+        // over) instead of acting on what it already has — burning the budget until
+        // the stall trips. When the action exactly repeats such a tool with nothing
+        // changed between, replace the (identical) observation with a terse nudge
+        // toward the actual edit. This breaks the loop a turn earlier than the stall
+        // detector and points the model at the next concrete move.
+        let (obs, action, changed, tool, arg) =
+            if prev_action == Some(action) && is_idempotent_tool(&tool) {
+                nudge_streak += 1;
+                // If a nudge already failed to move the model, stop nudging and ask
+                // the senior for a concrete hint (spec 02). The advisor sees the
+                // recent history and the workspace state via the predicament.
+                let escalated = if nudge_streak >= 2 {
+                    escalate(
+                        advisor,
+                        instruction,
+                        &plan,
+                        &history,
+                        &format!("model keeps repeating `{tool}` without making the fix"),
+                    )
+                } else {
+                    None
+                };
+                let obs = match escalated {
+                    Some(advice) => {
+                        interventions += 1;
+                        nudge_streak = 0;
+                        sink.record(&AgentEvent::Advice {
+                            trigger: format!("repeating {tool}"),
+                            advice: advice.clone(),
+                        });
+                        advice
+                    }
+                    None if tool == "run_verification" => {
+                        "You just ran the tests and nothing has changed since — re-running \
+                         gives the same result. The suite is still failing: EDIT the code to \
+                         fix the reported failure, then run_verification."
+                            .to_string()
+                    }
+                    None => format!(
+                        "You already have the result of `{tool}` (it's in the context \
+                         above) — re-running it changes nothing. Make the edit the task \
+                         needs now with edit_file, then run_verification."
+                    ),
+                };
+                (obs, action, false, tool, arg)
+            } else {
+                nudge_streak = 0;
+                (obs, action, changed, tool, arg)
+            };
+        prev_action = Some(action);
 
         // Record the turn and detect stalls (spec 03 — VERIFY, cheap every turn).
         let was_error = looks_like_failure(&obs);
@@ -777,6 +837,18 @@ fn first_line(s: &str) -> String {
         .to_string()
 }
 
+/// Tools whose result is fully determined by the current workspace + args, so
+/// issuing the *same* call twice in a row (with nothing changed between) yields
+/// the same observation — used by the repeat-dedup nudge. `run_verification` is
+/// included: re-running the suite without an intervening edit can only reprint
+/// the same failures, and a tiny model loves to re-verify instead of fixing.
+fn is_idempotent_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "read_file" | "list_dir" | "search_code" | "find_symbol" | "run_verification"
+    )
+}
+
 /// The key argument of a call, for the history record (path or query/name).
 fn key_arg(call: &dc_tools::ValidatedCall) -> String {
     for k in ["path", "query", "name"] {
@@ -938,6 +1010,66 @@ mod tests {
         let ws = temp_dir("err");
         let backend = MockBackend::new(Vec::<String>::new()); // exhausts immediately
         assert!(run_agent(&backend, "x", &ws, &AgentConfig::default()).is_err());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn a_repeated_read_is_nudged_not_re_served() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("read-dedup");
+        std::fs::write(ws.join("f.txt"), "FILE_BODY_MARKER").unwrap();
+
+        // The model reads the same file twice, then finishes. The second read must
+        // come back as a nudge — not the file body again.
+        let backend = MockBackend::new([
+            json!({"tool":"read_file","path":"f.txt"}).to_string(),
+            json!({"tool":"read_file","path":"f.txt"}).to_string(),
+            json!({"tool":"finish"}).to_string(),
+        ]);
+
+        #[derive(Default)]
+        struct Rec {
+            results: Mutex<Vec<String>>,
+        }
+        impl crate::event::EventSink for Rec {
+            fn record(&self, e: &AgentEvent) {
+                if let AgentEvent::ToolResult { full, .. } = e {
+                    self.results.lock().unwrap().push(full.clone());
+                }
+            }
+        }
+
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let sink = Rec::default();
+        let report = run_agent_observed(
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "read it",
+            &ws,
+            &AgentConfig::default(),
+            &sink,
+        )
+        .unwrap();
+        assert!(report.finished);
+
+        let results = sink.results.lock().unwrap();
+        // First read returns the file body; the second is the de-dup nudge.
+        assert!(
+            results[0].contains("FILE_BODY_MARKER"),
+            "first read serves the file: {:?}",
+            results[0]
+        );
+        assert!(
+            results[1].contains("already have the result")
+                && !results[1].contains("FILE_BODY_MARKER"),
+            "second identical read is nudged, not re-served: {:?}",
+            results[1]
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

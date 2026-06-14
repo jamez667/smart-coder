@@ -437,12 +437,29 @@ impl Cli {
 
     /// Build the swarm config from the parsed flags (used by `swarm`). Workers run
     /// the per-worker agent config; the verify command also gates integration.
+    ///
+    /// Swarm workers are tiny, reasoning-prone models (Qwen3-1.7B and the like).
+    /// Their `/no_think` suffix can't rely on the model-name auto-detect — a swarm
+    /// run usually aliases the worker (`coder-0`) so the name never contains
+    /// "qwen3". Default the worker suffix to `/no_think` unless one is set.
     pub fn swarm_config(&self) -> dc_swarm::SwarmConfig {
+        let mut worker = self.agent_config();
+        if worker.system_suffix.is_none() {
+            worker.system_suffix = Some("/no_think".to_string());
+        }
         dc_swarm::SwarmConfig {
             max_workers: self.max_workers,
-            worker: self.agent_config(),
+            worker,
             verify_command: self.verify_command.clone(),
         }
+    }
+
+    /// The advisor swarm workers consult when they stall ("junior asks senior").
+    /// Prefer an explicit `--advisor`; otherwise fall back to the orchestrator —
+    /// the bigger, smarter model is already in VRAM, so workers should be able to
+    /// ask it for help even when no separate advisor was named.
+    pub fn swarm_advisor(&self) -> OpenAiBackend {
+        self.advisor().unwrap_or_else(|| self.orchestrator())
     }
 }
 

@@ -66,7 +66,7 @@ pub fn run_worker(
 
     let before = snapshot_tree(&scratch);
 
-    let instruction = worker_instruction(subtask);
+    let instruction = worker_instruction(subtask, &scratch);
     let registry = default_registry();
     let report: Option<AgentReport> = run_agent_recovering(
         backend,
@@ -104,15 +104,28 @@ pub fn run_worker(
 }
 
 /// The tight, single-purpose instruction handed to a worker (spec 08 — scoped).
-fn worker_instruction(subtask: &Subtask) -> String {
+///
+/// When the subtask names files, we inline their *current contents* so a tiny
+/// worker can write a correct anchored edit without first spending turns reading
+/// (and without guessing `old_str` and looping on "0 matches"). Tests files are
+/// included as read-only context but explicitly off-limits to edit.
+fn worker_instruction(subtask: &Subtask, scratch: &Path) -> String {
     let mut s = format!("Your subtask: {}", subtask.goal);
     if !subtask.files.is_empty() {
-        s.push_str(&format!(
-            "\nFocus on these files: {}.",
-            subtask.files.join(", ")
-        ));
+        s.push_str("\n\nRelevant files (current contents — edit_file against these exactly):");
+        for f in &subtask.files {
+            if let Ok(content) = std::fs::read_to_string(scratch.join(f)) {
+                // Keep it bounded so a huge file doesn't blow the worker's window.
+                let body: String = content.chars().take(2000).collect();
+                s.push_str(&format!("\n\n=== {f} ===\n{body}"));
+            }
+        }
     }
-    s.push_str("\nMake only the change this subtask needs. Do not modify test files.");
+    s.push_str(
+        "\n\nMake only the change this subtask needs, with edit_file using an \
+         exact old_str from the contents above. Do not modify test files. Then \
+         run_verification.",
+    );
     s
 }
 
@@ -136,7 +149,7 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         // Skip noise that would bloat the copy / break isolation.
         if matches!(
             name.to_string_lossy().as_ref(),
-            ".git" | "target" | "node_modules" | "__pycache__" | ".venv"
+            ".git" | "target" | "node_modules" | "__pycache__" | ".venv" | ".pytest_cache"
         ) {
             continue;
         }
@@ -165,7 +178,7 @@ fn snapshot_tree(root: &Path) -> BTreeMap<String, String> {
                 let n = entry.file_name().to_string_lossy().into_owned();
                 if !matches!(
                     n.as_str(),
-                    ".git" | "target" | "node_modules" | "__pycache__"
+                    ".git" | "target" | "node_modules" | "__pycache__" | ".pytest_cache" | ".venv"
                 ) {
                     stack.push(path);
                 }

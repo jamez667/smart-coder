@@ -48,7 +48,10 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
     let spec = dc_web::WebSwarm {
         orchestrator: cli.orchestrator(),
         worker: cli.backend(),
-        advisor: cli.advisor(),
+        // Workers always get a senior to ask: the explicit --advisor if given,
+        // else the orchestrator (already in VRAM). A stalled tiny worker that can
+        // ask the bigger model how to proceed is the whole recovery story (spec 02).
+        advisor: Some(cli.swarm_advisor()),
         task,
         repo_overview: String::new(),
         workspace,

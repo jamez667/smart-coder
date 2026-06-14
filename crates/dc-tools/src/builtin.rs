@@ -341,6 +341,17 @@ fn create_file(workspace: &Path, path: &str, content: &str) -> String {
 }
 
 /// Anchored edit: replace the single exact occurrence of `old_str` with `new_str`.
+/// Render `content` with 1-based line numbers, so an edit error can point a small
+/// model at exact anchors to copy.
+fn number_lines(content: &str) -> String {
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, l)| format!("  {}: {}", i + 1, l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The "exactly once" rule is the small-model safety net (spec 04): an ambiguous
 /// anchor (0 or >1 matches) is rejected with a precise count instead of guessing.
 fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> String {
@@ -357,11 +368,63 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
     }
     let count = content.matches(old_str).count();
     if count == 0 {
-        return format!("edit_file {path} error: old_str not found (0 matches)");
+        // The anchor isn't in the file. The usual cause for a small model is that
+        // the edit already landed (or it's working from a stale view), so it keeps
+        // re-proposing a change that's no longer applicable. Show the CURRENT file
+        // with line numbers so it re-anchors on what's actually there now.
+        let numbered = number_lines(&content);
+        return format!(
+            "edit_file {path} error: old_str {old_str:?} not found (0 matches). The file may \
+             already have that change. Here is the CURRENT content — pick your next anchor \
+             from these exact lines:\n{numbered}"
+        );
     }
     if count > 1 {
+        // Whole-line disambiguation (spec 04 — do the work the small model can't).
+        // A bare anchor like "return n" substring-matches both `    return n` and
+        // `    return n % 2 == 0`. But as a *whole trimmed line* it matches exactly
+        // one (`    return n`), which is unambiguously what the model meant. When
+        // `old_str.trim()` equals exactly one line's trimmed text, edit that line
+        // in place, preserving its indentation.
+        let lines: Vec<&str> = content.lines().collect();
+        let needle = old_str.trim();
+        let line_hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.trim() == needle)
+            .map(|(i, _)| i)
+            .collect();
+        if line_hits.len() == 1 {
+            let i = line_hits[0];
+            let indent: String = lines[i].chars().take_while(|c| c.is_whitespace()).collect();
+            let trailing_newline = content.ends_with('\n');
+            let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+            out[i] = format!("{indent}{}", new_str.trim());
+            let mut joined = out.join("\n");
+            if trailing_newline {
+                joined.push('\n');
+            }
+            return match std::fs::write(&p, &joined) {
+                Ok(()) => format!(
+                    "edit_file {path} ok (1 replacement, matched whole line {})",
+                    i + 1
+                ),
+                Err(e) => format!("edit_file {path} error: {e}"),
+            };
+        }
+
+        // Couldn't disambiguate automatically — show each matching line with its
+        // number so the model can copy a longer, unique anchor.
+        let mut shown = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains(old_str) {
+                shown.push(format!("  line {}: {}", i + 1, line));
+            }
+        }
         return format!(
-            "edit_file {path} error: old_str is ambiguous ({count} matches); include more surrounding context to make it unique"
+            "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches). \
+             Pick a UNIQUE anchor — copy a whole distinct line (or two) from below verbatim:\n{}",
+            shown.join("\n")
         );
     }
     let updated = content.replacen(old_str, new_str, 1);
@@ -507,8 +570,34 @@ mod tests {
             o.contains("ambiguous") && o.contains("2 matches"),
             "got: {o}"
         );
+        // The error lists each matching line so the model can pick a unique anchor.
+        assert!(o.contains("line 1:") && o.contains("line 2:"), "got: {o}");
         // Untouched — never edits on ambiguity.
         assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "x\nx\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_disambiguates_by_whole_line() {
+        // "return n" substring-matches two lines, but as a whole trimmed line it
+        // matches exactly one — the harness edits that line in place, preserving
+        // indentation. (This is the mathlib `double` case from the live swarm.)
+        let ws = temp_dir("edit-wholeline");
+        std::fs::write(
+            ws.join("m.py"),
+            "def is_even(n):\n    return n % 2 == 0\n\n\ndef double(n):\n    return n\n",
+        )
+        .unwrap();
+        let e = call(json!({
+            "tool":"edit_file","path":"m.py","old_str":"return n","new_str":"return n * 2"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("whole line"), "got: {o}");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("m.py")).unwrap(),
+            "def is_even(n):\n    return n % 2 == 0\n\n\ndef double(n):\n    return n * 2\n",
+            "only the double body line changed, indentation preserved"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
