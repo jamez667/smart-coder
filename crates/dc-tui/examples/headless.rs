@@ -19,9 +19,14 @@ fn main() {
     let model = args.get(1).cloned().unwrap_or_else(|| "gemma4:e4b".into());
     let workspace = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| ".".into()));
     let verify = args.get(3).cloned().filter(|s| !s.is_empty());
-    let task = args[4..].join(" ");
+    // arg 4 is an optional advisor model ("-" / "" = none); the rest is the task.
+    let advisor_model = args.get(4).cloned().filter(|s| !s.is_empty() && s != "-");
+    let task = args[5.min(args.len())..].join(" ");
 
-    let backend = OpenAiBackend::new(base_url, model);
+    let backend = OpenAiBackend::new(base_url.clone(), model);
+    let advisor = advisor_model
+        .as_ref()
+        .map(|m| OpenAiBackend::new(base_url, m.clone()));
     let registry = default_registry();
     let strategy = dc_core::select_strategy(&backend.capabilities());
     let cfg = AgentConfig {
@@ -35,7 +40,7 @@ fn main() {
     println!("== driving {} on a real model ==", task);
     let report = run_agent_observed(
         &backend,
-        None,
+        advisor.as_ref().map(|a| a as &dyn ModelBackend),
         &registry,
         strategy.as_ref(),
         &task,

@@ -55,6 +55,9 @@ pub struct Cli {
     pub verify_command: Option<String>,
     /// Ask the planner to decompose the task before running (`run` only).
     pub plan_first: bool,
+    /// A larger "senior" model consulted when the coder stalls — "junior asks
+    /// senior" (spec 02). Same endpoint, different model. None = no advisor.
+    pub advisor_model: Option<String>,
 }
 
 impl Cli {
@@ -74,6 +77,7 @@ impl Cli {
         let mut tool_calling = ToolCallingArg::None;
         let mut verify_command = None;
         let mut plan_first = false;
+        let mut advisor_model = None;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
@@ -91,21 +95,29 @@ impl Cli {
                     }
                     // Pull flags back out of the collected task (so `run "x" --verify`
                     // works); simplest is to re-scan for our known flags.
-                    let (t, v, p) = split_run_args(rest)?;
+                    let parsed = split_run_args(rest)?;
                     command = Some(if is_serve {
-                        Command::Serve { task: t }
+                        Command::Serve { task: parsed.task }
                     } else {
-                        Command::Run { task: t }
+                        Command::Run { task: parsed.task }
                     });
-                    if v.is_some() {
-                        verify_command = v;
+                    if parsed.verify.is_some() {
+                        verify_command = parsed.verify;
                     }
-                    plan_first = p || plan_first;
+                    if parsed.advisor.is_some() {
+                        advisor_model = parsed.advisor;
+                    }
+                    plan_first = parsed.plan || plan_first;
                 }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
                 "--verify" => {
                     verify_command = Some(it.next().ok_or_else(|| {
                         DcError::Eval("--verify requires a command argument".to_string())
+                    })?);
+                }
+                "--advisor" => {
+                    advisor_model = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--advisor requires a model name".to_string())
                     })?);
                 }
                 "--plan" => plan_first = true,
@@ -149,7 +161,16 @@ impl Cli {
             tool_calling,
             verify_command,
             plan_first,
+            advisor_model,
         })
+    }
+
+    /// Build the advisor (senior) backend, if `--advisor` was given. Same endpoint
+    /// as the coder, a different model — "junior asks senior" (spec 02).
+    pub fn advisor(&self) -> Option<OpenAiBackend> {
+        self.advisor_model
+            .as_ref()
+            .map(|m| OpenAiBackend::new(self.base_url.clone(), m.clone()))
     }
 
     /// Build the configured backend, applying the requested enforcement (spec 02).
@@ -166,12 +187,21 @@ impl Cli {
     }
 }
 
-/// Split the args collected after `run` into (task, verify_command, plan_first).
-/// `run` consumes the rest of argv, so trailing `--verify X` / `--plan` are
-/// peeled back out here. The task is everything that isn't one of those flags.
-fn split_run_args(args: Vec<String>) -> Result<(String, Option<String>, bool)> {
+/// Flags peeled out of the args that follow `run`/`serve` (which greedily
+/// consume the rest of argv).
+struct RunArgs {
+    task: String,
+    verify: Option<String>,
+    advisor: Option<String>,
+    plan: bool,
+}
+
+/// Split the args collected after `run`/`serve` into the task plus its trailing
+/// `--verify X` / `--advisor M` / `--plan` flags. The task is everything else.
+fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut task_words = Vec::new();
     let mut verify = None;
+    let mut advisor = None;
     let mut plan = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -181,11 +211,22 @@ fn split_run_args(args: Vec<String>) -> Result<(String, Option<String>, bool)> {
                     DcError::Eval("--verify requires a command argument".to_string())
                 })?);
             }
+            "--advisor" => {
+                advisor =
+                    Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--advisor requires a model name".to_string())
+                    })?);
+            }
             "--plan" => plan = true,
             _ => task_words.push(a),
         }
     }
-    Ok((task_words.join(" "), verify, plan))
+    Ok(RunArgs {
+        task: task_words.join(" "),
+        verify,
+        advisor,
+        plan,
+    })
 }
 
 /// Usage text (spec 06 — invocation modes, trimmed to the M0 surface).
@@ -209,12 +250,15 @@ OPTIONS:
     --tool-calling MODE   none | native | gbnf — how the backend enforces tool
                           calls (spec 02)             [default: none]
     --verify CMD          Test command for `run` (enables the TDD whole-suite gate)
+    --advisor MODEL       A larger model consulted when the coder stalls
+                          (\"junior asks senior\", spec 02). Same endpoint.
     --plan                Decompose the task into a plan before running (`run`)
 
 EXAMPLES:
     dumb-coder doctor
     dumb-coder run \"make the failing test in is_even pass\" --verify \"sh test.sh\"
     dumb-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
+    dumb-coder run \"fix is_even\" --model gemma4:e2b --advisor gemma4:e4b --verify \"sh test.sh\"
     dumb-coder run \"add input validation to parse_config\" --plan
     dumb-coder --model gemma4:e4b --tool-calling native"
 }
@@ -329,6 +373,26 @@ mod tests {
     #[test]
     fn run_requires_a_task() {
         assert!(Cli::parse(["run"]).is_err());
+    }
+
+    #[test]
+    fn parses_advisor_and_builds_a_second_backend() {
+        use dc_model::ModelBackend;
+        // As a top-level flag and inside a `run`/`serve` tail.
+        let cli = Cli::parse([
+            "run",
+            "fix it",
+            "--model",
+            "gemma4:e2b",
+            "--advisor",
+            "gemma4:e4b",
+        ])
+        .unwrap();
+        assert_eq!(cli.advisor_model.as_deref(), Some("gemma4:e4b"));
+        let advisor = cli.advisor().expect("advisor backend");
+        assert_eq!(advisor.name(), "openai-compat");
+        // No --advisor → no advisor backend.
+        assert!(Cli::parse(["run", "x"]).unwrap().advisor().is_none());
     }
 
     #[test]

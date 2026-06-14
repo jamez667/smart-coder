@@ -48,7 +48,7 @@ fn serve_task(cli: &Cli, task: String) -> ExitCode {
 
     let spec = dc_web::WebRun {
         backend,
-        advisor: Option::<dc_model::OpenAiBackend>::None,
+        advisor: cli.advisor(),
         registry,
         strategy,
         instruction: task,
@@ -95,9 +95,8 @@ fn run_task(cli: &Cli, task: String) -> ExitCode {
 
     let spec = dc_tui::TuiRun {
         backend,
-        // No separate advisor profile yet (M4 escalation is wired but the CLI
-        // doesn't expose a second model); the senior is None for now.
-        advisor: Option::<dc_model::OpenAiBackend>::None,
+        // "Junior asks senior" (spec 02): the optional larger advisor model.
+        advisor: cli.advisor(),
         registry,
         strategy,
         instruction: task,

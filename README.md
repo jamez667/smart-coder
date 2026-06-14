@@ -56,6 +56,12 @@ the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 207 tests)
   - **Proven on real Gemma 4 E4B** (local Ollama): both drive a failing test
     red→green in a handful of clean turns. The agent runs on a worker thread; the
     JSON/state folds are headless-tested.
+  - **"Junior asks senior" live** (`--advisor <model>`): point a *larger* model at
+    the same endpoint and the UI lights up a magenta nudge line whenever the coder
+    stalls. Verified with `--model gemma4:e2b --advisor gemma4:e4b` — the tiny
+    coder thrashed, the harness detected the stall, consulted e4b, and got a
+    specific hint ("re-examine the modulo operator…") without the senior writing
+    the fix (spec 02 tiered models).
 
 - **M4 planning & recovery** (`dc-core`) — the agent survives multi-step tasks and
   its own mistakes (spec 03). A **planner** decomposes the task into a short,
