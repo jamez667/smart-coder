@@ -17,16 +17,21 @@ use crate::board::{Subtask, TaskBoard};
 /// Build the decomposition prompt: the task plus a repo overview, asking for a
 /// short list of independent, scoped subtasks as JSON.
 fn decompose_messages(task: &str, repo_overview: &str) -> Vec<Message> {
-    let system = "You are the orchestrator for a swarm of small coding agents. \
-        Break the task into INDEPENDENT subtasks so workers can run in parallel. \
-        Make each subtask as SMALL and narrowly-scoped as possible — the smaller the \
-        slice, the more reliably a tiny worker completes it — but each subtask owns a \
-        DISJOINT set of files: never give the same file to two subtasks; if two \
-        pieces of work touch one file, make them ONE subtask (the file is the unit of \
-        a worker's edits). Each subtask is a tight, single-purpose goal. Respond with \
-        ONLY a JSON array; each item: \
-        {\"id\":\"t1\",\"goal\":\"...\",\"files\":[\"path\"],\"deps\":[\"id\"]}. \
-        Use deps only when one subtask must finish before another. Keep it minimal."
+    // Keep this SHORT. A long, rationale-heavy system prompt makes the small
+    // orchestrator emit *nothing* (observed live 2026-06-14: coder-0 returned empty
+    // content for the verbose version, with and without /no_think, so every run fell
+    // back to a single file-less subtask). A concise instruction with one concrete
+    // example reliably yields a JSON array with a populated `files` field — which is
+    // what `integrate` needs to have a target to merge into. The disjoint-files
+    // invariant is enforced structurally by `coalesce_by_file`, so it needn't be
+    // belaboured in the prompt.
+    let system = "Break the coding task into independent subtasks, one JSON object per \
+        subtask. Fields: id, goal, files (the real source files this subtask edits), \
+        deps (ids that must finish first). Put work that touches the same file in ONE \
+        subtask. The test files are fixed — never create a subtask that edits a test \
+        file; subtasks only change the source code that must make the existing tests \
+        pass. Output ONLY a JSON array, e.g. \
+        [{\"id\":\"t1\",\"goal\":\"fix the parser\",\"files\":[\"parser.py\"],\"deps\":[]}]."
         .to_string();
     let mut user = format!("Task: {task}");
     if !repo_overview.is_empty() {

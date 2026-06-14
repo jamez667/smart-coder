@@ -21,6 +21,17 @@ pub enum SwarmEvent {
     WorkerStarted { subtask: String, goal: String },
     /// A worker finished its run (before integration).
     WorkerFinished { subtask: String, summary: String },
+    /// A subtask is being re-dispatched after an incomplete/rejected integration
+    /// (spec 08 — "Subtask retry on partial or rejected integration"). Emitted
+    /// before each re-dispatch. `attempt` is the retry number (1-based, so the
+    /// first retry is `1`), `max` the configured `max_subtask_retries`, and
+    /// `failing_tests` the still-red scoped tests that motivated the retry.
+    SubtaskRetry {
+        subtask: String,
+        attempt: usize,
+        max: usize,
+        failing_tests: Vec<String>,
+    },
     /// A worker's proposal was integrated (accepted) or rejected. On accept,
     /// `files` are the changed paths; on reject, `files[0]` is the reason.
     Integrated {
@@ -97,6 +108,12 @@ mod tests {
             SwarmEvent::WorkerFinished {
                 subtask: "s1".into(),
                 summary: "edited 1 file".into(),
+            },
+            SwarmEvent::SubtaskRetry {
+                subtask: "s1".into(),
+                attempt: 1,
+                max: 2,
+                failing_tests: vec!["test_upper_bound".into(), "test_clamp".into()],
             },
             SwarmEvent::Integrated {
                 subtask: "s1".into(),

@@ -81,6 +81,8 @@ pub struct Cli {
     pub orchestrator_url: Option<String>,
     /// Max workers running at once for `swarm` (spec 08).
     pub max_workers: usize,
+    /// Per-subtask retry cap for `swarm` (spec 08 — subtask retry). Default 2.
+    pub max_subtask_retries: usize,
     /// `plan` per-phase thinking base: `Some(false)` = think on every phase,
     /// `Some(true)` = `/no_think` every phase, `None` = the smart default (spec 09).
     pub think_base: Option<bool>,
@@ -144,6 +146,7 @@ impl Cli {
         let mut orchestrator_model = None;
         let mut orchestrator_url = None;
         let mut max_workers = 2usize;
+        let mut max_subtask_retries = 2usize;
         let mut json = false;
         let mut log: Option<String> = None;
         let mut yolo = false;
@@ -205,6 +208,9 @@ impl Cli {
                     }
                     if let Some(n) = parsed.max_workers {
                         max_workers = n;
+                    }
+                    if let Some(n) = parsed.max_subtask_retries {
+                        max_subtask_retries = n;
                     }
                     if let Some(u) = parsed.base_url {
                         base_url = u;
@@ -280,6 +286,14 @@ impl Cli {
                             DcError::Eval("--max-workers requires a positive integer".to_string())
                         })?;
                 }
+                "--max-retries" => {
+                    max_subtask_retries =
+                        it.next().and_then(|v| v.parse().ok()).ok_or_else(|| {
+                            DcError::Eval(
+                                "--max-retries requires a non-negative integer".to_string(),
+                            )
+                        })?;
+                }
                 "--no-think" => system_suffix = Some("/no_think".to_string()),
                 "--json" => json = true,
                 "--log" => {
@@ -350,6 +364,7 @@ impl Cli {
             orchestrator_model,
             orchestrator_url,
             max_workers,
+            max_subtask_retries,
             think_base,
             think_steps,
             ceremony,
@@ -454,6 +469,8 @@ struct RunArgs {
     orchestrator: Option<String>,
     orchestrator_url: Option<String>,
     max_workers: Option<usize>,
+    /// `--max-retries N` — per-subtask retry cap for `swarm` (spec 08).
+    max_subtask_retries: Option<usize>,
     no_think: bool,
     plan: bool,
     /// Halt at each `plan` phase boundary for a human checkpoint (spec 09).
@@ -498,6 +515,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut orchestrator = None;
     let mut orchestrator_url = None;
     let mut max_workers = None;
+    let mut max_subtask_retries = None;
     let mut no_think = false;
     let mut plan = false;
     let mut interactive = false;
@@ -537,6 +555,12 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                             DcError::Eval("--max-workers requires a positive integer".to_string())
                         })?,
                 );
+            }
+            "--max-retries" => {
+                max_subtask_retries =
+                    Some(need(&mut it, "--max-retries")?.parse().map_err(|_| {
+                        DcError::Eval("--max-retries requires a non-negative integer".to_string())
+                    })?);
             }
             "--base-url" => base_url = Some(need(&mut it, "--base-url")?),
             "--model" => model = Some(need(&mut it, "--model")?),
@@ -590,6 +614,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         orchestrator,
         orchestrator_url,
         max_workers,
+        max_subtask_retries,
         no_think,
         plan,
         interactive,
@@ -798,6 +823,7 @@ impl Cli {
             worker,
             verify_command: self.verify_command.clone(),
             frozen_paths: Vec::new(),
+            max_subtask_retries: self.max_subtask_retries,
         }
     }
 
@@ -981,11 +1007,15 @@ mod tests {
             "advisor-e4b",
             "--max-workers",
             "3",
+            "--max-retries",
+            "4",
             "--verify",
             "pytest -q",
         ])
         .unwrap();
         match &cli.command {
+            // The flags after the task must be peeled off, not swept into the goal
+            // (regression: `--max-retries` once leaked into the task string).
             Command::Swarm { task } => assert_eq!(task, "add validation"),
             other => panic!("expected Swarm, got {other:?}"),
         }
@@ -996,9 +1026,11 @@ mod tests {
             Some("http://localhost:11434/v1")
         );
         assert_eq!(cli.max_workers, 3);
+        assert_eq!(cli.max_subtask_retries, 4);
         // The swarm config carries the verify command (gates integration) + workers.
         let sc = cli.swarm_config();
         assert_eq!(sc.max_workers, 3);
+        assert_eq!(sc.max_subtask_retries, 4);
         assert_eq!(sc.verify_command.as_deref(), Some("pytest -q"));
     }
 

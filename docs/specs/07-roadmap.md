@@ -157,14 +157,22 @@ agent loop, unchanged; the swarm is a coordinator above it.
   done **only after a final whole-suite integration verification** passes (spec 08
   step 5) — closing a live-found gap where a partial fix could be reported done
   over a red suite (honest stop, [06](06-cli-ux.md)).
+- ✅ **Subtask retry on partial/rejected integration** (spec 08 "Subtask retry") —
+  a subtask is `Done` only when its **own** scoped tests pass, not merely when the
+  cumulative "didn't make it worse" gate accepted it. On an incomplete (or rejected)
+  proposal the orchestrator re-dispatches the *same* subtask with a feedback-augmented
+  prompt (still-failing test names + assertion messages + the merged file) under
+  `max_subtask_retries` (default 2; `0` = the prior no-retry behaviour), each attempt
+  scratch-isolated and gated exactly like the first; on exhaustion the subtask is
+  `Failed` (not `Done`) with the residual failures as the reason and dependents block
+  via quiescence. Visible as `SwarmEvent::SubtaskRetry { attempt, max, failing_tests }`
+  ("↻ retry 1/2 — N tests still red"). The swarm now *recovers* a partial fix instead
+  of stopping honestly-but-red; M4's per-step retry is the single-agent precedent.
 - *Deferred (vs. spec 08):* git-worktree isolation + branch merges (we propose
   diffs instead); conflict *arbitration* by the orchestrator (we reject+reassign);
   the serialized shared-workspace lease fallback; specialized worker roles;
-  **subtask retry on partial/rejected integration** — re-dispatch an incomplete
-  subtask to a worker with failing-test feedback under a bounded retry budget
-  (spec 08 "Subtask retry"), so the swarm *recovers* a partial fix instead of
-  stopping honestly-but-red; today the final verify reports it, M4's per-step
-  retry is the single-agent precedent.
+  advisor escalation before a subtask's final retry (the hook is threaded but the
+  one-shot proposer doesn't yet consult it).
 
 ## M8 — Android app + AICore (first platform client)
 **Goal:** the showcase of the "small model" thesis — fully on-device on a phone,

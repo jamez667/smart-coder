@@ -444,6 +444,16 @@ fn print_swarm_event(ev: &dc_swarm::SwarmEvent) {
         WorkerFinished { subtask, summary } => {
             println!("  · [{subtask}] finished — {summary}");
         }
+        SubtaskRetry {
+            subtask,
+            attempt,
+            max,
+            failing_tests,
+        } => {
+            let n = failing_tests.len();
+            let plural = if n == 1 { "" } else { "s" };
+            println!("  ↻ [{subtask}] retry {attempt}/{max} — {n} test{plural} still red");
+        }
         Integrated {
             subtask,
             accepted,
@@ -972,6 +982,12 @@ mod tests {
             WorkerFinished {
                 subtask: "s1".into(),
                 summary: "edited config.py".into(),
+            },
+            SubtaskRetry {
+                subtask: "s1".into(),
+                attempt: 1,
+                max: 2,
+                failing_tests: vec!["test_upper_bound".into()],
             },
             Integrated {
                 subtask: "s1".into(),

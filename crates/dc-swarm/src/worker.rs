@@ -51,12 +51,28 @@ impl WorkerResult {
 /// signature stability but a one-shot proposer doesn't use them.
 pub fn run_worker(
     backend: &dyn ModelBackend,
+    advisor: Option<&dyn ModelBackend>,
+    subtask: &Subtask,
+    workspace: &Path,
+    cfg: &AgentConfig,
+) -> WorkerResult {
+    run_worker_with_feedback(backend, advisor, subtask, workspace, cfg, None)
+}
+
+/// Like [`run_worker`], but for a **retry** (spec 08 — subtask retry): the prompt is
+/// augmented with `feedback` — the still-failing test names + assertion messages and
+/// the current (already-merged) file contents — so the worker fixes *what's still
+/// wrong* rather than re-deriving from scratch. `feedback == None` is the first
+/// attempt (identical to [`run_worker`]).
+pub fn run_worker_with_feedback(
+    backend: &dyn ModelBackend,
     _advisor: Option<&dyn ModelBackend>,
     subtask: &Subtask,
     workspace: &Path,
     _cfg: &AgentConfig,
+    feedback: Option<&str>,
 ) -> WorkerResult {
-    let prompt = propose_prompt(subtask, workspace);
+    let prompt = propose_prompt_with_feedback(subtask, workspace, feedback);
     let req = dc_model::GenerateRequest::new(vec![
         dc_model::Message::system(PROPOSER_SYSTEM),
         dc_model::Message::user(prompt),
@@ -80,15 +96,40 @@ pub fn run_worker(
 }
 
 /// System prompt for a worker: it's a reasoner, not an editor.
+// The trailing `/no_think` is load-bearing on Qwen3-class workers: without it the
+// model emits its chain-of-thought *as the reply*, which then gets written into the
+// source file as garbage (observed live 2026-06-14 — roman.py filled with "Okay,
+// let's see…" reasoning, breaking collection). A proposer only ever wants the final
+// file, never the thinking, so suppression belongs in the prompt itself. (Decompose,
+// by contrast, *needs* to think — see decompose.rs — so it omits the suffix.)
 const PROPOSER_SYSTEM: &str = "You fix code. You are shown a file and a task. \
 Reply with the COMPLETE corrected file and nothing else — no explanation, no \
 markdown fences, just the full file contents with your fix applied. Do not change \
-anything the task doesn't require.";
+anything the task doesn't require. /no_think";
 
 /// Build the worker's single-shot prompt: the task plus the current contents of
 /// the files it must fix. Only the named files are shown (the subtask is scoped).
+#[cfg(test)]
 fn propose_prompt(subtask: &Subtask, workspace: &Path) -> String {
+    propose_prompt_with_feedback(subtask, workspace, None)
+}
+
+/// Build the worker's single-shot prompt. On a retry, `feedback` (still-failing test
+/// names + assertion messages) is woven in *before* the file contents so the worker
+/// sees what's still wrong against the current — already-merged — code (spec 08).
+fn propose_prompt_with_feedback(
+    subtask: &Subtask,
+    workspace: &Path,
+    feedback: Option<&str>,
+) -> String {
     let mut s = format!("Task: {}\n", subtask.goal);
+    if let Some(fb) = feedback {
+        s.push_str(&format!(
+            "\nA previous attempt was incomplete — these tests are STILL failing:\n{fb}\n\
+             \nThe file below already contains that previous attempt. Fix what's still \
+             wrong so every test passes.\n"
+        ));
+    }
     for f in &subtask.files {
         if let Ok(content) = std::fs::read_to_string(workspace.join(f)) {
             let content = content.replace("\r\n", "\n");

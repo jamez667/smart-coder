@@ -32,6 +32,13 @@ pub struct SwarmConfig {
     /// to these, so workers make the tests pass instead of weakening them. Set by
     /// the staged workflow from the tests it wrote in Phase 4.
     pub frozen_paths: Vec<String>,
+    /// Per-subtask retry cap (spec 08 — "Subtask retry on partial or rejected
+    /// integration"). When an accepted-but-incomplete (or rejected) proposal leaves
+    /// a subtask's scoped tests red, the orchestrator re-dispatches the subtask to a
+    /// worker with failing-test feedback, up to this many extra attempts. Total
+    /// worker invocations for a subtask is `1 + max_subtask_retries`. `0` restores
+    /// the no-retry behaviour. Default **2**.
+    pub max_subtask_retries: usize,
 }
 
 impl Default for SwarmConfig {
@@ -41,6 +48,7 @@ impl Default for SwarmConfig {
             worker: AgentConfig::default(),
             verify_command: None,
             frozen_paths: Vec::new(),
+            max_subtask_retries: 2,
         }
     }
 }
@@ -145,35 +153,23 @@ pub fn run_swarm_board(
         // Deterministic integration order: by subtask id.
         results.sort_by(|a, b| a.subtask_id.cmp(&b.subtask_id));
 
-        // Integrate proposals ONE AT A TIME, verifying after each (serialized).
+        // Integrate proposals ONE AT A TIME, verifying after each (serialized). Each
+        // subtask runs through the scoped retry loop (spec 08): integrate → check the
+        // subtask's OWN tests → on incomplete, re-dispatch with feedback up to
+        // `max_subtask_retries`.
         for result in results {
-            sink.record(&SwarmEvent::WorkerFinished {
-                subtask: result.subtask_id.clone(),
-                summary: result.report_summary.clone(),
-            });
-            match integrate(orchestrator, workspace, &result, cfg) {
-                Integration::Accepted(files) => {
-                    board.complete(&result.subtask_id);
-                    for f in &files {
-                        if !integrated_files.contains(f) {
-                            integrated_files.push(f.clone());
-                        }
-                    }
-                    sink.record(&SwarmEvent::Integrated {
-                        subtask: result.subtask_id.clone(),
-                        accepted: true,
-                        files,
-                    });
-                }
-                Integration::Rejected(reason) => {
-                    board.fail(&result.subtask_id);
-                    sink.record(&SwarmEvent::Integrated {
-                        subtask: result.subtask_id.clone(),
-                        accepted: false,
-                        files: vec![reason],
-                    });
-                }
-            }
+            integrate_with_retry(
+                orchestrator,
+                worker_backend,
+                advisor,
+                &wave,
+                workspace,
+                result,
+                cfg,
+                sink,
+                &mut board,
+                &mut integrated_files,
+            );
         }
     }
 
@@ -206,6 +202,208 @@ pub fn run_swarm_board(
 enum Integration {
     Accepted(Vec<String>),
     Rejected(String),
+}
+
+/// Integrate one worker result and, if the subtask's own tests aren't satisfied,
+/// retry it with feedback up to `max_subtask_retries` (spec 08 — "Subtask retry on
+/// partial or rejected integration"). This layers a **scoped, per-subtask completion
+/// check** on top of the existing cumulative whole-suite gate: a subtask is `Done`
+/// only when (a) the merge didn't worsen the suite AND (b) its own tests pass.
+///
+/// On exhaustion the subtask is marked `Failed` with the residual failures as the
+/// reason; dependents then block via the board's quiescence rule. Every attempt is
+/// gated and serialized exactly like the first (a regressing retry is reverted by
+/// `integrate` itself).
+#[allow(clippy::too_many_arguments)]
+fn integrate_with_retry(
+    orchestrator: &dyn ModelBackend,
+    worker_backend: &(dyn ModelBackend + Sync),
+    advisor: Option<&(dyn ModelBackend + Sync)>,
+    wave: &[crate::board::Subtask],
+    workspace: &Path,
+    mut result: WorkerResult,
+    cfg: &SwarmConfig,
+    sink: &dyn SwarmSink,
+    board: &mut crate::board::TaskBoard,
+    integrated_files: &mut Vec<String>,
+) {
+    let id = result.subtask_id.clone();
+    let subtask = wave.iter().find(|s| s.id == id).cloned();
+
+    // The whole-suite baseline for THIS subtask's free-text fallback: the failing
+    // count just before this subtask's first merge (so the fallback can ask "did this
+    // subtask's merge clear the suite?"). Only needed when frozen tests are unknown.
+    let baseline = match (&cfg.verify_command, cfg.frozen_paths.is_empty()) {
+        (Some(cmd), true) => Some(badness(&dc_verify::run_verification(workspace, cmd))),
+        _ => None,
+    };
+
+    let mut attempt = 0usize;
+    loop {
+        sink.record(&SwarmEvent::WorkerFinished {
+            subtask: id.clone(),
+            summary: result.report_summary.clone(),
+        });
+
+        let outcome = integrate(orchestrator, workspace, &result, cfg);
+        let accepted_files = match &outcome {
+            Integration::Accepted(files) => Some(files.clone()),
+            Integration::Rejected(_) => None,
+        };
+
+        // Decide the subtask's TRUE status from a scoped check, not the cumulative
+        // gate alone (spec 08). A rejected merge is trivially incomplete.
+        let residual: Vec<dc_verify::TestCase> = match &cfg.verify_command {
+            // `max_subtask_retries == 0` restores today's behaviour (spec 08): no
+            // scoped completion check, no retry — trust the cumulative gate alone.
+            // Accept → Done (the final whole-suite verify is the only backstop).
+            _ if cfg.max_subtask_retries == 0 && accepted_files.is_some() => Vec::new(),
+            // No verify command: nothing to scope against. An accepted merge is taken
+            // as complete; a rejected one is incomplete.
+            None if accepted_files.is_some() => Vec::new(),
+            None => vec![synthetic_failure("integration rejected")],
+            // With a verify command, scope to the subtask's own tests — for both an
+            // accept (is the partial fix actually complete?) and a reject (the merge
+            // was reverted; check the prior state against this subtask's contract).
+            Some(cmd) => scoped_failures(workspace, cmd, &cfg.frozen_paths, baseline),
+        };
+
+        if let (true, Some(files)) = (residual.is_empty(), accepted_files) {
+            // Genuinely done: the gate accepted AND the subtask's tests are green.
+            board.complete(&id);
+            for f in &files {
+                if !integrated_files.contains(f) {
+                    integrated_files.push(f.clone());
+                }
+            }
+            sink.record(&SwarmEvent::Integrated {
+                subtask: id.clone(),
+                accepted: true,
+                files,
+            });
+            return;
+        }
+
+        // Incomplete (accepted-but-partial, or rejected). Retry if budget remains and
+        // we know the subtask to re-dispatch.
+        let failing: Vec<String> = residual.iter().map(|c| c.name.clone()).collect();
+        if attempt < cfg.max_subtask_retries {
+            if let Some(st) = &subtask {
+                attempt += 1;
+                sink.record(&SwarmEvent::SubtaskRetry {
+                    subtask: id.clone(),
+                    attempt,
+                    max: cfg.max_subtask_retries,
+                    failing_tests: failing.clone(),
+                });
+                let feedback = feedback_text(&residual);
+                let adv: Option<&dyn ModelBackend> = advisor.map(|a| a as &dyn ModelBackend);
+                let wb: &dyn ModelBackend = worker_backend;
+                result = crate::worker::run_worker_with_feedback(
+                    wb,
+                    adv,
+                    st,
+                    workspace,
+                    &cfg.worker,
+                    Some(&feedback),
+                );
+                continue;
+            }
+        }
+
+        // Exhausted (or nothing to re-dispatch): mark Failed with the residual as the
+        // reason (spec 08 — Failed, not Done; dependents block via quiescence).
+        board.fail(&id);
+        let reason = if failing.is_empty() {
+            match &outcome {
+                Integration::Rejected(r) => r.clone(),
+                Integration::Accepted(_) => "subtask tests still failing".to_string(),
+            }
+        } else {
+            format!("subtask tests still failing: {}", failing.join(", "))
+        };
+        sink.record(&SwarmEvent::Integrated {
+            subtask: id.clone(),
+            accepted: false,
+            files: vec![reason],
+        });
+        return;
+    }
+}
+
+/// The subtask's residual failing tests after a merge — the *scoped* completion
+/// check (spec 08 step 1). Two modes:
+///
+/// - **Frozen tests known** (staged workflow): run the verify command **filtered to
+///   the frozen contract-test paths** (`pytest <those files>`); the failing cases it
+///   reports are the subtask's own unmet contract. Precise.
+/// - **Frozen tests unknown** (free-text `swarm <task>`, `frozen_paths` empty): fall
+///   back to the **whole-suite delta vs. this subtask's baseline** — incomplete iff
+///   the suite is still red AND this subtask's merge didn't clear it. Coarser (can't
+///   attribute a residual to one subtask), but stops a red run being called done.
+fn scoped_failures(
+    workspace: &Path,
+    verify_command: &str,
+    frozen: &[String],
+    baseline: Option<usize>,
+) -> Vec<dc_verify::TestCase> {
+    if frozen.is_empty() {
+        // Free-text fallback: whole-suite delta vs. this subtask's own baseline.
+        let report = dc_verify::run_verification(workspace, verify_command);
+        let after = badness(&report);
+        let still_red = after > 0;
+        let cleared = baseline.map(|b| after < b).unwrap_or(false);
+        if still_red && !cleared {
+            let failed: Vec<dc_verify::TestCase> = report.failed().into_iter().cloned().collect();
+            if failed.is_empty() {
+                vec![synthetic_failure("suite still red after this subtask")]
+            } else {
+                failed
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        // Precise: verify filtered to the frozen contract tests for this subtask.
+        let cmd = format!("{verify_command} {}", frozen.join(" "));
+        let report = dc_verify::run_verification(workspace, &cmd);
+        if report.generic {
+            // No per-test breakdown — fall back to the command's pass/fail.
+            if report.command_ok {
+                Vec::new()
+            } else {
+                vec![synthetic_failure(
+                    "scoped tests failed (no per-test detail)",
+                )]
+            }
+        } else {
+            report.failed().into_iter().cloned().collect()
+        }
+    }
+}
+
+/// A stand-in failing case for paths where we know the subtask is incomplete but have
+/// no per-test breakdown (generic/exit-code-only suites, rejected merges).
+fn synthetic_failure(msg: &str) -> dc_verify::TestCase {
+    dc_verify::TestCase {
+        name: msg.to_string(),
+        passed: false,
+        message: None,
+    }
+}
+
+/// The feedback block for a retry prompt: still-failing test names + their assertion
+/// messages (spec 08 — `TestReport::failed()` carries `name` + `message`).
+fn feedback_text(residual: &[dc_verify::TestCase]) -> String {
+    let mut s = String::new();
+    for c in residual {
+        s.push_str(&format!("✗ {}", c.name));
+        if let Some(m) = &c.message {
+            s.push_str(&format!("\n    {}", m.replace('\n', "\n    ")));
+        }
+        s.push('\n');
+    }
+    s.trim_end().to_string()
 }
 
 /// How "bad" a verification result is, comparable before vs after a change. For a
@@ -328,10 +526,13 @@ fn merge_file(
     proposal: &str,
 ) -> Option<String> {
     use dc_model::{GenerateRequest, Message};
+    // `/no_think` for the same reason as the proposer (worker.rs): a Qwen3-class
+    // orchestrator otherwise writes its reasoning into the merged file. Merge only
+    // ever wants the final file bytes.
     let system = "You apply a proposed fix to a file. You are given the CURRENT file \
         and a worker's proposed corrected version. Output the complete, final file \
         contents only — no markdown fences, no commentary. Keep everything the fix \
-        doesn't change; apply the fix exactly.";
+        doesn't change; apply the fix exactly. /no_think";
     let user = format!(
         "File: {path}\n\n--- CURRENT ---\n{current}\n\n--- PROPOSED FIX ---\n{proposal}\n\n\
          Output the complete corrected {path}:"
@@ -475,7 +676,7 @@ mod tests {
         let backend = ScriptedSwarm::new(vec![
             // decomposition
             (
-                "orchestrator for a swarm",
+                "Break the coding task",
                 vec![
                     r#"[{"id":"a","goal":"set a.txt to new-a","files":["a.txt"]},{"id":"b","goal":"set b.txt to new-b","files":["b.txt"]}]"#,
                 ],
@@ -537,7 +738,7 @@ mod tests {
         let broken = "def is_even(n):\n    return False\n";
         let backend = ScriptedSwarm::new(vec![
             (
-                "orchestrator for a swarm",
+                "Break the coding task",
                 vec![r#"[{"id":"x","goal":"break calc.py badly","files":["calc.py"]}]"#],
             ),
             // merge (keyed on "File: <path>") and proposer (keyed on goal) both yield
@@ -582,7 +783,7 @@ mod tests {
         // test. The merge applies impl.py but must leave the test untouched.
         let backend = ScriptedSwarm::new(vec![
             (
-                "orchestrator for a swarm",
+                "Break the coding task",
                 vec![r#"[{"id":"x","goal":"do it","files":["impl.py","test_it.py"]}]"#],
             ),
             ("do it", vec!["new impl"]),

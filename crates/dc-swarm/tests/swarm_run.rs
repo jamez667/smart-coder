@@ -79,7 +79,7 @@ fn decomposes_runs_in_dependency_order_and_integrates_all() {
     // Orchestrator: subtask `a` (edit mod_a), then `b` depends on `a` (edit mod_b).
     let backend = Scripted::new(vec![
         (
-            "orchestrator for a swarm",
+            "Break the coding task",
             vec![
                 r#"[
                 {"id":"a","goal":"set VALUE to 1 in mod_a.py","files":["mod_a.py"],"deps":[]},
@@ -140,6 +140,143 @@ fn decomposes_runs_in_dependency_order_and_integrates_all() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// The retry loop (spec 08 — "Subtask retry on partial or rejected integration").
+/// A worker lands a **partial** fix on attempt 1 (`X = 1`) that the cumulative gate
+/// accepts (failing count flat) but that leaves the subtask's scoped test red. The
+/// orchestrator must NOT mark the subtask done — it must re-dispatch the subtask
+/// with failing-test feedback, and on attempt 2 the worker produces the correct fix
+/// (`X = 2`), the scoped test goes green, and the run reports `all_done`. Mirrors
+/// `partial_fix_that_leaves_the_suite_red_is_not_reported_done` but proves recovery
+/// rather than just honest failure.
+#[test]
+fn an_incomplete_subtask_is_retried_with_feedback_until_its_tests_pass() {
+    let ws = temp("retry-recover");
+    std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
+    std::fs::write(
+        ws.join("test_target.py").as_path(),
+        "from target import X\n\n\ndef test_x_is_two():\n    assert X == 2\n",
+    )
+    .unwrap();
+
+    // Attempt 1 yields `X = 1` (partial: still red, but failing count flat so the
+    // cumulative gate accepts the bytes). Attempt 2 — re-dispatched with feedback —
+    // yields `X = 2` (green). The Scripted backend pops a key's queue in order, so
+    // the same goal/merge keys serve attempt 1 then attempt 2.
+    let backend = Scripted::new(vec![
+        (
+            "Break the coding task",
+            vec![
+                r#"[{"id":"t","goal":"set X to 2 in target.py","files":["target.py"],"deps":[]}]"#,
+            ],
+        ),
+        ("File: target.py", vec!["X = 1\n", "X = 2\n"]),
+        ("set X to 2", vec!["X = 1\n", "X = 2\n"]),
+    ]);
+
+    let events = Mutex::new(Vec::new());
+    let sink = FnSwarmSink(|e: &SwarmEvent| events.lock().unwrap().push(e.clone()));
+
+    let cfg = SwarmConfig {
+        verify_command: Some("python -m pytest -q".to_string()),
+        frozen_paths: vec!["test_target.py".to_string()],
+        ..SwarmConfig::default()
+    };
+    let report = run_swarm(&backend, &backend, None, "fix target", "", &ws, &cfg, &sink);
+
+    // The subtask recovered: it's genuinely done and the suite is green.
+    assert_eq!(
+        report.done, 1,
+        "subtask should be done after retry: {report:?}"
+    );
+    assert_eq!(report.failed, 0, "no failures after recovery: {report:?}");
+    assert!(
+        report.all_done,
+        "the run is green after the retry: {report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("target.py")).unwrap(),
+        "X = 2\n"
+    );
+
+    // Exactly one SubtaskRetry was emitted (attempt 1 of 2), carrying the still-red
+    // test name as feedback.
+    let ev = events.into_inner().unwrap();
+    let retries: Vec<&SwarmEvent> = ev
+        .iter()
+        .filter(|e| matches!(e, SwarmEvent::SubtaskRetry { .. }))
+        .collect();
+    assert_eq!(retries.len(), 1, "one retry expected: {ev:?}");
+    match retries[0] {
+        SwarmEvent::SubtaskRetry {
+            subtask,
+            attempt,
+            max,
+            failing_tests,
+        } => {
+            assert_eq!(subtask, "t");
+            assert_eq!(*attempt, 1);
+            assert_eq!(*max, 2);
+            assert!(
+                failing_tests.iter().any(|t| t.contains("test_x_is_two")),
+                "feedback names the failing test: {failing_tests:?}"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// With `max_subtask_retries = 0`, the retry loop is disabled (today's behaviour):
+/// a partial fix integrates, the scoped check is skipped, and the run stops honestly
+/// on the final whole-suite verify (no retry attempted). Guards the `0` escape hatch.
+#[test]
+fn zero_retries_restores_no_retry_behaviour() {
+    let ws = temp("retry-zero");
+    std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
+    std::fs::write(
+        ws.join("test_target.py").as_path(),
+        "from target import X\n\n\ndef test_x_is_two():\n    assert X == 2\n",
+    )
+    .unwrap();
+
+    let backend = Scripted::new(vec![
+        (
+            "Break the coding task",
+            vec![
+                r#"[{"id":"t","goal":"set X to 2 in target.py","files":["target.py"],"deps":[]}]"#,
+            ],
+        ),
+        ("File: target.py", vec!["X = 1\n", "X = 2\n"]),
+        ("set X to 2", vec!["X = 1\n", "X = 2\n"]),
+    ]);
+
+    let events = Mutex::new(Vec::new());
+    let sink = FnSwarmSink(|e: &SwarmEvent| events.lock().unwrap().push(e.clone()));
+
+    let cfg = SwarmConfig {
+        verify_command: Some("python -m pytest -q".to_string()),
+        frozen_paths: vec!["test_target.py".to_string()],
+        max_subtask_retries: 0,
+        ..SwarmConfig::default()
+    };
+    let report = run_swarm(&backend, &backend, None, "fix target", "", &ws, &cfg, &sink);
+
+    // No retry attempted; the partial fix landed and the final verify says not-done.
+    assert!(
+        !report.all_done,
+        "0 retries → honest stop, not done: {report:?}"
+    );
+    let ev = events.into_inner().unwrap();
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, SwarmEvent::SubtaskRetry { .. })),
+        "no retry events when max_subtask_retries == 0"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// Regression for a real bug found live (2026-06-14): a worker can land a
 /// **partial** fix that the per-merge "didn't make it worse" gate accepts (failing
 /// count unchanged), so every subtask integrates and the board is all-done — yet
@@ -163,7 +300,7 @@ fn partial_fix_that_leaves_the_suite_red_is_not_reported_done() {
     // gate (after <= before) ACCEPTS it. The board then reads all-done.
     let backend = Scripted::new(vec![
         (
-            "orchestrator for a swarm",
+            "Break the coding task",
             vec![
                 r#"[{"id":"t","goal":"set X to 2 in target.py","files":["target.py"],"deps":[]}]"#,
             ],
@@ -172,8 +309,13 @@ fn partial_fix_that_leaves_the_suite_red_is_not_reported_done() {
         ("set X to 2", vec!["X = 1\n"]),
     ]);
 
+    // `max_subtask_retries: 0` isolates the final-integration-verify backstop this
+    // test was written to prove (no retry loop recovering the partial fix). With the
+    // gate accepting the no-worse merge, the subtask integrates `Done`, yet the final
+    // whole-suite verify must still report the run not-done.
     let cfg = SwarmConfig {
         verify_command: Some("python -m pytest -q".to_string()),
+        max_subtask_retries: 0,
         ..SwarmConfig::default()
     };
     let report = run_swarm(
