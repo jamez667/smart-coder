@@ -5,10 +5,14 @@
 //! running which subtasks, and how each integration resolved — on top of the
 //! per-worker activity.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One orchestrator-level event.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Serialize`/`Deserialize` so the stream round-trips: a `--json` swarm run
+/// emits one NDJSON line per event (mirroring `dc_core::AgentEvent`), and the
+/// same line parses back for replay/inspection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SwarmEvent {
     /// The task was decomposed into these subtask goals.
@@ -76,5 +80,44 @@ mod tests {
         assert_eq!(log.borrow().len(), 1);
         let json = serde_json::to_string(&log.borrow()[0]).unwrap();
         assert!(json.contains("\"type\":\"WorkerStarted\""), "{json}");
+    }
+
+    #[test]
+    fn event_round_trips_through_json() {
+        // Every variant must survive Serialize→Deserialize so `--json` swarm
+        // output is re-parseable (parity with `dc_core::AgentEvent`).
+        let events = vec![
+            SwarmEvent::Decomposed {
+                subtasks: vec!["a".into(), "b".into()],
+            },
+            SwarmEvent::WorkerStarted {
+                subtask: "s1".into(),
+                goal: "do the thing".into(),
+            },
+            SwarmEvent::WorkerFinished {
+                subtask: "s1".into(),
+                summary: "edited 1 file".into(),
+            },
+            SwarmEvent::Integrated {
+                subtask: "s1".into(),
+                accepted: true,
+                files: vec!["src/lib.rs".into()],
+            },
+            SwarmEvent::Integrated {
+                subtask: "s2".into(),
+                accepted: false,
+                files: vec!["suite went red".into()],
+            },
+            SwarmEvent::SwarmDone {
+                done: 2,
+                failed: 1,
+                all_done: false,
+            },
+        ];
+        for ev in &events {
+            let line = serde_json::to_string(ev).unwrap();
+            let back: SwarmEvent = serde_json::from_str(&line).unwrap();
+            assert_eq!(&back, ev, "round-trip mismatch for {line}");
+        }
     }
 }

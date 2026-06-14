@@ -178,7 +178,17 @@ pub fn run_swarm_board(
     }
 
     let (done, failed, pending) = board.tally();
-    let all_done = board.all_done();
+    // Final integration verification (spec 08 step 5: "Only after integration
+    // verification passes does the orchestrator finish"). The per-merge gate only
+    // checks "didn't make it worse" — a worker's *partial* fix can keep the failing
+    // count flat, integrate, and leave the board all-done over a still-red suite.
+    // Re-run the whole suite once at the end so "done" means the mainline is
+    // actually green, not merely that every subtask landed (honest stop, spec 06).
+    let all_done = board.all_done()
+        && match &cfg.verify_command {
+            Some(cmd) => badness(&dc_verify::run_verification(workspace, cmd)) == 0,
+            None => true,
+        };
     sink.record(&SwarmEvent::SwarmDone {
         done,
         failed,
@@ -509,32 +519,35 @@ mod tests {
     #[test]
     fn a_merge_that_breaks_the_suite_is_rejected_and_reverted() {
         let ws = temp("reject");
+        // A working impl + a frozen pytest that passes for it. Python (not `sh`) so
+        // the verify command is portable across platforms (incl. Windows CI).
         std::fs::write(
-            ws.join("impl.sh"),
-            "is_even() { [ $(( $1 % 2 )) -eq 0 ]; }\n",
+            ws.join("calc.py"),
+            "def is_even(n):\n    return n % 2 == 0\n",
         )
         .unwrap();
         std::fs::write(
-            ws.join("test.sh"),
-            ". ./impl.sh\nis_even 4 || exit 1\nexit 0\n",
+            ws.join("test_calc.py"),
+            "from calc import is_even\n\n\ndef test_even():\n    assert is_even(4)\n",
         )
         .unwrap();
 
         // The worker proposes a broken impl; the orchestrator merges it; the suite
         // goes red, so the merge is reverted and the subtask fails.
+        let broken = "def is_even(n):\n    return False\n";
         let backend = ScriptedSwarm::new(vec![
             (
                 "orchestrator for a swarm",
-                vec![r#"[{"id":"x","goal":"break impl.sh badly","files":["impl.sh"]}]"#],
+                vec![r#"[{"id":"x","goal":"break calc.py badly","files":["calc.py"]}]"#],
             ),
             // merge (keyed on "File: <path>") and proposer (keyed on goal) both yield
             // the broken version.
-            ("File: impl.sh", vec!["is_even() { return 1; }\n"]),
-            ("break impl.sh badly", vec!["is_even() { return 1; }\n"]),
+            ("File: calc.py", vec![broken]),
+            ("break calc.py badly", vec![broken]),
         ]);
 
         let cfg = SwarmConfig {
-            verify_command: Some("sh test.sh".to_string()),
+            verify_command: Some("python -m pytest -q".to_string()),
             ..Default::default()
         };
         let report = run_swarm(
@@ -550,10 +563,10 @@ mod tests {
 
         assert!(!report.all_done);
         assert_eq!(report.failed, 1);
-        // impl.sh was reverted to the working version (integration rejected it).
-        let impl_after = std::fs::read_to_string(ws.join("impl.sh")).unwrap();
+        // calc.py was reverted to the working version (integration rejected it).
+        let impl_after = std::fs::read_to_string(ws.join("calc.py")).unwrap();
         assert!(
-            impl_after.contains("% 2"),
+            impl_after.contains("n % 2 == 0"),
             "should be reverted: {impl_after}"
         );
         let _ = std::fs::remove_dir_all(&ws);

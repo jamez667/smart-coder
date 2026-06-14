@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use dc_model::{Capabilities, GenerateRequest, GenerateResponse, ModelBackend, ToolCalling};
 use dc_proto::Result;
-use dc_swarm::{run_swarm, FnSwarmSink, SwarmConfig, SwarmEvent};
+use dc_swarm::{run_swarm, FnSwarmSink, NullSwarmSink, SwarmConfig, SwarmEvent};
 
 /// A scripted, thread-safe backend: routes replies by a substring of the prompt.
 struct Scripted {
@@ -136,6 +136,64 @@ fn decomposes_runs_in_dependency_order_and_integrates_all() {
     let b_started =
         pos(&|e| matches!(e, SwarmEvent::WorkerStarted { subtask, .. } if subtask == "b"));
     assert!(a_integrated < b_started, "b must start after a integrates");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Regression for a real bug found live (2026-06-14): a worker can land a
+/// **partial** fix that the per-merge "didn't make it worse" gate accepts (failing
+/// count unchanged), so every subtask integrates and the board is all-done — yet
+/// the suite is still red. Spec 08 step 5 requires a **final integration
+/// verification** before `finish`; without it the swarm reported `all_done: true`
+/// over a red suite, violating the honest-stop-line (spec 06). The run must report
+/// `all_done == false` when the final suite isn't green.
+#[test]
+fn partial_fix_that_leaves_the_suite_red_is_not_reported_done() {
+    let ws = temp("partial");
+    // The target file and a frozen pytest that demands X == 2.
+    std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
+    std::fs::write(
+        ws.join("test_target.py").as_path(),
+        "from target import X\n\n\ndef test_x_is_two():\n    assert X == 2\n",
+    )
+    .unwrap();
+
+    // The worker/orchestrator only ever get X to 1 — closer, but still failing.
+    // Before: 1 failing. After merging `X = 1`: still 1 failing → the cumulative
+    // gate (after <= before) ACCEPTS it. The board then reads all-done.
+    let backend = Scripted::new(vec![
+        (
+            "orchestrator for a swarm",
+            vec![
+                r#"[{"id":"t","goal":"set X to 2 in target.py","files":["target.py"],"deps":[]}]"#,
+            ],
+        ),
+        ("File: target.py", vec!["X = 1\n"]),
+        ("set X to 2", vec!["X = 1\n"]),
+    ]);
+
+    let cfg = SwarmConfig {
+        verify_command: Some("python -m pytest -q".to_string()),
+        ..SwarmConfig::default()
+    };
+    let report = run_swarm(
+        &backend,
+        &backend,
+        None,
+        "fix target",
+        "",
+        &ws,
+        &cfg,
+        &NullSwarmSink,
+    );
+
+    // The subtask integrated (the per-merge gate accepted the no-worse change)...
+    assert_eq!(report.done, 1, "the partial fix integrates: {report:?}");
+    // ...but the suite is still red, so the run must NOT claim done.
+    assert!(
+        !report.all_done,
+        "a red final suite must not be reported as done: {report:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }

@@ -268,7 +268,10 @@ fn parse_decision(
     }
 }
 
-/// Drive a task with the worker swarm and serve the swarm dashboard.
+/// Drive a task with the worker swarm. By default this serves the live web
+/// dashboard; `--cli` renders the swarm to the terminal (line-oriented), and
+/// `--json` emits the `SwarmEvent` stream as NDJSON on stdout (spec 06 — "swarm
+/// rendering"). `--json` implies the terminal path (the dashboard isn't headless).
 fn swarm_task(cli: &Cli, task: String) -> ExitCode {
     let workspace = match std::env::current_dir() {
         Ok(d) => d,
@@ -278,8 +281,8 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
         }
     };
 
-    // Preflight the backends before serving — a crashed server otherwise looks
-    // like silent worker failures on the dashboard.
+    // Preflight the backends before running — a crashed server otherwise looks
+    // like silent worker failures on the dashboard / in the stream.
     let (orchestrator, worker, advisor) = (cli.orchestrator(), cli.backend(), cli.swarm_advisor());
     if let Err(e) = dc_cli::preflight(&[
         ("orchestrator", &orchestrator),
@@ -288,6 +291,13 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
     ]) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
+    }
+
+    // `--cli` / `--json` drive the swarm directly and render its event stream to
+    // the terminal, mirroring `run`'s TUI-vs-`run --json` split. The default
+    // (neither flag) keeps the web dashboard.
+    if cli.cli || cli.json {
+        return swarm_task_cli(cli, task, &orchestrator, &worker, &advisor, &workspace);
     }
 
     // Workers use --base-url/--model; the orchestrator decomposes; advisor is the
@@ -326,6 +336,139 @@ fn swarm_task(cli: &Cli, task: String) -> ExitCode {
         Err(e) => {
             eprintln!("error: swarm server failed: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Drive the swarm and render its event stream to the terminal — the line-oriented
+/// counterpart of the web dashboard (spec 06 "swarm rendering (later)"). With
+/// `--json` the stream is NDJSON on stdout (one `SwarmEvent` per line, re-parseable),
+/// human notes to stderr; otherwise it's the readable task-board view (`--cli`).
+fn swarm_task_cli(
+    cli: &Cli,
+    task: String,
+    orchestrator: &dc_model::OpenAiBackend,
+    worker: &dc_model::OpenAiBackend,
+    advisor: &dc_model::OpenAiBackend,
+    workspace: &std::path::Path,
+) -> ExitCode {
+    let cfg = cli.swarm_config();
+    if cli.json {
+        eprintln!("swarm: {task}");
+    } else {
+        println!("● swarm  {task}   (max {} workers)", cfg.max_workers);
+    }
+
+    // The sink renders each orchestrator event as it happens: JSON lines for
+    // machines, the task-board view for humans.
+    let report = if cli.json {
+        let sink = JsonSwarmSink;
+        dc_swarm::run_swarm(
+            orchestrator,
+            worker,
+            Some(advisor as &(dyn dc_model::ModelBackend + Sync)),
+            &task,
+            "",
+            workspace,
+            &cfg,
+            &sink,
+        )
+    } else {
+        let sink = dc_swarm::FnSwarmSink(|e: &dc_swarm::SwarmEvent| print_swarm_event(e));
+        dc_swarm::run_swarm(
+            orchestrator,
+            worker,
+            Some(advisor as &(dyn dc_model::ModelBackend + Sync)),
+            &task,
+            "",
+            workspace,
+            &cfg,
+            &sink,
+        )
+    };
+
+    // Honest closing line (spec 06): the human-readable summary goes to stderr in
+    // `--json` mode so it never pollutes the NDJSON a consumer is parsing.
+    let summary = format!(
+        "swarm: {} integrated, {} rejected, {} pending",
+        report.done, report.failed, report.pending
+    );
+    if cli.json {
+        eprintln!("{summary}");
+    } else {
+        println!("\n{summary}");
+    }
+
+    if report.all_done {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// A [`dc_swarm::SwarmSink`] that emits each event as one NDJSON line on stdout —
+/// the swarm counterpart of [`dc_core::JsonLinesSink`], so `swarm --json` is
+/// scriptable and the stream round-trips (`SwarmEvent` is Serialize↔Deserialize).
+struct JsonSwarmSink;
+impl dc_swarm::SwarmSink for JsonSwarmSink {
+    fn record(&self, event: &dc_swarm::SwarmEvent) {
+        match swarm_event_json(event) {
+            Ok(line) => println!("{line}"),
+            // Never let a serialization hiccup abort the swarm; note it on stderr.
+            Err(e) => eprintln!("warning: could not serialize swarm event: {e}"),
+        }
+    }
+}
+
+/// Serialize one swarm event to a single NDJSON line (the body of [`JsonSwarmSink`],
+/// split out so it's unit-testable without capturing stdout).
+fn swarm_event_json(event: &dc_swarm::SwarmEvent) -> serde_json::Result<String> {
+    serde_json::to_string(event)
+}
+
+/// Print one swarm event in the line-oriented style of spec 06 (mirrors
+/// [`print_event`] for the per-worker stream): decomposition → which worker is on
+/// which subtask → each integration accept/reject → the final tally.
+fn print_swarm_event(ev: &dc_swarm::SwarmEvent) {
+    use dc_swarm::SwarmEvent::*;
+    match ev {
+        Decomposed { subtasks } => {
+            println!("● board  ({} subtasks)", subtasks.len());
+            for (i, goal) in subtasks.iter().enumerate() {
+                println!("  {}. {goal}", i + 1);
+            }
+        }
+        WorkerStarted { subtask, goal } => {
+            println!("▸ worker [{subtask}]  {goal}");
+        }
+        WorkerFinished { subtask, summary } => {
+            println!("  · [{subtask}] finished — {summary}");
+        }
+        Integrated {
+            subtask,
+            accepted,
+            files,
+        } => {
+            if *accepted {
+                let what = if files.is_empty() {
+                    "(no file changes)".to_string()
+                } else {
+                    files.join(", ")
+                };
+                println!("  ✓ [{subtask}] integrated — {what}");
+            } else {
+                // On reject, `files[0]` carries the reason (spec / event.rs).
+                let reason = files.first().map(String::as_str).unwrap_or("rejected");
+                println!("  ✗ [{subtask}] reverted — {reason}");
+            }
+        }
+        SwarmDone {
+            done,
+            failed,
+            all_done,
+        } => {
+            let mark = if *all_done { "✔" } else { "■" };
+            println!("{mark} swarm done — {done} integrated, {failed} failed");
         }
     }
 }
@@ -811,5 +954,71 @@ mod tests {
                 notes: None,
             })
         );
+    }
+
+    /// Every swarm event variant the CLI renders. Kept in sync with the renderer
+    /// (`print_swarm_event`) and the JSON sink so both are exercised over the full
+    /// set, not just the happy path.
+    fn all_swarm_events() -> Vec<dc_swarm::SwarmEvent> {
+        use dc_swarm::SwarmEvent::*;
+        vec![
+            Decomposed {
+                subtasks: vec!["add validation".into(), "add a test".into()],
+            },
+            WorkerStarted {
+                subtask: "s1".into(),
+                goal: "add validation".into(),
+            },
+            WorkerFinished {
+                subtask: "s1".into(),
+                summary: "edited config.py".into(),
+            },
+            Integrated {
+                subtask: "s1".into(),
+                accepted: true,
+                files: vec!["config.py".into()],
+            },
+            // Accepted with no file changes — the empty-files branch.
+            Integrated {
+                subtask: "s2".into(),
+                accepted: true,
+                files: vec![],
+            },
+            // Rejected — files[0] is the reason.
+            Integrated {
+                subtask: "s3".into(),
+                accepted: false,
+                files: vec!["suite went red".into()],
+            },
+            SwarmDone {
+                done: 2,
+                failed: 1,
+                all_done: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn swarm_renderer_handles_every_variant() {
+        // The line renderer must not panic on any variant (incl. the empty-files
+        // and rejected branches). Output goes to stdout; we only assert no panic.
+        for ev in all_swarm_events() {
+            print_swarm_event(&ev);
+        }
+    }
+
+    #[test]
+    fn json_sink_lines_round_trip() {
+        // The `--json` swarm surface must emit one re-parseable NDJSON line per
+        // event (parity with `run --json`): serialize, then deserialize back.
+        for ev in all_swarm_events() {
+            let line = swarm_event_json(&ev).expect("serialize");
+            assert!(
+                !line.contains('\n'),
+                "NDJSON line must be single-line: {line}"
+            );
+            let back: dc_swarm::SwarmEvent = serde_json::from_str(&line).expect("deserialize back");
+            assert_eq!(back, ev, "round-trip mismatch for {line}");
+        }
     }
 }

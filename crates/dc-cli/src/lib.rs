@@ -111,6 +111,10 @@ pub struct Cli {
     /// Show the full assembled prompt each turn — what the model actually saw
     /// (`--verbose`/`-v`, spec 06). Threaded into `AgentConfig.verbose`.
     pub verbose: bool,
+    /// Render the swarm to the terminal (line-oriented `SwarmEvent` stream)
+    /// instead of serving the web dashboard (`--cli`, spec 06 "swarm rendering").
+    /// `--json` implies this (NDJSON is itself a CLI surface).
+    pub cli: bool,
 }
 
 impl Cli {
@@ -146,6 +150,7 @@ impl Cli {
         let mut allow: Vec<String> = Vec::new();
         let mut dry_run = false;
         let mut verbose = false;
+        let mut cli_render = false;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
@@ -235,6 +240,9 @@ impl Cli {
                     if parsed.verbose {
                         verbose = true;
                     }
+                    if parsed.cli {
+                        cli_render = true;
+                    }
                     plan_first = parsed.plan || plan_first;
                 }
                 "help" | "--help" | "-h" => command = Some(Command::Help),
@@ -287,6 +295,7 @@ impl Cli {
                 }
                 "--dry-run" => dry_run = true,
                 "--verbose" | "-v" => verbose = true,
+                "--cli" => cli_render = true,
                 "--plan" => plan_first = true,
                 "--base-url" => {
                     base_url = it.next().ok_or_else(|| {
@@ -351,6 +360,7 @@ impl Cli {
             allow,
             dry_run,
             verbose,
+            cli: cli_render,
         })
     }
 
@@ -474,6 +484,8 @@ struct RunArgs {
     dry_run: bool,
     /// `--verbose`/`-v` — show the full assembled prompt each turn.
     verbose: bool,
+    /// `--cli` — render the swarm to the terminal instead of the web dashboard.
+    cli: bool,
 }
 
 /// Split the args collected after `run`/`serve` into the task plus its trailing
@@ -502,6 +514,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut allow: Vec<String> = Vec::new();
     let mut dry_run = false;
     let mut verbose = false;
+    let mut cli = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let need = |it: &mut std::vec::IntoIter<String>, flag: &str| {
@@ -547,6 +560,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
             "--allow" => allow.push(need(&mut it, "--allow")?),
             "--dry-run" => dry_run = true,
             "--verbose" | "-v" => verbose = true,
+            "--cli" => cli = true,
             "--interactive" | "--gate" => interactive = true,
             "--think-all" => think_base = Some(false),
             "--no-think-all" => think_base = Some(true),
@@ -592,6 +606,7 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         allow,
         dry_run,
         verbose,
+        cli,
     })
 }
 
@@ -705,6 +720,9 @@ OPTIONS:
     --allow PREFIX        Auto-approve shell commands starting with PREFIX
                           (repeatable, e.g. --allow \"cargo test\")
   swarm / plan (workers use --base-url/--model):
+    --cli                 Render the swarm to the terminal (task board · workers ·
+                          integration) instead of serving the web dashboard. `--json`
+                          implies this and emits one NDJSON SwarmEvent per line.
     --orchestrator MODEL  The model that decomposes/plans         [default: --model]
     --orchestrator-url U  Endpoint for the orchestrator           [default: --base-url]
     --max-workers N       Max parallel workers                    [default: 2]
@@ -732,7 +750,7 @@ EXAMPLES:
     dumb-coder run \"refactor the parser\" --dry-run
     dumb-coder replay 1718000000000
     dumb-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
-    dumb-coder swarm \"add validation and a test\" --verify \"python -m pytest -q\" \\
+    dumb-coder swarm \"add validation and a test\" --cli --verify \"python -m pytest -q\" \\
         --base-url http://localhost:11435/v1 --model coder-0 --max-workers 2 \\
         --orchestrator-url http://localhost:11434/v1 --orchestrator advisor-e4b
     dumb-coder --model gemma4:e4b --tool-calling native"
@@ -982,6 +1000,24 @@ mod tests {
         let sc = cli.swarm_config();
         assert_eq!(sc.max_workers, 3);
         assert_eq!(sc.verify_command.as_deref(), Some("pytest -q"));
+    }
+
+    #[test]
+    fn parses_swarm_cli_and_json_flags() {
+        // `--cli` in the swarm tail switches to the line renderer.
+        let cli = Cli::parse(["swarm", "add a test", "--cli"]).unwrap();
+        assert!(cli.cli, "--cli should set the line-render flag");
+        assert!(!cli.json);
+
+        // As a top-level flag too (flags may appear in any order, spec 00).
+        let cli = Cli::parse(["--cli", "swarm", "add a test"]).unwrap();
+        assert!(cli.cli);
+
+        // `--json` is parsed independently; the `--json ⇒ cli` implication is
+        // applied at the call site, not here, so a bare --json leaves cli false.
+        let cli = Cli::parse(["swarm", "add a test", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(!cli.cli);
     }
 
     #[test]
