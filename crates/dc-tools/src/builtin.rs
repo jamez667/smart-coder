@@ -341,6 +341,44 @@ fn create_file(workspace: &Path, path: &str, content: &str) -> String {
 }
 
 /// Anchored edit: replace the single exact occurrence of `old_str` with `new_str`.
+/// Turn literal escape sequences a model may have emitted as text (`\n`, `\t`,
+/// `\r`, `\"`, `\\`) into the real characters — used as a fallback when a
+/// small model writes `\\n` instead of a real newline inside `old_str`.
+fn unescape_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    out.push('\n');
+                    chars.next();
+                }
+                Some('t') => {
+                    out.push('\t');
+                    chars.next();
+                }
+                Some('r') => {
+                    out.push('\r');
+                    chars.next();
+                }
+                Some('"') => {
+                    out.push('"');
+                    chars.next();
+                }
+                Some('\\') => {
+                    out.push('\\');
+                    chars.next();
+                }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Render `content` with 1-based line numbers, so an edit error can point a small
 /// model at exact anchors to copy.
 fn number_lines(content: &str) -> String {
@@ -359,20 +397,45 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
         Ok(p) => p,
         Err(e) => return format!("edit_file {path} rejected: {e}"),
     };
-    let content = match std::fs::read_to_string(&p) {
+    let raw = match std::fs::read_to_string(&p) {
         Ok(c) => c,
         Err(e) => return format!("edit_file {path} error: {e}"),
     };
     if old_str.is_empty() {
         return format!("edit_file {path} error: old_str must not be empty");
     }
+    // Normalize line endings to LF for matching/editing. A small model's anchor is
+    // LF-only, but a file checked out on Windows is CRLF — without this the anchor
+    // never matches (the \r breaks it). We edit in LF space and write LF; that's
+    // correct for source files and what the model expects.
+    let content = raw.replace("\r\n", "\n");
+    // Small models also emit a literal backslash-n (`\\n`) instead of a real
+    // newline inside a multi-line old_str. Resolve the anchor to whichever form the
+    // (normalized) file actually contains, un-escaping new_str to match.
+    let (old_owned, new_owned) = if content.contains(old_str) {
+        (old_str.to_string(), new_str.to_string())
+    } else {
+        let unescaped = unescape_literal(old_str);
+        if unescaped != old_str && content.contains(&unescaped) {
+            (unescaped, unescape_literal(new_str))
+        } else {
+            (old_str.to_string(), new_str.to_string())
+        }
+    };
+    edit_file_with(&p, path, &content, &old_owned, &new_owned)
+}
+
+/// Apply an `old_str`→`new_str` replacement to already-read `content` at `p`,
+/// enforcing the exactly-once rule (with whole-line disambiguation and
+/// self-correcting errors for small models).
+fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &str) -> String {
     let count = content.matches(old_str).count();
     if count == 0 {
         // The anchor isn't in the file. The usual cause for a small model is that
         // the edit already landed (or it's working from a stale view), so it keeps
         // re-proposing a change that's no longer applicable. Show the CURRENT file
         // with line numbers so it re-anchors on what's actually there now.
-        let numbered = number_lines(&content);
+        let numbered = number_lines(content);
         return format!(
             "edit_file {path} error: old_str {old_str:?} not found (0 matches). The file may \
              already have that change. Here is the CURRENT content — pick your next anchor \
@@ -404,7 +467,7 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
             if trailing_newline {
                 joined.push('\n');
             }
-            return match std::fs::write(&p, &joined) {
+            return match std::fs::write(p, &joined) {
                 Ok(()) => format!(
                     "edit_file {path} ok (1 replacement, matched whole line {})",
                     i + 1
@@ -428,7 +491,7 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
         );
     }
     let updated = content.replacen(old_str, new_str, 1);
-    match std::fs::write(&p, &updated) {
+    match std::fs::write(p, &updated) {
         Ok(()) => format!("edit_file {path} ok (1 replacement)"),
         Err(e) => format!("edit_file {path} error: {e}"),
     }
@@ -574,6 +637,27 @@ mod tests {
         assert!(o.contains("line 1:") && o.contains("line 2:"), "got: {o}");
         // Untouched — never edits on ambiguity.
         assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "x\nx\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_tolerates_literal_backslash_n_in_old_str() {
+        // A small model writes "\\n" (literal backslash-n) instead of a real
+        // newline in a multi-line old_str. The harness un-escapes and matches.
+        let ws = temp_dir("edit-escn");
+        std::fs::write(ws.join("m.py"), "def is_even(n):\n    return False\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_file","path":"m.py",
+            "old_str":"def is_even(n):\\n    return False",
+            "new_str":"def is_even(n):\\n    return n % 2 == 0"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("1 replacement"), "got: {o}");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("m.py")).unwrap(),
+            "def is_even(n):\n    return n % 2 == 0\n",
+            "real newlines applied, not literal backslash-n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

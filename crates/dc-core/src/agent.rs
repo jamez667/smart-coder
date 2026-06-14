@@ -68,6 +68,13 @@ pub struct AgentConfig {
     /// burns its budget in a reasoning block and returns empty). Kept generic so
     /// the harness stays model-agnostic; the CLI sets it per model.
     pub system_suffix: Option<String>,
+    /// Files the agent is scoped to edit. When set, the loop pins their *current*
+    /// contents (re-read fresh every turn) into the retrieved zone, so a small model
+    /// always has a correct, up-to-date view to anchor `edit_file` on without having
+    /// to re-read — and, crucially, without the view ever going stale after an edit.
+    /// Empty = no focus (the model navigates with read_file as usual). Set by the
+    /// swarm, which scopes each worker to a disjoint set of files.
+    pub focus_files: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -86,6 +93,7 @@ impl Default for AgentConfig {
             no_progress_limit: 4,
             step_retry_budget: 3,
             system_suffix: None,
+            focus_files: Vec::new(),
         }
     }
 }
@@ -125,6 +133,22 @@ Make the failing test pass. Follow this loop: \
 shell is blocked); read which tests still fail and fix them; \
 4) finish only when the tests pass. \
 Take a concrete action every turn — prefer editing over searching.\n\n";
+
+/// System preamble for a focus-scoped run: the file you must edit is already shown
+/// to you every turn, so don't read it — edit it. Used by the swarm worker (and
+/// any caller that sets `focus_files`).
+const FOCUS_TASK_PREFIX: &str = "You are a coding agent. The exact file you must \
+change is shown to you every turn under \"Current contents of the file(s) you must \
+edit\", with line numbers. You ALREADY have the file — do NOT call read_file or \
+search_code. Follow this loop: \
+1) edit_file the file with a precise change, copying old_str verbatim (with \
+indentation, no line numbers) from the contents shown between the === markers; \
+2) run_verification to run the tests (use run_verification, NOT run_command — \
+shell is blocked); read which tests still fail; \
+3) edit again to fix them, always copying old_str from the CURRENT contents shown \
+(not from earlier in the chat — the file changes as you edit); \
+4) finish only when the tests pass. \
+Edit every turn — never read or search.\n\n";
 
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
@@ -211,7 +235,15 @@ pub fn run_agent_observed(
     cfg: &AgentConfig,
     sink: &dyn EventSink,
 ) -> Result<AgentReport> {
-    let mut system = format!("{TASK_PREFIX}{}", strategy.system_preamble(registry));
+    // When the agent is scoped to focus files, the loop pins their live contents
+    // every turn — so the system prompt must NOT tell the model to read first
+    // (that just traps a tiny model in a read loop). Lead with "edit" instead.
+    let prefix = if cfg.focus_files.is_empty() {
+        TASK_PREFIX
+    } else {
+        FOCUS_TASK_PREFIX
+    };
+    let mut system = format!("{prefix}{}", strategy.system_preamble(registry));
     if let Some(suffix) = &cfg.system_suffix {
         system.push('\n');
         system.push_str(suffix);
@@ -288,6 +320,14 @@ pub fn run_agent_observed(
         }
         if !repo_map.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, repo_map.clone()));
+        }
+        // Pin the current contents of the focused files, re-read fresh every turn so
+        // the view never goes stale after an edit (the failure mode that traps a
+        // tiny model into re-applying its own first edit). This is the live anchor
+        // the model copies `old_str` from.
+        let focus = render_focus_files(workspace, &cfg.focus_files);
+        if !focus.is_empty() {
+            segments.push(Segment::user(Zone::Retrieved, focus));
         }
         if !summary.is_empty() {
             segments.push(Segment::user(Zone::HistorySummary, summary));
@@ -835,6 +875,36 @@ fn first_line(s: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Render the current contents of the focused files for the retrieved zone, with
+/// line numbers so a small model can copy an exact, unique `old_str`. Re-read from
+/// the workspace each turn, so it always reflects edits already made.
+fn render_focus_files(workspace: &Path, files: &[String]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "Current contents of the file(s) you must edit, shown EXACTLY as stored (this \
+         updates after every edit — always copy old_str from here, character for \
+         character, not from earlier in the chat). The text between the === markers \
+         is the literal file; do not add line numbers or any other prefix to old_str:\n",
+    );
+    let mut any = false;
+    for f in files {
+        let p = workspace.join(f);
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            any = true;
+            // Verbatim, with no line numbers — whatever the model copies as old_str
+            // must match the file byte-for-byte, so any prefix we add would poison it.
+            s.push_str(&format!("\n=== {f} ===\n{content}\n=== end {f} ===\n"));
+        }
+    }
+    if any {
+        s
+    } else {
+        String::new()
+    }
 }
 
 /// Tools whose result is fully determined by the current workspace + args, so

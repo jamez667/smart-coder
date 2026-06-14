@@ -66,8 +66,15 @@ pub fn run_worker(
 
     let before = snapshot_tree(&scratch);
 
-    let instruction = worker_instruction(subtask, &scratch);
+    let instruction = worker_instruction(subtask);
     let registry = default_registry();
+    // Scope the agent's "focus files" to this subtask's files, so the loop pins
+    // their live contents every turn — the small worker always has a fresh,
+    // correct view to anchor its edits on (spec 08 — workers own disjoint files).
+    let mut wcfg = cfg.clone();
+    if wcfg.focus_files.is_empty() {
+        wcfg.focus_files = subtask.files.clone();
+    }
     let report: Option<AgentReport> = run_agent_recovering(
         backend,
         advisor,
@@ -75,7 +82,7 @@ pub fn run_worker(
         &ParseRepair,
         &instruction,
         &scratch,
-        cfg,
+        &wcfg,
     )
     .ok();
 
@@ -105,27 +112,37 @@ pub fn run_worker(
 
 /// The tight, single-purpose instruction handed to a worker (spec 08 — scoped).
 ///
-/// When the subtask names files, we inline their *current contents* so a tiny
-/// worker can write a correct anchored edit without first spending turns reading
-/// (and without guessing `old_str` and looping on "0 matches"). Tests files are
-/// included as read-only context but explicitly off-limits to edit.
-fn worker_instruction(subtask: &Subtask, scratch: &Path) -> String {
+/// We deliberately do NOT inline file *contents* here: this instruction is pinned
+/// in the task anchor and shown verbatim every turn, so an inlined snapshot goes
+/// stale the moment the worker edits — a tiny model then keeps re-applying its
+/// first edit because the anchor still shows the original. Instead we name the
+/// files and tell the worker to `read_file` for the live contents (the read-dedup
+/// nudge in the loop stops it from re-reading in circles), so it always anchors
+/// its `edit_file` on the file's *current* state.
+fn worker_instruction(subtask: &Subtask) -> String {
     let mut s = format!("Your subtask: {}", subtask.goal);
     if !subtask.files.is_empty() {
-        s.push_str("\n\nRelevant files (current contents — edit_file against these exactly):");
-        for f in &subtask.files {
-            if let Ok(content) = std::fs::read_to_string(scratch.join(f)) {
-                // Keep it bounded so a huge file doesn't blow the worker's window.
-                let body: String = content.chars().take(2000).collect();
-                s.push_str(&format!("\n\n=== {f} ===\n{body}"));
-            }
-        }
+        s.push_str("\n\nFiles to change: ");
+        s.push_str(&subtask.files.join(", "));
+        // The loop pins the live contents of these files every turn (see the
+        // "Current contents" block), so the worker does NOT need to read first —
+        // telling a tiny model to read just makes it loop on read_file. Point it
+        // straight at the edit.
+        s.push_str(
+            "\n\nThe current contents of that file are shown to you each turn under \
+             \"Current contents of the file(s) you must edit\". Do NOT call read_file — \
+             you already have the file. Go straight to edit_file, copying old_str \
+             exactly (with indentation) from those numbered lines. Do not modify test \
+             files. After each edit call run_verification, read which test still \
+             fails, and edit again until all tests pass; then call finish.",
+        );
+    } else {
+        s.push_str(
+            "\n\nRead the file you must change with read_file, then edit_file it with a \
+             precise change. Do not modify test files. Then run_verification and fix \
+             what it reports until the tests pass, then finish.",
+        );
     }
-    s.push_str(
-        "\n\nMake only the change this subtask needs, with edit_file using an \
-         exact old_str from the contents above. Do not modify test files. Then \
-         run_verification.",
-    );
     s
 }
 
