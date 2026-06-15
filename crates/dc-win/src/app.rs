@@ -9,7 +9,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Space};
-use iced::{Element, Fill, Length, Subscription, Task, Theme};
+use iced::{Background, Border, Color, Element, Fill, Length, Subscription, Task, Theme};
 
 use dc_core::Confirmation;
 use dc_win::bridge::Pending;
@@ -18,6 +18,78 @@ use dc_win::session::{RunKind, Session, UiEvent};
 use dc_win::view::{agent_rows, swarm_rows, Row};
 use dc_win::UiConfig;
 use dc_workflow::{Decision, Phase};
+
+// --- Visual design tokens (Tokyo Night-aligned) -----------------------------------
+// A small, consistent palette + spacing so panels read as cards on a dark canvas,
+// not bare text floating on the background.
+
+/// Panel/card surface — a hair lighter than the window background.
+const SURFACE: Color = Color::from_rgb(0.106, 0.118, 0.18);
+/// A subtle border around cards.
+const CARD_BORDER: Color = Color::from_rgb(0.20, 0.22, 0.32);
+/// Primary text.
+const FG: Color = Color::from_rgb(0.84, 0.86, 0.93);
+/// Muted / secondary text (section labels, hints).
+const FG_MUTED: Color = Color::from_rgb(0.52, 0.55, 0.66);
+/// Accent (the build action, current step, active flows).
+const ACCENT: Color = Color::from_rgb(0.48, 0.65, 0.98);
+const GOOD: Color = Color::from_rgb(0.45, 0.78, 0.55);
+const BAD: Color = Color::from_rgb(0.93, 0.45, 0.50);
+
+/// Card surface style: filled rounded panel with a thin border.
+fn card_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(SURFACE)),
+        border: Border {
+            color: CARD_BORDER,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// A tinted card for the outcome banner: `good`/`bad` accent border + faint wash.
+fn banner_style(ok: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_t| {
+        let accent = if ok { GOOD } else { BAD };
+        let mut wash = accent;
+        wash.a = 0.08;
+        container::Style {
+            background: Some(Background::Color(wash)),
+            border: Border {
+                color: accent,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            text_color: Some(FG),
+            ..container::Style::default()
+        }
+    }
+}
+
+/// Primary (accent-filled) button style for the build action.
+fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb(0.56, 0.72, 1.0),
+        _ => ACCENT,
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::from_rgb(0.06, 0.07, 0.11),
+        border: Border {
+            radius: 6.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// A section header label (muted, uppercase-ish small caps feel via size).
+fn section(label: &str) -> iced::widget::Text<'_> {
+    text(label).size(12).color(FG_MUTED)
+}
 
 /// Launch the desktop app.
 pub fn run() -> iced::Result {
@@ -501,7 +573,7 @@ impl App {
         let tests = self.view_coder_io();
         let gate = self.view_gatebar();
 
-        let mut col = column![header].spacing(12).padding(16);
+        let mut col = column![header].spacing(14).padding(18);
         // The step-flow strip sits right under the header once a build is underway, so
         // you can see which phase it's on at a glance.
         if self.plan.started() {
@@ -530,30 +602,37 @@ impl App {
             return None;
         }
         let r = self.result.as_ref()?;
-        let (mark, color) = if r.ok {
-            ("✓", iced::Color::from_rgb(0.45, 0.78, 0.55))
-        } else {
-            ("✗", iced::Color::from_rgb(0.93, 0.42, 0.42))
-        };
+        let (mark, color) = if r.ok { ("✓", GOOD) } else { ("✗", BAD) };
         let mut col = column![text(format!("{mark}  {}", r.headline))
             .size(18)
             .color(color)]
         .spacing(4);
         if !r.reason.is_empty() {
-            col = col.push(text(&r.reason).size(13));
+            col = col.push(text(&r.reason).size(13).color(FG_MUTED));
         }
         // The files it built (capped), so you can see the actual output.
         for f in r.files.iter().take(12) {
             col = col.push(text(format!("  • {f}")).size(12));
         }
         if r.files.len() > 12 {
-            col = col.push(text(format!("  … and {} more", r.files.len() - 12)).size(12));
+            col = col.push(
+                text(format!("  … and {} more", r.files.len() - 12))
+                    .size(12)
+                    .color(FG_MUTED),
+            );
         }
         if r.dir.is_some() {
+            col = col.push(Space::new().height(Length::Fixed(4.0)));
             col =
                 col.push(button(text("📂 open output folder")).on_press(Message::OpenOutputFolder));
         }
-        Some(container(col).width(Fill).padding(12).into())
+        Some(
+            container(col)
+                .width(Fill)
+                .padding(14)
+                .style(banner_style(r.ok))
+                .into(),
+        )
     }
 
     /// The horizontal step-flow at the top: each phase with arrows between, the current
@@ -607,7 +686,8 @@ impl App {
             )),
         )
         .width(Fill)
-        .padding(6)
+        .padding(10)
+        .style(card_style)
         .into()
     }
 
@@ -626,11 +706,15 @@ impl App {
         // the only run action — strictly better than a bare swarm or a single agent that
         // can't tell whether it actually succeeded.
         let build_btn = if running {
-            button(text("building…")).width(Length::Fixed(120.0))
+            button(text("building…"))
+                .width(Length::Fixed(120.0))
+                .padding([8, 12])
         } else {
-            button(text("⚒ build"))
+            button(text("⚒  build").size(15))
                 .on_press(Message::RunTdd)
                 .width(Length::Fixed(120.0))
+                .padding([8, 12])
+                .style(primary_button)
         };
         // 📁 picks a project folder to iterate in; once picked it becomes a "new
         // project" button that clears the selection (back to fresh datetime folders).
@@ -668,14 +752,10 @@ impl App {
     }
 
     fn view_activity(&self) -> Element<'_, Message> {
-        let mut col = column![text("activity").size(14)].spacing(4);
+        let mut col = column![section("ACTIVITY")].spacing(4);
         for r in &self.rows {
             let line = text(format!("{}  {}", r.icon, r.text)).size(13);
-            let line = if r.is_error {
-                line.color(iced::Color::from_rgb(0.93, 0.42, 0.42))
-            } else {
-                line
-            };
+            let line = if r.is_error { line.color(BAD) } else { line };
             col = col.push(line);
         }
         if let Some(s) = &self.summary {
@@ -684,7 +764,8 @@ impl App {
         }
         container(scrollable(col).height(Fill))
             .width(Length::FillPortion(2))
-            .padding(8)
+            .padding(12)
+            .style(card_style)
             .into()
     }
 
@@ -695,10 +776,11 @@ impl App {
             self.selected_coder.as_deref(),
         )
         .view();
-        container(column![text("swarm topology").size(14), canvas].spacing(4))
+        container(column![section("SWARM TOPOLOGY"), canvas].spacing(6))
             .width(Length::FillPortion(2))
             .height(Fill)
-            .padding(8)
+            .padding(12)
+            .style(card_style)
             .into()
     }
 
@@ -706,14 +788,14 @@ impl App {
     /// the frozen tests written, and the readable subtask list — so you can see what it
     /// intends to do, before and while it does it.
     fn view_plan(&self) -> Element<'_, Message> {
-        let mut col = column![text("plan (TDD)").size(15)].spacing(4);
+        let mut col = column![section("PLAN  ·  TDD")].spacing(4);
         for step in self.plan.steps() {
             let mark = if step.done { "✓" } else { "·" };
             let line = text(format!("{mark} {}", step.title)).size(13);
             let line = if step.done {
-                line
+                line.color(GOOD)
             } else {
-                line.color(iced::Color::from_rgb(0.5, 0.53, 0.66))
+                line.color(FG_MUTED)
             };
             col = col.push(line);
             // Show the produced artifact text under each completed phase.
@@ -730,18 +812,18 @@ impl App {
         if !self.plan.frozen_tests.is_empty() {
             col = col.push(Space::new().height(Length::Fixed(8.0)));
             col = col.push(
-                text(format!("frozen tests ({}):", self.plan.frozen_tests.len()))
+                text(format!("frozen tests ({})", self.plan.frozen_tests.len()))
                     .size(13)
-                    .color(iced::Color::from_rgb(0.45, 0.78, 0.55)),
+                    .color(GOOD),
             );
             for t in &self.plan.frozen_tests {
-                col = col.push(text(format!("  🔒 {t}")).size(12));
+                col = col.push(text(format!("  🔒 {t}")).size(12).color(FG_MUTED));
             }
         }
 
         if !self.plan.subtasks.is_empty() {
             col = col.push(Space::new().height(Length::Fixed(8.0)));
-            col = col.push(text("subtasks to implement:").size(13));
+            col = col.push(section("SUBTASKS TO IMPLEMENT"));
             for (i, g) in self.plan.subtasks.iter().enumerate() {
                 col = col.push(text(format!("  {}. {g}", i + 1)).size(12));
             }
@@ -749,7 +831,8 @@ impl App {
 
         container(scrollable(col).height(Fill))
             .width(Length::FillPortion(2))
-            .padding(8)
+            .padding(12)
+            .style(card_style)
             .into()
     }
 
@@ -770,11 +853,13 @@ impl App {
                     .clone()
                     .unwrap_or_else(|| "(still working…)".into());
                 column![
-                    text(format!("coder [{}] — {}", c.subtask, c.goal)).size(14),
-                    text("▸ prompt sent to this coder").size(12),
+                    text(format!("coder [{}] — {}", c.subtask, c.goal))
+                        .size(14)
+                        .color(ACCENT),
+                    section("▸ PROMPT SENT TO THIS CODER"),
                     text(prompt).size(11),
                     Space::new().height(Length::Fixed(6.0)),
-                    text("◂ output it proposed").size(12),
+                    section("◂ OUTPUT IT PROPOSED"),
                     text(proposal).size(11),
                 ]
                 .spacing(3)
@@ -785,11 +870,14 @@ impl App {
                 } else {
                     "the coders' prompts & output appear here during the build"
                 };
-                let mut c =
-                    column![text("coder prompt & output").size(14), text(hint).size(12)].spacing(4);
+                let mut c = column![
+                    section("CODER PROMPT & OUTPUT"),
+                    text(hint).size(12).color(FG_MUTED)
+                ]
+                .spacing(4);
                 if let Some(v) = &self.verify_text {
                     c = c.push(Space::new().height(Length::Fixed(6.0)));
-                    c = c.push(text("latest verification:").size(12));
+                    c = c.push(section("LATEST VERIFICATION"));
                     c = c.push(text(v).size(11));
                 }
                 c
@@ -799,7 +887,8 @@ impl App {
         container(scrollable(inner).height(Fill))
             .width(Fill)
             .height(Length::FillPortion(1))
-            .padding(8)
+            .padding(12)
+            .style(card_style)
             .into()
     }
 
@@ -819,7 +908,8 @@ impl App {
                 Some(
                     container(column![head, why, buttons].spacing(6))
                         .width(Fill)
-                        .padding(10)
+                        .padding(12)
+                        .style(card_style)
                         .into(),
                 )
             }
@@ -841,7 +931,8 @@ impl App {
                 Some(
                     container(column![head, preview, notes, buttons].spacing(6))
                         .width(Fill)
-                        .padding(10)
+                        .padding(12)
+                        .style(card_style)
                         .into(),
                 )
             }
@@ -882,14 +973,20 @@ impl App {
 
         container(
             column![
-                text("settings / connection").size(14),
-                text("coder (does the file writing)").size(11),
+                section("SETTINGS  ·  CONNECTION"),
+                text("coder (does the file writing)")
+                    .size(11)
+                    .color(FG_MUTED),
                 model,
                 url,
-                text("orchestrator (decomposes the task — needs a reasoning model)").size(11),
+                text("orchestrator (decomposes the task — needs a reasoning model)")
+                    .size(11)
+                    .color(FG_MUTED),
                 orch_model,
                 orch_url,
-                text("advisor (junior asks senior on a stall)").size(11),
+                text("advisor (junior asks senior on a stall)")
+                    .size(11)
+                    .color(FG_MUTED),
                 advisor,
                 advisor_url,
                 verify,
@@ -900,7 +997,8 @@ impl App {
             .spacing(6),
         )
         .width(Fill)
-        .padding(10)
+        .padding(12)
+        .style(card_style)
         .into()
     }
 }
