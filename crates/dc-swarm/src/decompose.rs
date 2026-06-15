@@ -25,13 +25,20 @@ fn decompose_messages(task: &str, repo_overview: &str) -> Vec<Message> {
     // what `integrate` needs to have a target to merge into. The disjoint-files
     // invariant is enforced structurally by `coalesce_by_file`, so it needn't be
     // belaboured in the prompt.
+    // The trailing `/no_think` is load-bearing on the Qwen3-class orchestrator: WITHOUT
+    // it the model frequently spends its whole budget in a reasoning block and returns
+    // EMPTY content, so the swarm falls back to a single trivial subtask (observed live
+    // 2026-06-14). An earlier note here claimed `/no_think` didn't help — it does once
+    // the prompt is also kept short, which it now is. Suppressing the think block yields
+    // a populated JSON array reliably.
     let system = "Break the coding task into independent subtasks, one JSON object per \
         subtask. Fields: id, goal, files (the real source files this subtask edits), \
         deps (ids that must finish first). Put work that touches the same file in ONE \
         subtask. The test files are fixed — never create a subtask that edits a test \
         file; subtasks only change the source code that must make the existing tests \
         pass. Output ONLY a JSON array, e.g. \
-        [{\"id\":\"t1\",\"goal\":\"fix the parser\",\"files\":[\"parser.py\"],\"deps\":[]}]."
+        [{\"id\":\"t1\",\"goal\":\"fix the parser\",\"files\":[\"parser.py\"],\"deps\":[]}]. \
+        /no_think"
         .to_string();
     let mut user = format!("Task: {task}");
     if !repo_overview.is_empty() {
@@ -72,13 +79,51 @@ pub fn parse_subtasks(reply: &str) -> Vec<Subtask> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("t{}", i + 1));
-        let files = str_array(item.get("files"));
+        let raw_files = str_array(item.get("files"));
+        // Stack lock: drop files in off-stack languages (a stray `.ts`/`.go`/`.java`).
+        // A subtask that named files but ends up with none was purely off-stack work
+        // (e.g. a Node.js/TypeScript module when the backend must be Python) — skip it
+        // so a drifted language can't derail the build. See `is_on_stack`.
+        let had_files = !raw_files.is_empty();
+        let files: Vec<String> = raw_files.into_iter().filter(|f| is_on_stack(f)).collect();
+        if had_files && files.is_empty() {
+            continue;
+        }
         let deps = str_array(item.get("deps"));
         out.push(Subtask::new(id, goal).with_files(files).with_deps(deps));
     }
     drop_dangling_deps(&mut out);
     coalesce_by_file(&mut out);
     out
+}
+
+/// Whether a file is allowed on the locked stack: Python backend + plain JS/HTML/CSS
+/// frontend. Rejects off-stack languages (`.ts`/`.java`/`.go`/…), React (`.jsx`/`.tsx`),
+/// and Node-style backend JavaScript (a `.js` under a `server/`/`backend/` path — the
+/// backend must be Python). Plain frontend `.js`/`.html`/`.css` and data/config files
+/// (`.txt`, `.json`, `.sql`, templates) are allowed. This forces a Node/React
+/// decomposition to be rejected (observed live 2026-06-14: "restaurant review website"
+/// decomposed into a Node `.js` backend + React `.jsx`, which never matched the Python
+/// tests and cascaded to 0 integrated).
+fn is_on_stack(path: &str) -> bool {
+    const OFF_STACK_CODE: &[&str] = &[
+        ".ts", ".tsx", ".jsx", ".java", ".go", ".rb", ".php", ".rs", ".cs", ".cpp", ".c", ".kt",
+        ".swift", ".scala", ".ex", ".dart",
+    ];
+    let lower = path.to_ascii_lowercase();
+    if OFF_STACK_CODE.iter().any(|ext| lower.ends_with(ext)) {
+        return false;
+    }
+    // A `.js` file living under a backend path is Node — reject (backend must be Python).
+    if lower.ends_with(".js")
+        && (lower.starts_with("server/")
+            || lower.starts_with("backend/")
+            || lower.contains("/server/")
+            || lower.contains("/backend/"))
+    {
+        return false;
+    }
+    true
 }
 
 /// Enforce **one file → one worker** (the unit of serialized writes is the file).
@@ -223,26 +268,92 @@ fn str_array(v: Option<&serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A decomposition plus the exact prompt/reply that produced it, so the harness can
+/// surface *what the orchestrator was asked and answered* (the swarm UI renders this).
+#[derive(Debug, Clone)]
+pub struct Decomposition {
+    pub board: TaskBoard,
+    /// The full prompt sent to the orchestrator (system + user, joined for display).
+    pub prompt: String,
+    /// The orchestrator's raw reply, or a `(…)` note when it errored/returned empty.
+    pub reply: String,
+    /// Whether the board is the trivial single-subtask fallback (the model gave us
+    /// nothing parseable even after a retry).
+    pub fell_back: bool,
+}
+
+/// How many times to re-ask the orchestrator when it returns an empty/unparseable
+/// reply before falling back to the trivial single-subtask board. A small model
+/// occasionally returns an empty completion; one retry recovers most of those without
+/// silently collapsing the task into one worker.
+const DECOMPOSE_RETRIES: usize = 2;
+
+/// Ask `orchestrator` to decompose `task`, returning the board **and** the prompt/reply
+/// (spec 08). Retries on an empty/unparseable reply before degrading to a single
+/// whole-task subtask, so a flaky empty completion doesn't silently collapse the work.
+pub fn decompose_observed(
+    orchestrator: &dyn ModelBackend,
+    task: &str,
+    repo_overview: &str,
+) -> Decomposition {
+    let messages = decompose_messages(task, repo_overview);
+    let prompt = messages
+        .iter()
+        .map(|m| format!("[{:?}] {}", m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut req = GenerateRequest::new(messages);
+    // A real decomposition of a multi-part app is several subtasks of JSON — well over
+    // the 1024-token default, which truncates the array mid-object so it won't parse and
+    // the whole (good) decomposition is discarded as a fallback (observed live
+    // 2026-06-14: "a websocket powered chat website" produced a perfect 5-subtask plan
+    // that was cut off at t5 and thrown away). Give the one-shot decomposer room.
+    req.max_tokens = 4096;
+
+    let mut last_reply = String::new();
+    for _ in 0..=DECOMPOSE_RETRIES {
+        match orchestrator.generate(&req) {
+            Ok(resp) => {
+                last_reply = resp.content.clone();
+                let subtasks = parse_subtasks(&resp.content);
+                if !subtasks.is_empty() {
+                    return Decomposition {
+                        board: TaskBoard::new(subtasks),
+                        prompt,
+                        reply: last_reply,
+                        fell_back: false,
+                    };
+                }
+                // Empty/unparseable — retry.
+            }
+            Err(e) => last_reply = format!("(backend error: {e})"),
+        }
+    }
+
+    // Every attempt came back empty/unparseable: degrade to one whole-task subtask so
+    // the swarm still runs (spec 08's degenerate case), but flag it so the UI can warn.
+    Decomposition {
+        board: TaskBoard::new(vec![Subtask::new("t1", task)]),
+        prompt,
+        reply: if last_reply.is_empty() {
+            "(orchestrator returned empty after retries)".to_string()
+        } else {
+            last_reply
+        },
+        fell_back: true,
+    }
+}
+
 /// Ask `orchestrator` to decompose `task` into a [`TaskBoard`]. Always returns a
 /// usable board: on an unparseable reply (or backend error) it degrades to a
 /// single subtask for the whole task, so the swarm can still run (as a single
-/// worker — spec 08's degenerate case).
+/// worker — spec 08's degenerate case). Thin wrapper over [`decompose_observed`].
 pub fn decompose(
     orchestrator: &dyn ModelBackend,
     task: &str,
     repo_overview: &str,
 ) -> Result<TaskBoard> {
-    let req = GenerateRequest::new(decompose_messages(task, repo_overview));
-    let subtasks = match orchestrator.generate(&req) {
-        Ok(resp) => parse_subtasks(&resp.content),
-        Err(_) => Vec::new(),
-    };
-    let board = if subtasks.is_empty() {
-        TaskBoard::new(vec![Subtask::new("t1", task)])
-    } else {
-        TaskBoard::new(subtasks)
-    };
-    Ok(board)
+    Ok(decompose_observed(orchestrator, task, repo_overview).board)
 }
 
 #[cfg(test)]
@@ -270,6 +381,29 @@ mod tests {
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[0].id, "t1");
         assert_eq!(subs[1].id, "t2");
+    }
+
+    #[test]
+    fn rejects_node_react_keeps_python_and_plain_frontend() {
+        // Stack lock: Python backend + plain JS/HTML/CSS frontend. A Node-backend .js,
+        // a React .jsx, and any off-stack language are dropped; Python, plain frontend
+        // JS/HTML, and data files survive.
+        let reply = r#"[
+            {"id":"a","goal":"py route","files":["server/app.py"]},
+            {"id":"b","goal":"node backend","files":["server/src/db.js"]},
+            {"id":"c","goal":"react ui","files":["client/HomePage.jsx"]},
+            {"id":"d","goal":"go thing","files":["main.go"]},
+            {"id":"e","goal":"frontend js","files":["static/app.js","index.html"]},
+            {"id":"f","goal":"schema","files":["schema.sql"]}
+        ]"#;
+        let subs = parse_subtasks(reply);
+        let ids: Vec<&str> = subs.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"a"), "python backend kept");
+        assert!(!ids.contains(&"b"), "Node-backend .js (server/) dropped");
+        assert!(!ids.contains(&"c"), "React .jsx dropped");
+        assert!(!ids.contains(&"d"), "off-stack .go dropped");
+        assert!(ids.contains(&"e"), "plain frontend .js + .html kept");
+        assert!(ids.contains(&"f"), "data file .sql kept");
     }
 
     #[test]
@@ -306,6 +440,38 @@ mod tests {
         let backend = MockBackend::new(Vec::<String>::new());
         let board = decompose(&backend, "task", "").unwrap();
         assert_eq!(board.len(), 1);
+    }
+
+    #[test]
+    fn decompose_retries_past_an_empty_reply() {
+        // A flaky orchestrator returns empty first, then a real array on retry. The
+        // swarm must NOT collapse to one trivial subtask on the first empty.
+        let backend =
+            MockBackend::new(["", r#"[{"id":"a","goal":"do a"},{"id":"b","goal":"do b"}]"#]);
+        let d = decompose_observed(&backend, "the task", "");
+        assert_eq!(d.board.len(), 2, "the retry's good reply is used");
+        assert!(!d.fell_back);
+    }
+
+    #[test]
+    fn decompose_flags_fell_back_after_all_empties() {
+        // Every attempt empty ⇒ the trivial fallback, flagged so the UI can warn.
+        let backend = MockBackend::new(["", "", ""]);
+        let d = decompose_observed(&backend, "the whole task", "");
+        assert_eq!(d.board.len(), 1);
+        assert_eq!(d.board.subtasks()[0].goal, "the whole task");
+        assert!(
+            d.fell_back,
+            "fell_back is set when nothing parseable came back"
+        );
+    }
+
+    #[test]
+    fn decompose_surfaces_the_prompt_and_reply() {
+        let backend = MockBackend::new([r#"[{"id":"a","goal":"do a"}]"#]);
+        let d = decompose_observed(&backend, "the task", "");
+        assert!(d.prompt.contains("the task"), "prompt carries the task");
+        assert!(d.reply.contains("do a"), "reply is the model's raw output");
     }
 
     #[test]

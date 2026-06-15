@@ -252,10 +252,7 @@ mod tests {
                     r#"[{"file":"test_a.py","covers":"a works"}]"#,
                 ),
                 // The test-writer worker call (system prompt says "You write a runnable unit-test file").
-                (
-                    "runnable unit-test file",
-                    "def test_a():\n    assert a() == 1",
-                ),
+                ("pytest test file", "def test_a():\n    assert a() == 1"),
                 ("ordered plan", "# Plan\nsteps"),
                 (
                     "INDEPENDENT subtasks",
@@ -303,10 +300,7 @@ mod tests {
                     "plan the TESTS",
                     r#"[{"file":"test_a.py","covers":"a works"}]"#,
                 ),
-                (
-                    "runnable unit-test file",
-                    "def test_a():\n    assert a() == 1",
-                ),
+                ("pytest test file", "def test_a():\n    assert a() == 1"),
                 ("ordered plan", "# Plan\nsteps"),
                 (
                     "INDEPENDENT subtasks",

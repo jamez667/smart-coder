@@ -117,7 +117,7 @@ fn propose_prompt(subtask: &Subtask, workspace: &Path) -> String {
 /// Build the worker's single-shot prompt. On a retry, `feedback` (still-failing test
 /// names + assertion messages) is woven in *before* the file contents so the worker
 /// sees what's still wrong against the current — already-merged — code (spec 08).
-fn propose_prompt_with_feedback(
+pub(crate) fn propose_prompt_with_feedback(
     subtask: &Subtask,
     workspace: &Path,
     feedback: Option<&str>,

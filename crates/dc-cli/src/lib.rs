@@ -904,6 +904,9 @@ impl Cli {
             // because it needs filesystem access this `&self` method lacks.
             frozen_paths: self.frozen_paths.clone(),
             max_subtask_retries: self.max_subtask_retries,
+            // The CLI runs on the host (the user controls their own environment); the
+            // GUI defaults to the Docker sandbox.
+            sandbox: dc_swarm::Sandbox::Host,
         }
     }
 

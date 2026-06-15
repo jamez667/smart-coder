@@ -18,8 +18,14 @@ use crate::state::{Artifact, WorkflowState};
 /// prompt (a thinking model then skips its chain-of-thought).
 pub fn phase_messages(phase: Phase, state: &WorkflowState, think: ThinkPolicy) -> Vec<Message> {
     let mut user = format!("Task: {}\n", state.task);
+    // Ground only on the upstream artifacts this phase actually needs — not the whole
+    // chain. Stuffing every approved artifact into every phase overflows a small model
+    // by the late phases (the WorkDecomposition call carried specs+arch+layout+stage-
+    // breakdown and returned empty → no subtasks → nothing built). See
+    // `Phase::needs_upstream`.
+    let needed = phase.needs_upstream();
     for a in state.approved() {
-        if a.phase.index() < phase.index() {
+        if needed.contains(&a.phase) {
             user.push_str(&format!(
                 "\n=== Approved {} ===\n{}\n",
                 a.phase.title(),
@@ -60,23 +66,48 @@ pub fn generate_phase(
     think: ThinkPolicy,
 ) -> Artifact {
     for attempt in 0..3 {
-        // After a first empty result, drop thinking for this phase: the likeliest
-        // cause is the budget vanishing into reasoning_content.
+        // After a first weak result, drop thinking for this phase: the likeliest cause
+        // is the budget vanishing into reasoning_content (the model narrates the task
+        // instead of answering, and runs out before emitting the JSON).
         let effective = if attempt == 0 {
             think
         } else {
             think.with(phase, true)
         };
         let mut req = GenerateRequest::new(phase_messages(phase, state, effective));
-        req.max_tokens = 1536;
+        // A complex task's decomposition / coverage plan is long structured JSON; the
+        // old 1536 cap truncated it mid-array (observed live 2026-06-14: a restaurant
+        // site decomposition ran out of budget while still reasoning → no JSON → empty
+        // board → nothing built). Give the phases real room; the JSON phases get more.
+        req.max_tokens = if phase.produces_json() { 4096 } else { 2048 };
         if let Ok(resp) = orchestrator.generate(&req) {
             let content = resp.content.trim().to_string();
-            if !content.is_empty() {
+            // A JSON phase that came back as prose-only (no parseable array) is a FAILED
+            // attempt, not a usable artifact — retry with thinking suppressed rather than
+            // chaining an empty board downstream and silently building nothing.
+            let usable =
+                !content.is_empty() && (!phase.produces_json() || contains_json_array(&content));
+            if usable {
                 return Artifact::draft(phase, content);
             }
         }
     }
     Artifact::draft(phase, String::new())
+}
+
+/// Whether `text` contains a non-empty JSON array (tolerating surrounding prose/fences)
+/// — the gate for a JSON phase's output being usable rather than just reasoning.
+fn contains_json_array(text: &str) -> bool {
+    let (Some(start), Some(end)) = (text.find('['), text.rfind(']')) else {
+        return false;
+    };
+    if start >= end {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&text[start..=end])
+        .ok()
+        .and_then(|v| v.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
 }
 
 fn system_for(phase: Phase) -> String {
@@ -102,9 +133,24 @@ fn system_for(phase: Phase) -> String {
     };
     format!(
         "You are the orchestrator (architect) in a staged coding workflow. {role} \
-        Ground everything in the approved artifacts you are given. Be concise and concrete."
+        Ground everything in the approved artifacts you are given. Be concise and concrete. \
+        {STACK_CONSTRAINT}"
     )
 }
+
+/// The locked technology stack, woven into every phase prompt. The small models are
+/// most reliable on Python + plain web, and a fixed stack lets the harness match the
+/// verify command (pytest / vitest) and reject off-stack files. No TypeScript, no React
+/// build tooling, no other backend languages.
+const STACK_CONSTRAINT: &str = "STACK (REQUIRED): backend in Python with Flask, frontend \
+    in plain JavaScript, HTML, and CSS only. Do NOT use TypeScript, React, Vue, a build \
+    step, or any other backend language (no Node.js/Express, no Java, no Go). Every source \
+    file must be a .py, .js, .html, or .css file. \
+    LIBRARIES: the installed Python packages you may import are flask, flask_sqlalchemy, \
+    flask_restful, flask_cors, marshmallow, requests, pytest, and the standard library. \
+    Do NOT use any package outside that list (no FastAPI, no Django) — it is not installed \
+    and the tests will fail to import. Frontend uses only the browser's built-in fetch and \
+    DOM APIs (no npm packages).";
 
 fn phase_instruction(phase: Phase) -> String {
     match phase {
@@ -114,7 +160,9 @@ fn phase_instruction(phase: Phase) -> String {
             "Output ONLY a JSON array of coverage items; each item: \
              {\"file\":\"test_x.py\",\"covers\":\"one specific behavior the test must check\"}. \
              Group related behaviors under the same test file. Cover the happy path and the \
-             important edge cases. No prose, just the JSON array."
+             important edge cases. Backend test files are Python (test_*.py, run by pytest); \
+             frontend test files are plain JavaScript (test_*.js, NOT .jsx — no React). \
+             No prose, just the JSON array."
                 .to_string()
         }
         Phase::WorkDecomposition => {
@@ -165,6 +213,37 @@ mod tests {
         let msgs = phase_messages(Phase::Specs, &s, ThinkPolicy::default());
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(!joined.contains("ARCH_DRAFT"));
+    }
+
+    #[test]
+    fn late_phases_ground_only_on_needed_upstream_not_the_whole_chain() {
+        // The overflow fix: WorkDecomposition needs the layout (files) + stage-breakdown
+        // (tests), but NOT the prose specs/architecture — feeding everything overflows
+        // the small model and it returns empty (observed live: restaurant site).
+        let mut s = WorkflowState::new("build it");
+        for (p, body) in [
+            (Phase::Specs, "SPECS_PROSE"),
+            (Phase::Architecture, "ARCH_PROSE"),
+            (Phase::Layout, "LAYOUT_FILES"),
+            (Phase::StageBreakdown, "STAGE_TESTS"),
+            (Phase::ImplementationPlan, "IMPL_PLAN"),
+        ] {
+            s.set(Artifact::draft(p, body));
+            s.approve(p);
+        }
+        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default());
+        let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
+        assert!(joined.contains("LAYOUT_FILES"), "needs the layout");
+        assert!(joined.contains("STAGE_TESTS"), "needs the stage breakdown");
+        assert!(!joined.contains("SPECS_PROSE"), "must drop the specs prose");
+        assert!(
+            !joined.contains("ARCH_PROSE"),
+            "must drop the architecture prose"
+        );
+        assert!(
+            !joined.contains("IMPL_PLAN"),
+            "must drop the impl-plan prose"
+        );
     }
 
     #[test]
@@ -222,5 +301,44 @@ mod tests {
         let s = WorkflowState::new("t");
         let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
         assert!(a.content.is_empty());
+    }
+
+    #[test]
+    fn json_phase_rejects_prose_only_and_retries_for_the_array() {
+        // The restaurant-site bug: the decomposition model narrates the task in prose
+        // and never emits JSON. That's NOT a usable artifact for a JSON phase — the
+        // engine must reject it and retry until it gets a parseable array.
+        let backend = MockBackend::new([
+            "The user wants me to act as an orchestrator. Constraint Checklist: ...",
+            r#"[{"id":"t1","goal":"do a","files":["a.py"]}]"#,
+        ]);
+        let s = WorkflowState::new("build a thing");
+        let a = generate_phase(
+            &backend,
+            Phase::WorkDecomposition,
+            &s,
+            ThinkPolicy::default(),
+        );
+        assert!(
+            a.content.contains("\"id\""),
+            "a JSON phase must yield the array, not the prose: {:?}",
+            a.content
+        );
+    }
+
+    #[test]
+    fn prose_phase_accepts_prose_as_usual() {
+        // A non-JSON phase (specs) is happy with prose — the JSON gate must not apply.
+        let backend = MockBackend::new(["## Goals\nship a great thing"]);
+        let s = WorkflowState::new("t");
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        assert!(a.content.contains("Goals"));
+    }
+
+    #[test]
+    fn contains_json_array_detects_array_in_prose() {
+        assert!(contains_json_array("blah [\n{\"id\":\"t1\"}\n] done"));
+        assert!(!contains_json_array("no json here, just prose"));
+        assert!(!contains_json_array("[]"), "empty array is not usable");
     }
 }

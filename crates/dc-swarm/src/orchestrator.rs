@@ -14,9 +14,9 @@ use std::sync::Mutex;
 use dc_core::AgentConfig;
 use dc_model::ModelBackend;
 
-use crate::decompose::decompose;
+use crate::decompose::decompose_observed;
 use crate::event::{SwarmEvent, SwarmSink};
-use crate::worker::{run_worker, ProposedChange, WorkerResult};
+use crate::worker::{propose_prompt_with_feedback, run_worker, ProposedChange, WorkerResult};
 
 /// Configuration for a swarm run.
 #[derive(Debug, Clone)]
@@ -39,6 +39,10 @@ pub struct SwarmConfig {
     /// worker invocations for a subtask is `1 + max_subtask_retries`. `0` restores
     /// the no-retry behaviour. Default **2**.
     pub max_subtask_retries: usize,
+    /// Where the verify command runs (spec 12): the host, or a per-run ephemeral Docker
+    /// container. Docker gives generated code a pinned toolkit + a known layout, so a
+    /// build doesn't depend on (or pollute) the host. Defaults to [`Sandbox::Host`].
+    pub sandbox: dc_verify::Sandbox,
 }
 
 impl Default for SwarmConfig {
@@ -49,6 +53,7 @@ impl Default for SwarmConfig {
             verify_command: None,
             frozen_paths: Vec::new(),
             max_subtask_retries: 2,
+            sandbox: dc_verify::Sandbox::default(),
         }
     }
 }
@@ -79,12 +84,19 @@ pub fn run_swarm(
     cfg: &SwarmConfig,
     sink: &dyn SwarmSink,
 ) -> SwarmReport {
-    let board = decompose(orchestrator, task, repo_overview).unwrap_or_default();
+    let d = decompose_observed(orchestrator, task, repo_overview);
+    // Surface the decomposition prompt + raw reply before the board, so a UI can show
+    // what the orchestrator was asked and answered (and whether it fell back).
+    sink.record(&SwarmEvent::OrchestratorPrompt {
+        prompt: d.prompt,
+        reply: d.reply,
+        fell_back: d.fell_back,
+    });
     run_swarm_board(
         orchestrator,
         worker_backend,
         advisor,
-        board,
+        d.board,
         workspace,
         cfg,
         sink,
@@ -129,6 +141,9 @@ pub fn run_swarm_board(
             sink.record(&SwarmEvent::WorkerStarted {
                 subtask: st.id.clone(),
                 goal: st.goal.clone(),
+                // The exact single-shot prompt this coder is handed (first attempt, no
+                // feedback) — what the worker "sees", surfaced for the UI.
+                prompt: propose_prompt_with_feedback(st, workspace, None),
             });
         }
 
@@ -182,7 +197,13 @@ pub fn run_swarm_board(
     // actually green, not merely that every subtask landed (honest stop, spec 06).
     let all_done = board.all_done()
         && match &cfg.verify_command {
-            Some(cmd) => badness(&dc_verify::run_verification(workspace, cmd)) == 0,
+            Some(cmd) => {
+                badness(&dc_verify::run_verification_in(
+                    &cfg.sandbox,
+                    workspace,
+                    cmd,
+                )) == 0
+            }
             None => true,
         };
     sink.record(&SwarmEvent::SwarmDone {
@@ -234,7 +255,11 @@ fn integrate_with_retry(
     // count just before this subtask's first merge (so the fallback can ask "did this
     // subtask's merge clear the suite?"). Only needed when frozen tests are unknown.
     let baseline = match (&cfg.verify_command, cfg.frozen_paths.is_empty()) {
-        (Some(cmd), true) => Some(badness(&dc_verify::run_verification(workspace, cmd))),
+        (Some(cmd), true) => Some(badness(&dc_verify::run_verification_in(
+            &cfg.sandbox,
+            workspace,
+            cmd,
+        ))),
         _ => None,
     };
 
@@ -243,6 +268,7 @@ fn integrate_with_retry(
         sink.record(&SwarmEvent::WorkerFinished {
             subtask: id.clone(),
             summary: result.report_summary.clone(),
+            proposal: result.proposal.clone(),
         });
 
         let outcome = integrate(orchestrator, workspace, &result, cfg);
@@ -265,7 +291,7 @@ fn integrate_with_retry(
             // With a verify command, scope to the subtask's own tests — for both an
             // accept (is the partial fix actually complete?) and a reject (the merge
             // was reverted; check the prior state against this subtask's contract).
-            Some(cmd) => scoped_failures(workspace, cmd, &cfg.frozen_paths, baseline),
+            Some(cmd) => scoped_failures(&cfg.sandbox, workspace, cmd, &cfg.frozen_paths, baseline),
         };
 
         if let (true, Some(files)) = (residual.is_empty(), accepted_files) {
@@ -368,6 +394,7 @@ fn integrate_with_retry(
 ///   the suite is still red AND this subtask's merge didn't clear it. Coarser (can't
 ///   attribute a residual to one subtask), but stops a red run being called done.
 fn scoped_failures(
+    sandbox: &dc_verify::Sandbox,
     workspace: &Path,
     verify_command: &str,
     frozen: &[String],
@@ -375,7 +402,7 @@ fn scoped_failures(
 ) -> Vec<dc_verify::TestCase> {
     if frozen.is_empty() {
         // Free-text fallback: whole-suite delta vs. this subtask's own baseline.
-        let report = dc_verify::run_verification(workspace, verify_command);
+        let report = dc_verify::run_verification_in(sandbox, workspace, verify_command);
         let after = badness(&report);
         let still_red = after > 0;
         let cleared = baseline.map(|b| after < b).unwrap_or(false);
@@ -392,7 +419,7 @@ fn scoped_failures(
     } else {
         // Precise: verify filtered to the frozen contract tests for this subtask.
         let cmd = format!("{verify_command} {}", frozen.join(" "));
-        let report = dc_verify::run_verification(workspace, &cmd);
+        let report = dc_verify::run_verification_in(sandbox, workspace, &cmd);
         if report.generic {
             // No per-test breakdown — fall back to the command's pass/fail.
             if report.command_ok {
@@ -528,9 +555,17 @@ fn integrate(
     // down or stays equal; reject only a change that increases failures. The run is
     // "done" only when every subtask lands and the board is all-done — by which
     // point, for genuine fixes, the suite is actually green.
-    let before = badness(&dc_verify::run_verification(workspace, cmd));
+    let before = badness(&dc_verify::run_verification_in(
+        &cfg.sandbox,
+        workspace,
+        cmd,
+    ));
     apply_changes(workspace, &changes);
-    let after = badness(&dc_verify::run_verification(workspace, cmd));
+    let after = badness(&dc_verify::run_verification_in(
+        &cfg.sandbox,
+        workspace,
+        cmd,
+    ));
 
     if after <= before {
         Integration::Accepted(changes.iter().map(|c| c.path.clone()).collect())

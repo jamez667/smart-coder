@@ -17,10 +17,29 @@ use serde::{Deserialize, Serialize};
 pub enum SwarmEvent {
     /// The task was decomposed into these subtask goals.
     Decomposed { subtasks: Vec<String> },
-    /// A worker began a subtask.
-    WorkerStarted { subtask: String, goal: String },
-    /// A worker finished its run (before integration).
-    WorkerFinished { subtask: String, summary: String },
+    /// The exact prompt sent to the orchestrator to decompose the task, and its raw
+    /// reply — so a UI can show *what was asked and answered* (and whether it fell back
+    /// to a trivial split). Emitted once, before [`Decomposed`].
+    OrchestratorPrompt {
+        prompt: String,
+        reply: String,
+        fell_back: bool,
+    },
+    /// A worker began a subtask. `prompt` is the full single-shot prompt it was handed
+    /// (the goal + the current contents of its scoped files) — what the coder "saw".
+    WorkerStarted {
+        subtask: String,
+        goal: String,
+        prompt: String,
+    },
+    /// A worker finished its run (before integration). `summary` is the one-line
+    /// report ("proposed a fix (N words)"); `proposal` is the worker's full proposed
+    /// file content, so a UI can show *what* it produced, not just that it did.
+    WorkerFinished {
+        subtask: String,
+        summary: String,
+        proposal: String,
+    },
     /// A subtask is being re-dispatched after an incomplete/rejected integration
     /// (spec 08 — "Subtask retry on partial or rejected integration"). Emitted
     /// before each re-dispatch. `attempt` is the retry number (1-based, so the
@@ -91,6 +110,7 @@ mod tests {
         sink.record(&SwarmEvent::WorkerStarted {
             subtask: "a".into(),
             goal: "do a".into(),
+            prompt: "Task: do a".into(),
         });
         assert_eq!(log.borrow().len(), 1);
         let json = serde_json::to_string(&log.borrow()[0]).unwrap();
@@ -105,13 +125,20 @@ mod tests {
             SwarmEvent::Decomposed {
                 subtasks: vec!["a".into(), "b".into()],
             },
+            SwarmEvent::OrchestratorPrompt {
+                prompt: "Break the task…".into(),
+                reply: "[{\"id\":\"t1\"}]".into(),
+                fell_back: false,
+            },
             SwarmEvent::WorkerStarted {
                 subtask: "s1".into(),
                 goal: "do the thing".into(),
+                prompt: "Task: do the thing".into(),
             },
             SwarmEvent::WorkerFinished {
                 subtask: "s1".into(),
                 summary: "edited 1 file".into(),
+                proposal: "the proposed file body".into(),
             },
             SwarmEvent::SubtaskRetry {
                 subtask: "s1".into(),

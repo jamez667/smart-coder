@@ -11,6 +11,7 @@ members = [
     "crates/dc-swarm",
     "crates/dc-workflow",
     "crates/dc-tui",
+    "crates/dc-win",
     "crates/dc-web",
     "crates/dc-cli",
     "crates/dc-eval",

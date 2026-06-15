@@ -20,13 +20,16 @@ pub struct WrittenTest {
     pub content: String,
 }
 
-const TEST_WRITER_SYSTEM: &str = "You write a runnable unit-test file. You are given the test \
-file name and the behaviors it must cover. Reply with ONLY the file body — no fences, no prose, \
-no explanation, and do NOT repeat the filename. The very first line MUST be the import of the \
-functions under test from their module (the module is the test filename without the leading \
-'test_' and the '.py'; e.g. test_mathlib.py → `from mathlib import ...`). Then one test function \
-per behavior. The implementation does not exist yet, so the tests must FAIL until it is written \
-correctly. /no_think";
+// Keep this SHORT and concrete. A long, instruction-heavy prompt makes the small
+// worker model degrade — observed live 2026-06-14: an elaborate version (Flask test-
+// client tutorial + library allowlist) made coder-0 reply with just the filename, so
+// every test came back empty and NONE were written. One example beats three paragraphs.
+const TEST_WRITER_SYSTEM: &str = "You write a runnable pytest test file. Reply with ONLY the \
+file body — no fences, no prose, do not repeat the filename. Import from the module under test \
+(the test filename minus the leading 'test_' and '.py'; e.g. test_app.py → `app`). If it is a \
+Flask app, use the test client: `from app import app` / `c = app.test_client()` / \
+`r = c.get('/path')`. One test per behavior; the implementation does not exist yet so tests must \
+FAIL until written. /no_think";
 
 /// Ask `worker` to write each test file named by the coverage plan. One model call
 /// per file (the cheapest path); the file's coverage items are the worker's brief.
@@ -119,11 +122,36 @@ fn clean_test(file: &str, s: &str) -> String {
                 || t.starts_with('#')
         })
         .unwrap_or(false);
-    if looks_like_code {
-        lines.join("\n").trim_end().to_string()
-    } else {
-        String::new()
+    if !looks_like_code {
+        return String::new();
     }
+    let joined = lines.join("\n");
+    fix_self_import(file, &joined).trim_end().to_string()
+}
+
+/// Deterministically correct the module a Python test imports from. A small model
+/// often writes `from test_app import ...` (the test file importing from itself) instead
+/// of `from app import ...` — a circular/undefined import that can NEVER pass, no matter
+/// how correct the implementation (observed live 2026-06-14: a `test_app.py` self-
+/// imported, so the coder's correct Flask app still "failed"). The module name is
+/// deterministic (`test_<mod>.py` → `<mod>`), so the harness fixes it rather than
+/// trusting the model to. No-op for non-`test_*.py` files.
+fn fix_self_import(file: &str, body: &str) -> String {
+    let Some(module) = file
+        .strip_prefix("test_")
+        .and_then(|f| f.strip_suffix(".py"))
+        .filter(|m| !m.is_empty())
+    else {
+        return body.to_string();
+    };
+    body.replace(
+        &format!("from test_{module} import"),
+        &format!("from {module} import"),
+    )
+    .replace(
+        &format!("import test_{module}"),
+        &format!("import {module}"),
+    )
 }
 
 /// Strip a surrounding ``` fence (optional language tag) a model may add.
@@ -186,6 +214,32 @@ mod tests {
         assert!(cleaned.starts_with("from m import f"), "got: {cleaned}");
         assert!(!cleaned.contains("```"));
         assert!(!cleaned.lines().next().unwrap().contains("test_m.py"));
+    }
+
+    #[test]
+    fn clean_test_fixes_the_self_import_bug() {
+        // The model self-imports (`from test_app import ...`) — uncorrectable by the
+        // coder, so the harness rewrites it to the real module (`from app import ...`).
+        let raw =
+            "from test_app import get_restaurants\ndef test_x():\n    assert get_restaurants()";
+        let cleaned = clean_test("test_app.py", raw);
+        assert!(
+            cleaned.starts_with("from app import get_restaurants"),
+            "got: {cleaned}"
+        );
+        assert!(!cleaned.contains("from test_app"));
+
+        // `import test_app` form is fixed too.
+        let raw2 = "import test_app\ndef test_y():\n    assert test_app";
+        // (the call-site `test_app` won't be rewritten — only the import statement is,
+        //  which is the load-bearing line; a correct test refers to the module by its
+        //  real name anyway.)
+        let cleaned2 = clean_test("test_app.py", raw2);
+        assert!(cleaned2.contains("import app"), "got: {cleaned2}");
+
+        // A test that already imports correctly is untouched.
+        let ok = "from app import f\ndef test_f():\n    assert f()";
+        assert_eq!(clean_test("test_app.py", ok), ok);
     }
 
     #[test]

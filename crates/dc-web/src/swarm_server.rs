@@ -184,6 +184,7 @@ mod tests {
         hub.push(SwarmEvent::WorkerStarted {
             subtask: "a".into(),
             goal: "do a".into(),
+            prompt: "Task: do a".into(),
         });
         let (_, next, _) = hub.since(0);
         let (batch2, _, _) = hub.since(next);

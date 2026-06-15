@@ -56,6 +56,37 @@ impl Phase {
         matches!(self, Phase::StageBreakdown | Phase::WorkDecomposition)
     }
 
+    /// Which *upstream* phases this phase actually needs as grounding. Feeding every
+    /// approved artifact into every phase overflows a small model by the later phases
+    /// (observed live 2026-06-14: the WorkDecomposition call carried specs+arch+layout+
+    /// stage-breakdown and returned empty → no subtasks → nothing built). Each phase
+    /// only consumes what it depends on, so the late phases stay within budget:
+    /// - architecture grounds on the specs;
+    /// - layout grounds on the architecture (which already summarizes the specs);
+    /// - stage-breakdown needs the layout (what files exist) + the specs (what to test);
+    /// - implementation plan needs the stage-breakdown (the tests) + layout;
+    /// - work decomposition needs ONLY the layout (files) + stage-breakdown (tests) —
+    ///   NOT the prose specs/architecture/impl-plan, which it doesn't act on.
+    pub fn needs_upstream(self) -> &'static [Phase] {
+        use Phase::*;
+        match self {
+            Specs => &[],
+            Architecture => &[Specs],
+            Layout => &[Architecture],
+            StageBreakdown => &[Specs, Layout],
+            ImplementationPlan => &[Layout, StageBreakdown],
+            WorkDecomposition => &[Layout, StageBreakdown],
+        }
+    }
+
+    /// Whether this phase must emit a machine-readable JSON array (the coverage test
+    /// plan and the work decomposition). The engine validates these: a JSON phase that
+    /// returns only prose (the reasoning model narrating instead of answering) is a
+    /// failed attempt, not a usable artifact — retried with thinking suppressed.
+    pub fn produces_json(self) -> bool {
+        matches!(self, Phase::StageBreakdown | Phase::WorkDecomposition)
+    }
+
     /// A short kebab slug used in artifact filenames (`01-specs.md`, …). The
     /// numeric prefix keeps the plan directory ordered on disk.
     pub fn slug(self) -> &'static str {

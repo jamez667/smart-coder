@@ -10,6 +10,7 @@
 //! decoded never touches this file.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use dc_context::{
     prompt_budget, summarize_history, truncate_observation, ContextBuilder, Segment, TokenCounter,
@@ -21,6 +22,7 @@ use dc_proto::Result;
 use dc_tools::{execute, Journal, PermissionPolicy, ToolOutcome, ToolRegistry};
 
 use crate::advisor::{advice_observation, consult, Predicament};
+use crate::confirm::{Confirmation, Confirmer};
 use crate::event::{AgentEvent, EventSink, NullSink};
 use crate::metrics::ToolCallMetrics;
 use crate::plan::PlanState;
@@ -29,7 +31,12 @@ use crate::recovery::{action_hash, Progress, StallDetector, StopReason};
 use crate::strategy::ToolCallStrategy;
 
 /// Loop configuration, including the Context Manager's budget knobs (spec 05).
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written (below) rather than derived because [`confirmer`] is a
+/// trait object, which is not `Debug`.
+///
+/// [`confirmer`]: AgentConfig::confirmer
+#[derive(Clone)]
 pub struct AgentConfig {
     /// Hard cap on model turns (spec 03 — budgets are first-class).
     pub max_steps: usize,
@@ -85,6 +92,40 @@ pub struct AgentConfig {
     /// — *what the model actually saw* (spec 06 `--verbose`, spec 05). Off by
     /// default because the payload is large; renderers/logs only get it when asked.
     pub verbose: bool,
+    /// Optional human confirmer for confirm-gated shell commands (spec 04 / spec 06).
+    /// When `None`, an unapproved `run_command` is auto-denied exactly as before
+    /// (headless). When set, the loop blocks and asks before denying — the seam the
+    /// GUI's approve/deny buttons and the CLI's interactive prompt drive. `Arc` keeps
+    /// `AgentConfig: Clone` and lets the handle cross to the worker thread.
+    pub confirmer: Option<Arc<dyn Confirmer>>,
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("max_steps", &self.max_steps)
+            .field(
+                "effective_context_fraction",
+                &self.effective_context_fraction,
+            )
+            .field("response_reserve_tokens", &self.response_reserve_tokens)
+            .field("observation_line_cap", &self.observation_line_cap)
+            .field("keep_recent_turns", &self.keep_recent_turns)
+            .field("repo_map_top_k", &self.repo_map_top_k)
+            .field("permission", &self.permission)
+            .field("verify_command", &self.verify_command)
+            .field("plan_first", &self.plan_first)
+            .field("repeat_limit", &self.repeat_limit)
+            .field("no_progress_limit", &self.no_progress_limit)
+            .field("step_retry_budget", &self.step_retry_budget)
+            .field("system_suffix", &self.system_suffix)
+            .field("focus_files", &self.focus_files)
+            .field("dry_run", &self.dry_run)
+            .field("verbose", &self.verbose)
+            // `dyn Confirmer` isn't `Debug`; report presence only.
+            .field("confirmer", &self.confirmer.is_some())
+            .finish()
+    }
 }
 
 impl Default for AgentConfig {
@@ -106,6 +147,7 @@ impl Default for AgentConfig {
             focus_files: Vec::new(),
             dry_run: false,
             verbose: false,
+            confirmer: None,
         }
     }
 }
@@ -307,6 +349,10 @@ pub fn run_agent_observed(
     // repeat. If a nudge doesn't land, escalate to the advisor rather than nudging
     // forever (spec 02 — junior asks senior).
     let mut nudge_streak = 0usize;
+    // Shell-command approvals accumulated this run via `Confirmation::AllowRemember`
+    // (spec 06). Owned by the loop and mutated in place, so `cfg` stays shared and
+    // `PermissionPolicy` is never mutated. Checked in addition to the static policy.
+    let mut session_allow: Vec<String> = Vec::new();
 
     for step in 0..cfg.max_steps {
         // Compact older turns; keep the recent ones verbatim.
@@ -446,6 +492,8 @@ pub fn run_agent_observed(
                         &call,
                         registry,
                         &cfg.permission,
+                        cfg.confirmer.as_deref(),
+                        &mut session_allow,
                         &cfg.verify_command,
                         cfg.dry_run,
                         workspace,
@@ -804,10 +852,17 @@ fn gate_finish(verify_command: &Option<String>, workspace: &Path) -> FinishGate 
 /// to the right executor. `find_symbol` goes to the retrieval index and
 /// `run_command`/`run_verification` to dc-verify (neither belongs in the pure-fs
 /// tool registry); everything else is the registry's `execute`.
+// Each parameter is a distinct, irreducible concern of one tool dispatch (the call,
+// the registry/policy it's checked against, the confirm seam + its session allowlist,
+// the verify command, the dry-run flag, the workspace); bundling them into a struct
+// would only move the noise. Private routing fn — keep it flat.
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     call: &dc_tools::ValidatedCall,
     registry: &ToolRegistry,
     policy: &PermissionPolicy,
+    confirmer: Option<&dyn Confirmer>,
+    session_allow: &mut Vec<String>,
     verify_command: &Option<String>,
     dry_run: bool,
     workspace: &Path,
@@ -815,17 +870,52 @@ fn dispatch(
     // Permission gate — the harness decides, outside the model's control (spec 04).
     if let Some(spec) = registry.get(&call.name) {
         if let dc_tools::Decision::Deny(reason) = policy.check(call, spec.side_effect) {
-            // A small model often reaches for `run_command "pytest"/"cargo test"`;
-            // redirect it to the allowed run_verification tool instead of just
-            // denying (spec 04 — structured, actionable feedback).
-            if call.name == "run_command" && looks_like_test_command(call.str("command")) {
-                return ToolOutcome::Observation(
-                    "run_command denied (shell is blocked). To run the tests, use \
-                     {\"tool\":\"run_verification\"} instead."
-                        .to_string(),
-                );
+            // Only `run_command` is confirm-gated. Other denials (frozen tests, etc.)
+            // keep their current auto-deny behavior untouched.
+            if call.name == "run_command" {
+                let cmd = call.str("command").unwrap_or_default();
+
+                // A command approved-and-remembered earlier this run is already
+                // allowed — fall through to execution without re-prompting.
+                let remembered = session_allow.iter().any(|p| cmd.starts_with(p.as_str()));
+                if !remembered {
+                    // A small model often reaches for `run_command "pytest"/"cargo
+                    // test"`; redirect it to the allowed run_verification tool instead
+                    // of prompting or denying (spec 04 — structured feedback). This
+                    // takes precedence over the confirmer.
+                    if looks_like_test_command(call.str("command")) {
+                        return ToolOutcome::Observation(
+                            "run_command denied (shell is blocked). To run the tests, use \
+                             {\"tool\":\"run_verification\"} instead."
+                                .to_string(),
+                        );
+                    }
+                    // Ask the human, iff a confirmer is wired. No confirmer ⇒ today's
+                    // exact behavior: the static Deny stands.
+                    match confirmer {
+                        None => {
+                            return ToolOutcome::Observation(format!(
+                                "{} denied: {reason}",
+                                call.name
+                            ))
+                        }
+                        Some(c) => match c.confirm_command(cmd, &reason) {
+                            Confirmation::Deny(why) => {
+                                return ToolOutcome::Observation(format!(
+                                    "run_command denied: {why}"
+                                ))
+                            }
+                            Confirmation::AllowRemember { prefix } => session_allow.push(prefix),
+                            Confirmation::AllowOnce => {}
+                        },
+                    }
+                }
+                // Approved (once, remembered, or matched a remembered prefix): fall
+                // through to the shared dry-run check + execution below, so `--dry-run`
+                // is still honored for a human-approved command.
+            } else {
+                return ToolOutcome::Observation(format!("{} denied: {reason}", call.name));
             }
-            return ToolOutcome::Observation(format!("{} denied: {reason}", call.name));
         }
 
         // Dry-run (spec 06): preview only. Read-only tools still run for real (the
@@ -1312,5 +1402,146 @@ mod tests {
             results[1]
         );
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    // --- Confirm-gated run_command (spec 04 / spec 06) -----------------------
+
+    use crate::confirm::{Confirmation, Confirmer};
+    use std::sync::Mutex;
+
+    /// Records every command it's asked about and answers with a canned decision.
+    struct FakeConfirmer {
+        answer: Confirmation,
+        seen: Mutex<Vec<String>>,
+    }
+    impl FakeConfirmer {
+        fn new(answer: Confirmation) -> Self {
+            Self {
+                answer,
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+    }
+    impl Confirmer for FakeConfirmer {
+        fn confirm_command(&self, command: &str, _default_reason: &str) -> Confirmation {
+            self.seen.lock().unwrap().push(command.to_string());
+            self.answer.clone()
+        }
+    }
+
+    fn run_command_call(cmd: &str) -> dc_tools::ValidatedCall {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("command".to_string(), json!(cmd));
+        dc_tools::ValidatedCall {
+            name: "run_command".to_string(),
+            args,
+        }
+    }
+
+    /// `dispatch` with the default (shell-denying) policy, a temp workspace, and a
+    /// caller-supplied confirmer + session allowlist. Returns the observation text.
+    fn dispatch_run_command(
+        cmd: &str,
+        confirmer: Option<&dyn Confirmer>,
+        session_allow: &mut Vec<String>,
+        dry_run: bool,
+    ) -> String {
+        let ws = temp_dir("confirm");
+        let registry = dc_tools::default_registry();
+        let policy = PermissionPolicy::default(); // shell denied
+        let outcome = dispatch(
+            &run_command_call(cmd),
+            &registry,
+            &policy,
+            confirmer,
+            session_allow,
+            &None,
+            dry_run,
+            &ws,
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+        match outcome {
+            ToolOutcome::Observation(s) => s,
+            _ => panic!("expected an Observation from run_command dispatch"),
+        }
+    }
+
+    #[test]
+    fn unapproved_shell_denied_when_no_confirmer() {
+        // No confirmer ⇒ today's behavior: the static Deny stands.
+        let mut allow = Vec::new();
+        let obs = dispatch_run_command("echo hi", None, &mut allow, false);
+        assert!(obs.contains("denied"), "{obs}");
+        assert!(!obs.contains("exited"), "command must not run: {obs}");
+        assert!(allow.is_empty());
+    }
+
+    #[test]
+    fn confirmer_allow_once_runs_otherwise_denied_command() {
+        let fake = FakeConfirmer::new(Confirmation::AllowOnce);
+        let mut allow = Vec::new();
+        let obs = dispatch_run_command("echo hi", Some(&fake), &mut allow, false);
+        assert!(obs.contains("exited"), "command should have run: {obs}");
+        assert_eq!(fake.calls(), 1);
+        assert!(allow.is_empty(), "AllowOnce must not remember anything");
+    }
+
+    #[test]
+    fn confirmer_deny_blocks_command() {
+        let fake = FakeConfirmer::new(Confirmation::Deny("nope".to_string()));
+        let mut allow = Vec::new();
+        let obs = dispatch_run_command("echo hi", Some(&fake), &mut allow, false);
+        assert!(obs.contains("denied: nope"), "{obs}");
+        assert!(!obs.contains("exited"), "command must not run: {obs}");
+    }
+
+    #[test]
+    fn remember_mutates_effective_allowlist_for_rest_of_run() {
+        let fake = FakeConfirmer::new(Confirmation::AllowRemember {
+            prefix: "echo ".to_string(),
+        });
+        let mut allow = Vec::new();
+
+        // First matching command: prompts once, runs, and remembers the prefix.
+        let first = dispatch_run_command("echo one", Some(&fake), &mut allow, false);
+        assert!(first.contains("exited"), "{first}");
+        assert_eq!(allow, vec!["echo ".to_string()]);
+
+        // Second matching command: runs WITHOUT consulting the confirmer again.
+        let second = dispatch_run_command("echo two", Some(&fake), &mut allow, false);
+        assert!(second.contains("exited"), "{second}");
+        assert_eq!(
+            fake.calls(),
+            1,
+            "remembered prefix must short-circuit the gate"
+        );
+    }
+
+    #[test]
+    fn test_command_redirect_still_wins_over_confirmer() {
+        // The pytest→run_verification redirect precedes prompting, so the confirmer
+        // is never consulted for a test command.
+        let fake = FakeConfirmer::new(Confirmation::AllowOnce);
+        let mut allow = Vec::new();
+        let obs = dispatch_run_command("pytest", Some(&fake), &mut allow, false);
+        assert!(obs.contains("run_verification"), "{obs}");
+        assert_eq!(
+            fake.calls(),
+            0,
+            "confirmer must not be consulted for a test cmd"
+        );
+    }
+
+    #[test]
+    fn dry_run_honored_even_when_confirmer_allows() {
+        // A human-approved command still respects --dry-run: no process is spawned.
+        let fake = FakeConfirmer::new(Confirmation::AllowOnce);
+        let mut allow = Vec::new();
+        let obs = dispatch_run_command("echo hi", Some(&fake), &mut allow, true);
+        assert!(obs.contains("[dry-run]"), "{obs}");
+        assert!(!obs.contains("exited"), "dry-run must not execute: {obs}");
     }
 }

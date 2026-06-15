@@ -56,8 +56,18 @@ impl OpenAiBackend {
             },
             // Don't let ureq turn a non-2xx into a transport error — we read the
             // body ourselves to surface the server's error detail (spec 02).
+            //
+            // A generous global timeout: a reasoning model generating a long structured
+            // reply (e.g. a full work-decomposition JSON array) on a big prompt can take
+            // a couple of minutes. ureq's default timeout cut these off, so `generate()`
+            // returned a transport error → the workflow's retries all timed out → an
+            // empty artifact → "decomposition produced no content" (observed live
+            // 2026-06-14: the restaurant-site decomposition that works fine with a long
+            // HTTP timeout). 5 minutes covers the slowest local model without hanging
+            // forever on a truly dead backend.
             agent: ureq::Agent::config_builder()
                 .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(300)))
                 .build()
                 .into(),
         }

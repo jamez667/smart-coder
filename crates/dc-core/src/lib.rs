@@ -13,6 +13,7 @@
 
 pub mod advisor;
 pub mod agent;
+pub mod confirm;
 pub mod event;
 pub mod metrics;
 pub mod plan;
@@ -24,6 +25,7 @@ pub use advisor::{advice_observation, consult, Predicament};
 pub use agent::{
     run_agent, run_agent_observed, run_agent_recovering, run_agent_with, AgentConfig, AgentReport,
 };
+pub use confirm::{AutoDeny, Confirmation, Confirmer};
 pub use event::{AgentEvent, EventSink, FnSink, JsonLinesSink, NullSink, PromptMessage, TeeSink};
 pub use metrics::ToolCallMetrics;
 pub use plan::{PlanState, Step, StepStatus};

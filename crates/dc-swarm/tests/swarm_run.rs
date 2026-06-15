@@ -122,8 +122,15 @@ fn decomposes_runs_in_dependency_order_and_integrates_all() {
         .contains("RESULT = 2"));
 
     let ev = events.into_inner().unwrap();
-    // Decomposed first, SwarmDone last.
-    assert!(matches!(ev.first(), Some(SwarmEvent::Decomposed { .. })));
+    // The decomposition prompt is emitted first, then the Decomposed board; SwarmDone
+    // last.
+    assert!(matches!(
+        ev.first(),
+        Some(SwarmEvent::OrchestratorPrompt { .. })
+    ));
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, SwarmEvent::Decomposed { .. })));
     assert!(matches!(
         ev.last(),
         Some(SwarmEvent::SwarmDone { all_done: true, .. })

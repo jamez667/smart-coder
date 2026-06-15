@@ -451,10 +451,19 @@ fn print_swarm_event(ev: &dc_swarm::SwarmEvent) {
                 println!("  {}. {goal}", i + 1);
             }
         }
-        WorkerStarted { subtask, goal } => {
+        OrchestratorPrompt { fell_back, .. } => {
+            if *fell_back {
+                println!(
+                    "  ⚠ decomposition fell back to one subtask (orchestrator gave nothing usable)"
+                );
+            }
+        }
+        WorkerStarted { subtask, goal, .. } => {
             println!("▸ worker [{subtask}]  {goal}");
         }
-        WorkerFinished { subtask, summary } => {
+        WorkerFinished {
+            subtask, summary, ..
+        } => {
             println!("  · [{subtask}] finished — {summary}");
         }
         SubtaskRetry {
@@ -994,10 +1003,12 @@ mod tests {
             WorkerStarted {
                 subtask: "s1".into(),
                 goal: "add validation".into(),
+                prompt: "Task: add validation\n…".into(),
             },
             WorkerFinished {
                 subtask: "s1".into(),
                 summary: "edited config.py".into(),
+                proposal: "proposed body".into(),
             },
             SubtaskRetry {
                 subtask: "s1".into(),
