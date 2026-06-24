@@ -260,50 +260,120 @@ fn run_tdd(
         });
         return;
     };
-    if outcome.board.is_empty() {
+    if outcome.test_files.is_empty() {
         let _ = ev_tx.send(UiEvent::Failed(
-            "work decomposition produced no subtasks; nothing to implement".to_string(),
+            "no tests were written; nothing to implement against".to_string(),
         ));
         return;
     }
 
-    // Implement: the swarm runs against the workflow's board, gated by the frozen
-    // tests (the merge may never overwrite them).
-    let advisor = cfg.swarm_advisor();
-    let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
-    let mut swarm_cfg = cfg.swarm_config(Some(confirmer));
-    swarm_cfg.frozen_paths = outcome.test_files.clone();
-    // Match the verify command to the tests that were actually written (e.g. JS tests →
-    // vitest, not pytest), so the gate can actually run.
-    let verify = cfg.verify_command.clone().unwrap_or_default();
-    swarm_cfg.verify_command = Some(crate::config::detect_verify_command(
-        &outcome.test_files,
-        &verify,
-    ));
+    // IMPLEMENT with a SINGLE agent loop (no swarm, no advisor). One capable model reads
+    // the plan + the frozen tests, writes ALL the source files itself, runs the tests,
+    // and iterates until green — keeping cross-file coherence the swarm couldn't. The
+    // verify command runs every test language (pytest for .py, vitest for *.test.js) in
+    // the Docker sandbox so a route test that spans files actually passes.
+    let verify_cmd = combined_verify_command(&outcome.test_files);
+    let instruction = format!(
+        "Implement this project so ALL the existing tests pass: {task}\n\n\
+         The tests are already written and FROZEN — do not edit or delete any test file \
+         (test_*.py or *.test.js). Read them to learn the exact contract, then write the \
+         source files (app.py, templates, static, etc.) to satisfy them. Use \
+         run_verification to run the whole suite; keep editing until it is green, then \
+         finish.\n\n\
+         Plan:\n{}",
+        outcome
+            .state
+            .approved()
+            .iter()
+            .map(|a| format!("=== {} ===\n{}", a.phase.title(), a.content))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    );
 
-    let sink = FnSwarmSink(|e: &SwarmEvent| {
-        let _ = ev_tx.send(UiEvent::Swarm(e.clone()));
+    let backend = cfg.backend();
+    let registry = dc_tools::default_registry();
+    let strategy = dc_core::select_strategy(&backend.capabilities());
+    let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
+    let mut agent_cfg = cfg.agent_config(Some(confirmer));
+    agent_cfg.verify_command = Some(verify_cmd);
+    // The frozen tests must not be edited by the implementer (spec 11).
+    agent_cfg.permission.frozen_paths = outcome.test_files.clone();
+    agent_cfg.sandbox = cfg.sandbox();
+    // Plan-free: the staged workflow already planned; the agent just implements.
+    agent_cfg.plan_first = false;
+
+    let sink = FnSink(|e: &AgentEvent| {
+        let _ = ev_tx.send(UiEvent::Agent(e.clone()));
     });
-    let report = dc_swarm::run_swarm_board(
-        &orchestrator,
-        &worker,
-        Some(&advisor as &(dyn dc_model::ModelBackend + Sync)),
-        outcome.board,
+    let report = dc_core::run_agent_observed(
+        &backend,
+        None, // no advisor — single model
+        &registry,
+        strategy.as_ref(),
+        &instruction,
         &workspace,
-        &swarm_cfg,
+        &agent_cfg,
         &sink,
     );
 
-    let _ = ev_tx.send(UiEvent::Done {
-        ok: report.all_done,
-        summary: format!(
-            "{} integrated, {} rejected, {} pending (against {} frozen test file(s))",
-            report.done,
-            report.failed,
-            report.pending,
-            outcome.test_files.len()
-        ),
-    });
+    match report {
+        Ok(r) => {
+            let _ = ev_tx.send(UiEvent::Done {
+                ok: r.finished && r.verified == Some(true),
+                summary: if r.verified == Some(true) {
+                    format!("all tests green in {} steps", r.steps)
+                } else {
+                    format!("stopped after {} steps — tests not green", r.steps)
+                },
+            });
+        }
+        Err(e) => {
+            let _ = ev_tx.send(UiEvent::Failed(format!("implementation failed: {e}")));
+        }
+    }
+}
+
+/// One verify command that runs every test language present in `test_files`: pytest for
+/// `.py` tests, vitest for `*.test.js`. Joined with `&&` so the gate is green only when
+/// both pass. (The single agent loop has one verify command; this lets it cover a mixed
+/// Python-backend + JS-frontend project.)
+fn combined_verify_command(test_files: &[String]) -> String {
+    let py: Vec<&String> = test_files.iter().filter(|f| f.ends_with(".py")).collect();
+    let js: Vec<&String> = test_files
+        .iter()
+        .filter(|f| f.ends_with(".test.js"))
+        .collect();
+    let mut parts = Vec::new();
+    if !py.is_empty() {
+        // Name the frozen test files explicitly so pytest verifies the CONTRACT, not
+        // whatever `test_*.py` happens to sit in the workspace (a stale file from a
+        // prior run, or a scratch test the model wrote, must never poison the gate).
+        let files = py
+            .iter()
+            .map(|f| shell_quote(f))
+            .collect::<Vec<_>>()
+            .join(" ");
+        parts.push(format!("python -m pytest -q {files}"));
+    }
+    if !js.is_empty() {
+        let files = js
+            .iter()
+            .map(|f| shell_quote(f))
+            .collect::<Vec<_>>()
+            .join(" ");
+        parts.push(format!("vitest run {files}"));
+    }
+    if parts.is_empty() {
+        "python -m pytest -q".to_string()
+    } else {
+        parts.join(" && ")
+    }
+}
+
+/// Minimal POSIX single-quote (the sandbox runs the command via `sh -c`). Test paths
+/// are workspace-relative and tame, but quoting keeps a path with spaces safe.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -345,6 +415,33 @@ mod tests {
                 Err(_) => return None, // worker ended without a terminal (shouldn't happen)
             }
         }
+    }
+
+    #[test]
+    fn verify_command_targets_only_the_frozen_tests() {
+        // The gate must name the frozen test files, not blanket-collect `test_*.py`
+        // — a stale or scratch test in the workspace must never poison verification.
+        let cmd =
+            combined_verify_command(&["test_app.py".to_string(), "static/app.test.js".to_string()]);
+        assert!(
+            cmd.contains("pytest -q 'test_app.py'"),
+            "pytest scoped to the frozen file: {cmd}"
+        );
+        assert!(
+            cmd.contains("vitest run 'static/app.test.js'"),
+            "vitest scoped to the frozen file: {cmd}"
+        );
+        // No bare whole-directory pytest.
+        assert!(
+            !cmd.contains("pytest -q &&") && !cmd.trim_end().ends_with("pytest -q"),
+            "must not run an unscoped pytest: {cmd}"
+        );
+    }
+
+    #[test]
+    fn py_only_verify_is_scoped() {
+        let cmd = combined_verify_command(&["test_app.py".to_string()]);
+        assert_eq!(cmd, "python -m pytest -q 'test_app.py'");
     }
 
     #[test]

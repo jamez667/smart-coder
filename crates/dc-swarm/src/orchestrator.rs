@@ -288,10 +288,20 @@ fn integrate_with_retry(
             // as complete; a rejected one is incomplete.
             None if accepted_files.is_some() => Vec::new(),
             None => vec![synthetic_failure("integration rejected")],
-            // With a verify command, scope to the subtask's own tests — for both an
-            // accept (is the partial fix actually complete?) and a reject (the merge
-            // was reverted; check the prior state against this subtask's contract).
-            Some(cmd) => scoped_failures(&cfg.sandbox, workspace, cmd, &cfg.frozen_paths, baseline),
+            // With a verify command, scope to THIS subtask's OWN test files, not the
+            // whole frozen suite — a single-file subtask must be judged only by the test
+            // for its file, or tests for not-yet-written files keep it red and revert it
+            // (observed live 2026-06-14: every subtask saw "2 tests still red"). Map the
+            // subtask's source files to their tests by basename; fall back to the whole
+            // suite if no own-test is found (so a subtask is never un-gated).
+            Some(cmd) => {
+                let own = subtask
+                    .as_ref()
+                    .map(|s| own_tests(&s.files, &cfg.frozen_paths))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| cfg.frozen_paths.clone());
+                scoped_failures(&cfg.sandbox, workspace, cmd, &own, baseline)
+            }
         };
 
         if let (true, Some(files)) = (residual.is_empty(), accepted_files) {
@@ -417,21 +427,65 @@ fn scoped_failures(
             Vec::new()
         }
     } else {
-        // Precise: verify filtered to the frozen contract tests for this subtask.
-        let cmd = format!("{verify_command} {}", frozen.join(" "));
-        let report = dc_verify::run_verification_in(sandbox, workspace, &cmd);
-        if report.generic {
-            // No per-test breakdown — fall back to the command's pass/fail.
-            if report.command_ok {
-                Vec::new()
+        // Precise: verify filtered to this subtask's frozen contract tests. Tests can
+        // span languages (Python backend + JS frontend), so run each group with its OWN
+        // runner — pytest for `.py`, vitest for `.test.js` — and combine the failures.
+        // (A single `pytest test_x.js` can't run JS; that mismatch reverted every
+        // frontend subtask, observed live 2026-06-14.)
+        let mut py: Vec<&String> = Vec::new();
+        let mut js: Vec<&String> = Vec::new();
+        for f in frozen {
+            if is_js_test(f) {
+                js.push(f);
             } else {
-                vec![synthetic_failure(
-                    "scoped tests failed (no per-test detail)",
-                )]
+                py.push(f);
             }
-        } else {
-            report.failed().into_iter().cloned().collect()
         }
+        let mut residual = Vec::new();
+        if !py.is_empty() {
+            let cmd = format!(
+                "{verify_command} {}",
+                py.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+            );
+            residual.extend(run_scoped(sandbox, workspace, &cmd));
+        }
+        if !js.is_empty() {
+            // Vitest filters by a path substring; pass each file. The container has it.
+            let cmd = format!(
+                "vitest run {}",
+                js.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+            );
+            residual.extend(run_scoped(sandbox, workspace, &cmd));
+        }
+        residual
+    }
+}
+
+/// Whether a test path is a JS test (vitest's `*.test.js`/`*.spec.js` convention),
+/// vs a Python `test_*.py` (pytest).
+fn is_js_test(path: &str) -> bool {
+    let l = path.to_ascii_lowercase();
+    l.ends_with(".test.js") || l.ends_with(".spec.js") || l.ends_with(".test.mjs")
+}
+
+/// Run one scoped verify command and return its failing cases (or a synthetic failure
+/// when the runner errored with no per-test detail).
+fn run_scoped(
+    sandbox: &dc_verify::Sandbox,
+    workspace: &Path,
+    cmd: &str,
+) -> Vec<dc_verify::TestCase> {
+    let report = dc_verify::run_verification_in(sandbox, workspace, cmd);
+    if report.generic {
+        if report.command_ok {
+            Vec::new()
+        } else {
+            vec![synthetic_failure(
+                "scoped tests failed (no per-test detail)",
+            )]
+        }
+    } else {
+        report.failed().into_iter().cloned().collect()
     }
 }
 
@@ -483,6 +537,26 @@ fn is_frozen(path: &str, frozen: &[String]) -> bool {
     let norm = |s: &str| s.replace('\\', "/");
     let p = norm(path);
     frozen.iter().any(|f| norm(f) == p)
+}
+
+/// The frozen test files that belong to a subtask's `source_files` — its own contract,
+/// for the scoped completion check. Tests are 1:1 with source files by basename stem:
+/// `app.py` → `test_app.py`, `index.html` → `index.test.js`. A subtask is judged only by
+/// these, not the whole suite (tests for other, not-yet-written files would keep it red).
+fn own_tests(source_files: &[String], frozen: &[String]) -> Vec<String> {
+    let stem = |path: &str| -> String {
+        let base = path.replace('\\', "/");
+        let base = base.rsplit('/').next().unwrap_or(&base);
+        // The bare name: drop every extension and a leading `test_`.
+        let s = base.split('.').next().unwrap_or(base);
+        s.strip_prefix("test_").unwrap_or(s).to_ascii_lowercase()
+    };
+    let want: std::collections::HashSet<String> = source_files.iter().map(|f| stem(f)).collect();
+    frozen
+        .iter()
+        .filter(|t| want.contains(&stem(t)))
+        .cloned()
+        .collect()
 }
 
 /// Merge a worker's *text* proposal into the real workspace, then verify (spec 08
@@ -660,6 +734,27 @@ mod tests {
     use dc_model::{Capabilities, GenerateRequest, GenerateResponse, ModelBackend, ToolCalling};
     use dc_proto::Result;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn own_tests_maps_source_files_to_their_tests_by_stem() {
+        let frozen = vec![
+            "test_app.py".to_string(),
+            "index.test.js".to_string(),
+            "style.test.js".to_string(),
+        ];
+        // app.py → test_app.py only (not the frontend tests).
+        assert_eq!(
+            own_tests(&["app.py".to_string()], &frozen),
+            vec!["test_app.py"]
+        );
+        // index.html → index.test.js (frontend test by stem).
+        assert_eq!(
+            own_tests(&["templates/index.html".to_string()], &frozen),
+            vec!["index.test.js"]
+        );
+        // A source file with no matching test → empty (caller falls back to the suite).
+        assert!(own_tests(&["nope.py".to_string()], &frozen).is_empty());
+    }
 
     fn temp(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(

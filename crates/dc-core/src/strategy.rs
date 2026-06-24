@@ -118,10 +118,41 @@ impl ToolCallStrategy for ParseRepair {
     }
 
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError> {
-        let json = extract_json_object(raw).ok_or(RepairError::NoJson)?;
-        let value: serde_json::Value =
-            serde_json::from_str(json).map_err(|e| RepairError::BadJson(e.to_string()))?;
-        registry.validate(&value).map_err(RepairError::Invalid)
+        let objects = extract_all_json_objects(raw);
+        if objects.is_empty() {
+            return Err(RepairError::NoJson);
+        }
+        // Validate each candidate object (tolerating raw control chars in strings).
+        // A model may batch several calls in one turn (Gemma-4); collect the valid ones.
+        let mut valid: Vec<ValidatedCall> = Vec::new();
+        let mut last_err: Option<RepairError> = None;
+        for json in &objects {
+            let value: serde_json::Value = match serde_json::from_str(json)
+                .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(json)))
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = Some(RepairError::BadJson(e.to_string()));
+                    continue;
+                }
+            };
+            match registry.validate(&value) {
+                Ok(call) => valid.push(call),
+                Err(e) => last_err = Some(RepairError::Invalid(e)),
+            }
+        }
+        if valid.is_empty() {
+            // Nothing parsed/validated — surface the most specific error for repair.
+            return Err(last_err.unwrap_or(RepairError::NoJson));
+        }
+        // One action per turn (preserves observe→react). When the model batched calls,
+        // run the FIRST one that makes progress (edit/create/run/finish) — the leading
+        // reads are it re-confirming context it already has. Else take the first valid.
+        let chosen = valid
+            .iter()
+            .position(|c| is_progress_tool(&c.name))
+            .unwrap_or(0);
+        Ok(valid.into_iter().nth(chosen).unwrap())
     }
 }
 
@@ -210,10 +241,82 @@ pub fn extract_json_object(text: &str) -> Option<&str> {
     extract_balanced(text, '{', '}')
 }
 
+/// Escape raw (unescaped) control characters that appear INSIDE JSON string values —
+/// a literal newline/carriage-return/tab a model emitted instead of `\n`/`\r`/`\t`.
+/// JSON forbids raw control chars in strings, so `serde_json` rejects them; a coder
+/// model writing multi-line code in an argument hits this constantly. We only touch
+/// chars inside string literals (tracking quote/escape state), so structural JSON is
+/// untouched and an already-escaped `\n` (backslash + n) passes through verbatim.
+fn escape_raw_control_chars_in_strings(json: &str) -> String {
+    let mut out = String::with_capacity(json.len() + 16);
+    let mut in_str = false;
+    let mut escaped = false;
+    for ch in json.chars() {
+        if in_str {
+            if escaped {
+                escaped = false;
+                out.push(ch);
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    out.push(ch);
+                }
+                '"' => {
+                    in_str = false;
+                    out.push(ch);
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        } else {
+            if ch == '"' {
+                in_str = true;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Find the first balanced `[...]` block, ignoring brackets inside JSON strings.
 /// Used by the planner to pull a step array out of a small model's noisy reply.
 pub fn extract_json_array(text: &str) -> Option<&str> {
     extract_balanced(text, '[', ']')
+}
+
+/// Find ALL top-level balanced `{...}` blocks in order. Some models (Gemma-4) emit
+/// several tool calls in ONE turn, separated by markers like `<tool_call|>`, e.g.
+/// `{read_file}<tool_call|>{create_file}<tool_call|>{run_verification}`. The loop runs
+/// one action per turn, so we need every candidate to pick the one that makes progress.
+fn extract_all_json_objects(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(obj) = extract_balanced(rest, '{', '}') {
+        out.push(obj);
+        // Advance past this object. `obj` is a slice of `rest`; find where it ends.
+        let end = (obj.as_ptr() as usize - rest.as_ptr() as usize) + obj.len();
+        if end >= rest.len() {
+            break;
+        }
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// Tools that change the workspace or end the run. When a model batches several calls
+/// in one turn (e.g. `read → create → verify → finish`), the leading reads are it
+/// re-confirming context; the call that actually *makes progress* is the first of
+/// these. The loop preserves observe-react by running just that one and feeding back.
+fn is_progress_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "edit_file" | "create_file" | "write_file" | "run_command" | "run_verification" | "finish"
+    )
 }
 
 /// Find the first balanced `open..close` block, ignoring delimiters inside JSON
@@ -266,11 +369,64 @@ mod tests {
     }
 
     #[test]
+    fn batched_turn_runs_the_first_progress_call_not_the_leading_read() {
+        // Gemma-4 emits several calls in one turn separated by `<tool_call|>`. The loop
+        // runs one action/turn, so we must pick the call that makes PROGRESS (create),
+        // not the leading re-read the model already has. Observed live 2026-06-24.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"read_file\",\"path\":\"test_app.py\"}<tool_call|>\
+                   {\"tool\":\"create_file\",\"path\":\"app.py\",\"content\":\"x = 1\"}<tool_call|>\
+                   {\"tool\":\"run_verification\"}<tool_call|>{\"tool\":\"finish\"}";
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(
+            call.name, "create_file",
+            "must skip the leading read to the create"
+        );
+        assert_eq!(call.str("path"), Some("app.py"));
+    }
+
+    #[test]
+    fn batched_reads_only_returns_the_first() {
+        // If every batched call is a no-op read, just take the first (no progress call).
+        let reg = default_registry();
+        let raw = "{\"tool\":\"read_file\",\"path\":\"a.py\"}<tool_call|>\
+                   {\"tool\":\"read_file\",\"path\":\"b.py\"}";
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.name, "read_file");
+        assert_eq!(call.str("path"), Some("a.py"));
+    }
+
+    #[test]
     fn tolerates_prose_and_braces_in_strings() {
         let reg = default_registry();
         let raw = "Sure:\n{\"tool\":\"write_file\",\"path\":\"x\",\"content\":\"a { b } c\"}\ndone";
         let call = ParseRepair.extract(raw, &reg).unwrap();
         assert_eq!(call.str("content"), Some("a { b } c"));
+    }
+
+    #[test]
+    fn tolerates_raw_newlines_inside_a_string_value() {
+        // A coder model writes a multi-line `old_str` with LITERAL newlines (and even a
+        // mix of escaped + raw, exactly as qwen3-coder-30b did 2026-06-23). Strict JSON
+        // forbids raw control chars in strings; the sanitizer must rescue it.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"edit_file\",\"path\":\"app.py\",\"old_str\":\"def page():\n    start = n * 3\",\"new_str\":\"def page():\n    start = (n-1) * 3\"}";
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.name, "edit_file");
+        assert_eq!(call.str("old_str"), Some("def page():\n    start = n * 3"));
+        assert_eq!(
+            call.str("new_str"),
+            Some("def page():\n    start = (n-1) * 3")
+        );
+    }
+
+    #[test]
+    fn already_escaped_newlines_still_parse_unchanged() {
+        // The sanitizer must not double-escape a correctly-escaped `\n`.
+        let reg = default_registry();
+        let raw = r#"{"tool":"write_file","path":"a.py","content":"x = 1\ny = 2"}"#;
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.str("content"), Some("x = 1\ny = 2"));
     }
 
     #[test]

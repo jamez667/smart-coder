@@ -65,7 +65,14 @@ pub fn generate_phase(
     state: &WorkflowState,
     think: ThinkPolicy,
 ) -> Artifact {
-    for attempt in 0..3 {
+    // A transient backend error (a 503 "Loading model" while a Docker container
+    // reloads, or a network blip) needs the retries to span a few SECONDS — three
+    // back-to-back calls all land inside the same reload and all fail (observed live
+    // 2026-06-15: the Specs phase died because the model was mid-reload). So when the
+    // call itself errors, back off before retrying; an empty-but-successful reply
+    // (thinking-budget exhaustion) retries immediately with /no_think as before.
+    const BACKOFF_MS: [u64; 4] = [0, 1000, 2000, 4000];
+    for attempt in 0..4 {
         // After a first weak result, drop thinking for this phase: the likeliest cause
         // is the budget vanishing into reasoning_content (the model narrates the task
         // instead of answering, and runs out before emitting the JSON).
@@ -80,15 +87,26 @@ pub fn generate_phase(
         // site decomposition ran out of budget while still reasoning → no JSON → empty
         // board → nothing built). Give the phases real room; the JSON phases get more.
         req.max_tokens = if phase.produces_json() { 4096 } else { 2048 };
-        if let Ok(resp) = orchestrator.generate(&req) {
-            let content = resp.content.trim().to_string();
-            // A JSON phase that came back as prose-only (no parseable array) is a FAILED
-            // attempt, not a usable artifact — retry with thinking suppressed rather than
-            // chaining an empty board downstream and silently building nothing.
-            let usable =
-                !content.is_empty() && (!phase.produces_json() || contains_json_array(&content));
-            if usable {
-                return Artifact::draft(phase, content);
+        match orchestrator.generate(&req) {
+            Ok(resp) => {
+                let content = resp.content.trim().to_string();
+                // A JSON phase that came back as prose-only (no parseable array) is a
+                // FAILED attempt, not a usable artifact — retry with thinking suppressed
+                // rather than chaining an empty board downstream and building nothing.
+                let usable = !content.is_empty()
+                    && (!phase.produces_json() || contains_json_array(&content));
+                if usable {
+                    return Artifact::draft(phase, content);
+                }
+                // Empty/unusable but the backend answered: retry now (no backoff).
+            }
+            Err(_) => {
+                // The backend errored — likely transient (reload/blip). Wait so the
+                // remaining attempts outlast a multi-second model load.
+                let delay = BACKOFF_MS[(attempt + 1).min(BACKOFF_MS.len() - 1)];
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
             }
         }
     }
@@ -128,7 +146,8 @@ fn system_for(phase: Phase) -> String {
             "For each stage, you write the concrete, ordered plan to make its tests pass (red → green)."
         }
         Phase::WorkDecomposition => {
-            "You slice the plan into small INDEPENDENT subtasks sized for a tiny worker model."
+            "You slice the implementation into subtasks — ONE per source file — each \
+             writing a single file to pass its own test, sized for a tiny worker model."
         }
     };
     format!(
@@ -142,10 +161,12 @@ fn system_for(phase: Phase) -> String {
 /// most reliable on Python + plain web, and a fixed stack lets the harness match the
 /// verify command (pytest / vitest) and reject off-stack files. No TypeScript, no React
 /// build tooling, no other backend languages.
-const STACK_CONSTRAINT: &str = "STACK (REQUIRED): backend in Python with Flask, frontend \
-    in plain JavaScript, HTML, and CSS only. Do NOT use TypeScript, React, Vue, a build \
-    step, or any other backend language (no Node.js/Express, no Java, no Go). Every source \
-    file must be a .py, .js, .html, or .css file. \
+const STACK_CONSTRAINT: &str = "STACK: backend in Python with Flask; a frontend, ONLY IF the \
+    task needs a user interface, in plain JavaScript, HTML, and CSS. Build ONLY what the task \
+    asks for — if it is a backend/JSON API with no UI, create NO frontend files (no index.html, \
+    script.js, or styles.css) and write NO frontend tests; app.py alone is the whole project. \
+    Do NOT use TypeScript, React, Vue, a build step, or any other backend language (no \
+    Node.js/Express, no Java, no Go). Every source file must be a .py, .js, .html, or .css file. \
     LIBRARIES: the installed Python packages you may import are flask, flask_sqlalchemy, \
     flask_restful, flask_cors, marshmallow, requests, pytest, and the standard library. \
     Do NOT use any package outside that list (no FastAPI, no Django) — it is not installed \
@@ -155,28 +176,44 @@ const STACK_CONSTRAINT: &str = "STACK (REQUIRED): backend in Python with Flask, 
 fn phase_instruction(phase: Phase) -> String {
     match phase {
         Phase::StageBreakdown => {
-            // A coverage test-plan, not test code. Each item names a test file and
-            // the behavior it must cover; a worker writes the actual test from this.
-            "Output ONLY a JSON array of coverage items; each item: \
-             {\"file\":\"test_x.py\",\"covers\":\"one specific behavior the test must check\"}. \
-             Group related behaviors under the same test file. Cover the happy path and the \
-             important edge cases. Backend test files are Python (test_*.py, run by pytest); \
-             frontend test files are plain JavaScript (test_*.js, NOT .jsx — no React). \
-             No prose, just the JSON array."
+            // ONE test file per SOURCE file in the layout. This 1:1 alignment is what
+            // makes the swarm work: each source file gets its own test, so each becomes a
+            // single-file subtask judged by a single test the worker can actually satisfy.
+            // A test that spans multiple source files (a route test that needs both the
+            // .py and its template) can't be satisfied by any one single-file worker, and
+            // every subtask reverts (observed live 2026-06-14). Two runners (spec 08):
+            // pytest for `.py` (test_<name>.py), vitest for frontend (.<name>.test.js).
+            "Output the tests that pin the task's required BEHAVIOR — nothing more. JSON array \
+             of coverage items; each item: \
+             {\"file\":\"<test file>\",\"covers\":\"one specific behavior the test must check\",\
+             \"expect\":<the exact JSON the route returns for this case>}. The `expect` value is \
+             the EXACT response body as a JSON literal, with EVERY field the spec states — e.g. \
+             for a counter that returns name+value: \"expect\":{\"name\":\"x\",\"value\":1}; for \
+             an error: \"expect\":{\"error\":\"not found\"}. Omit `expect` only when the behavior \
+             has no JSON body. For a Flask backend/API, ALL route behavior is tested via the test \
+             client in ONE `test_app.py` (pytest) — one item per route/behavior (happy path and \
+             important edge cases, e.g. invalid input returning the right error code). Add a \
+             frontend test (`<name>.test.js`, vitest) ONLY if the task asked for a UI file; if \
+             the task is a backend/JSON API with no UI, output NO frontend tests. Do NOT invent \
+             tests for files the task didn't ask for. No prose, just the JSON array."
                 .to_string()
         }
         Phase::WorkDecomposition => {
-            // The swarm's decomposition parser expects exactly this JSON shape.
-            // Crucially: the test files are ALREADY WRITTEN and frozen — decompose
-            // only the IMPLEMENTATION work that makes them pass, never test-writing
-            // or a 'run the tests' step (the harness verifies; tests aren't a task).
-            "The test files already exist and are FROZEN — do not include any subtask \
-             that writes, edits, or runs tests. Decompose only the IMPLEMENTATION work \
-             that makes the existing tests pass. Output ONLY a JSON array of subtasks; \
-             each item: {\"id\":\"t1\",\"goal\":\"...\",\"files\":[\"path\"],\"deps\":[\"id\"]}. \
-             Every `files` entry is a non-test source file, and each subtask owns a \
-             DISJOINT set of files; use deps only when one must finish before another. \
-             No prose, just the JSON array."
+            // ONE SUBTASK PER SOURCE FILE. The tests are 1:1 with source files (one test
+            // per file), so each subtask is a single source file gated by its single test
+            // — which a single-file worker can actually write and pass. (A subtask owning
+            // multiple files breaks: the single-shot worker returns one file's content and
+            // mashes the rest into it — observed live 2026-06-14, HTML pasted into app.py.)
+            "Create ONE subtask per IMPLEMENTATION source file the layout defines. Each \
+             subtask writes exactly ONE source file to make that file's own test pass. The \
+             goal must be an IMPLEMENT instruction (what to build), e.g. \"Implement the \
+             Flask root route in app.py that serves the page\" — NOT a restatement of what \
+             the test verifies. Do NOT include any subtask that writes, edits, or runs \
+             tests (the tests are frozen). Output ONLY a JSON array of subtasks; each item: \
+             {\"id\":\"t1\",\"goal\":\"Implement ...\",\"files\":[\"one_source_file\"],\"deps\":[\"id\"]}. \
+             Each `files` list has exactly ONE non-test source file. Use deps only when one \
+             file must exist before another (e.g. a template before the route that renders \
+             it). No prose, just the JSON array."
                 .to_string()
         }
         _ => format!(
@@ -301,6 +338,55 @@ mod tests {
         let s = WorkflowState::new("t");
         let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
         assert!(a.content.is_empty());
+    }
+
+    #[test]
+    fn generate_phase_recovers_from_a_transient_backend_error() {
+        // A 503 "Loading model" while the Docker container reloads makes generate()
+        // return Err. The engine must back off and retry, not give up — otherwise a
+        // momentary blip kills the whole workflow (observed live 2026-06-15). Here the
+        // first call errors, the second succeeds.
+        use dc_model::{Capabilities, GenerateResponse, ToolCalling};
+        use std::cell::Cell;
+
+        struct FlakyBackend {
+            calls: Cell<usize>,
+        }
+        impl ModelBackend for FlakyBackend {
+            fn name(&self) -> &str {
+                "flaky"
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    max_context_tokens: 8_192,
+                    tool_calling: ToolCalling::None,
+                    on_device: false,
+                }
+            }
+            fn generate(&self, _req: &GenerateRequest) -> dc_proto::Result<GenerateResponse> {
+                let n = self.calls.get();
+                self.calls.set(n + 1);
+                if n == 0 {
+                    Err(dc_proto::DcError::Backend("Loading model".to_string()))
+                } else {
+                    Ok(GenerateResponse {
+                        content: "# Specs\nrecovered after the blip".to_string(),
+                    })
+                }
+            }
+        }
+
+        let backend = FlakyBackend {
+            calls: Cell::new(0),
+        };
+        let s = WorkflowState::new("t");
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        assert!(
+            a.content.contains("recovered after the blip"),
+            "must recover from a transient error, got: {:?}",
+            a.content
+        );
+        assert_eq!(backend.calls.get(), 2, "errored once, then succeeded");
     }
 
     #[test]

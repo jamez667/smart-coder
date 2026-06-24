@@ -76,19 +76,18 @@ impl Default for UiConfig {
     fn default() -> Self {
         // The live-test defaults from MEMORY: coder on :11435, advisor on :11434.
         Self {
+            // ONE model does everything now (plan + implement) — no swarm, no advisor.
+            // The single Qwen3-8B backend (dc-qwen8b container, llama.cpp, :11435).
             base_url: "http://localhost:11435/v1".to_string(),
-            model: String::new(),
+            model: "qwen3-coder-30b".to_string(),
             tool_calling: ToolCalling::None,
-            // Decomposition (orchestrator) and "junior asks senior" (advisor) need a
-            // REASONING model — a code-completion coder can't decompose, it just echoes
-            // the prompt's example (observed live 2026-06-14: coder-0 returned the
-            // literal `fix the parser`/`parser.py` sample, so the swarm built a stub).
-            // Default both to the e4b box; editable in settings. Leaving these unset
-            // would silently fall the orchestrator back to the coder and break swarms.
-            advisor_url: Some("http://localhost:11434/v1".to_string()),
-            advisor_model: Some("advisor-e4b".to_string()),
-            orchestrator_url: Some("http://localhost:11434/v1".to_string()),
-            orchestrator_model: Some("advisor-e4b".to_string()),
+            // No separate advisor/orchestrator: the workflow planner and the implement
+            // agent both use the single backend above (orchestrator()/advisor() fall back
+            // to base_url/model when unset). The single-agent pivot dropped the swarm.
+            advisor_url: None,
+            advisor_model: None,
+            orchestrator_url: None,
+            orchestrator_model: None,
             // The TDD build needs a verify command to drive the implementation against
             // the frozen tests. Default to pytest (the live boxes are Python); editable
             // in settings. Without it the build stops at "plan + tests written".
@@ -561,21 +560,22 @@ mod tests {
     }
 
     #[test]
-    fn default_orchestrator_is_a_distinct_reasoning_model_not_the_coder() {
-        // The decomposition bug: if the orchestrator defaults to the coder, a small
-        // code model can't decompose and the swarm builds garbage. The default must
-        // point the orchestrator at its own (reasoning) model/endpoint.
+    fn single_model_pivot_has_no_separate_advisor_or_orchestrator() {
+        // The pivot: ONE capable model (Qwen3-8B) does plan + implement. There is no
+        // swarm and no advisor — both the workflow planner (orchestrator()) and the
+        // implement agent fall back to the single backend, and no advisor is wired.
         let cfg = UiConfig::default();
         assert!(
-            cfg.orchestrator_model.is_some(),
-            "orchestrator must default to an explicit reasoning model"
+            !cfg.model.is_empty(),
+            "the single model must be set by default"
         );
-        assert_ne!(
-            cfg.orchestrator_model.as_deref(),
-            Some(cfg.model.as_str()),
-            "orchestrator model must differ from the (empty) coder model"
+        assert!(
+            cfg.orchestrator_model.is_none() && cfg.orchestrator_url.is_none(),
+            "no separate orchestrator — the planner uses the one model"
         );
-        // And the advisor is wired by default too (junior-asks-senior available).
-        assert!(cfg.advisor().is_some());
+        assert!(
+            cfg.advisor().is_none(),
+            "no advisor in the single-model setup (the harness self-recovers instead)"
+        );
     }
 }

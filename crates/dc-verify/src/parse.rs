@@ -120,12 +120,16 @@ fn attach_cargo_failure_messages(output: &str, cases: &mut [TestCase]) {
 fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
     let mut cases = Vec::new();
 
-    // Verbose per-test lines.
+    // Verbose per-test lines: `path::test_name STATUS` (the STATUS is the LAST token).
+    // Guard against captured-log noise — pytest echoes Flask's logger lines like
+    // `ERROR    app:app.py:875 Exception on /sum [POST]` where the level is the FIRST
+    // token and the line merely *contains* `.py`. Require a real pytest node id (has
+    // `::`) or a test-file name, so a stray log line is never counted as a test.
     for line in output.lines() {
         let line = line.trim();
         for status in ["PASSED", "FAILED", "ERROR"] {
             if let Some(name) = line.strip_suffix(status).map(str::trim) {
-                if !name.is_empty() && (name.contains("::") || name.contains(".py")) {
+                if !name.is_empty() && is_pytest_node(name) {
                     cases.push(TestCase {
                         name: name.to_string(),
                         passed: status == "PASSED",
@@ -146,7 +150,7 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
                         Some((n, m)) => (n.trim(), Some(m.trim().to_string())),
                         None => (rest.trim(), Some(kind.trim().to_string())),
                     };
-                    if name.contains("::") || name.contains(".py") {
+                    if is_pytest_node(name) {
                         cases.push(TestCase {
                             name: name.to_string(),
                             passed: false,
@@ -156,6 +160,20 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
                 }
             }
         }
+        // A collection ERROR (e.g. the source file has a syntax error, or an import
+        // fails) shows in the summary as a bare `ERROR path.py` with no ` - reason`;
+        // the real traceback lives in an `___ ERROR collecting path.py ___` block
+        // above. Attach the last line of that block (the actual exception) so the
+        // model sees WHAT broke, not a blind "ERROR".
+        attach_pytest_collection_errors(output, &mut cases);
+
+        // A test whose only message is a bare assertion (e.g. `assert 500 == 200` from a
+        // route that raised) hides the ROOT cause: the exception is in the failure-detail
+        // block (`___ test_x ___` with `E   NameError: ...`). Without it the model loops
+        // blindly (observed live 2026-06-15: a route 500'd on a missing `render_template`
+        // import and the agent never learned why). Append the underlying exception.
+        attach_pytest_failure_exceptions(output, &mut cases);
+
         // Add placeholder passes from the summary so passed/total is meaningful
         // (e.g. "2 failed, 1 passed in 0.05s").
         if let Some(passed) = pytest_summary_passed(output) {
@@ -176,6 +194,119 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
         cases,
         command_ok,
         generic: false,
+    }
+}
+
+/// Whether `name` looks like a real pytest node id, not a captured-log line. A node
+/// is either `path::test_...` (the common case) or a bare test-file name like
+/// `test_foo.py` / `foo_test.py` (collection errors). Rejects Flask logger noise such
+/// as `app:app.py:875 Exception on /sum [POST]` — it has a single `:` (not `::`), an
+/// embedded `:<line>`, and whitespace in the "name".
+fn is_pytest_node(name: &str) -> bool {
+    if name.contains("::") {
+        // A node id's left side is a path; the right side a test name. Reject if it
+        // carries spaces (a log message) before the first `::`.
+        return !name.split("::").next().unwrap_or("").contains(' ');
+    }
+    // Bare file name (collection error): `<something>test<something>.py` with no spaces
+    // and no `:line` suffix.
+    let f = name.trim();
+    !f.contains(' ')
+        && !f.contains(':')
+        && f.ends_with(".py")
+        && (f.contains("test_") || f.contains("_test"))
+}
+
+/// For each FAILED test, look in its `____ <test> ____` failure-detail block for the
+/// underlying exception (`E   NameError: ...`) and append it to the message when the
+/// message alone is a bare assertion. A route that raises shows in the summary only as
+/// `assert 500 == 200`; the real cause (e.g. `NameError: name 'render_template' is not
+/// defined`) lives in the traceback. Surfacing it is the difference between the model
+/// fixing the import and looping blindly.
+fn attach_pytest_failure_exceptions(output: &str, cases: &mut [TestCase]) {
+    let lines: Vec<&str> = output.lines().collect();
+    for case in cases.iter_mut() {
+        if case.passed {
+            continue;
+        }
+        // The test name in the detail header is the last `::` segment.
+        let short = case.name.rsplit("::").next().unwrap_or(&case.name);
+        // Find the `____ <short> ____` failure block header.
+        let Some(start) = lines.iter().position(|l| {
+            let t = l.trim_matches('_').trim();
+            (t == short || t.starts_with(&format!("{short} "))) && l.trim_start().starts_with('_')
+        }) else {
+            continue;
+        };
+        // Scan the block (including any `--- Captured log call ---` traceback that
+        // follows, up to the next test/section header) for the REAL exception. Two
+        // shapes: pytest's assertion-rewrite `E   <Exc>: ...` lines, AND a raw
+        // traceback's final `<Exc>: ...` line (a route that raised logs its traceback
+        // via Flask — the cause has NO `E ` prefix). Keep the last named-exception line.
+        let mut exc: Option<String> = None;
+        for next in &lines[start + 1..] {
+            let t = next.trim();
+            // Stop at the next failure block or the final summary, but DON'T stop at a
+            // `---`-ruled sub-section (that's where Captured log / traceback lives).
+            if t.starts_with("___") || t.starts_with("===") {
+                break;
+            }
+            let candidate = t.strip_prefix("E ").map(str::trim).unwrap_or(t);
+            // A named exception line looks like `SomeError: message` / `SomeException: …`.
+            let is_named_exc = (candidate.contains("Error") || candidate.contains("Exception"))
+                && candidate.contains(':')
+                && !candidate.starts_with("File ");
+            if is_named_exc {
+                exc = Some(candidate.to_string());
+            }
+        }
+        if let Some(e) = exc {
+            // Append the exception unless the message already carries it.
+            match &case.message {
+                Some(m) if m.contains(&e) => {}
+                Some(m) => case.message = Some(format!("{m}  ({e})")),
+                None => case.message = Some(e),
+            }
+        }
+    }
+}
+
+/// For each ERROR case whose message is still the bare placeholder, find the
+/// matching `___ ERROR collecting <name> ___` block and attach the real exception
+/// line (e.g. `ModuleNotFoundError: No module named 'run'`) so the model can act.
+fn attach_pytest_collection_errors(output: &str, cases: &mut [TestCase]) {
+    let lines: Vec<&str> = output.lines().collect();
+    for case in cases.iter_mut() {
+        // Only ERROR cases left with the placeholder message ("ERROR").
+        if case.passed || case.message.as_deref() != Some("ERROR") {
+            continue;
+        }
+        // The collection block header names the file: "ERROR collecting <file>".
+        let file = case.name.split("::").next().unwrap_or(&case.name);
+        if let Some(start) = lines.iter().position(|l| {
+            let t = l.trim_matches('_').trim();
+            t.starts_with("ERROR collecting") && t.contains(file)
+        }) {
+            // The exception line is the last non-empty line of the block (before the
+            // next `___`-ruled header or the short-summary section).
+            let mut exc: Option<String> = None;
+            for next in &lines[start + 1..] {
+                let t = next.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if t.starts_with("___") || t.starts_with("===") {
+                    break;
+                }
+                // Keep the most specific line: an `Error:`/`Exception` line wins.
+                if t.contains("Error") || t.contains("Exception") || exc.is_none() {
+                    exc = Some(t.to_string());
+                }
+            }
+            if let Some(e) = exc {
+                case.message = Some(e);
+            }
+        }
     }
 }
 
@@ -297,6 +428,102 @@ FAILED test_calc.py::test_ten_is_even - assert False is True
             .iter()
             .any(|c| c.message.as_deref() == Some("assert False is True")));
         assert!(!report.all_green());
+    }
+
+    #[test]
+    fn pytest_collection_error_surfaces_the_exception_not_just_error() {
+        // A source file that fails to import shows as a bare `ERROR <file>` in the
+        // summary with the real traceback in an `ERROR collecting` block above. The
+        // model must see the exception, not a blind "ERROR".
+        let out = "\
+==================================== ERRORS ====================================
+_______________________ ERROR collecting test_run.py _______________________
+test_run.py:2: in <module>
+    from run import app
+E   ModuleNotFoundError: No module named 'run'
+=========================== short test summary info ===========================
+ERROR test_run.py
+1 error in 0.04s
+";
+        let report = parse("python -m pytest -q", out, false);
+        assert!(!report.generic, "should parse: {out}");
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "test_run.py");
+        assert_eq!(
+            failed[0].message.as_deref(),
+            Some("E   ModuleNotFoundError: No module named 'run'"),
+            "the exception is attached, not the bare placeholder"
+        );
+        assert!(!report.all_green());
+    }
+
+    #[test]
+    fn pytest_failure_surfaces_the_underlying_exception_not_just_the_assert() {
+        // A route that raises shows in the summary as `assert 500 == 200`; the real
+        // cause is in the failure block. The model must SEE the NameError to fix it.
+        // The REAL format observed live: the exception is in a `Captured log call`
+        // traceback (NO `E ` prefix), not in the assertion-rewrite block.
+        let out = "\
+=================================== FAILURES ===================================
+__________________________ test_root_renders_template __________________________
+
+    def test_root_renders_template():
+        c = app.test_client()
+        r = c.get('/')
+>       assert r.status_code == 200
+E       assert 500 == 200
+E        +  where 500 = <WrapperTestResponse streamed [500 INTERNAL SERVER ERROR]>.status_code
+
+test_app.py:6: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    app:app.py:875 Exception on / [GET]
+Traceback (most recent call last):
+  File \"/workspace/app.py\", line 7, in index
+    return app.render_template('index.html')
+AttributeError: 'Flask' object has no attribute 'render_template'
+=========================== short test summary info ============================
+FAILED test_app.py::test_root_renders_template - assert 500 == 200
+1 failed in 0.12s
+";
+        let report = parse("python -m pytest -q", out, false);
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1);
+        let msg = failed[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("AttributeError") && msg.contains("render_template"),
+            "the underlying exception must be surfaced, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn flask_log_lines_are_not_counted_as_tests() {
+        // pytest echoes Flask's captured logger output. A line like
+        // `ERROR    app:app.py:875 Exception on /sum [POST]` ends in nothing useful but
+        // earlier code matched any `.py`-containing line ending in a status word and
+        // invented a phantom failing "test". It must be ignored; only the real node id
+        // counts.
+        let out = "\
+test_app.py::test_health PASSED
+ERROR    app:app.py:875 Exception on /sum [POST]
+test_app.py::test_sum_invalid_json FAILED
+";
+        let report = parse("python -m pytest -v", out, false);
+        assert!(!report.generic);
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1, "only the real test failed: {failed:?}");
+        assert_eq!(failed[0].name, "test_app.py::test_sum_invalid_json");
+        assert_eq!(report.passed_count(), 1);
+    }
+
+    #[test]
+    fn is_pytest_node_accepts_nodes_rejects_logs() {
+        assert!(is_pytest_node("test_app.py::test_health"));
+        assert!(is_pytest_node("tests/test_core.py::test_add"));
+        assert!(is_pytest_node("test_run.py")); // collection-error file
+        assert!(!is_pytest_node("app:app.py:875 Exception on /sum [POST]"));
+        assert!(!is_pytest_node("app.py")); // a source file, not a test
+        assert!(!is_pytest_node("in app: Exception on /sum [POST]"));
     }
 
     #[test]

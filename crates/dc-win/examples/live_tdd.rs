@@ -13,7 +13,7 @@ fn main() {
         model: "coder-0".to_string(),
         ..UiConfig::default()
     };
-    let task = "Make me a restaurant review website".to_string();
+    let task = "hello world website".to_string();
     let ws = cfg.run_workspace("tdd-livecheck");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(&ws).unwrap();
@@ -45,8 +45,18 @@ fn main() {
                     }
                 }
                 UiEvent::Swarm(e) => {
-                    for r in dc_win::view::swarm_rows(&e) {
-                        println!("  {}  {}", r.icon, r.text);
+                    // Print the raw reject reason for diagnosis (swarm_rows hides it).
+                    if let dc_swarm::SwarmEvent::Integrated {
+                        subtask,
+                        accepted: false,
+                        files,
+                    } = &e
+                    {
+                        println!("  ✗  [{subtask}] REVERTED — {}", files.join(", "));
+                    } else {
+                        for r in dc_win::view::swarm_rows(&e) {
+                            println!("  {}  {}", r.icon, r.text);
+                        }
                     }
                 }
                 UiEvent::Done { ok, summary } => {

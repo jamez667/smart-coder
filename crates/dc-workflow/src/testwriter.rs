@@ -20,16 +20,41 @@ pub struct WrittenTest {
     pub content: String,
 }
 
-// Keep this SHORT and concrete. A long, instruction-heavy prompt makes the small
+// Keep these SHORT and concrete. A long, instruction-heavy prompt makes the small
 // worker model degrade — observed live 2026-06-14: an elaborate version (Flask test-
 // client tutorial + library allowlist) made coder-0 reply with just the filename, so
 // every test came back empty and NONE were written. One example beats three paragraphs.
-const TEST_WRITER_SYSTEM: &str = "You write a runnable pytest test file. Reply with ONLY the \
+
+/// Python/pytest test-writer (for `test_*.py` files).
+const TEST_WRITER_PY: &str = "You write a runnable pytest test file. Reply with ONLY the \
 file body — no fences, no prose, do not repeat the filename. Import from the module under test \
 (the test filename minus the leading 'test_' and '.py'; e.g. test_app.py → `app`). If it is a \
 Flask app, use the test client: `from app import app` / `c = app.test_client()` / \
 `r = c.get('/path')`. One test per behavior; the implementation does not exist yet so tests must \
-FAIL until written. /no_think";
+FAIL until written. Write EXACTLY one test function per behavior listed below — do NOT invent \
+extra tests (no 'is it importable' / isinstance / smoke tests). Assert EXACTLY, never loosely: \
+check `r.status_code == <code>` AND compare the WHOLE parsed body with every field the behavior \
+specifies, e.g. `assert r.get_json() == {'name': 'x', 'value': 2}` — NOT `b'2' in r.data` (that \
+substring also matches '12' or '200') and NOT a partial dict that drops fields. When the app \
+holds state across requests (e.g. an in-memory store), use a DIFFERENT resource name in each \
+test so tests don't interfere. /no_think";
+
+/// JavaScript/vitest test-writer (for `*.test.js` files — the plain-JS frontend).
+const TEST_WRITER_JS: &str = "You write a runnable vitest test file (plain JavaScript, ES \
+modules). Reply with ONLY the file body — no fences, no prose, do not repeat the filename. \
+Start with `import { test, expect } from 'vitest'` and import the module under test (the \
+test filename minus `.test.js`; e.g. script.test.js → `./script.js`). For DOM behavior, set \
+`document.body.innerHTML` and assert on it. One test per behavior; the implementation does not \
+exist yet so tests must FAIL until written.";
+
+/// The right test-writer system prompt for a test file, by extension.
+fn test_writer_system(file: &str) -> &'static str {
+    if file.to_ascii_lowercase().ends_with(".js") {
+        TEST_WRITER_JS
+    } else {
+        TEST_WRITER_PY
+    }
+}
 
 /// Ask `worker` to write each test file named by the coverage plan. One model call
 /// per file (the cheapest path); the file's coverage items are the worker's brief.
@@ -39,23 +64,35 @@ pub fn write_tests(worker: &dyn ModelBackend, coverage: &[CoverageItem]) -> Vec<
     for (file, covers) in group_by_file(coverage) {
         let prompt = test_prompt(&file, &covers);
         let req = GenerateRequest::new(vec![
-            Message::system(TEST_WRITER_SYSTEM),
+            Message::system(test_writer_system(&file).to_string()),
             Message::user(prompt),
         ]);
         // Retry a few times: a tiny thinking model can leak reasoning (rejected by
-        // clean_test) or blip. Take the first reply that cleans to real code.
+        // clean_test) or blip, OR drop a required field from the contract (the 8B
+        // systematically omits keys). Take the first reply that cleans to real code AND
+        // asserts every `expect` key; keep the last non-empty as a fallback so we still
+        // produce *a* test if none is perfect (better a slightly loose test than none).
+        let mut fallback: Option<String> = None;
         for _ in 0..3 {
             let Ok(resp) = worker.generate(&req) else {
                 continue;
             };
             let content = clean_test(&file, &resp.content);
-            if !content.trim().is_empty() {
-                out.push(WrittenTest {
-                    file: file.clone(),
-                    content,
-                });
+            if content.trim().is_empty() {
+                continue;
+            }
+            if covers_all_expected_keys(&content, &covers) {
+                fallback = Some(content);
                 break;
             }
+            // Cleans to code but drops a contract field — remember it, try again.
+            fallback.get_or_insert(content);
+        }
+        if let Some(content) = fallback {
+            out.push(WrittenTest {
+                file: file.clone(),
+                content,
+            });
         }
     }
     out
@@ -79,13 +116,51 @@ pub fn persist_tests(workspace: &Path, tests: &[WrittenTest]) -> std::io::Result
     Ok(written)
 }
 
-fn test_prompt(file: &str, covers: &[String]) -> String {
+fn test_prompt(file: &str, covers: &[CoverageItem]) -> String {
     let mut s = format!("Test file: {file}\n\nCover these behaviors, one test each:\n");
     for c in covers {
-        s.push_str(&format!("- {c}\n"));
+        s.push_str(&format!("- {}", c.covers));
+        if let Some(expect) = &c.expect {
+            // Hand the writer the exact body to assert so it copies rather than
+            // reconstructs (the 8B drops fields when reconstructing — 0/3 kept `name`).
+            s.push_str(&format!(
+                "  → the response body must equal EXACTLY: {expect} (assert this whole \
+                 dict; do not drop any key)"
+            ));
+        }
+        s.push('\n');
     }
     s.push_str("\nReply with the complete test file.");
     s
+}
+
+/// The JSON object keys an `expect` literal requires (e.g. `{"name":..,"value":..}` →
+/// `["name","value"]`). Empty if `expect` isn't a JSON object.
+fn expected_keys(expect: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(expect)
+        .ok()
+        .and_then(|v| v.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()))
+        .unwrap_or_default()
+}
+
+/// Does `test_body` assert every key each `expect` literal requires? The 8B
+/// systematically drops fields (asserts `{'value':1}` for a `{name,value}` contract),
+/// which under-specifies the frozen contract — so we verify in code, not just by prompt.
+/// A test is acceptable if, for every behavior with an `expect` object, all its keys
+/// appear somewhere in the generated body.
+fn covers_all_expected_keys(test_body: &str, covers: &[CoverageItem]) -> bool {
+    for c in covers {
+        let Some(expect) = &c.expect else { continue };
+        for key in expected_keys(expect) {
+            // The key must appear as a string literal the assertion uses.
+            let quoted_single = format!("'{key}'");
+            let quoted_double = format!("\"{key}\"");
+            if !test_body.contains(&quoted_single) && !test_body.contains(&quoted_double) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Clean a worker's test output into a runnable file, or return empty if it isn't
@@ -106,10 +181,9 @@ fn clean_test(file: &str, s: &str) -> String {
             break;
         }
     }
-    // The first real line must look like Python (import/from/def/class/@/comment).
-    // If it's a prose sentence, the model leaked its reasoning instead of code —
-    // reject the whole thing (empty → the workflow retries / fails loudly) rather
-    // than salvage code buried in a monologue.
+    // The first real line must look like code (Python or JS), not prose. If the model
+    // leaked its reasoning ("Okay, let's…"), reject the whole thing (empty → the
+    // workflow retries / fails loudly) rather than salvage code buried in a monologue.
     let looks_like_code = lines
         .first()
         .map(|l| {
@@ -118,6 +192,11 @@ fn clean_test(file: &str, s: &str) -> String {
                 || t.starts_with("from ")
                 || t.starts_with("def ")
                 || t.starts_with("class ")
+                || t.starts_with("const ")
+                || t.starts_with("let ")
+                || t.starts_with("test(")
+                || t.starts_with("describe(")
+                || t.starts_with("//")
                 || t.starts_with('@')
                 || t.starts_with('#')
         })
@@ -126,7 +205,12 @@ fn clean_test(file: &str, s: &str) -> String {
         return String::new();
     }
     let joined = lines.join("\n");
-    fix_self_import(file, &joined).trim_end().to_string()
+    // The self-import fix is Python-only (test_app.py → from app). JS files keep theirs.
+    if file.to_ascii_lowercase().ends_with(".py") {
+        fix_self_import(file, &joined).trim_end().to_string()
+    } else {
+        joined.trim_end().to_string()
+    }
 }
 
 /// Deterministically correct the module a Python test imports from. A small model
@@ -191,10 +275,12 @@ mod tests {
             CoverageItem {
                 file: "test_f.py".into(),
                 covers: "returns 1".into(),
+                expect: None,
             },
             CoverageItem {
                 file: "test_f.py".into(),
                 covers: "handles zero".into(),
+                expect: None,
             },
         ];
         let written = write_tests(&backend, &coverage);
@@ -261,10 +347,33 @@ mod tests {
         let coverage = vec![CoverageItem {
             file: "test_m.py".into(),
             covers: "f works".into(),
+            expect: None,
         }];
         let written = write_tests(&backend, &coverage);
         assert_eq!(written.len(), 1);
         assert!(written[0].content.starts_with("from m import f"));
+    }
+
+    #[test]
+    fn rejects_a_test_that_drops_a_contract_field() {
+        // The 8B drops fields: a {name,value} contract asserted as {value} only. The
+        // first reply omits `name` (rejected); the second includes both (accepted).
+        let backend = MockBackend::new([
+            "from app import app\ndef test_incr():\n    r = app.test_client().post('/c/x/incr')\n    assert r.get_json() == {'value': 1}",
+            "from app import app\ndef test_incr():\n    r = app.test_client().post('/c/x/incr')\n    assert r.get_json() == {'name': 'x', 'value': 1}",
+        ]);
+        let coverage = vec![CoverageItem {
+            file: "test_app.py".into(),
+            covers: "incr returns name and value".into(),
+            expect: Some(r#"{"name":"x","value":1}"#.to_string()),
+        }];
+        let written = write_tests(&backend, &coverage);
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].content.contains("'name'"),
+            "must keep the full contract, got: {}",
+            written[0].content
+        );
     }
 
     #[test]

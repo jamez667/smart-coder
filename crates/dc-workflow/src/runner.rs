@@ -255,7 +255,7 @@ mod tests {
                 ("pytest test file", "def test_a():\n    assert a() == 1"),
                 ("ordered plan", "# Plan\nsteps"),
                 (
-                    "INDEPENDENT subtasks",
+                    "per source file",
                     r#"[{"id":"t1","goal":"do a","files":["a.py"]},{"id":"t2","goal":"do b","files":["b.py"]}]"#,
                 ),
             ]),
@@ -303,7 +303,7 @@ mod tests {
                 ("pytest test file", "def test_a():\n    assert a() == 1"),
                 ("ordered plan", "# Plan\nsteps"),
                 (
-                    "INDEPENDENT subtasks",
+                    "per source file",
                     r#"[{"id":"t1","goal":"do a","files":["a.py"]}]"#,
                 ),
             ]),

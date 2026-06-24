@@ -98,6 +98,10 @@ pub struct AgentConfig {
     /// GUI's approve/deny buttons and the CLI's interactive prompt drive. `Arc` keeps
     /// `AgentConfig: Clone` and lets the handle cross to the worker thread.
     pub confirmer: Option<Arc<dyn Confirmer>>,
+    /// Where `run_verification` runs (spec 12): the host, or a per-run Docker container.
+    /// Docker gives generated code a pinned toolkit + a known layout so the tests run
+    /// against a reproducible env (the GUI defaults to it). Defaults to the host.
+    pub sandbox: dc_verify::Sandbox,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -124,6 +128,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("verbose", &self.verbose)
             // `dyn Confirmer` isn't `Debug`; report presence only.
             .field("confirmer", &self.confirmer.is_some())
+            .field("sandbox", &self.sandbox)
             .finish()
     }
 }
@@ -148,6 +153,7 @@ impl Default for AgentConfig {
             dry_run: false,
             verbose: false,
             confirmer: None,
+            sandbox: dc_verify::Sandbox::default(),
         }
     }
 }
@@ -349,6 +355,26 @@ pub fn run_agent_observed(
     // repeat. If a nudge doesn't land, escalate to the advisor rather than nudging
     // forever (spec 02 — junior asks senior).
     let mut nudge_streak = 0usize;
+    // How many times we've self-recovered from a stall WITHOUT an advisor. A single
+    // capable model has no senior to ask, so the harness steers it back in-band with
+    // a firm directive instead of dying on the first loop. Bounded so a genuinely
+    // stuck model still terminates (spec 03 — the harness owns recovery).
+    let mut self_recoveries = 0usize;
+    // A failing `edit_file` on this path, and how many times in a row. A small model
+    // often anchors `edit_file` on code it *imagines* it wrote (e.g. a `jsonify(...)`
+    // line that isn't in the file), so the anchor never matches and it loops. After a
+    // couple of misses the harness tells it to stop fiddling with anchors and rewrite
+    // the whole (small) file with `create_file` — far more reliable than a perfect
+    // anchor. Observed live 2026-06-15 (the A/B `/sum` 500→400 fix it couldn't apply).
+    let mut failed_edit_path: Option<String> = None;
+    let mut failed_edit_streak = 0usize;
+    // The same verification failure, seen N times in a row. A model stuck on a hard bug
+    // edits ineffectively (each edit resets the stall, so the stall detector never trips)
+    // or spams run_verification — burning the whole budget while the SAME tests keep
+    // failing. When the failure signature is unchanged across several verifications, the
+    // harness escalates: quote the exact failing tests and demand a full rewrite of the
+    // offending file (observed live 2026-06-15: the ladder's expr-eval/root-cause rungs
+    // looped ~10 verifications on an unchanged failure and died at the step budget).
     // Shell-command approvals accumulated this run via `Confirmation::AllowRemember`
     // (spec 06). Owned by the loop and mutated in place, so `cfg` stays shared and
     // `PermissionPolicy` is never mutated. Checked in addition to the static policy.
@@ -474,6 +500,7 @@ pub fn run_agent_observed(
                             return Ok(stopped(
                                 reason,
                                 step + 1,
+                                &cfg.sandbox,
                                 &cfg.verify_command,
                                 workspace,
                                 &journal,
@@ -494,6 +521,7 @@ pub fn run_agent_observed(
                         &cfg.permission,
                         cfg.confirmer.as_deref(),
                         &mut session_allow,
+                        &cfg.sandbox,
                         &cfg.verify_command,
                         cfg.dry_run,
                         workspace,
@@ -509,7 +537,7 @@ pub fn run_agent_observed(
 
                     match outcome {
                         ToolOutcome::Finished => {
-                            match gate_finish(&cfg.verify_command, workspace) {
+                            match gate_finish(&cfg.sandbox, &cfg.verify_command, workspace) {
                                 FinishGate::Allow(verified) => {
                                     if let Some(v) = verified {
                                         sink.record(&AgentEvent::Verification {
@@ -654,6 +682,65 @@ pub fn run_agent_observed(
             };
         prev_action = Some(action);
 
+        // edit_file anchor-loop breaker (spec 03): a non-matching `edit_file` (the
+        // anchor isn't in the file) is a mutating call that errored, so the
+        // idempotent-repeat path above never catches it — yet a small model will
+        // re-submit the same imagined anchor until the stall kills it. Track repeated
+        // misses on the same path and, after a couple, steer it to rewrite the whole
+        // file with `create_file` instead of hunting for an anchor that doesn't exist.
+        // Two failure modes, one cure (`write_file`):
+        //  - `edit_file` whose anchor isn't in the file (model imagines the contents).
+        //  - `create_file` on a path that already exists (create_file refuses to
+        //    overwrite, so the model that wants to FIX a file it already wrote loops on
+        //    `create_file` forever — observed live 2026-06-15, the multi-file db task
+        //    died this way after writing app.py once). Both mean "rewrite this file".
+        let edit_missed = tool == "edit_file"
+            && (obs.contains("0 matches") || obs.contains("not found"))
+            && !changed;
+        let create_clash = tool == "create_file" && obs.contains("already exists") && !changed;
+        let write_loop = edit_missed || create_clash;
+        if write_loop && failed_edit_path.as_deref() == Some(arg.as_str()) {
+            failed_edit_streak += 1;
+        } else if write_loop {
+            failed_edit_path = Some(arg.clone());
+            failed_edit_streak = 1;
+        } else {
+            failed_edit_path = None;
+            failed_edit_streak = 0;
+        }
+        let obs = if failed_edit_streak >= 2 {
+            failed_edit_path = None;
+            failed_edit_streak = 0;
+            interventions += 1;
+            let directive = if create_clash {
+                format!(
+                    "`{arg}` already exists — `create_file` will NOT overwrite it, so \
+                     repeating it does nothing. To change it, call `write_file` with `path` \
+                     `{arg}` and the ENTIRE new file contents in one shot (write_file \
+                     overwrites). Make the fix the failing test needs."
+                )
+            } else {
+                format!(
+                    "Your `edit_file` anchor does not exist in `{arg}` — you are matching \
+                     against code that isn't in the file. STOP editing by anchor. Instead call \
+                     `write_file` with `path` `{arg}` and the ENTIRE corrected file contents in \
+                     one shot (write_file overwrites the existing file). Base it on the file \
+                     shown in the error above plus the fix the failing test needs."
+                )
+            };
+            sink.record(&AgentEvent::Advice {
+                trigger: if create_clash {
+                    "create_file keeps clashing with an existing file".to_string()
+                } else {
+                    "edit_file anchor keeps missing".to_string()
+                },
+                advice: directive.clone(),
+            });
+            directive
+        } else {
+            obs
+        };
+
         // Record the turn and detect stalls (spec 03 — VERIFY, cheap every turn).
         let was_error = looks_like_failure(&obs);
         sink.record(&AgentEvent::ToolResult {
@@ -671,7 +758,7 @@ pub fn run_agent_observed(
         // the loop as a fresh observation the model reacts to.
         if changed {
             if let Some(cmd) = &cfg.verify_command {
-                let report = dc_verify::run_verification(workspace, cmd);
+                let report = dc_verify::run_verification_in(&cfg.sandbox, workspace, cmd);
                 sink.record(&AgentEvent::Verification {
                     green: report.all_green(),
                     summary: first_line(&report.observation()),
@@ -720,11 +807,26 @@ pub fn run_agent_observed(
                 sink.record(&AgentEvent::Stalled {
                     trigger: trigger.to_string(),
                 });
-                // Junior asks senior for a nudge (spec 02). No advisor → stop.
+                // Junior asks senior for a nudge (spec 02). With no advisor (the
+                // single-model setup), the harness steers the model back in-band a
+                // bounded number of times before giving up — a capable model just
+                // needs a firm directive, not a senior.
                 match escalate(advisor, instruction, &plan, &history, trigger) {
                     Some(advice) => {
                         interventions += 1;
                         stall.reset();
+                        sink.record(&AgentEvent::Advice {
+                            trigger: trigger.to_string(),
+                            advice: advice.clone(),
+                        });
+                        push_observation(&mut recent, &advice, cfg.keep_recent_turns);
+                    }
+                    None if self_recoveries < SELF_RECOVERY_LIMIT => {
+                        self_recoveries += 1;
+                        interventions += 1;
+                        stall.reset();
+                        prev_action = None;
+                        let advice = self_recovery_directive(&recent_tools(&history));
                         sink.record(&AgentEvent::Advice {
                             trigger: trigger.to_string(),
                             advice: advice.clone(),
@@ -739,6 +841,7 @@ pub fn run_agent_observed(
                         return Ok(stopped(
                             reason,
                             step + 1,
+                            &cfg.sandbox,
                             &cfg.verify_command,
                             workspace,
                             &journal,
@@ -759,6 +862,7 @@ pub fn run_agent_observed(
     Ok(stopped(
         StopReason::BudgetExhausted,
         cfg.max_steps,
+        &cfg.sandbox,
         &cfg.verify_command,
         workspace,
         &journal,
@@ -767,6 +871,49 @@ pub fn run_agent_observed(
         budget,
         interventions,
     ))
+}
+
+/// How many times the harness steers a stalled model back in-band when there is no
+/// advisor to escalate to (the single-model setup). Bounded so a genuinely stuck
+/// model still terminates rather than burning the whole step budget looping.
+const SELF_RECOVERY_LIMIT: usize = 2;
+
+/// The last few distinct tools the model has used, most-recent first — context for
+/// the self-recovery directive so it names what the model keeps doing.
+fn recent_tools(history: &[TurnRecord]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in history.iter().rev() {
+        if !out.contains(&t.tool) {
+            out.push(t.tool.clone());
+        }
+        if out.len() == 3 {
+            break;
+        }
+    }
+    out
+}
+
+/// A firm, advisor-free recovery instruction injected when a single model stalls.
+/// Unlike the gentle repeat-nudge, this names the loop and gives the model a
+/// concrete decision: if you've read what you need, EDIT now; if the suite is the
+/// blocker, fix the failure it reported. The model has no senior to ask, so the
+/// harness has to be the one that breaks the loop.
+fn self_recovery_directive(recent: &[String]) -> String {
+    let looped = recent
+        .first()
+        .map(String::as_str)
+        .unwrap_or("the same tool");
+    format!(
+        "STOP — you are stuck in a loop calling `{looped}` and making no progress. \
+         You already have everything you read in the context above; re-reading or \
+         re-running changes nothing. Decide the next CONCRETE move right now:\n\
+         - If the source file the tests need does not exist yet, CREATE it with \
+         `edit_file` (write the whole file).\n\
+         - If it exists but a test is failing, EDIT it to fix the exact failure the \
+         suite reported, then `run_verification`.\n\
+         Emit an `edit_file` (or another action that changes the workspace) this turn. \
+         Do NOT emit `{looped}` again."
+    )
 }
 
 /// Consult the advisor (senior) for a hint, formatted as guidance to inject.
@@ -798,6 +945,7 @@ fn escalate(
 fn stopped(
     reason: StopReason,
     steps: usize,
+    sandbox: &dc_verify::Sandbox,
     verify_command: &Option<String>,
     workspace: &Path,
     journal: &Journal,
@@ -814,7 +962,7 @@ fn stopped(
         prompt_budget,
         verified: verify_command
             .as_ref()
-            .map(|c| dc_verify::run_verification(workspace, c).all_green()),
+            .map(|c| dc_verify::run_verification_in(sandbox, workspace, c).all_green()),
         change_summary: journal.change_summary(),
         stop_reason: reason,
         interventions,
@@ -831,11 +979,15 @@ enum FinishGate {
 
 /// Run the configured verification before honoring `finish` (spec 11). With no
 /// command configured, finish is always allowed (verified = None).
-fn gate_finish(verify_command: &Option<String>, workspace: &Path) -> FinishGate {
+fn gate_finish(
+    sandbox: &dc_verify::Sandbox,
+    verify_command: &Option<String>,
+    workspace: &Path,
+) -> FinishGate {
     match verify_command {
         None => FinishGate::Allow(None),
         Some(cmd) => {
-            let report = dc_verify::run_verification(workspace, cmd);
+            let report = dc_verify::run_verification_in(sandbox, workspace, cmd);
             if report.all_green() {
                 FinishGate::Allow(Some(true))
             } else {
@@ -863,6 +1015,7 @@ fn dispatch(
     policy: &PermissionPolicy,
     confirmer: Option<&dyn Confirmer>,
     session_allow: &mut Vec<String>,
+    sandbox: &dc_verify::Sandbox,
     verify_command: &Option<String>,
     dry_run: bool,
     workspace: &Path,
@@ -951,9 +1104,9 @@ fn dispatch(
             ))
         }
         "run_verification" => match verify_command {
-            Some(cmd) => {
-                ToolOutcome::Observation(dc_verify::run_verification(workspace, cmd).observation())
-            }
+            Some(cmd) => ToolOutcome::Observation(
+                dc_verify::run_verification_in(sandbox, workspace, cmd).observation(),
+            ),
             None => ToolOutcome::Observation(
                 "run_verification: no verification command is configured for this project".into(),
             ),
@@ -1404,6 +1557,199 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    #[test]
+    fn no_advisor_self_recovers_before_giving_up() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("self-recover");
+        std::fs::write(ws.join("f.txt"), "BODY").unwrap();
+
+        // A model that loops on the same read forever, with NO advisor. The harness
+        // must steer it back in-band (emit Advice) at each stall instead of stopping
+        // on the first one — but still terminate once the recovery budget is spent.
+        let read = json!({"tool":"read_file","path":"f.txt"}).to_string();
+        let backend = CallbackBackend::android_core(move |_req| {
+            Ok(GenerateResponse {
+                content: read.clone(),
+            })
+        });
+
+        #[derive(Default)]
+        struct Adv {
+            advice: Mutex<Vec<String>>,
+            stalled: Mutex<usize>,
+        }
+        impl crate::event::EventSink for Adv {
+            fn record(&self, e: &AgentEvent) {
+                match e {
+                    AgentEvent::Advice { advice, .. } => {
+                        self.advice.lock().unwrap().push(advice.clone())
+                    }
+                    AgentEvent::Stalled { .. } => *self.stalled.lock().unwrap() += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let sink = Adv::default();
+        let cfg = AgentConfig {
+            max_steps: 30,
+            ..Default::default()
+        };
+        let report = run_agent_observed(
+            &backend,
+            None, // no advisor — the single-model setup
+            &registry,
+            strategy.as_ref(),
+            "read forever",
+            &ws,
+            &cfg,
+            &sink,
+        )
+        .unwrap();
+
+        // It eventually gives up (the model never edits), but only AFTER self-recovery.
+        assert!(!report.finished);
+        assert!(
+            matches!(report.stop_reason, StopReason::Stalled(_)),
+            "should stop stalled, got {:?}",
+            report.stop_reason
+        );
+        // SELF_RECOVERY_LIMIT firm directives were injected before giving up.
+        let advice = sink.advice.lock().unwrap();
+        assert_eq!(
+            advice.len(),
+            SELF_RECOVERY_LIMIT,
+            "expected {SELF_RECOVERY_LIMIT} self-recovery directives, got {advice:?}"
+        );
+        assert!(
+            advice[0].contains("stuck in a loop") && advice[0].contains("edit_file"),
+            "directive names the loop and points at the edit: {:?}",
+            advice[0]
+        );
+        // It did NOT die on the first stall: more stalls than the no-advisor stop
+        // would have allowed (1).
+        assert!(*sink.stalled.lock().unwrap() > 1);
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repeated_edit_miss_is_steered_to_write_file() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("edit-loop");
+        // The file exists but does NOT contain the model's imagined anchor, so every
+        // edit_file misses. After two misses the harness must steer it to write_file.
+        std::fs::write(ws.join("app.py"), "x = 1\n").unwrap();
+
+        let miss = json!({"tool":"edit_file","path":"app.py",
+            "old_str":"return jsonify(x)","new_str":"return jsonify(x), 200"})
+        .to_string();
+        let backend = MockBackend::new([
+            miss.clone(),
+            miss.clone(),
+            miss, // 3 misses
+            json!({"tool":"finish"}).to_string(),
+        ]);
+
+        #[derive(Default)]
+        struct Cap {
+            advice: Mutex<Vec<String>>,
+        }
+        impl crate::event::EventSink for Cap {
+            fn record(&self, e: &AgentEvent) {
+                if let AgentEvent::Advice { advice, .. } = e {
+                    self.advice.lock().unwrap().push(advice.clone());
+                }
+            }
+        }
+
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let sink = Cap::default();
+        let _ = run_agent_observed(
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "fix it",
+            &ws,
+            &AgentConfig::default(),
+            &sink,
+        )
+        .unwrap();
+
+        let advice = sink.advice.lock().unwrap();
+        assert!(
+            advice.iter().any(|a| a.contains("write_file")
+                && a.contains("anchor does not exist")
+                && a.contains("app.py")),
+            "a repeated edit miss must steer to write_file: {advice:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repeated_create_file_clash_is_steered_to_write_file() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("create-loop");
+        // app.py already exists. The model keeps calling create_file to "fix" it, but
+        // create_file refuses to overwrite — so it would loop forever. After two clashes
+        // the harness must steer it to write_file (observed live: the multi-file db task).
+        std::fs::write(ws.join("app.py"), "x = 1\n").unwrap();
+
+        let clash = json!({"tool":"create_file","path":"app.py","content":"y = 2\n"}).to_string();
+        let backend = MockBackend::new([
+            clash.clone(),
+            clash.clone(),
+            clash,
+            json!({"tool":"finish"}).to_string(),
+        ]);
+
+        #[derive(Default)]
+        struct Cap {
+            advice: Mutex<Vec<String>>,
+        }
+        impl crate::event::EventSink for Cap {
+            fn record(&self, e: &AgentEvent) {
+                if let AgentEvent::Advice { advice, .. } = e {
+                    self.advice.lock().unwrap().push(advice.clone());
+                }
+            }
+        }
+
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let sink = Cap::default();
+        let _ = run_agent_observed(
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "fix it",
+            &ws,
+            &AgentConfig::default(),
+            &sink,
+        )
+        .unwrap();
+
+        let advice = sink.advice.lock().unwrap();
+        assert!(
+            advice.iter().any(|a| a.contains("write_file")
+                && a.contains("already exists")
+                && a.contains("app.py")),
+            "a repeated create_file clash must steer to write_file: {advice:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     // --- Confirm-gated run_command (spec 04 / spec 06) -----------------------
 
     use crate::confirm::{Confirmation, Confirmer};
@@ -1458,6 +1804,7 @@ mod tests {
             &policy,
             confirmer,
             session_allow,
+            &dc_verify::Sandbox::Host,
             &None,
             dry_run,
             &ws,
