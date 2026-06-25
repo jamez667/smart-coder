@@ -151,6 +151,13 @@ fn validated_calls(
     let mut valid: Vec<ValidatedCall> = Vec::new();
     let mut last_err: Option<RepairError> = None;
     for json in extract_all_json_objects(raw) {
+        // Ignore an incidental `{...}` that isn't a tool call — when a model "thinks out loud"
+        // it embeds Python dicts / JSON examples in prose (e.g. `{'n': 5}`), and grabbing the
+        // FIRST brace block made the harness try to parse that as the tool call ("key must be a
+        // string"). A real tool call always has a `"tool"` key; require it before parsing.
+        if !json.contains("\"tool\"") {
+            continue;
+        }
         let value: serde_json::Value = match serde_json::from_str(json)
             .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(json)))
         {
@@ -363,6 +370,52 @@ fn is_progress_tool(name: &str) -> bool {
         name,
         "edit_file" | "create_file" | "write_file" | "run_command" | "run_verification" | "finish"
     )
+}
+
+/// Recover a `write_file` from a model that replied with a fenced CODE BLOCK instead of a
+/// tool call. Despite `/no_think`, qwen3-coder-30b often "thinks out loud" and writes the
+/// file as ```python ... ``` — its natural format — which the JSON extractor rejects, costing
+/// a turn (observed: a per-file step burned its whole budget this way). When the loop knows
+/// the single file the step is writing (`default_path`, the focus file) and the reply has a
+/// code fence, synthesize the `write_file(default_path, <block contents>)` call. Only the loop
+/// calls this, as a fallback after `extract` errors — the happy path is untouched.
+pub fn extract_markdown_write(
+    raw: &str,
+    default_path: &str,
+    registry: &ToolRegistry,
+) -> Option<ValidatedCall> {
+    let body = fenced_code_block(raw)?;
+    if body.trim().is_empty() {
+        return None;
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert("tool".to_string(), serde_json::Value::String("write_file".to_string()));
+    obj.insert("path".to_string(), serde_json::Value::String(default_path.to_string()));
+    obj.insert("content".to_string(), serde_json::Value::String(body));
+    registry.validate(&serde_json::Value::Object(obj)).ok()
+}
+
+/// The contents of the LAST fenced ```...``` code block in `raw` (the model's final/most
+/// complete version when it shows a draft then a revision), or `None` if there's no fence.
+fn fenced_code_block(raw: &str) -> Option<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with("```") {
+            let mut body = String::new();
+            for l in lines.by_ref() {
+                if l.trim() == "```" {
+                    break;
+                }
+                body.push_str(l);
+                body.push('\n');
+            }
+            if !body.trim().is_empty() {
+                blocks.push(body);
+            }
+        }
+    }
+    blocks.pop()
 }
 
 /// Key-aware recovery for a `write_file`/`create_file` call whose `content` body broke
@@ -602,6 +655,34 @@ mod tests {
             call.str("new_str"),
             Some("def page():\n    start = (n-1) * 3")
         );
+    }
+
+    #[test]
+    fn incidental_python_dicts_in_prose_are_not_mistaken_for_a_tool_call() {
+        // The model "thinks out loud" with Python dicts in the prose (`{'n': 5}`). The
+        // extractor must IGNORE those (no "tool" key) and not try to parse one as the call.
+        let reg = default_registry();
+        // Pure prose with dicts, no tool call → a clean repairable error (NoJson), not a
+        // confusing "key must be a string".
+        let prose = "I'll return {'result': 25} when given {'n': 5}. Let me implement it.";
+        assert!(ParseRepair.extract(prose, &reg).is_err());
+        // Prose dicts FOLLOWED by a real tool call → the real call is found.
+        let mixed = "First {'n': 5} then the call:\n{\"tool\":\"finish\"}";
+        assert_eq!(ParseRepair.extract(mixed, &reg).unwrap().name, "finish");
+    }
+
+    #[test]
+    fn a_fenced_code_block_recovers_a_write_to_the_focused_file() {
+        // The model replies with a ```python``` block instead of a JSON tool call. With a known
+        // focus file, extract_markdown_write synthesizes the write_file it meant.
+        let reg = default_registry();
+        let raw = "Here is the implementation:\n\n```python\ndef square(n):\n    return n * n\n```\n";
+        let call = extract_markdown_write(raw, "mathlib.py", &reg).expect("recovered a write");
+        assert_eq!(call.name, "write_file");
+        assert_eq!(call.str("path"), Some("mathlib.py"));
+        assert_eq!(call.str("content"), Some("def square(n):\n    return n * n\n"));
+        // No fence → no recovery (don't invent a write from prose).
+        assert!(extract_markdown_write("just prose, no code", "x.py", &reg).is_none());
     }
 
     #[test]

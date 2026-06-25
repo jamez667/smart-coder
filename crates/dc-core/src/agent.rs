@@ -526,7 +526,25 @@ pub fn run_agent_observed(
         });
 
         // Decode the tool call.
-        let (obs, action, changed, tool, arg) = match strategy.extract(&resp.content, registry) {
+        // Decode the tool call. If extraction fails but the model replied with a fenced code
+        // block AND the step is scoped to a single file (a per-file step), recover a
+        // `write_file` of that block to the focused file — the model "thought out loud" and
+        // wrote the file as ```python```, its natural format, instead of a JSON tool call
+        // (observed: a per-file step burned its whole budget being rejected for this). This
+        // turns a wasted turn into the write the model intended.
+        let extracted = strategy.extract(&resp.content, registry).or_else(|e| {
+            if cfg.focus_files.len() == 1 {
+                crate::strategy::extract_markdown_write(
+                    &resp.content,
+                    &cfg.focus_files[0],
+                    registry,
+                )
+                .ok_or(e)
+            } else {
+                Err(e)
+            }
+        });
+        let (obs, action, changed, tool, arg) = match extracted {
             Ok(call) => {
                 metrics.record_valid();
                 let arg = key_arg(&call);
