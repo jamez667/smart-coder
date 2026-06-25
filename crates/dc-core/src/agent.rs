@@ -216,11 +216,14 @@ Take a concrete action every turn — prefer editing over searching.\n\n";
 /// to you every turn, so don't read it — edit it. Used by the swarm worker (and
 /// any caller that sets `focus_files`).
 const FOCUS_TASK_PREFIX: &str = "You fix code. The file you must change is shown \
-below, between === markers. Each turn, do ONE of:\n\
-- edit_file: change the code. Copy old_str exactly from the file shown below.\n\
+below IN FULL, between === markers — it updates after each edit, so never read it again. \
+The OTHER files in the project appear as a SIGNATURE MAP (their `path:line  name` symbols, \
+not their bodies): import from them BY NAME using that map — do NOT read_file them, you have \
+what you need. Each turn, do ONE of:\n\
+- edit_file / write_file: change the shown file. Copy old_str exactly from it.\n\
 - run_verification: run the tests to see what still fails.\n\
 - finish: stop, once the tests pass.\n\
-Edit, then verify, then edit again until the tests pass.\n\n";
+Edit the shown file (importing other files by their signatures), verify, repeat.\n\n";
 
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
@@ -426,23 +429,26 @@ pub fn run_agent_observed(
         if !plan_render.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, plan_render));
         }
-        // The repo map helps a model navigate to the right file — but a focus-scoped
-        // worker is already shown its exact file below, so the map is just noise that
-        // tempts a dumb model toward the wrong target. Skip it when focused.
-        if !repo_map.is_empty() && cfg.focus_files.is_empty() {
-            segments.push(Segment::user(Zone::Retrieved, repo_map.clone()));
-        }
-        // Progress ledger (spec 03/05): the files that ACTUALLY exist on disk right now,
-        // read fresh every turn. The history summary tells the model what it *did* (from its
-        // own action log); this tells it what's *there*. Without it a small model re-creates
-        // files it already wrote (create_file → "already exists" → thrash) and never notices
-        // a required file was never made (observed live: a 6-file task where it rewrote 4
-        // files 6-13× each and never created the other 2). Focus-scoped workers are already
-        // shown their exact file, so skip the ledger there.
         if cfg.focus_files.is_empty() {
+            // WHOLE-TASK path: the repo map helps navigation; the progress ledger lists the
+            // files that exist (so it doesn't re-create/forget them).
+            if !repo_map.is_empty() {
+                segments.push(Segment::user(Zone::Retrieved, repo_map.clone()));
+            }
             let ledger = render_progress_ledger(workspace);
             if !ledger.is_empty() {
                 segments.push(Segment::user(Zone::Retrieved, ledger));
+            }
+        } else {
+            // FOCUSED path (per-file step): the model sees its file's FULL body below, plus a
+            // lean SIGNATURE MAP of the OTHER files (names + lines, not bodies) so it imports
+            // from them by name without re-reading their contents — the "bigger concept" that
+            // kills the re-read tax (observed: app.py read 96× because the model had no durable
+            // view of the other files). Computed FRESH each turn (files are written mid-run) and
+            // excludes the focused file (its full body is already shown).
+            let others = render_other_files_map(workspace, &cfg.focus_files, cfg.repo_map_top_k);
+            if !others.is_empty() {
+                segments.push(Segment::user(Zone::Retrieved, others));
             }
         }
         // Pin the current contents of the focused files, re-read fresh every turn so
@@ -1419,6 +1425,44 @@ fn first_line(s: &str) -> String {
         .to_string()
 }
 
+/// Render a lean SIGNATURE MAP of the files OTHER than the focused one(s): each indexed
+/// symbol as `path:line  name` (the "bigger concept" — what the other files expose, so the
+/// focused step can import by name without reading their bodies). Computed fresh from disk
+/// each turn (files appear as the build proceeds) and filtered to drop the focused file's own
+/// lines (its full body is already pinned). Empty if there's nothing else to show.
+fn render_other_files_map(workspace: &Path, focus: &[String], top_k: usize) -> String {
+    let map = dc_index::repo_map(
+        workspace,
+        &Boosts {
+            mentioned_symbols: Vec::new(),
+            in_play_files: Vec::new(),
+        },
+        top_k,
+    );
+    if map.is_empty() {
+        return String::new();
+    }
+    // The map header is the first line; each entry line is `  path:line  symbol`. Keep the
+    // header + only the entries whose path is NOT a focused file.
+    let mut out: Vec<&str> = Vec::new();
+    for (i, line) in map.lines().enumerate() {
+        if i == 0 {
+            out.push(line); // header
+            continue;
+        }
+        let path = line.trim().split(':').next().unwrap_or("");
+        if !focus.iter().any(|f| f == path) {
+            out.push(line);
+        }
+    }
+    // Header-only (every entry was the focused file) → nothing useful to show.
+    if out.len() <= 1 {
+        String::new()
+    } else {
+        out.join("\n")
+    }
+}
+
 /// Render the filesystem progress ledger: the source files that ACTUALLY exist in
 /// `workspace` right now (read fresh each turn), framed so a small model stops re-creating
 /// files it already wrote and notices required files it has not made yet. Excludes the
@@ -1816,6 +1860,69 @@ mod tests {
         // Flag off ⇒ never; flag on but no verify command ⇒ never (not a test-driven run).
         assert_eq!(run(false, Some("echo x")), 0, "flag off → no diagnosis");
         assert_eq!(run(true, None), 0, "no verify command → no diagnosis");
+    }
+
+    #[test]
+    fn focused_run_pins_its_file_and_shows_others_as_signatures_only() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("focus-map");
+        // The focused file (full body shown) + a sibling whose SIGNATURES should appear but
+        // whose BODY must not (it has a unique marker we assert is absent).
+        std::fs::write(
+            ws.join("app.py"),
+            "from store import add\n\ndef handler():\n    return add(1)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("store.py"),
+            "SECRET_BODY_MARKER = 42\n\ndef add(n):\n    return n + 1\n",
+        )
+        .unwrap();
+
+        let backend = MockBackend::new([json!({"tool":"finish"}).to_string()]);
+        let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+        let sink = crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let cfg = AgentConfig {
+            focus_files: vec!["app.py".to_string()],
+            verbose: true,
+            ..AgentConfig::default()
+        };
+        run_agent_observed(
+            &backend, None, &registry, strategy.as_ref(), "edit app.py", &ws, &cfg, &sink,
+        )
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        let prompt = evs
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::PromptAssembled { messages, .. } => Some(
+                    messages
+                        .iter()
+                        .map(|m| m.content.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .expect("a verbose run emits the assembled prompt");
+
+        // The focused file's full body IS shown.
+        assert!(prompt.contains("def handler():"), "focus file body must be pinned");
+        // The sibling's SIGNATURE is shown (a symbol from the map)...
+        assert!(prompt.contains("store.py:"), "the other file's signature map must appear");
+        // ...but NOT its body.
+        assert!(
+            !prompt.contains("SECRET_BODY_MARKER"),
+            "the other file's BODY must NOT be pinned (signatures only): {prompt}"
+        );
+        // The prompt tells the model not to re-read the others.
+        assert!(prompt.contains("SIGNATURE MAP"));
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
