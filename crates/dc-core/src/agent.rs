@@ -307,6 +307,14 @@ pub fn run_agent_observed(
     cfg: &AgentConfig,
     sink: &dyn EventSink,
 ) -> Result<AgentReport> {
+    // Centralized run log: tee every event into a queryable in-process store (spec 01). The
+    // loop can then read earlier results (e.g. the last verification output for the diagnostic)
+    // with code, instead of re-running to recover what it already saw. `sink` is shadowed so
+    // all existing `sink.record(...)` calls fan out to both the caller's sink and the log.
+    let runlog = crate::runlog::RunLogSink::new();
+    let tee = crate::event::TeeSink::new(vec![sink, &runlog]);
+    let sink: &dyn EventSink = &tee;
+
     // When the agent is scoped to focus files, the loop pins their live contents
     // every turn — so the system prompt must NOT tell the model to read first
     // (that just traps a tiny model in a read loop). Lead with "edit" instead.
@@ -842,11 +850,16 @@ pub fn run_agent_observed(
         // the loop as a fresh observation the model reacts to.
         if changed {
             if let Some(cmd) = &cfg.verify_command {
-                let report = dc_verify::run_verification_in(&cfg.sandbox, workspace, cmd);
+                // Run once, keep BOTH the raw output (the lossless record the run log stores,
+                // for the diagnostic) and the parsed report (the failure-first form the model
+                // reacts to). Before, only the compact observation was kept and the raw dump
+                // was lost — so the diagnostic had to re-run the suite to recover it.
+                let cmd_result = dc_verify::run_command_in(&cfg.sandbox, workspace, cmd);
+                let report = dc_verify::parse(cmd, &cmd_result.output, cmd_result.ok);
                 sink.record(&AgentEvent::Verification {
                     green: report.all_green(),
                     summary: first_line(&report.observation()),
-                    full: report.observation(),
+                    full: cmd_result.output.clone(),
                 });
                 if report.all_green() {
                     sink.record(&AgentEvent::Stopped {
@@ -903,12 +916,15 @@ pub fn run_agent_observed(
                 // reacts to a downstream symptom and edits the wrong file). Gated: opt-in
                 // flag, a configured verify command, and a bounded count. On success it IS the
                 // intervention for this stall — inject it and skip the generic ladder.
-                let diagnosed = if cfg.diagnose
-                    && diagnoses < DIAGNOSIS_LIMIT
-                    && cfg.verify_command.is_some()
-                {
-                    let cmd = cfg.verify_command.as_deref().unwrap();
-                    let full = dc_verify::run_command_in(&cfg.sandbox, workspace, cmd).output;
+                // Read the last RED verification the run log already captured — no re-run (the
+                // suite was just run at the auto-verify above; re-running wasted a Docker
+                // subprocess per diagnosis and risked a different result). `None` only if no
+                // failing verification was recorded, in which case there's nothing to diagnose.
+                let stored_failure = runlog.lock().slice_for_diagnosis().map(str::to_owned);
+                let diagnosed = if let (true, Some(full)) = (
+                    cfg.diagnose && diagnoses < DIAGNOSIS_LIMIT && cfg.verify_command.is_some(),
+                    stored_failure,
+                ) {
                     let sources = gather_sources(workspace);
                     match crate::diagnose::diagnose_failure(backend, instruction, &full, &sources) {
                         Some(report) => {
@@ -1677,7 +1693,9 @@ mod tests {
         use std::sync::Mutex;
 
         let ws = temp_dir("diagnose");
-        std::fs::write(ws.join("a.txt"), "x").unwrap();
+        // Seed DIFFERENT from what the model writes, so its first write is a real change (which
+        // triggers the auto-verify), and every identical write after is a no-op (the stall).
+        std::fs::write(ws.join("a.txt"), "seed").unwrap();
 
         // The worker LOOPS on a no-op read forever — UNLESS the request is the diagnostic
         // pass (its system prompt says "ROOT-CAUSE analysis"), in which case it returns a
@@ -1688,6 +1706,11 @@ mod tests {
             tool_calling: dc_model::ToolCalling::None,
             on_device: false,
         };
+        // The model writes the SAME file content every turn: the first write changes the
+        // workspace (triggering the auto-verify, which records a RED verification), and
+        // subsequent identical writes don't change it → a no-progress stall, where the
+        // diagnosis fires off the STORED red output. On a diagnostic request it returns a
+        // diagnosis.
         let backend = CallbackBackend::new("loop-or-diagnose", caps, |req: &GenerateRequest| {
             let is_diag = req
                 .messages
@@ -1696,7 +1719,7 @@ mod tests {
             let content = if is_diag {
                 "FILE: a.txt\nLINE: 1\nCAUSE: the value is wrong\nFIX: set it right".to_string()
             } else {
-                r#"{"tool":"read_file","path":"a.txt"}"#.to_string()
+                r#"{"tool":"write_file","path":"a.txt","content":"x"}"#.to_string()
             };
             Ok(GenerateResponse { content })
         });
@@ -1708,9 +1731,13 @@ mod tests {
         let cfg = AgentConfig {
             max_steps: 40,
             repeat_limit: 3,
-            // A harmless host "verify command" so the diagnosis path (run_command_in) runs
-            // fast and `verify_command.is_some()` is true; it's NOT a real test runner.
-            verify_command: Some("echo failing".to_string()),
+            no_progress_limit: 3,
+            // A host verify command that prints a parseable RED result and exits non-zero, so
+            // the auto-verify records a failing Verification the diagnosis can read.
+            verify_command: Some(
+                "python -c \"print('test_app.py::test_x FAILED'); import sys; sys.exit(1)\""
+                    .to_string(),
+            ),
             diagnose: true,
             ..AgentConfig::default()
         };
