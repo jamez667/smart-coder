@@ -118,44 +118,16 @@ impl ToolCallStrategy for ParseRepair {
     }
 
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError> {
-        let objects = extract_all_json_objects(raw);
-        if objects.is_empty() {
-            return Err(RepairError::NoJson);
-        }
-        // Validate each candidate object (tolerating raw control chars in strings).
-        // A model may batch several calls in one turn (Gemma-4); collect the valid ones.
-        let mut valid: Vec<ValidatedCall> = Vec::new();
-        let mut last_err: Option<RepairError> = None;
-        for json in &objects {
-            let value: serde_json::Value = match serde_json::from_str(json)
-                .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(json)))
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    last_err = Some(RepairError::BadJson(e.to_string()));
-                    continue;
-                }
-            };
-            match registry.validate(&value) {
-                Ok(call) => valid.push(call),
-                Err(e) => last_err = Some(RepairError::Invalid(e)),
-            }
-        }
+        let (valid, last_err) = validated_calls(raw, registry);
         if valid.is_empty() {
-            // Last resort before giving up: a `write_file`/`create_file` whose `content` is a
-            // whole source file routinely contains characters that are illegal *inside* a JSON
-            // string — most often a Python `"""docstring"""`, whose inner `"` closes the JSON
-            // string early and breaks the parse (the writefile-docstring-json-break bug). The
-            // control-char escaper above can't fix an inner quote. So when strict parsing fails
-            // entirely, try a KEY-AWARE recovery: pull the literal `content` body out of the
-            // raw text and rebuild a valid call. Only fires on the already-failing branch, so it
-            // can't change the result of a turn that parsed normally.
+            // Last resort: key-aware recovery for a write_file/create_file whose content broke
+            // strict parsing (a literal Python `"""docstring"""` — the inner `"` closes the
+            // JSON string early). Only fires on the already-failing branch.
             if let Some(value) = repair_file_content_call(raw) {
                 if let Ok(call) = registry.validate(&value) {
                     return Ok(call);
                 }
             }
-            // Nothing parsed/validated — surface the most specific error for repair.
             return Err(last_err.unwrap_or(RepairError::NoJson));
         }
         // One action per turn (preserves observe→react). When the model batched calls,
@@ -167,6 +139,67 @@ impl ToolCallStrategy for ParseRepair {
             .unwrap_or(0);
         Ok(valid.into_iter().nth(chosen).unwrap())
     }
+}
+
+/// Parse + validate every JSON object in a model turn (tolerating raw control chars). Shared
+/// by [`ParseRepair::extract`] (picks one) and [`extract_write_batch`] (takes a safe run).
+/// Returns the valid calls in emission order plus the most specific error seen (for repair).
+fn validated_calls(
+    raw: &str,
+    registry: &ToolRegistry,
+) -> (Vec<ValidatedCall>, Option<RepairError>) {
+    let mut valid: Vec<ValidatedCall> = Vec::new();
+    let mut last_err: Option<RepairError> = None;
+    for json in extract_all_json_objects(raw) {
+        let value: serde_json::Value = match serde_json::from_str(json)
+            .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(json)))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = Some(RepairError::BadJson(e.to_string()));
+                continue;
+            }
+        };
+        match registry.validate(&value) {
+            Ok(call) => valid.push(call),
+            Err(e) => last_err = Some(RepairError::Invalid(e)),
+        }
+    }
+    (valid, last_err)
+}
+
+/// The leading run of **distinct-path whole-file writes** a model batched into one turn —
+/// the safe-to-execute-in-sequence prefix (thread 3). qwen3-coder-30b emits the entire
+/// solution as 20-40 tool calls in ONE turn and the loop ran just the first, discarding the
+/// rest. Creating several DIFFERENT files in a row is order-independent and needs no
+/// observe→react between them, so we can apply them all. The batch is strictly gated — it
+/// stops at the FIRST call that is anything other than a `create_file`/`write_file` to a
+/// **new** path:
+///   - `edit_file` (anchored — needs the file's current state),
+///   - a second write to a path already in the batch (the model is revising — react first),
+///   - `run_verification`/`run_command`/`finish`/`read_file`/anything else (needs the result).
+/// Returns the ordered batch (length ≥ 0). The caller still dispatches the FIRST call through
+/// the normal single-action path; this only says which *additional* leading writes are safe to
+/// pre-apply. An empty/length-1 result means "no batching — behave exactly as before".
+pub fn extract_write_batch(raw: &str, registry: &ToolRegistry) -> Vec<ValidatedCall> {
+    let (valid, _) = validated_calls(raw, registry);
+    let mut seen_paths: Vec<String> = Vec::new();
+    let mut batch: Vec<ValidatedCall> = Vec::new();
+    for call in valid {
+        let is_whole_file_write = call.name == "write_file" || call.name == "create_file";
+        if !is_whole_file_write {
+            break; // gate: anything but a whole-file write ends the safe run
+        }
+        let Some(path) = call.str("path").map(str::to_string) else {
+            break;
+        };
+        if seen_paths.contains(&path) {
+            break; // gate: a re-write of a path already in the batch — react first
+        }
+        seen_paths.push(path);
+        batch.push(call);
+    }
+    batch
 }
 
 /// Build the OpenAI-style function definitions for a registry.
@@ -507,6 +540,44 @@ mod tests {
         let call = ParseRepair.extract(raw, &reg).unwrap();
         assert_eq!(call.name, "read_file");
         assert_eq!(call.str("path"), Some("a.py"));
+    }
+
+    #[test]
+    fn write_batch_collects_consecutive_distinct_path_writes() {
+        // The thread-3 case: the model emits the whole app as create/write calls in one turn.
+        // extract_write_batch returns the leading run of DISTINCT-path whole-file writes.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"create_file\",\"path\":\"store.py\",\"content\":\"a\"}\
+                   {\"tool\":\"create_file\",\"path\":\"app.py\",\"content\":\"b\"}\
+                   {\"tool\":\"write_file\",\"path\":\"util.py\",\"content\":\"c\"}\
+                   {\"tool\":\"run_verification\"}";
+        let batch = extract_write_batch(raw, &reg);
+        let paths: Vec<_> = batch.iter().filter_map(|c| c.str("path")).collect();
+        assert_eq!(paths, vec!["store.py", "app.py", "util.py"], "stops at run_verification");
+    }
+
+    #[test]
+    fn write_batch_stops_at_an_edit_or_a_repeated_path() {
+        let reg = default_registry();
+        // Gate 1: an edit_file (anchored — needs current file state) ends the batch.
+        let raw_edit = "{\"tool\":\"write_file\",\"path\":\"a.py\",\"content\":\"x\"}\
+                        {\"tool\":\"edit_file\",\"path\":\"a.py\",\"old_str\":\"x\",\"new_str\":\"y\"}";
+        let b1 = extract_write_batch(raw_edit, &reg);
+        assert_eq!(b1.len(), 1, "edit ends the batch: {b1:?}");
+        // Gate 2: a re-write of a path already in the batch (revision — react first) ends it.
+        let raw_dup = "{\"tool\":\"write_file\",\"path\":\"a.py\",\"content\":\"x\"}\
+                       {\"tool\":\"write_file\",\"path\":\"a.py\",\"content\":\"x2\"}";
+        let b2 = extract_write_batch(raw_dup, &reg);
+        assert_eq!(b2.len(), 1, "duplicate path ends the batch: {b2:?}");
+    }
+
+    #[test]
+    fn write_batch_is_empty_when_the_turn_does_not_lead_with_a_write() {
+        let reg = default_registry();
+        // A leading read → no batch (the loop's normal single-action path handles it).
+        let raw = "{\"tool\":\"read_file\",\"path\":\"a.py\"}\
+                   {\"tool\":\"write_file\",\"path\":\"b.py\",\"content\":\"x\"}";
+        assert!(extract_write_batch(raw, &reg).is_empty());
     }
 
     #[test]

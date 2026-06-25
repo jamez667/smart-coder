@@ -537,6 +537,30 @@ pub fn run_agent_observed(
                         }
                     }
                 } else {
+                    // Batched whole-file writes (spec 03 / thread 3): a capable model emits
+                    // the entire solution as many tool calls in ONE turn. The loop runs one
+                    // action per turn, so the leading run of distinct-path create/write calls
+                    // beyond the first used to be discarded — the model then re-emitted them
+                    // turn after turn (a long grind / stall). Creating several DIFFERENT files
+                    // is order-independent and needs no observe→react between them, so when the
+                    // first call IS such a write, pre-apply the rest of the safe leading batch
+                    // here (strictly gated by extract_write_batch). The first call still flows
+                    // through the normal dispatch below; this only adds the extra writes.
+                    let batch_note = if matches!(call.name.as_str(), "write_file" | "create_file")
+                        && !cfg.dry_run
+                    {
+                        pre_apply_batched_writes(
+                            &resp.content,
+                            registry,
+                            &cfg.permission,
+                            workspace,
+                            &mut journal,
+                            sink,
+                        )
+                    } else {
+                        String::new()
+                    };
+
                     // A normal tool call. Snapshot for the journal, then dispatch.
                     let pre = mutating_path(&call, registry)
                         .map(|p| (p.clone(), Journal::snapshot(workspace, &p)));
@@ -632,6 +656,15 @@ pub fn run_agent_observed(
                                     });
                                 }
                             }
+                            // Prepend the note about any extra files the batch pre-applied,
+                            // so the model's next observation reflects ALL the writes (not just
+                            // the first), and a change anywhere in the batch counts as progress.
+                            let o = if batch_note.is_empty() {
+                                o
+                            } else {
+                                format!("{batch_note}{o}")
+                            };
+                            let changed = changed || !batch_note.is_empty();
                             (o, action, changed, tool, arg)
                         }
                     }
@@ -1160,6 +1193,69 @@ fn dispatch(
     }
 }
 
+/// Pre-apply the EXTRA writes of a batched turn (thread 3): the leading run of distinct-path
+/// `create_file`/`write_file` calls beyond the first, which `extract_write_batch` has vetted
+/// as safe to apply in sequence (different files, no observe→react needed between them). The
+/// FIRST call is left for the normal dispatch; this applies calls 2..N directly, journals
+/// each, emits ToolCall/ToolResult events for them, and returns a short note to prepend to the
+/// turn's observation so the model sees all the writes happened. Honors the permission gate
+/// (a frozen path is skipped). Returns "" when there's nothing extra to apply.
+fn pre_apply_batched_writes(
+    raw: &str,
+    registry: &ToolRegistry,
+    policy: &PermissionPolicy,
+    workspace: &Path,
+    journal: &mut Journal,
+    sink: &dyn EventSink,
+) -> String {
+    let batch = crate::strategy::extract_write_batch(raw, registry);
+    // batch[0] is the first call (handled by the normal dispatch); apply 2..N here.
+    if batch.len() < 2 {
+        return String::new();
+    }
+    let mut applied: Vec<String> = Vec::new();
+    for call in batch.iter().skip(1) {
+        let Some(path) = call.str("path").map(str::to_string) else {
+            continue;
+        };
+        // Respect the permission gate (e.g. frozen test files are never written).
+        if let Some(spec) = registry.get(&call.name) {
+            if matches!(policy.check(call, spec.side_effect), dc_tools::Decision::Deny(_)) {
+                continue;
+            }
+        }
+        let before = Journal::snapshot(workspace, &path);
+        let outcome = execute(call, workspace);
+        let after = Journal::snapshot(workspace, &path);
+        if before != after {
+            journal.record(workspace, &path, before);
+            applied.push(path.clone());
+        }
+        let summary = match &outcome {
+            ToolOutcome::Observation(o) => first_line(o),
+            ToolOutcome::Finished => "finished".to_string(),
+        };
+        sink.record(&AgentEvent::ToolCall {
+            tool: call.name.clone(),
+            arg: path.clone(),
+        });
+        sink.record(&AgentEvent::ToolResult {
+            summary: summary.clone(),
+            full: summary,
+            is_error: false,
+        });
+    }
+    if applied.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "(harness also applied {} more batched file write(s) from this turn: {})\n",
+            applied.len(),
+            applied.join(", ")
+        )
+    }
+}
+
 /// Append the assistant action + its observation, capping the verbatim window to
 /// roughly `keep_recent` turns (each turn is one assistant + one user message).
 fn push_recent(recent: &mut Vec<Message>, action: &str, observation: &str, keep_recent: usize) {
@@ -1501,6 +1597,26 @@ mod tests {
         assert_eq!(report.metrics.invalid, 0);
         assert_eq!(std::fs::read_to_string(ws.join("out.txt")).unwrap(), "hi");
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn a_batched_turn_writes_every_distinct_file_in_one_turn() {
+        // Thread 3: the model emits the whole app as several create/write calls in ONE turn.
+        // The loop must apply ALL the distinct-path writes that turn (not just the first and
+        // discard the rest), then finish. Three files must exist after a single build turn.
+        let ws = temp_dir("batch");
+        let batched = "{\"tool\":\"create_file\",\"path\":\"store.py\",\"content\":\"S\"}\
+                       {\"tool\":\"create_file\",\"path\":\"app.py\",\"content\":\"A\"}\
+                       {\"tool\":\"write_file\",\"path\":\"util.py\",\"content\":\"U\"}";
+        let backend = MockBackend::new([batched.to_string(), json!({"tool":"finish"}).to_string()]);
+        let report = run_agent(&backend, "build the app", &ws, &AgentConfig::default()).unwrap();
+        assert!(report.finished);
+        // All three files written in the single batched turn (turn 1), finish on turn 2.
+        assert_eq!(std::fs::read_to_string(ws.join("store.py")).unwrap(), "S");
+        assert_eq!(std::fs::read_to_string(ws.join("app.py")).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(ws.join("util.py")).unwrap(), "U");
+        assert_eq!(report.steps, 2, "one batched build turn + finish");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
