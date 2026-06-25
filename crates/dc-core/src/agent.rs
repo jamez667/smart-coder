@@ -45,8 +45,15 @@ pub struct AgentConfig {
     pub effective_context_fraction: f64,
     /// Tokens reserved for the model's reply (subtracted from the budget).
     pub response_reserve_tokens: usize,
-    /// Max lines kept from any single tool observation before truncation (spec 05).
+    /// Max lines kept from any single tool observation before truncation (spec 05). This
+    /// is the cap for runaway command/test logs (a 5k-line pytest dump), where error-first
+    /// truncation keeps the signal. File reads use the more generous `read_file_line_cap`.
     pub observation_line_cap: usize,
+    /// Max lines kept from a `read_file` observation. A source file is not a runaway log —
+    /// clipping it to `observation_line_cap` (40) amputates the very code the model must
+    /// edit, so it re-reads or guesses. Give file reads real room to hold whole small/medium
+    /// files; the general `observation_line_cap` still tames noisy command output.
+    pub read_file_line_cap: usize,
     /// How many most-recent turns stay verbatim before older ones are compacted
     /// into a rolling summary (spec 05).
     pub keep_recent_turns: usize,
@@ -114,6 +121,7 @@ impl std::fmt::Debug for AgentConfig {
             )
             .field("response_reserve_tokens", &self.response_reserve_tokens)
             .field("observation_line_cap", &self.observation_line_cap)
+            .field("read_file_line_cap", &self.read_file_line_cap)
             .field("keep_recent_turns", &self.keep_recent_turns)
             .field("repo_map_top_k", &self.repo_map_top_k)
             .field("permission", &self.permission)
@@ -140,6 +148,7 @@ impl Default for AgentConfig {
             effective_context_fraction: 0.75,
             response_reserve_tokens: 1024,
             observation_line_cap: 40,
+            read_file_line_cap: 400,
             keep_recent_turns: 3,
             repo_map_top_k: 30,
             permission: PermissionPolicy::default(),
@@ -402,6 +411,19 @@ pub fn run_agent_observed(
         if !repo_map.is_empty() && cfg.focus_files.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, repo_map.clone()));
         }
+        // Progress ledger (spec 03/05): the files that ACTUALLY exist on disk right now,
+        // read fresh every turn. The history summary tells the model what it *did* (from its
+        // own action log); this tells it what's *there*. Without it a small model re-creates
+        // files it already wrote (create_file → "already exists" → thrash) and never notices
+        // a required file was never made (observed live: a 6-file task where it rewrote 4
+        // files 6-13× each and never created the other 2). Focus-scoped workers are already
+        // shown their exact file, so skip the ledger there.
+        if cfg.focus_files.is_empty() {
+            let ledger = render_progress_ledger(workspace);
+            if !ledger.is_empty() {
+                segments.push(Segment::user(Zone::Retrieved, ledger));
+            }
+        }
         // Pin the current contents of the focused files, re-read fresh every turn so
         // the view never goes stale after an edit (the failure mode that traps a
         // tiny model into re-applying its own first edit). This is the live anchor
@@ -413,13 +435,16 @@ pub fn run_agent_observed(
         if !summary.is_empty() {
             segments.push(Segment::user(Zone::HistorySummary, summary));
         }
-        for (i, m) in recent.iter().enumerate() {
-            let zone = if i + 1 == recent.len() {
-                Zone::RecentObservation
-            } else {
-                Zone::HistorySummary
-            };
-            segments.push(seg_from_message(zone, m));
+        // The whole `keep_recent_turns` window is verbatim recent context and must
+        // SURVIVE eviction — that's what keep_recent_turns promises. Tagging only the last
+        // message `RecentObservation` (sacred) and the rest `HistorySummary` meant the
+        // earlier recent turns were evicted first under budget pressure: a file the model
+        // had just read evaporated one turn later, so it re-read it and stalled. Tag the
+        // entire recent window `RecentObservation` so it's all sacred. Older turns are
+        // already compacted into the `summary` above (split_for_compaction), so this only
+        // protects the genuinely-recent window, not unbounded history.
+        for m in recent.iter() {
+            segments.push(seg_from_message(Zone::RecentObservation, m));
         }
 
         let built = builder.build(segments);
@@ -665,16 +690,29 @@ pub fn run_agent_observed(
                     }
                     None if tool == "run_verification" => {
                         "You just ran the tests and nothing has changed since — re-running \
-                         gives the same result. The suite is still failing: EDIT the code to \
-                         fix the reported failure, then run_verification."
+                         gives the same result. The suite is still failing: change the code \
+                         to fix the reported failure (use `write_file` to write/overwrite a \
+                         whole file, or `edit_file` for a small anchored change), then \
+                         run_verification."
                             .to_string()
                     }
                     None => format!(
-                        "You already have the result of `{tool}` (it's in the context \
-                         above) — re-running it changes nothing. Make the edit the task \
-                         needs now with edit_file, then run_verification."
+                        "You already have the result of `{tool}` — re-running it changes \
+                         nothing. Take a CONCRETE next action now: if a source file the tests \
+                         need does not exist yet, create it with `write_file` (the ENTIRE file \
+                         contents in one shot); if it exists but a test is failing, fix it with \
+                         `write_file` (whole file) or `edit_file` (anchored change), then \
+                         run_verification."
                     ),
                 };
+                // Fix #2: the PRIOR turn's successful result of this same idempotent call is
+                // still the last user message in `recent` — the model trusts that concrete
+                // "it worked" output over the nudge sitting next to it. Supersede it so the
+                // nudge isn't drowned by a visible success of the very call we're discouraging.
+                replace_last_user(
+                    &mut recent,
+                    &format!("[earlier `{tool}` result superseded — act on the note below]"),
+                );
                 (obs, action, false, tool, arg)
             } else {
                 nudge_streak = 0;
@@ -748,8 +786,8 @@ pub fn run_agent_observed(
             full: obs.clone(),
             is_error: was_error,
         });
-        history.push(TurnRecord::new(tool, arg, was_error));
-        let trimmed = truncate_observation(&obs, cfg.observation_line_cap, true);
+        history.push(TurnRecord::new(tool.clone(), arg, was_error));
+        let trimmed = truncate_observation(&obs, observation_cap_for(&tool, cfg), true);
         push_recent(&mut recent, &resp.content, &trimmed, cfg.keep_recent_turns);
 
         // Auto test-repair (spec 03): the moment an edit lands, the harness runs
@@ -787,7 +825,13 @@ pub fn run_agent_observed(
                     );
                     push_observation(
                         &mut recent,
-                        &truncate_observation(&fb, cfg.observation_line_cap, true),
+                        // Use the generous read_file cap, not the tight log cap: the report
+                        // is failure-first and carries the underlying exception (e.g.
+                        // TemplateNotFound) that the model must see to fix the bug. At the
+                        // 40-line log cap the `✗`/assert headers crowded the real exception
+                        // out, so the model only saw a bare `assert ... == ...` (observed
+                        // live) and looped blind. 400 lines still bounds a degenerate suite.
+                        &truncate_observation(&fb, cfg.read_file_line_cap, true),
                         cfg.keep_recent_turns,
                     );
                     // A failed auto-verify resets the stall streak: real progress
@@ -907,12 +951,13 @@ fn self_recovery_directive(recent: &[String]) -> String {
         "STOP — you are stuck in a loop calling `{looped}` and making no progress. \
          You already have everything you read in the context above; re-reading or \
          re-running changes nothing. Decide the next CONCRETE move right now:\n\
-         - If the source file the tests need does not exist yet, CREATE it with \
-         `edit_file` (write the whole file).\n\
-         - If it exists but a test is failing, EDIT it to fix the exact failure the \
-         suite reported, then `run_verification`.\n\
-         Emit an `edit_file` (or another action that changes the workspace) this turn. \
-         Do NOT emit `{looped}` again."
+         - If the source file the tests need does not exist yet, create it with \
+         `write_file` (path + the ENTIRE file contents in one shot).\n\
+         - If it exists but a test is failing, fix it: use `edit_file` for a small \
+         anchored change, or `write_file` with the ENTIRE corrected contents to rewrite \
+         it wholesale, then `run_verification`.\n\
+         Emit a `write_file` or `edit_file` (an action that changes the workspace) this \
+         turn. Do NOT emit `{looped}` again."
     )
 }
 
@@ -1138,6 +1183,22 @@ fn trim_recent(recent: &mut Vec<Message>, keep_recent: usize) {
     }
 }
 
+/// Overwrite the content of the most recent `user` message in `recent`, in place. Used by
+/// the repeat-dedup nudge (Fix #2): when an idempotent call is repeated, the prior turn's
+/// *successful* result of that same call is the last user message — leaving it verbatim
+/// lets the model trust "it worked" over the nudge. Replacing it with a short superseded
+/// marker keeps the window honest (that result was already consumed) without dropping the
+/// assistant/user turn structure. No-op if there is no user message yet.
+fn replace_last_user(recent: &mut [Message], marker: &str) {
+    if let Some(m) = recent
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == dc_model::Role::User)
+    {
+        m.content = marker.to_string();
+    }
+}
+
 /// The lowercase role word for the verbose prompt dump (`PromptAssembled`).
 fn role_word(role: dc_model::Role) -> &'static str {
     match role {
@@ -1173,6 +1234,33 @@ fn first_line(s: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+/// Render the filesystem progress ledger: the source files that ACTUALLY exist in
+/// `workspace` right now (read fresh each turn), framed so a small model stops re-creating
+/// files it already wrote and notices required files it has not made yet. Excludes the
+/// frozen tests and tooling caches (via `dc_tools::source_files`).
+fn render_progress_ledger(workspace: &Path) -> String {
+    let files = dc_tools::source_files(workspace);
+    if files.is_empty() {
+        return "Files you have created so far: (none yet — the workspace is empty). Create \
+                the source files the task requires."
+            .to_string();
+    }
+    let mut s = String::from(
+        "Files that ALREADY EXIST in the workspace (do NOT re-create these — `create_file` \
+         will fail on a path listed here; use `edit_file` or `write_file` to change one):\n",
+    );
+    for f in &files {
+        s.push_str("  ");
+        s.push_str(f);
+        s.push('\n');
+    }
+    s.push_str(
+        "Compare this list to the files the task requires above: create any required file \
+         that is NOT listed here next.",
+    );
+    s
 }
 
 /// Render the current contents of the focused files for the retrieved zone, with
@@ -1213,6 +1301,21 @@ fn is_idempotent_tool(tool: &str) -> bool {
         tool,
         "read_file" | "list_dir" | "search_code" | "find_symbol" | "run_verification"
     )
+}
+
+/// The line cap to truncate a tool's observation to before it re-enters context. A
+/// `read_file` returns source the model must edit, so it gets the generous
+/// `read_file_line_cap` (whole small/medium files); a runaway command/test log gets the
+/// tight `observation_line_cap` where error-first truncation keeps the signal (spec 05).
+fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
+    match tool {
+        // A file read is source the model edits; a verification report is failure-first and
+        // carries the underlying exception the model must see — both need real room. A
+        // runaway command/test log keeps the tight default where error-first truncation
+        // does the work.
+        "read_file" | "run_verification" => cfg.read_file_line_cap,
+        _ => cfg.observation_line_cap,
+    }
 }
 
 /// The key argument of a call, for the history record (path or query/name).
@@ -1282,6 +1385,93 @@ mod tests {
     use super::*;
     use dc_model::{CallbackBackend, GenerateResponse, MockBackend};
     use serde_json::json;
+
+    #[test]
+    fn progress_ledger_lists_existing_files_and_flags_empty() {
+        let ws = temp_dir("ledger");
+        // Empty workspace → "none yet", a prompt to start creating.
+        let empty = render_progress_ledger(&ws);
+        assert!(empty.contains("none yet"), "empty ledger: {empty}");
+
+        // After writing real sources + a frozen test, the ledger lists the sources only.
+        std::fs::create_dir_all(ws.join("templates")).unwrap();
+        std::fs::write(ws.join("app.py"), "x").unwrap();
+        std::fs::write(ws.join("templates/board.html"), "x").unwrap();
+        std::fs::write(ws.join("test_app.py"), "x").unwrap(); // frozen → excluded
+        let led = render_progress_ledger(&ws);
+        assert!(led.contains("ALREADY EXIST"), "{led}");
+        assert!(led.contains("app.py"), "{led}");
+        assert!(led.contains("templates/board.html"), "{led}");
+        assert!(
+            !led.contains("test_app.py"),
+            "the frozen test must not appear in the ledger: {led}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn verify_feedback_keeps_the_underlying_exception() {
+        // The auto-verify feedback is now truncated with read_file_line_cap, not the tight
+        // log cap — so a deep TemplateNotFound/AttributeError survives instead of being
+        // crowded out by the ✗/assert headers (the live bug: the model saw only `assert`).
+        let mut fb = String::from("(harness ran the tests after your edit)\n");
+        for i in 0..60 {
+            fb.push_str(&format!("✗ test_app.py::test_{i}\n    assert 500 == 200\n"));
+        }
+        fb.push_str("E   jinja2.exceptions.TemplateNotFound: board.html\n");
+        let cfg = AgentConfig::default();
+        let kept = truncate_observation(&fb, cfg.read_file_line_cap, true);
+        assert!(
+            kept.contains("TemplateNotFound"),
+            "the underlying exception must survive truncation"
+        );
+        // And the tight log cap would have been at risk — document the contrast.
+        assert_eq!(observation_cap_for("run_verification", &cfg), cfg.read_file_line_cap);
+    }
+
+    #[test]
+    fn read_file_and_verification_get_a_generous_cap_but_logs_stay_tight() {
+        // A read_file is source the model edits, and a verification report carries the
+        // underlying exception — both get read_file_line_cap. A runaway shell log
+        // (run_command) and a dir listing keep the tight default where error-first
+        // truncation does the work.
+        let cfg = AgentConfig {
+            observation_line_cap: 40,
+            read_file_line_cap: 400,
+            ..AgentConfig::default()
+        };
+        assert_eq!(observation_cap_for("read_file", &cfg), 400);
+        assert_eq!(observation_cap_for("run_verification", &cfg), 400);
+        assert_eq!(observation_cap_for("run_command", &cfg), 40);
+        assert_eq!(observation_cap_for("list_dir", &cfg), 40);
+    }
+
+    #[test]
+    fn whole_recent_window_is_tagged_recent_observation_so_it_survives_eviction() {
+        // Fix B: a file the model read two turns ago must NOT be evicted just because a
+        // newer turn arrived. The loop tags the ENTIRE recent window RecentObservation
+        // (sacred), so an earlier read survives a tight budget. We verify the zoning rule
+        // directly: every message in a multi-message recent window maps to the sacred zone.
+        let recent = vec![
+            Message::assistant(r#"{"tool":"read_file","path":"app.py"}"#.to_string()),
+            Message::user("read_file app.py:\n<the whole file body>".to_string()),
+            Message::assistant(r#"{"tool":"read_file","path":"db.py"}"#.to_string()),
+            Message::user("read_file db.py:\n<another file body>".to_string()),
+        ];
+        // The zoning the loop now applies (mirrors the assembly loop): all RecentObservation.
+        for m in recent.iter() {
+            let seg = seg_from_message(Zone::RecentObservation, m);
+            assert_eq!(
+                seg.zone,
+                Zone::RecentObservation,
+                "every recent message must be in the sacred recent zone"
+            );
+            assert!(
+                seg.zone.is_sacred(),
+                "the recent zone must be sacred so an earlier read survives eviction"
+            );
+        }
+    }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(

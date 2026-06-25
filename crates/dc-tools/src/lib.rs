@@ -18,7 +18,9 @@ mod journal;
 mod permission;
 mod spec;
 
-pub use builtin::{default_registry, execute, minimal_worker_registry, safe_join, ToolOutcome};
+pub use builtin::{
+    default_registry, execute, minimal_worker_registry, safe_join, source_files, ToolOutcome,
+};
 pub use grammar::{params_json_schema, registry_gbnf};
 pub use journal::{EditRecord, Journal};
 pub use permission::{Decision, PermissionPolicy};

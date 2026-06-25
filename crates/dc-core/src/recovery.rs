@@ -37,6 +37,14 @@ pub struct StallDetector {
     last_action: Option<u64>,
     repeat_count: usize,
     no_progress_count: usize,
+    /// Distinct actions seen since the last real progress (a workspace change). A read of a
+    /// file not yet read in this window is *investigation*, not idling — common and correct
+    /// when diagnosing a cross-file bug (read app.py, store.py, routes.py, then fix). So a
+    /// NEW action resets the no-progress streak; only a NON-novel action (re-read the same
+    /// file, re-run verification) increments it. This stops the harness from guillotining a
+    /// model mid-investigation (observed live: a 5-file integration pass died after 4 distinct
+    /// reads, never reaching the fix) while still catching genuine spinning.
+    seen_since_progress: std::collections::HashSet<u64>,
 }
 
 /// What the detector recommends after observing a turn.
@@ -69,10 +77,19 @@ impl StallDetector {
             self.last_action = Some(action);
         }
 
-        // No-progress streak (nothing in the workspace changed).
+        // No-progress streak. A workspace change is unambiguous progress — reset, and clear
+        // the investigation window. Otherwise, a NOVEL action (e.g. reading a file not yet
+        // read this window) is investigation toward a fix, so it also resets the streak; only
+        // a NON-novel action (re-reading the same file, re-running verification) — true
+        // idling — increments it. The repeat detector still catches back-to-back duplicates.
         if changed_workspace {
             self.no_progress_count = 0;
+            self.seen_since_progress.clear();
+        } else if self.seen_since_progress.insert(action) {
+            // First time we've seen this action since the last change → investigation.
+            self.no_progress_count = 0;
         } else {
+            // A read/verify we've already done this window → not advancing.
             self.no_progress_count += 1;
         }
 
@@ -91,6 +108,7 @@ impl StallDetector {
         self.last_action = None;
         self.repeat_count = 0;
         self.no_progress_count = 0;
+        self.seen_since_progress.clear();
     }
 }
 
@@ -128,15 +146,38 @@ mod tests {
     }
 
     #[test]
-    fn flags_no_progress_streak() {
+    fn distinct_reads_are_investigation_not_a_stall() {
+        // Reading several DIFFERENT files without writing is how a model diagnoses a
+        // cross-file bug — each novel read is progress, so it must NOT trip the no-progress
+        // stall (no_progress_limit=3 here). (Before: this guillotined the integration pass
+        // mid-investigation.)
         let mut d = StallDetector::default();
-        // Different actions each turn (no looping) but nothing changes.
-        for i in 0..2 {
+        for i in 0..6 {
             let a = action_hash("read_file", &format!("f{i}.rs"));
-            assert_eq!(d.observe(a, false, 5, 3), Progress::Ok);
+            assert_eq!(
+                d.observe(a, false, 8, 3),
+                Progress::Ok,
+                "distinct read #{i} should be progress, not a stall"
+            );
         }
-        let a = action_hash("read_file", "f2.rs");
-        assert_eq!(d.observe(a, false, 5, 3), Progress::Stuck);
+    }
+
+    #[test]
+    fn re_reading_the_same_files_still_stalls() {
+        // The protection that remains: once there's nothing NEW to read, re-reading files
+        // already seen this window is idling and must trip the no-progress stall. Use two
+        // files alternating so the *repeat* detector (back-to-back identical) doesn't fire
+        // first — this isolates the no-progress path.
+        let mut d = StallDetector::default();
+        let a = action_hash("read_file", "a.rs");
+        let b = action_hash("read_file", "b.rs");
+        // Novel reads: progress.
+        assert_eq!(d.observe(a, false, 8, 3), Progress::Ok);
+        assert_eq!(d.observe(b, false, 8, 3), Progress::Ok);
+        // Now re-reading the same two (non-novel) → no-progress climbs to the limit.
+        assert_eq!(d.observe(a, false, 8, 3), Progress::Ok); // count 1
+        assert_eq!(d.observe(b, false, 8, 3), Progress::Ok); // count 2
+        assert_eq!(d.observe(a, false, 8, 3), Progress::Stuck); // count 3 → stuck
     }
 
     #[test]

@@ -153,7 +153,20 @@ impl std::fmt::Display for ValidationError {
                 write!(f, "tool {tool:?} parameter {param:?} must not be empty")
             }
             ValidationError::UnknownParam { tool, param } => {
-                write!(f, "tool {tool:?} has no parameter {param:?}")
+                // A small model that wants to overwrite a file reaches for `edit_file`
+                // with a `content` arg (edit_file only does an anchored old_str/new_str
+                // replace). Name the right tool inline so it pivots on the FIRST mis-call
+                // instead of looping — `edit_file content` → stall was the G2 death loop.
+                if tool == "edit_file" && param == "content" {
+                    write!(
+                        f,
+                        "tool {tool:?} has no parameter {param:?}. To replace a whole \
+                         file's contents use `write_file` (path + content); `edit_file` \
+                         only does an anchored old_str/new_str replace."
+                    )
+                } else {
+                    write!(f, "tool {tool:?} has no parameter {param:?}")
+                }
             }
         }
     }
@@ -325,6 +338,19 @@ mod tests {
                 side_effect: SideEffect::ReadOnly,
                 permission: Permission::Auto,
             },
+            // Mirrors the real anchored-edit tool (path/old_str/new_str, NO content) so
+            // the edit_file+content UnknownParam hint can be exercised here.
+            ToolSpec {
+                name: "edit_file",
+                description: "Anchored replace.",
+                params: vec![
+                    ParamSpec::new("path", ParamType::String, "relative path"),
+                    ParamSpec::new("old_str", ParamType::String, "exact text to replace"),
+                    ParamSpec::new("new_str", ParamType::String, "replacement"),
+                ],
+                side_effect: SideEffect::Mutating,
+                permission: Permission::Auto,
+            },
         ])
     }
 
@@ -398,6 +424,23 @@ mod tests {
                 tool: "read_file".into(),
                 param: "bogus".into()
             }
+        );
+    }
+
+    #[test]
+    fn edit_file_with_content_param_points_at_write_file() {
+        // The G2 death loop: the model wanted to overwrite a file, called `edit_file`
+        // with `content`, got a bare "no parameter" error, and looped. The error must
+        // now name `write_file` so it pivots on the first mis-call.
+        let err = reg()
+            .validate(&json!({
+                "tool":"edit_file","path":"app.py","content":"x = 1"
+            }))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("write_file"),
+            "edit_file+content error must name write_file, got: {msg}"
         );
     }
 

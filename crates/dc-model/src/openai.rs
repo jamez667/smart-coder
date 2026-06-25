@@ -85,6 +85,36 @@ impl OpenAiBackend {
         self
     }
 
+    /// Best-effort: query the server's `/models` and adopt the real context window it
+    /// serves the model at (llama.cpp returns `data[0].meta.n_ctx`). The hardcoded 8192
+    /// default badly under-budgets a model actually served at e.g. 24576 — the prompt is
+    /// squeezed to a third of the window, forcing file-by-file navigation and stalls.
+    ///
+    /// On ANY failure (endpoint absent, server doesn't expose `n_ctx`, parse error) the
+    /// existing `max_context_tokens` is kept — this never fails construction, so a server
+    /// that doesn't advertise the window simply keeps the conservative default.
+    pub fn with_detected_context(mut self) -> Self {
+        if let Some(n) = self.fetch_n_ctx() {
+            self.caps.max_context_tokens = n;
+        }
+        self
+    }
+
+    /// GET `{base_url}/models` and pull `data[0].meta.n_ctx`. `None` on any error.
+    fn fetch_n_ctx(&self) -> Option<usize> {
+        let url = format!("{}/models", self.base_url);
+        let mut call = self.agent.get(&url);
+        if let Some(key) = &self.api_key {
+            call = call.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut resp = call.call().ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = resp.body_mut().read_to_string().ok()?;
+        parse_n_ctx(&body)
+    }
+
     /// Declare that the served model supports OpenAI-style function calling, so
     /// the strategy layer may attach a [`OutputConstraint::Tools`] constraint and
     /// this backend will forward it as `tools`/`tool_choice` (spec 02).
@@ -160,6 +190,21 @@ struct WireFunction {
     /// JSON-encoded argument object (a *string* per the OpenAI schema).
     #[serde(default)]
     arguments: String,
+}
+
+/// Pull `data[0].meta.n_ctx` out of a `/models` response body. Host-testable (takes the
+/// raw JSON string) so the detection logic is verified without a live server. `None` if the
+/// body doesn't parse or doesn't carry a positive `n_ctx`.
+fn parse_n_ctx(body: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let n = v
+        .get("data")?
+        .as_array()?
+        .first()?
+        .get("meta")?
+        .get("n_ctx")?
+        .as_u64()?;
+    (n > 0).then_some(n as usize)
 }
 
 fn role_str(role: Role) -> &'static str {
@@ -428,6 +473,27 @@ mod tests {
         assert_eq!(backend.capabilities().max_context_tokens, 8_192);
         let bumped = OpenAiBackend::new("http://x/v1", "m").with_context_tokens(32_768);
         assert_eq!(bumped.capabilities().max_context_tokens, 32_768);
+    }
+
+    #[test]
+    fn parses_n_ctx_from_a_models_payload() {
+        // The real llama.cpp /models shape: data[0].meta.n_ctx is the served window.
+        let body = r#"{"object":"list","data":[{"id":"qwen3-coder-30b","object":"model",
+            "meta":{"n_vocab":151936,"n_ctx":24576,"n_embd":2048}}]}"#;
+        assert_eq!(super::parse_n_ctx(body), Some(24_576));
+    }
+
+    #[test]
+    fn parse_n_ctx_is_none_when_absent_or_malformed() {
+        // A server that doesn't advertise n_ctx → None → caller keeps the 8192 default.
+        assert_eq!(super::parse_n_ctx(r#"{"data":[{"id":"m"}]}"#), None);
+        assert_eq!(super::parse_n_ctx(r#"{"data":[]}"#), None);
+        assert_eq!(super::parse_n_ctx("not json"), None);
+        // A zero/negative window is not usable.
+        assert_eq!(
+            super::parse_n_ctx(r#"{"data":[{"meta":{"n_ctx":0}}]}"#),
+            None
+        );
     }
 
     #[test]

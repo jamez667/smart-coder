@@ -171,7 +171,7 @@ const STACK_CONSTRAINT: &str = "STACK: backend in Python with Flask; a frontend,
     flask_restful, flask_cors, marshmallow, requests, pytest, and the standard library. \
     Do NOT use any package outside that list (no FastAPI, no Django) — it is not installed \
     and the tests will fail to import. Frontend uses only the browser's built-in fetch and \
-    DOM APIs (no npm packages).";
+    DOM APIs (no npm packages). Write Flask route handlers as plain `def`, never `async def`.";
 
 fn phase_instruction(phase: Phase) -> String {
     match phase {

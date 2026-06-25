@@ -291,7 +291,7 @@ impl UiConfig {
     /// Build the coder/worker backend, applying the requested tool-calling
     /// enforcement — the mirror of `Cli::backend()`.
     pub fn backend(&self) -> OpenAiBackend {
-        match self.tool_calling {
+        let b = match self.tool_calling {
             ToolCalling::None => OpenAiBackend::new(self.base_url.clone(), self.model.clone()),
             ToolCalling::Native => {
                 OpenAiBackend::new(self.base_url.clone(), self.model.clone()).with_native_tools()
@@ -299,7 +299,12 @@ impl UiConfig {
             ToolCalling::Gbnf => {
                 OpenAiBackend::llama_cpp(self.base_url.clone(), self.model.clone())
             }
-        }
+        };
+        // Adopt the real context window the server serves the model at (e.g. 24576) instead
+        // of the conservative 8192 default — best-effort, falls back to the default if the
+        // server doesn't advertise it. This is the worker backend that drives the agent
+        // loop, where the under-budget hurt most.
+        b.with_detected_context()
     }
 
     /// Build the advisor backend if a model was set — its own URL if given, else the

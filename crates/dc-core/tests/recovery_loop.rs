@@ -154,6 +154,88 @@ fn an_advisor_nudge_breaks_a_loop_and_lets_it_finish() {
 }
 
 #[test]
+fn idempotent_nudge_names_write_file_and_supersedes_the_stale_result() {
+    // When a model repeats an idempotent call (read/list) with no advisor, the harness
+    // injects a text NUDGE. This test pins the two fixes that make the nudge actually land
+    // on a coder model (it was ignored 30/30 times on the live scale ladder):
+    //   Fix #1 — the nudge names the APPLICABLE tool (`write_file` to create the missing
+    //            file), not `edit_file` on a file that doesn't exist yet.
+    //   Fix #2 — the PRIOR turn's successful result of the same call is superseded in the
+    //            window, so the nudge isn't drowned by a visible "it worked".
+    use std::sync::Mutex;
+    use dc_core::{run_agent_observed, AgentEvent, FnSink};
+    use dc_core::select_strategy;
+
+    let ws = temp("nudge-text");
+    std::fs::write(ws.join("a.txt"), "hello-from-a-txt").unwrap();
+
+    // read, read (the 2nd trips the dedup nudge), then a productive write. repeat_limit is
+    // high so the stall STOP can't fire first — we're isolating the nudge path.
+    let backend = Scripted::new(vec![
+        r#"{"tool":"read_file","path":"a.txt"}"#,
+        r#"{"tool":"read_file","path":"a.txt"}"#,
+        r#"{"tool":"write_file","path":"out.py","content":"x = 1\n"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 10,
+        repeat_limit: 8,
+        no_progress_limit: 8,
+        // Verbose so we can inspect the assembled window and confirm Fix #2 superseded the
+        // stale identical result (it lives in `recent`, surfaced via PromptAssembled).
+        verbose: true,
+        ..Default::default()
+    };
+
+    let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    let strategy = select_strategy(&backend.capabilities());
+    let report = run_agent_observed(
+        &backend, None, &registry, strategy.as_ref(), "fix it", &ws, &cfg, &sink,
+    )
+    .unwrap();
+
+    // The model reached the productive write (it wasn't stalled out before acting).
+    assert!(
+        report.change_summary.contains("out.py"),
+        "should reach the write_file, got change: {:?}",
+        report.change_summary
+    );
+
+    let evs = events.lock().unwrap();
+    // Fix #1: the injected nudge observation names write_file, NOT the impossible edit_file.
+    let nudge = evs.iter().find_map(|e| match e {
+        AgentEvent::ToolResult { full, .. } if full.contains("re-running it changes nothing") => {
+            Some(full.clone())
+        }
+        _ => None,
+    });
+    let nudge = nudge.expect("a dedup nudge should have been injected");
+    assert!(
+        nudge.contains("write_file"),
+        "nudge must name write_file (Fix #1), got: {nudge}"
+    );
+    assert!(
+        !nudge.contains("now with edit_file"),
+        "nudge must NOT prescribe the old edit_file-only wording: {nudge}"
+    );
+    // Fix #2: the prior identical result was superseded IN THE WINDOW. The marker lives in
+    // `recent`, so it shows up in a later assembled prompt — and crucially the original
+    // successful body ("hello-from-a-txt") must NOT still be sitting next to the nudge.
+    let superseded_in_prompt = evs.iter().any(|e| matches!(
+        e,
+        AgentEvent::PromptAssembled { messages, .. }
+            if messages.iter().any(|m| m.content.contains("superseded"))
+    ));
+    assert!(
+        superseded_in_prompt,
+        "the prior identical result should be superseded in the assembled window (Fix #2)"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn ask_user_consults_the_advisor_and_continues() {
     // The model explicitly asks for help, gets advice, then finishes — escalation
     // is a nudge, not a stop, when an advisor is present.
