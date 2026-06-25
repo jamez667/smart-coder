@@ -142,6 +142,19 @@ impl ToolCallStrategy for ParseRepair {
             }
         }
         if valid.is_empty() {
+            // Last resort before giving up: a `write_file`/`create_file` whose `content` is a
+            // whole source file routinely contains characters that are illegal *inside* a JSON
+            // string — most often a Python `"""docstring"""`, whose inner `"` closes the JSON
+            // string early and breaks the parse (the writefile-docstring-json-break bug). The
+            // control-char escaper above can't fix an inner quote. So when strict parsing fails
+            // entirely, try a KEY-AWARE recovery: pull the literal `content` body out of the
+            // raw text and rebuild a valid call. Only fires on the already-failing branch, so it
+            // can't change the result of a turn that parsed normally.
+            if let Some(value) = repair_file_content_call(raw) {
+                if let Ok(call) = registry.validate(&value) {
+                    return Ok(call);
+                }
+            }
             // Nothing parsed/validated — surface the most specific error for repair.
             return Err(last_err.unwrap_or(RepairError::NoJson));
         }
@@ -319,6 +332,106 @@ fn is_progress_tool(name: &str) -> bool {
     )
 }
 
+/// Key-aware recovery for a `write_file`/`create_file` call whose `content` body broke
+/// strict JSON parsing (an unescaped inner `"` from a Python `"""docstring"""`, an inner `}`
+/// from code, etc.). Rather than parse the malformed JSON, pull the fields out by position:
+/// the `tool` and `path` come before `content` and are well-formed; everything from after
+/// `"content":"` to the LAST `"` (the value's real closing quote, since content is the final
+/// field a model emits) is taken as the LITERAL file body. Returns a rebuilt JSON object
+/// (serde re-escapes the body correctly) for the normal validation path, or `None` if the
+/// shape doesn't match (so non-file calls fall through to the existing error).
+fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
+    // Identify a file-content tool. Accept either order of quoting/spacing a model emits.
+    let tool = ["write_file", "create_file"]
+        .into_iter()
+        .find(|t| raw.contains(&format!("\"{t}\"")))?;
+
+    // `path`: a well-formed `"path":"<...>"` — read the first quoted value after the key.
+    let path = quoted_value_after(raw, "\"path\"")?;
+
+    // `content`: take everything after the opening quote of its value up to the final closing
+    // quote of the object. The model emits `content` last, so the body runs from there to the
+    // last `"` before the trailing `}` — rfind the closer so inner quotes don't truncate it.
+    let key_pos = raw.find("\"content\"")?;
+    let after_key = &raw[key_pos + "\"content\"".len()..];
+    // Skip `:` and whitespace, then the opening `"`.
+    let colon = after_key.find(':')?;
+    let rest = &after_key[colon + 1..];
+    let open_q = rest.find('"')?;
+    let body_region = &rest[open_q + 1..];
+    // The value ends at the last `"` in the remaining text (before/at the closing brace). If
+    // there's a trailing `"}` / `" }`, the closer is that quote; else the last quote present.
+    let close_rel = body_region.rfind('"')?;
+    let literal = &body_region[..close_rel];
+
+    // Un-escape only the standard JSON escapes the model DID write correctly (so a properly
+    // escaped `\n`/`\"` in the body becomes the real char); leave everything else literal.
+    let content = unescape_json_string_lenient(literal);
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("tool".to_string(), serde_json::Value::String(tool.to_string()));
+    obj.insert("path".to_string(), serde_json::Value::String(path));
+    obj.insert("content".to_string(), serde_json::Value::String(content));
+    Some(serde_json::Value::Object(obj))
+}
+
+/// Read the first JSON-quoted string value appearing after `key` in `raw` (the value of a
+/// well-formed `"key":"value"`). `None` if absent. Used by [`repair_file_content_call`] for
+/// the `path`, which precedes the broken `content` and is itself well-formed.
+fn quoted_value_after(raw: &str, key: &str) -> Option<String> {
+    let key_pos = raw.find(key)?;
+    let after = &raw[key_pos + key.len()..];
+    let colon = after.find(':')?;
+    let rest = &after[colon + 1..];
+    let open_q = rest.find('"')?;
+    let body = &rest[open_q + 1..];
+    // Scan to the unescaped closing quote.
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            out.push(ch);
+            escaped = true;
+        } else if ch == '"' {
+            return Some(unescape_json_string_lenient(&out));
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+/// Resolve the standard JSON string escapes (`\n \t \r \" \\ \/`) a model wrote correctly,
+/// leaving any other backslash sequence and all raw characters as-is. Lenient on purpose:
+/// the input is a recovered literal that may mix escaped and raw characters.
+fn unescape_json_string_lenient(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Find the first balanced `open..close` block, ignoring delimiters inside JSON
 /// strings (with escape handling).
 fn extract_balanced(text: &str, open: char, close: char) -> Option<&str> {
@@ -418,6 +531,47 @@ mod tests {
             call.str("new_str"),
             Some("def page():\n    start = (n-1) * 3")
         );
+    }
+
+    #[test]
+    fn write_file_with_a_literal_python_docstring_is_recovered() {
+        // The writefile-docstring-json-break: a model writes a real Python `"""docstring"""`
+        // inside `content`, whose inner `"` closes the JSON string early so strict parsing
+        // fails and the file is never written. The key-aware fallback must recover it.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"write_file\",\"path\":\"app.py\",\"content\":\"def f():\n    \"\"\"doc string\"\"\"\n    return 1\n\"}";
+        let call = ParseRepair
+            .extract(raw, &reg)
+            .expect("the docstring write_file must be recovered, not dropped");
+        assert_eq!(call.name, "write_file");
+        assert_eq!(call.str("path"), Some("app.py"));
+        // The literal body (triple quotes intact) is preserved.
+        let content = call.str("content").unwrap();
+        assert!(content.contains("\"\"\"doc string\"\"\""), "got: {content:?}");
+        assert!(content.contains("def f():") && content.contains("return 1"));
+    }
+
+    #[test]
+    fn recovery_handles_content_whose_body_contains_braces() {
+        // Code content with `{` / `}` (a dict) AND an inner quote — the balanced-brace object
+        // scan can mis-cut here, so recovery must still pull the right body by key position.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"create_file\",\"path\":\"d.py\",\"content\":\"X = {\"a\": 1}\nY = \"\"\"q\"\"\"\n\"}";
+        let call = ParseRepair.extract(raw, &reg).expect("recovered");
+        assert_eq!(call.name, "create_file");
+        let content = call.str("content").unwrap();
+        assert!(content.contains("X = {\"a\": 1}"), "got: {content:?}");
+        assert!(content.contains("\"\"\"q\"\"\""));
+    }
+
+    #[test]
+    fn recovery_does_not_fire_on_a_well_formed_call() {
+        // A normal, parseable write_file must take the strict path and be byte-exact — the
+        // fallback only runs when strict parsing fails, so this proves no regression.
+        let reg = default_registry();
+        let raw = r#"{"tool":"write_file","path":"a.py","content":"x = 1\ny = 2\n"}"#;
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.str("content"), Some("x = 1\ny = 2\n"));
     }
 
     #[test]
