@@ -75,6 +75,9 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
         }
         Stalled { trigger } => vec![Row::err("⚠", format!("stalled: {trigger}"))],
         Advice { trigger, advice } => vec![Row::ok("☎", format!("advisor ({trigger}): {advice}"))],
+        Diagnosis { trigger, report } => {
+            vec![Row::ok("🔬", format!("diagnosis ({trigger}): {report}"))]
+        }
         Stopped { reason } => vec![stop_row(reason)],
     }
 }

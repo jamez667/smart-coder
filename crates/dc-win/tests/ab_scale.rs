@@ -739,6 +739,8 @@ fn arm_sequential_build(cfg: &UiConfig, rung: &Rung) -> (Pass, usize) {
     agent_cfg.permission.frozen_paths = vec!["test_app.py".to_string()];
     agent_cfg.sandbox = cfg.sandbox();
     agent_cfg.max_steps = BUILD_STEPS;
+    // The integration pass benefits from diagnosis too (it's where cross-file glue is fixed).
+    agent_cfg.diagnose = std::env::var("DC_DIAGNOSE").is_ok();
     let sink = dc_core::FnSink(|e: &dc_core::AgentEvent| eprintln!("[S {e:?}]"));
 
     let report = dc_workflow::build_sequential_with_board(
@@ -778,6 +780,8 @@ fn run_pass(
     agent_cfg.sandbox = cfg.sandbox();
     agent_cfg.plan_first = false;
     agent_cfg.max_steps = max_steps;
+    // Diagnostic sub-agent A/B: DC_DIAGNOSE=1 turns on the root-cause diagnosis on a stall.
+    agent_cfg.diagnose = std::env::var("DC_DIAGNOSE").is_ok();
     // Diagnosis hook (thread 2): set DC_DUMP_DIR to capture a readable prompt transcript per
     // run (the exact assembled prompt + raw replies) via the standing TranscriptSink, so the
     // "dump the prompt before assuming a model limit" method is one env var away.

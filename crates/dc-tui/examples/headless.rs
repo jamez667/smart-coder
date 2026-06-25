@@ -116,6 +116,7 @@ fn fmt_event(e: &AgentEvent) -> String {
         }
         AgentEvent::Stalled { trigger } => format!("  ⚠ stalled: {trigger}"),
         AgentEvent::Advice { advice, .. } => format!("  💡 {advice}"),
+        AgentEvent::Diagnosis { report, .. } => format!("  🔬 {report}"),
         AgentEvent::Stopped { reason } => format!("■ stopped: {reason:?}"),
     }
 }

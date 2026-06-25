@@ -153,6 +153,10 @@ impl TuiState {
                 self.interventions += 1;
                 self.push(LineKind::Advice, format!("💡 {advice}"));
             }
+            AgentEvent::Diagnosis { report, .. } => {
+                self.interventions += 1;
+                self.push(LineKind::Advice, format!("🔬 {report}"));
+            }
             AgentEvent::Stopped { reason } => {
                 self.stop = Some(reason.clone());
                 self.push(LineKind::Stop, format!("■ {}", self.status_line()));

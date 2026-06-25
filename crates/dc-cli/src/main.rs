@@ -799,6 +799,9 @@ fn print_event(ev: &dc_core::AgentEvent) {
         Advice { trigger, advice } => {
             println!("  ☎ advisor ({trigger}): {advice}");
         }
+        Diagnosis { trigger, report } => {
+            println!("  🔬 diagnosis ({trigger}): {report}");
+        }
         Stopped { reason } => {
             println!("■ stopped — {reason:?}");
         }

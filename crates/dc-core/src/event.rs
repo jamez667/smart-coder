@@ -82,6 +82,10 @@ pub enum AgentEvent {
     /// The advisor (senior) was consulted. `trigger` is why it was asked; `advice`
     /// is the full hint it returned — the complete junior↔senior exchange.
     Advice { trigger: String, advice: String },
+    /// A root-cause diagnosis ran (a focused debugger pass over the full test output + all
+    /// source files). `trigger` is the stall that prompted it; `report` is the diagnosis
+    /// injected back into the loop.
+    Diagnosis { trigger: String, report: String },
     /// The plan was revised mid-run (via `update_plan`).
     PlanRevised { steps: Vec<String> },
     /// The run ended. Carries the structured reason.
@@ -208,6 +212,9 @@ impl<W: Write> TranscriptSink<W> {
             AgentEvent::Stalled { trigger } => format!("** STALLED: {trigger}\n"),
             AgentEvent::Advice { trigger, advice } => {
                 format!("** ADVICE ({trigger}):\n{advice}\n")
+            }
+            AgentEvent::Diagnosis { trigger, report } => {
+                format!("** DIAGNOSIS ({trigger}):\n{report}\n")
             }
             AgentEvent::Stopped { reason } => format!("** STOPPED: {reason:?}\n"),
             // Not surfaced in a prompt transcript (covered by the reply / prompt blocks).

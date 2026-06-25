@@ -109,6 +109,13 @@ pub struct AgentConfig {
     /// Docker gives generated code a pinned toolkit + a known layout so the tests run
     /// against a reproducible env (the GUI defaults to it). Defaults to the host.
     pub sandbox: dc_verify::Sandbox,
+    /// On a test-failure stall, run a root-cause diagnosis (a focused debugger pass over the
+    /// FULL test output + all source files) and inject it, instead of the generic
+    /// self-recovery directive (spec 03 — recovery). The model debugs blind otherwise: it
+    /// reacts to a downstream symptom and edits the wrong file. Default OFF — it costs an
+    /// extra suite run + model call per stall, so it ships dark and is enabled once proven
+    /// on the ladder. Bounded by `DIAGNOSIS_LIMIT` and gated on a configured verify command.
+    pub diagnose: bool,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -137,6 +144,7 @@ impl std::fmt::Debug for AgentConfig {
             // `dyn Confirmer` isn't `Debug`; report presence only.
             .field("confirmer", &self.confirmer.is_some())
             .field("sandbox", &self.sandbox)
+            .field("diagnose", &self.diagnose)
             .finish()
     }
 }
@@ -163,6 +171,7 @@ impl Default for AgentConfig {
             verbose: false,
             confirmer: None,
             sandbox: dc_verify::Sandbox::default(),
+            diagnose: false,
         }
     }
 }
@@ -369,6 +378,10 @@ pub fn run_agent_observed(
     // a firm directive instead of dying on the first loop. Bounded so a genuinely
     // stuck model still terminates (spec 03 — the harness owns recovery).
     let mut self_recoveries = 0usize;
+    // How many root-cause diagnoses we've run this stall-recovery sequence. Bounded like the
+    // self-recovery directives — a diagnosis costs an extra suite run + model call, and a
+    // model that ignores two of them won't be helped by a third (spec 03).
+    let mut diagnoses = 0usize;
     // A failing `edit_file` on this path, and how many times in a row. A small model
     // often anchors `edit_file` on code it *imagines* it wrote (e.g. a `jsonify(...)`
     // line that isn't in the file), so the anchor never matches and it loops. After a
@@ -884,6 +897,44 @@ pub fn run_agent_observed(
                 sink.record(&AgentEvent::Stalled {
                     trigger: trigger.to_string(),
                 });
+                // Root-cause diagnosis (spec 03 — recovery). Before the generic recovery
+                // ladder, on a TEST-driven run, a focused debugger pass reads the FULL test
+                // output + every source file and names the real culprit (the model otherwise
+                // reacts to a downstream symptom and edits the wrong file). Gated: opt-in
+                // flag, a configured verify command, and a bounded count. On success it IS the
+                // intervention for this stall — inject it and skip the generic ladder.
+                let diagnosed = if cfg.diagnose
+                    && diagnoses < DIAGNOSIS_LIMIT
+                    && cfg.verify_command.is_some()
+                {
+                    let cmd = cfg.verify_command.as_deref().unwrap();
+                    let full = dc_verify::run_command_in(&cfg.sandbox, workspace, cmd).output;
+                    let sources = gather_sources(workspace);
+                    match crate::diagnose::diagnose_failure(backend, instruction, &full, &sources) {
+                        Some(report) => {
+                            diagnoses += 1;
+                            interventions += 1;
+                            stall.reset();
+                            prev_action = None;
+                            sink.record(&AgentEvent::Diagnosis {
+                                trigger: trigger.to_string(),
+                                report: report.clone(),
+                            });
+                            push_observation(
+                                &mut recent,
+                                &crate::diagnose::diagnosis_observation(&report),
+                                cfg.keep_recent_turns,
+                            );
+                            true
+                        }
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                if diagnosed {
+                    continue;
+                }
                 // Junior asks senior for a nudge (spec 02). With no advisor (the
                 // single-model setup), the harness steers the model back in-band a
                 // bounded number of times before giving up — a capable model just
@@ -954,6 +1005,26 @@ pub fn run_agent_observed(
 /// advisor to escalate to (the single-model setup). Bounded so a genuinely stuck
 /// model still terminates rather than burning the whole step budget looping.
 const SELF_RECOVERY_LIMIT: usize = 2;
+
+/// How many root-cause diagnoses the harness runs per run before falling through to the
+/// generic recovery ladder. Bounded like [`SELF_RECOVERY_LIMIT`]: each costs a suite run +
+/// model call, and a model that ignored two pointed diagnoses won't be saved by a third.
+const DIAGNOSIS_LIMIT: usize = 2;
+
+/// Read every on-disk source file (excluding tests/caches) as a [`crate::diagnose::SourceFile`]
+/// for the diagnostic pass. A pathologically large file is skipped so one blob can't blow the
+/// diagnostic prompt (these apps are far under the cap).
+fn gather_sources(workspace: &Path) -> Vec<crate::diagnose::SourceFile> {
+    const MAX_BYTES: usize = 64 * 1024;
+    dc_tools::source_files(workspace)
+        .into_iter()
+        .filter_map(|rel| {
+            let contents = std::fs::read_to_string(workspace.join(&rel)).ok()?;
+            (contents.len() <= MAX_BYTES)
+                .then(|| crate::diagnose::SourceFile { path: rel, contents })
+        })
+        .collect()
+}
 
 /// The last few distinct tools the model has used, most-recent first — context for
 /// the self-recovery directive so it names what the model keeps doing.
@@ -1598,6 +1669,126 @@ mod tests {
         assert_eq!(std::fs::read_to_string(ws.join("out.txt")).unwrap(), "hi");
 
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn diagnosis_fires_on_a_test_stall_then_is_bounded() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("diagnose");
+        std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+        // The worker LOOPS on a no-op read forever — UNLESS the request is the diagnostic
+        // pass (its system prompt says "ROOT-CAUSE analysis"), in which case it returns a
+        // diagnosis. So the loop stalls, the diagnosis fires, and (because the model keeps
+        // looping after) it stalls again — letting us assert the bound.
+        let caps = dc_model::Capabilities {
+            max_context_tokens: 8192,
+            tool_calling: dc_model::ToolCalling::None,
+            on_device: false,
+        };
+        let backend = CallbackBackend::new("loop-or-diagnose", caps, |req: &GenerateRequest| {
+            let is_diag = req
+                .messages
+                .iter()
+                .any(|m| m.content.contains("ROOT-CAUSE analysis"));
+            let content = if is_diag {
+                "FILE: a.txt\nLINE: 1\nCAUSE: the value is wrong\nFIX: set it right".to_string()
+            } else {
+                r#"{"tool":"read_file","path":"a.txt"}"#.to_string()
+            };
+            Ok(GenerateResponse { content })
+        });
+
+        let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+        let sink = crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let cfg = AgentConfig {
+            max_steps: 40,
+            repeat_limit: 3,
+            // A harmless host "verify command" so the diagnosis path (run_command_in) runs
+            // fast and `verify_command.is_some()` is true; it's NOT a real test runner.
+            verify_command: Some("echo failing".to_string()),
+            diagnose: true,
+            ..AgentConfig::default()
+        };
+        run_agent_observed(
+            &backend, None, &registry, strategy.as_ref(), "fix it", &ws, &cfg, &sink,
+        )
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        let diagnoses = evs
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Diagnosis { .. }))
+            .count();
+        // It fired (the model debugs blind, the harness diagnoses) and is bounded.
+        assert!(diagnoses >= 1, "a diagnosis should fire on a test stall");
+        assert!(
+            diagnoses <= DIAGNOSIS_LIMIT,
+            "diagnoses must be bounded to {DIAGNOSIS_LIMIT}, got {diagnoses}"
+        );
+        // The diagnosis report reached the model as an observation.
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                AgentEvent::Diagnosis { report, .. } if report.contains("CAUSE:")
+            )),
+            "the diagnosis carries a root-cause report"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn no_diagnosis_when_the_flag_is_off_or_no_verify_command() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let run = |diagnose: bool, verify: Option<&str>| -> usize {
+            let ws = temp_dir("no-diag");
+            std::fs::write(ws.join("a.txt"), "x").unwrap();
+            // A backend that loops forever on a no-op read (so the run stalls), via a
+            // callback (MockBackend errors once exhausted).
+            let caps = dc_model::Capabilities {
+                max_context_tokens: 8192,
+                tool_calling: dc_model::ToolCalling::None,
+                on_device: false,
+            };
+            let backend = CallbackBackend::new("looper", caps, |_req: &GenerateRequest| {
+                Ok(GenerateResponse {
+                    content: r#"{"tool":"read_file","path":"a.txt"}"#.to_string(),
+                })
+            });
+            let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+            let sink =
+                crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+            let registry = dc_tools::default_registry();
+            let strategy = crate::strategy::select_strategy(&backend.capabilities());
+            let cfg = AgentConfig {
+                max_steps: 20,
+                repeat_limit: 3,
+                verify_command: verify.map(String::from),
+                diagnose,
+                ..AgentConfig::default()
+            };
+            run_agent_observed(
+                &backend, None, &registry, strategy.as_ref(), "x", &ws, &cfg, &sink,
+            )
+            .unwrap();
+            let n = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Diagnosis { .. }))
+                .count();
+            let _ = std::fs::remove_dir_all(&ws);
+            n
+        };
+        // Flag off ⇒ never; flag on but no verify command ⇒ never (not a test-driven run).
+        assert_eq!(run(false, Some("echo x")), 0, "flag off → no diagnosis");
+        assert_eq!(run(true, None), 0, "no verify command → no diagnosis");
     }
 
     #[test]
