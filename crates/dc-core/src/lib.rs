@@ -44,6 +44,6 @@ pub use strategy::{
 
 // Re-export the tool surface so downstream crates (dc-eval) get it via dc-core.
 pub use dc_tools::{
-    default_registry, execute, minimal_worker_registry, Permission, SideEffect, ToolOutcome,
-    ToolRegistry, ToolSpec, ValidatedCall, ValidationError,
+    default_registry, execute, minimal_worker_registry, source_files, Permission, SideEffect,
+    ToolOutcome, ToolRegistry, ToolSpec, ValidatedCall, ValidationError,
 };

@@ -193,7 +193,7 @@ pub fn build_sequential_with_board(
             .clone();
         board.claim(&st.id);
 
-        let cfg = per_file_cfg(base_cfg, PER_FILE_MAX_STEPS);
+        let cfg = per_file_cfg(base_cfg, PER_FILE_MAX_STEPS, &st.files);
         let instruction = per_file_instruction(&st.files, &st.goal, &contract);
 
         // Retry budget: a weak first attempt gets one more scoped try before we give up on
@@ -240,13 +240,16 @@ pub fn build_sequential_with_board(
     })
 }
 
-/// The config for a per-file step: clone the base, drop the suite gate, cap the steps.
-/// We deliberately do NOT set `focus_files` — the focus prefix is edit-only and assumes the
-/// file already exists, which is wrong for greenfield creation; a scoped instruction over
-/// the full registry is enough, and asking for ONE file removes the reason to batch.
-fn per_file_cfg(base: &AgentConfig, max_steps: usize) -> AgentConfig {
+/// The config for a per-file step: clone the base, drop the suite gate, cap the steps, and
+/// FOCUS on the subtask's file(s). Focusing pins the file's live contents every turn (and the
+/// files it imports), and the harness short-circuits a `read_file` of an already-pinned file —
+/// killing the re-read tax (the per-file step otherwise re-reads its own file + imports
+/// reflexively). The FOCUS_TASK_PREFIX handles greenfield: when the file doesn't exist yet
+/// nothing is pinned, and the instruction tells the model to `write_file` it.
+fn per_file_cfg(base: &AgentConfig, max_steps: usize, files: &[String]) -> AgentConfig {
     let mut cfg = base.clone();
     cfg.plan_first = false;
+    cfg.focus_files = files.to_vec();
     // Per-file steps are NOT gated on the frozen suite: the suite imports `from app import
     // app`, so until EVERY file exists it errors at collection for reasons unrelated to the
     // file being written. Gating an early step on it is incoherent (can never be green yet).
@@ -300,17 +303,24 @@ fn run_integration_pass(
     let strategy = select_strategy(&worker.capabilities());
     let registry = default_registry();
     let mut cfg = base_cfg.clone();
-    cfg.focus_files = Vec::new();
+    // PIN every source file's full contents (focus = all sources, re-read fresh each turn).
+    // This pass reconciles cross-file glue, so it legitimately needs to SEE every file — and
+    // the harness already KNOWS the files (they're on disk). Without this it told the model
+    // "the source files are written, fix them" but pinned NONE, forcing it to read_file each
+    // one repeatedly (observed: app.py read 51× because a read evicts after keep_recent_turns).
+    // We name the files AND hand over their contents instead of making it go fetch them.
+    cfg.focus_files = dc_core::source_files(workspace);
     cfg.plan_first = false;
     // The convergence loop gets a generous budget — it must verify, read failures, and fix
     // cross-file glue iteratively (but honor a smaller base_cfg.max_steps if the caller set one).
     cfg.max_steps = base_cfg.max_steps.max(INTEGRATION_MAX_STEPS);
     // base_cfg.verify_command is the real pytest oracle — keep it; this pass IS gated.
     let instruction = format!(
-        "All the source files for this project have been written. Make the FULL frozen test \
-         suite pass. The tests are FROZEN — do not edit any test file. Run run_verification, \
-         read the failures, and fix the SOURCE files — most remaining failures are cross-file \
-         glue: a wrong import name between files, a route registered at the wrong path, or a \
+        "All the source files for this project are shown below in full (they update after \
+         each edit). Make the FULL frozen test suite pass. The tests are FROZEN — do not edit \
+         any test file, and do NOT read_file the source files — they are already shown. Run \
+         run_verification, read the failures, and fix the SOURCE files — most remaining failures \
+         are cross-file glue: a wrong import name between files, a route at the wrong path, or a \
          return-shape mismatch. Keep editing until green, then finish.\n\nProject: {task}"
     );
     run_agent_observed(
