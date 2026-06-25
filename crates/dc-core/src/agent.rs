@@ -429,6 +429,9 @@ pub fn run_agent_observed(
         if !plan_render.is_empty() {
             segments.push(Segment::user(Zone::Retrieved, plan_render));
         }
+        // Files whose full current contents are pinned in this turn's prompt (set in the
+        // focused branch). A `read_file` of one is redundant and gets short-circuited.
+        let mut pinned_full_files: Vec<String> = Vec::new();
         if cfg.focus_files.is_empty() {
             // WHOLE-TASK path: the repo map helps navigation; the progress ledger lists the
             // files that exist (so it doesn't re-create/forget them).
@@ -442,11 +445,10 @@ pub fn run_agent_observed(
         } else {
             // FOCUSED path (per-file step): the model needs the CODE of the files its file
             // IMPORTS FROM — signatures alone weren't enough (it re-read them to see args /
-            // behavior; observed ~24% read cut from signatures vs the full re-read tax). So pin
-            // the FULL bodies of the imported files (read-only context), bounded to the few it
-            // actually imports, and use the cheap signature map only for the DISTANT rest. The
-            // focused file's own body is pinned just below. All re-read FRESH each turn so the
-            // view never goes stale after an edit.
+            // behavior). So pin the FULL bodies of the imported files (read-only context),
+            // bounded to the few it actually imports, and use the cheap signature map only for
+            // the DISTANT rest. The focused file's own body is pinned just below. All re-read
+            // FRESH each turn so the view never goes stale after an edit.
             let imports = imported_files(workspace, &cfg.focus_files);
             if !imports.is_empty() {
                 let ctx = render_context_files(workspace, &imports);
@@ -456,11 +458,17 @@ pub fn run_agent_observed(
             }
             // Signature map of everything that's neither the focused file nor an imported one.
             let mut exclude = cfg.focus_files.clone();
-            exclude.extend(imports);
+            exclude.extend(imports.iter().cloned());
             let others = render_other_files_map(workspace, &exclude, cfg.repo_map_top_k);
             if !others.is_empty() {
                 segments.push(Segment::user(Zone::Retrieved, others));
             }
+            // The files whose CURRENT contents are pinned IN FULL this turn (focus + imported).
+            // A `read_file` of any of these is pure waste — the content is already shown — so
+            // the dispatch short-circuits it below (the model re-reads pinned files reflexively,
+            // even its own focus file; the immediate-repeat guard misses interleaved re-reads).
+            pinned_full_files = cfg.focus_files.clone();
+            pinned_full_files.extend(imports);
         }
         // Pin the current contents of the focused files, re-read fresh every turn so
         // the view never goes stale after an edit (the failure mode that traps a
@@ -574,6 +582,21 @@ pub fn run_agent_observed(
                             ));
                         }
                     }
+                } else if call.name == "read_file"
+                    && pinned_full_files.iter().any(|f| Some(f.as_str()) == call.str("path"))
+                {
+                    // Short-circuit a read of a file whose CURRENT contents are already pinned
+                    // in this turn's prompt (the focus file or an imported one). The model
+                    // re-reads pinned files reflexively — even its own focus file — and the
+                    // immediate-repeat guard misses interleaved re-reads (read a, read b, read
+                    // a). Redirect it to the shown copy instead of spending a turn on the read.
+                    let path = call.str("path").unwrap_or_default().to_string();
+                    let obs = format!(
+                        "`{path}` is ALREADY SHOWN IN FULL above (between the file markers) and \
+                         updates after each edit — you do not need to read it. Edit it directly \
+                         (or, if it's read-only context, just use it). Make your next change now."
+                    );
+                    (obs, action, false, tool, arg)
                 } else {
                     // Batched whole-file writes (spec 03 / thread 3): a capable model emits
                     // the entire solution as many tool calls in ONE turn. The loop runs one
@@ -1936,6 +1959,62 @@ mod tests {
         // Flag off ⇒ never; flag on but no verify command ⇒ never (not a test-driven run).
         assert_eq!(run(false, Some("echo x")), 0, "flag off → no diagnosis");
         assert_eq!(run(true, None), 0, "no verify command → no diagnosis");
+    }
+
+    #[test]
+    fn reading_an_already_pinned_file_is_short_circuited() {
+        use crate::event::AgentEvent;
+        use std::sync::Mutex;
+
+        let ws = temp_dir("pinned-read");
+        std::fs::write(ws.join("app.py"), "PINNED_CONTENT_MARKER = 1\n").unwrap();
+        std::fs::write(ws.join("other.py"), "OTHER_CONTENT_MARKER = 2\n").unwrap();
+
+        // Turn 1: read the focused (pinned) file → must be redirected, NOT executed.
+        // Turn 2: read an UNPINNED file → must run normally (returns its content).
+        // Turn 3: finish.
+        let backend = MockBackend::new([
+            json!({"tool":"read_file","path":"app.py"}).to_string(),
+            json!({"tool":"read_file","path":"other.py"}).to_string(),
+            json!({"tool":"finish"}).to_string(),
+        ]);
+        let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+        let sink = crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+        let registry = dc_tools::default_registry();
+        let strategy = crate::strategy::select_strategy(&backend.capabilities());
+        let cfg = AgentConfig {
+            focus_files: vec!["app.py".to_string()],
+            ..AgentConfig::default()
+        };
+        run_agent_observed(
+            &backend, None, &registry, strategy.as_ref(), "edit app.py", &ws, &cfg, &sink,
+        )
+        .unwrap();
+
+        let evs = events.lock().unwrap();
+        let results: Vec<&str> = evs
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolResult { full, .. } => Some(full.as_str()),
+                _ => None,
+            })
+            .collect();
+        // The pinned read was redirected (no file content; a "already shown" note).
+        assert!(
+            results.iter().any(|r| r.contains("ALREADY SHOWN IN FULL")),
+            "reading the pinned focus file must be short-circuited: {results:?}"
+        );
+        // The pinned file's body did NOT come back via a read (it's only in the prompt).
+        assert!(
+            !results.iter().any(|r| r.contains("PINNED_CONTENT_MARKER")),
+            "the pinned read must not return file content"
+        );
+        // The UNPINNED read ran for real and returned its content.
+        assert!(
+            results.iter().any(|r| r.contains("OTHER_CONTENT_MARKER")),
+            "an unpinned read must still execute: {results:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
