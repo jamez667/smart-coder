@@ -53,6 +53,11 @@ pub enum RunKind {
     /// The staged TDD workflow (spec 09/11): plan → write frozen tests → swarm
     /// implements against them until green.
     Tdd,
+    /// Multi-file build via the sequential per-file driver: plan → write frozen tests →
+    /// build ONE file at a time (each step scoped to its file + the contract + a signature
+    /// map of the others) → a final integration pass. Avoids the whole-task file-juggling
+    /// (and the re-read tax) by scoping each step to a single file.
+    SequentialBuild,
 }
 
 /// A live run. Holds the receiving ends the UI drains; the worker thread owns the
@@ -76,6 +81,9 @@ impl Session {
             RunKind::Agent => run_agent(cfg, task, workspace, ev_tx, pending_tx),
             RunKind::Swarm => run_swarm(cfg, task, workspace, ev_tx, pending_tx),
             RunKind::Tdd => run_tdd(cfg, task, workspace, ev_tx, pending_tx),
+            RunKind::SequentialBuild => {
+                run_sequential_build(cfg, task, workspace, ev_tx, pending_tx)
+            }
         });
 
         Self {
@@ -329,6 +337,89 @@ fn run_tdd(
         }
         Err(e) => {
             let _ = ev_tx.send(UiEvent::Failed(format!("implementation failed: {e}")));
+        }
+    }
+}
+
+/// Drive a multi-file build via the SEQUENTIAL per-file driver: plan → write frozen tests →
+/// build one file at a time (each step scoped to its file + the contract + a signature map of
+/// the others) → a final integration pass. The per-file scoping is what avoids the whole-task
+/// file-juggling and the re-read tax. Mirrors `run_tdd`'s plan+test phase, then hands the board
+/// to `dc_workflow::build_sequential_with_board` instead of one whole-task agent loop.
+fn run_sequential_build(
+    cfg: UiConfig,
+    task: String,
+    workspace: PathBuf,
+    ev_tx: Sender<UiEvent>,
+    pending_tx: Sender<Pending>,
+) {
+    let orchestrator = cfg.orchestrator();
+    let worker = cfg.backend();
+    let phase_tx = ev_tx.clone();
+    let on_phase = move |phase: dc_workflow::Phase, content: &str| {
+        let _ = phase_tx.send(UiEvent::Phase {
+            phase,
+            content: content.to_string(),
+            tests_written: Vec::new(),
+        });
+    };
+
+    let outcome = match dc_workflow::run_workflow(
+        &orchestrator,
+        &worker,
+        &task,
+        &workspace,
+        dc_workflow::ThinkPolicy::default(),
+        &on_phase,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = ev_tx.send(UiEvent::Failed(format!("workflow failed: {e}")));
+            return;
+        }
+    };
+    if cfg.verify_command.is_none() {
+        let _ = ev_tx.send(UiEvent::Done {
+            ok: true,
+            summary: "plan + frozen tests written; set a verify command to implement".to_string(),
+        });
+        return;
+    }
+
+    let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
+    let mut agent_cfg = cfg.agent_config(Some(confirmer));
+    agent_cfg.verify_command = Some(combined_verify_command(&outcome.test_files));
+    agent_cfg.permission.frozen_paths = outcome.test_files.clone();
+    agent_cfg.sandbox = cfg.sandbox();
+    agent_cfg.plan_first = false;
+
+    let sink = FnSink(|e: &AgentEvent| {
+        let _ = ev_tx.send(UiEvent::Agent(e.clone()));
+    });
+    let report = dc_workflow::build_sequential_with_board(
+        outcome.board,
+        &worker,
+        &task,
+        &workspace,
+        &agent_cfg,
+        1, // per-file retry budget
+        &sink,
+    );
+    match report {
+        Ok(r) => {
+            let _ = ev_tx.send(UiEvent::Done {
+                ok: r.verified,
+                summary: if r.verified {
+                    "all tests green (sequential build)".to_string()
+                } else if r.fell_back_whole_task {
+                    "built whole-task (degenerate decomposition) — tests not green".to_string()
+                } else {
+                    format!("built {} file(s) — tests not green", r.per_file.len())
+                },
+            });
+        }
+        Err(e) => {
+            let _ = ev_tx.send(UiEvent::Failed(format!("sequential build failed: {e}")));
         }
     }
 }
