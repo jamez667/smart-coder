@@ -174,6 +174,15 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
         // import and the agent never learned why). Append the underlying exception.
         attach_pytest_failure_exceptions(output, &mut cases);
 
+        // A route that the test calls but that isn't registered (or is registered under the
+        // wrong path — e.g. a blueprint `@bp.route('/tasks')` AND `register_blueprint(bp,
+        // url_prefix='/tasks')` → the real URL is `/tasks/tasks`) returns a 404 HTML page, so
+        // `r.get_json()` is None and the test fails with `'NoneType' object is not
+        // subscriptable` — which points the model at its (innocent) data layer, not the
+        // routing. Surface the likely cause so it checks the route/blueprint instead of
+        // editing store/service in circles (observed live: S2-todo-board, double url_prefix).
+        attach_route_not_found_hint(output, &mut cases);
+
         // Add placeholder passes from the summary so passed/total is meaningful
         // (e.g. "2 failed, 1 passed in 0.05s").
         if let Some(passed) = pytest_summary_passed(output) {
@@ -223,6 +232,53 @@ fn is_pytest_node(name: &str) -> bool {
 /// `assert 500 == 200`; the real cause (e.g. `NameError: name 'render_template' is not
 /// defined`) lives in the traceback. Surfacing it is the difference between the model
 /// fixing the import and looping blindly.
+/// For each failed test whose detail block shows the signature of a route that returned a
+/// 404 where the test expected JSON — `'NoneType' object is not subscriptable` (the test did
+/// `r.get_json()[...]` on a 404's None body), or an explicit `assert 404 == <2xx>` — append a
+/// hint pointing at the routing/blueprint, so the model fixes the URL instead of its data
+/// layer. Idempotent: skips a case whose message already carries the hint.
+fn attach_route_not_found_hint(output: &str, cases: &mut [TestCase]) {
+    const HINT: &str = "likely the route was NOT FOUND (404) — the response has no JSON body. \
+                        Check the URL path and any blueprint url_prefix (a blueprint route \
+                        `/x` registered with url_prefix `/x` becomes `/x/x`).";
+    let lines: Vec<&str> = output.lines().collect();
+    for case in cases.iter_mut() {
+        if case.passed {
+            continue;
+        }
+        let short = case.name.rsplit("::").next().unwrap_or(&case.name);
+        let Some(start) = lines.iter().position(|l| {
+            let t = l.trim_matches('_').trim();
+            (t == short || t.starts_with(&format!("{short} "))) && l.trim_start().starts_with('_')
+        }) else {
+            continue;
+        };
+        let mut looks_like_404 = false;
+        for next in &lines[start + 1..] {
+            let t = next.trim();
+            if t.starts_with("___") || t.starts_with("===") {
+                break;
+            }
+            let c = t.strip_prefix("E ").map(str::trim).unwrap_or(t);
+            // The None-subscript on a get_json() result, or an explicit 404 assertion where a
+            // 2xx was expected (`assert 404 == 200/201`).
+            if c.contains("'NoneType' object is not subscriptable")
+                || (c.contains("assert 404 ==") && !c.contains("== 404"))
+            {
+                looks_like_404 = true;
+                break;
+            }
+        }
+        if looks_like_404 {
+            match &case.message {
+                Some(m) if m.contains("NOT FOUND (404)") => {}
+                Some(m) => case.message = Some(format!("{m}  ({HINT})")),
+                None => case.message = Some(HINT.to_string()),
+            }
+        }
+    }
+}
+
 fn attach_pytest_failure_exceptions(output: &str, cases: &mut [TestCase]) {
     let lines: Vec<&str> = output.lines().collect();
     for case in cases.iter_mut() {
@@ -493,6 +549,35 @@ FAILED test_app.py::test_root_renders_template - assert 500 == 200
         assert!(
             msg.contains("AttributeError") && msg.contains("render_template"),
             "the underlying exception must be surfaced, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn route_not_found_404_surfaces_a_routing_hint() {
+        // A 404 (route not registered / wrong prefix) makes get_json() None, so the test
+        // fails with a NoneType subscript — which points at the data layer, not the route.
+        // The parser must surface the routing hint so the model checks the URL/blueprint.
+        let out = "\
+=================================== FAILURES ===================================
+___________________________ test_create_returns_task ___________________________
+
+    def test_create_returns_task():
+        cl = c()
+>       t = cl.post('/tasks', json={'title': 'x'}).get_json()['id']
+E       TypeError: 'NoneType' object is not subscriptable
+
+test_app.py:12: TypeError
+=========================== short test summary info ============================
+FAILED test_app.py::test_create_returns_task - TypeError: 'NoneType' object is not subscriptable
+1 failed in 0.10s
+";
+        let report = parse("python -m pytest -q", out, false);
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1);
+        let msg = failed[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("NOT FOUND (404)") && msg.contains("url_prefix"),
+            "the routing hint must be surfaced, got: {msg:?}"
         );
     }
 
