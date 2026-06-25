@@ -215,15 +215,15 @@ Take a concrete action every turn — prefer editing over searching.\n\n";
 /// System preamble for a focus-scoped run: the file you must edit is already shown
 /// to you every turn, so don't read it — edit it. Used by the swarm worker (and
 /// any caller that sets `focus_files`).
-const FOCUS_TASK_PREFIX: &str = "You fix code. The file you must change is shown \
-below IN FULL, between === markers — it updates after each edit, so never read it again. \
-The OTHER files in the project appear as a SIGNATURE MAP (their `path:line  name` symbols, \
-not their bodies): import from them BY NAME using that map — do NOT read_file them, you have \
-what you need. Each turn, do ONE of:\n\
+const FOCUS_TASK_PREFIX: &str = "You fix code. The file you must change is shown below IN FULL, \
+between === markers — it updates after each edit, so never read it again. The files it imports \
+from are also shown in full as READ-ONLY context (between --- markers); any remaining files \
+appear as a signature map (`path:line  name`). You already have everything you need — do NOT \
+read_file any of these. Each turn, do ONE of:\n\
 - edit_file / write_file: change the shown file. Copy old_str exactly from it.\n\
 - run_verification: run the tests to see what still fails.\n\
 - finish: stop, once the tests pass.\n\
-Edit the shown file (importing other files by their signatures), verify, repeat.\n\n";
+Edit the shown file (using the imported files and the map for context), verify, repeat.\n\n";
 
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
@@ -440,13 +440,24 @@ pub fn run_agent_observed(
                 segments.push(Segment::user(Zone::Retrieved, ledger));
             }
         } else {
-            // FOCUSED path (per-file step): the model sees its file's FULL body below, plus a
-            // lean SIGNATURE MAP of the OTHER files (names + lines, not bodies) so it imports
-            // from them by name without re-reading their contents — the "bigger concept" that
-            // kills the re-read tax (observed: app.py read 96× because the model had no durable
-            // view of the other files). Computed FRESH each turn (files are written mid-run) and
-            // excludes the focused file (its full body is already shown).
-            let others = render_other_files_map(workspace, &cfg.focus_files, cfg.repo_map_top_k);
+            // FOCUSED path (per-file step): the model needs the CODE of the files its file
+            // IMPORTS FROM — signatures alone weren't enough (it re-read them to see args /
+            // behavior; observed ~24% read cut from signatures vs the full re-read tax). So pin
+            // the FULL bodies of the imported files (read-only context), bounded to the few it
+            // actually imports, and use the cheap signature map only for the DISTANT rest. The
+            // focused file's own body is pinned just below. All re-read FRESH each turn so the
+            // view never goes stale after an edit.
+            let imports = imported_files(workspace, &cfg.focus_files);
+            if !imports.is_empty() {
+                let ctx = render_context_files(workspace, &imports);
+                if !ctx.is_empty() {
+                    segments.push(Segment::user(Zone::Retrieved, ctx));
+                }
+            }
+            // Signature map of everything that's neither the focused file nor an imported one.
+            let mut exclude = cfg.focus_files.clone();
+            exclude.extend(imports);
+            let others = render_other_files_map(workspace, &exclude, cfg.repo_map_top_k);
             if !others.is_empty() {
                 segments.push(Segment::user(Zone::Retrieved, others));
             }
@@ -1426,11 +1437,51 @@ fn first_line(s: &str) -> String {
 }
 
 /// Render a lean SIGNATURE MAP of the files OTHER than the focused one(s): each indexed
-/// symbol as `path:line  name` (the "bigger concept" — what the other files expose, so the
-/// focused step can import by name without reading their bodies). Computed fresh from disk
-/// each turn (files appear as the build proceeds) and filtered to drop the focused file's own
-/// lines (its full body is already pinned). Empty if there's nothing else to show.
-fn render_other_files_map(workspace: &Path, focus: &[String], top_k: usize) -> String {
+/// The workspace files the focused file(s) IMPORT FROM — resolved from their Python import
+/// statements (`import store`, `from store import add`) to `<module>.py` paths that exist in
+/// the workspace. These are the files the model actually needs the CODE of (signatures alone
+/// aren't enough — it re-reads them to see args/behavior), so the caller pins their full
+/// bodies. Excludes the focused files themselves. Best-effort + Python-only (the stack);
+/// returns workspace-relative paths.
+fn imported_files(workspace: &Path, focus: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in focus {
+        let Ok(src) = std::fs::read_to_string(workspace.join(f)) else {
+            continue;
+        };
+        for line in src.lines() {
+            let t = line.trim();
+            // `from <mod> import ...` or `import <mod>[, <mod2>]`.
+            let mods: Vec<&str> = if let Some(rest) = t.strip_prefix("from ") {
+                rest.split_whitespace().next().into_iter().collect()
+            } else if let Some(rest) = t.strip_prefix("import ") {
+                rest.split(',').map(|m| m.split_whitespace().next().unwrap_or("")).collect()
+            } else {
+                continue;
+            };
+            for m in mods {
+                // Only the top-level module (`a.b` → `a`); map to `<a>.py`.
+                let base = m.split('.').next().unwrap_or("").trim();
+                if base.is_empty() {
+                    continue;
+                }
+                let candidate = format!("{base}.py");
+                if focus.iter().any(|x| x == &candidate) || out.contains(&candidate) {
+                    continue;
+                }
+                if workspace.join(&candidate).is_file() {
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Render a SIGNATURE MAP (each indexed symbol as `path:line  name`) of files OTHER than the
+/// given `exclude` set — the "distant" context (files the focused file does not import). Empty
+/// if there's nothing left to show.
+fn render_other_files_map(workspace: &Path, exclude: &[String], top_k: usize) -> String {
     let map = dc_index::repo_map(
         workspace,
         &Boosts {
@@ -1451,11 +1502,11 @@ fn render_other_files_map(workspace: &Path, focus: &[String], top_k: usize) -> S
             continue;
         }
         let path = line.trim().split(':').next().unwrap_or("");
-        if !focus.iter().any(|f| f == path) {
+        if !exclude.iter().any(|f| f == path) {
             out.push(line);
         }
     }
-    // Header-only (every entry was the focused file) → nothing useful to show.
+    // Header-only (everything was excluded) → nothing useful to show.
     if out.len() <= 1 {
         String::new()
     } else {
@@ -1509,6 +1560,31 @@ fn render_focus_files(workspace: &Path, files: &[String]) -> String {
             // Verbatim, with no line numbers — whatever the model copies as old_str
             // must match the file byte-for-byte, so any prefix we add would poison it.
             s.push_str(&format!("\n=== {f} ===\n{content}\n=== end {f} ===\n"));
+        }
+    }
+    if any {
+        s
+    } else {
+        String::new()
+    }
+}
+
+/// Render the full bodies of READ-ONLY CONTEXT files (the ones the focused file imports
+/// from), clearly distinguished from the file-to-edit so the model doesn't confuse which to
+/// change. Re-read fresh each turn so the view never goes stale. Empty if none readable.
+fn render_context_files(workspace: &Path, files: &[String]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "Files your file IMPORTS FROM, shown in full for reference — do NOT edit or read these, \
+         just import from them (they update after each edit):\n",
+    );
+    let mut any = false;
+    for f in files {
+        if let Ok(content) = std::fs::read_to_string(workspace.join(f)) {
+            any = true;
+            s.push_str(&format!("\n--- {f} (read-only) ---\n{content}\n--- end {f} ---\n"));
         }
     }
     if any {
@@ -1863,13 +1939,33 @@ mod tests {
     }
 
     #[test]
-    fn focused_run_pins_its_file_and_shows_others_as_signatures_only() {
+    fn imported_files_resolves_python_imports_to_existing_workspace_files() {
+        let ws = temp_dir("imports");
+        std::fs::write(
+            ws.join("app.py"),
+            "from store import add\nimport service, missingmod\nfrom pkg.sub import x\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("store.py"), "").unwrap();
+        std::fs::write(ws.join("service.py"), "").unwrap();
+        std::fs::write(ws.join("pkg.py"), "").unwrap(); // `from pkg.sub` → top-level pkg.py
+        // missingmod has no file → not resolved.
+        let mut got = imported_files(&ws, &["app.py".to_string()]);
+        got.sort();
+        assert_eq!(got, vec!["pkg.py", "service.py", "store.py"]);
+        // The focused file itself is never in its own imports.
+        assert!(!got.contains(&"app.py".to_string()));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn focused_run_pins_its_file_plus_imported_bodies_and_maps_the_rest() {
         use crate::event::AgentEvent;
         use std::sync::Mutex;
 
         let ws = temp_dir("focus-map");
-        // The focused file (full body shown) + a sibling whose SIGNATURES should appear but
-        // whose BODY must not (it has a unique marker we assert is absent).
+        // Focused app.py imports store (→ store.py's FULL body shown) but NOT util (→ util.py
+        // only as a signature, body absent). Tests the import-aware split.
         std::fs::write(
             ws.join("app.py"),
             "from store import add\n\ndef handler():\n    return add(1)\n",
@@ -1877,7 +1973,12 @@ mod tests {
         .unwrap();
         std::fs::write(
             ws.join("store.py"),
-            "SECRET_BODY_MARKER = 42\n\ndef add(n):\n    return n + 1\n",
+            "IMPORTED_BODY_MARKER = 42\n\ndef add(n):\n    return n + 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("util.py"),
+            "UNIMPORTED_BODY_MARKER = 99\n\ndef helper():\n    return 0\n",
         )
         .unwrap();
 
@@ -1913,15 +2014,19 @@ mod tests {
 
         // The focused file's full body IS shown.
         assert!(prompt.contains("def handler():"), "focus file body must be pinned");
-        // The sibling's SIGNATURE is shown (a symbol from the map)...
-        assert!(prompt.contains("store.py:"), "the other file's signature map must appear");
-        // ...but NOT its body.
+        // The IMPORTED file (store) is shown IN FULL — app.py does `from store import add`.
         assert!(
-            !prompt.contains("SECRET_BODY_MARKER"),
-            "the other file's BODY must NOT be pinned (signatures only): {prompt}"
+            prompt.contains("IMPORTED_BODY_MARKER"),
+            "an imported file's full body must be pinned (the model needs its code): {prompt}"
         );
-        // The prompt tells the model not to re-read the others.
-        assert!(prompt.contains("SIGNATURE MAP"));
+        // The UNIMPORTED file (util) is NOT pinned in full — only its signature appears.
+        assert!(
+            !prompt.contains("UNIMPORTED_BODY_MARKER"),
+            "an unimported file's body must NOT be pinned (signature only): {prompt}"
+        );
+        assert!(prompt.contains("util.py:"), "the unimported file appears as a signature");
+        // The prompt frames the imported files as read-only context.
+        assert!(prompt.contains("IMPORTS FROM"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
