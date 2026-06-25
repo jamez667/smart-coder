@@ -147,6 +147,90 @@ impl<W: Write> EventSink for JsonLinesSink<W> {
     }
 }
 
+/// A standing **prompt-transcript** sink: writes a human-readable record of *exactly what
+/// the model saw and said* each turn — the full assembled prompt (`PromptAssembled`), the
+/// raw reply (`ModelTurn`), the observation it got back (`ToolResult`/`Verification`), and
+/// stalls/advice/stops. This is the "dump the exact prompt" capability the whole multi-file
+/// debugging effort relied on, promoted from throwaway probe examples to a reusable sink:
+/// attach it (typically via [`TeeSink`]) to any run with `verbose` on and read the `.md` it
+/// produces. Requires `AgentConfig.verbose = true` for the prompt bodies (that's what gates
+/// `PromptAssembled`); without it you still get the replies/observations, just not the
+/// assembled prompt.
+///
+/// Like [`JsonLinesSink`], the writer is behind a `Mutex` so the sink is `Sync`, and write
+/// failures are swallowed — observation must never break a run.
+pub struct TranscriptSink<W: Write> {
+    writer: Mutex<W>,
+}
+
+impl<W: Write> TranscriptSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer: Mutex::new(writer),
+        }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Render one event as a readable transcript block (empty string for events we don't
+    /// surface in a prompt transcript — e.g. `ToolCall`, which is implied by the reply).
+    fn render(event: &AgentEvent) -> String {
+        match event {
+            AgentEvent::RunStarted { task, prompt_budget } => {
+                let head: String = task.chars().take(120).collect();
+                format!(
+                    "\n\n========================= NEW RUN =========================\n\
+                     task: {head}\nprompt_budget: {prompt_budget}\n"
+                )
+            }
+            AgentEvent::PromptAssembled { step, tokens, messages } => {
+                let mut s = format!(
+                    "\n---------------- TURN {step} — ASSEMBLED PROMPT ({tokens} tokens) ----------------\n"
+                );
+                for m in messages {
+                    s.push_str(&format!("[[{}]]\n{}\n", m.role, m.content));
+                }
+                s
+            }
+            AgentEvent::ModelTurn { step, raw, .. } => {
+                format!("\n>>> TURN {step} — MODEL REPLY:\n{raw}\n")
+            }
+            AgentEvent::ToolResult { full, is_error, .. } => {
+                let tag = if *is_error { "OBSERVATION (error)" } else { "OBSERVATION" };
+                format!("<<< {tag}:\n{full}\n")
+            }
+            AgentEvent::Verification { green, full, .. } => {
+                format!("<<< VERIFICATION (green={green}):\n{full}\n")
+            }
+            AgentEvent::RepairTriggered { detail } => format!("!! REPAIR: {detail}\n"),
+            AgentEvent::Stalled { trigger } => format!("** STALLED: {trigger}\n"),
+            AgentEvent::Advice { trigger, advice } => {
+                format!("** ADVICE ({trigger}):\n{advice}\n")
+            }
+            AgentEvent::Stopped { reason } => format!("** STOPPED: {reason:?}\n"),
+            // Not surfaced in a prompt transcript (covered by the reply / prompt blocks).
+            AgentEvent::ToolCall { .. }
+            | AgentEvent::Planned { .. }
+            | AgentEvent::PlanRevised { .. } => String::new(),
+        }
+    }
+}
+
+impl<W: Write> EventSink for TranscriptSink<W> {
+    fn record(&self, event: &AgentEvent) {
+        let block = Self::render(event);
+        if block.is_empty() {
+            return;
+        }
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = write!(w, "{block}");
+            let _ = w.flush();
+        }
+    }
+}
+
 /// A sink that fans every event out to several others — so a live renderer and a
 /// session log can both observe one run without changing the loop's single-sink
 /// signature (spec 01/06). Each delegate is called in order.
@@ -265,6 +349,50 @@ mod tests {
             let back: AgentEvent = serde_json::from_str(&line).unwrap();
             assert_eq!(back, e, "round-trip mismatch for {line}");
         }
+    }
+
+    #[test]
+    fn transcript_sink_renders_a_readable_prompt_dump() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let sink = TranscriptSink::new(&mut buf);
+            sink.record(&AgentEvent::RunStarted {
+                task: "build app".into(),
+                prompt_budget: 17408,
+            });
+            sink.record(&AgentEvent::PromptAssembled {
+                step: 1,
+                tokens: 790,
+                messages: vec![
+                    PromptMessage { role: "system".into(), content: "you are an agent".into() },
+                    PromptMessage { role: "user".into(), content: "write store.py".into() },
+                ],
+            });
+            sink.record(&AgentEvent::ModelTurn {
+                step: 1,
+                prompt_tokens: 790,
+                raw: r#"{"tool":"write_file","path":"store.py","content":"x=1"}"#.into(),
+            });
+            sink.record(&AgentEvent::ToolResult {
+                summary: "write_file store.py ok".into(),
+                full: "write_file store.py ok (3 bytes)".into(),
+                is_error: false,
+            });
+            // A ToolCall is intentionally NOT surfaced (implied by the reply).
+            sink.record(&AgentEvent::ToolCall { tool: "write_file".into(), arg: "store.py".into() });
+            sink.record(&AgentEvent::Stopped { reason: StopReason::Finished });
+        }
+        let text = String::from_utf8(buf).unwrap();
+        // The assembled prompt (both roles) is present verbatim — the whole point.
+        assert!(text.contains("ASSEMBLED PROMPT (790 tokens)"));
+        assert!(text.contains("[[system]]\nyou are an agent"));
+        assert!(text.contains("[[user]]\nwrite store.py"));
+        // The raw reply and the observation are present.
+        assert!(text.contains("MODEL REPLY:") && text.contains(r#""tool":"write_file""#));
+        assert!(text.contains("OBSERVATION:") && text.contains("ok (3 bytes)"));
+        assert!(text.contains("STOPPED: Finished"));
+        // ToolCall produced no block.
+        assert!(!text.contains("write_file\", arg"));
     }
 
     #[test]

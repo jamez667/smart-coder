@@ -778,17 +778,26 @@ fn run_pass(
     agent_cfg.sandbox = cfg.sandbox();
     agent_cfg.plan_first = false;
     agent_cfg.max_steps = max_steps;
-    let sink = dc_core::FnSink(|e: &dc_core::AgentEvent| eprintln!("[A {e:?}]"));
-    let report = dc_core::run_agent_observed(
-        worker,
-        None,
-        &registry,
-        strategy.as_ref(),
-        instruction,
-        ws,
-        &agent_cfg,
-        &sink,
-    );
+    // Diagnosis hook (thread 2): set DC_DUMP_DIR to capture a readable prompt transcript per
+    // run (the exact assembled prompt + raw replies) via the standing TranscriptSink, so the
+    // "dump the prompt before assuming a model limit" method is one env var away.
+    let eprint = dc_core::FnSink(|e: &dc_core::AgentEvent| eprintln!("[A {e:?}]"));
+    let dump = dump_transcript_file(ws);
+    if dump.is_some() {
+        agent_cfg.verbose = true; // PromptAssembled is gated on verbose
+    }
+    let report = match &dump {
+        Some(file) => {
+            let ts = dc_core::TranscriptSink::new(file);
+            let tee = dc_core::TeeSink::new(vec![&eprint, &ts]);
+            dc_core::run_agent_observed(
+                worker, None, &registry, strategy.as_ref(), instruction, ws, &agent_cfg, &tee,
+            )
+        }
+        None => dc_core::run_agent_observed(
+            worker, None, &registry, strategy.as_ref(), instruction, ws, &agent_cfg, &eprint,
+        ),
+    };
     let (pass, total) = run_and_count(cfg, ws);
     match report {
         Ok(r) => (r.verified == Some(true), r.steps, pass, total),
@@ -797,6 +806,19 @@ fn run_pass(
             (false, 0, pass, total)
         }
     }
+}
+
+/// If `DC_DUMP_DIR` is set, open a per-run transcript file under it (named after the run's
+/// workspace dir so each rung/pass gets its own), for the `TranscriptSink`. `None` otherwise.
+fn dump_transcript_file(ws: &std::path::Path) -> Option<std::fs::File> {
+    let dir = std::env::var("DC_DUMP_DIR").ok()?;
+    let _ = std::fs::create_dir_all(&dir);
+    let tag = ws
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("run")
+        .to_string();
+    std::fs::File::create(std::path::Path::new(&dir).join(format!("{tag}.md"))).ok()
 }
 
 // ---- helpers (verbatim from ab_ladder.rs) ----
