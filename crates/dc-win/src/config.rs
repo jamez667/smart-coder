@@ -93,12 +93,12 @@ impl Default for UiConfig {
             // in settings. Without it the build stops at "plan + tests written".
             verify_command: Some("python -m pytest -q".to_string()),
             plan_first: false,
-            // Small coders (Qwen3 et al.) burn their whole budget in a reasoning
-            // block and return an EMPTY completion unless told `/no_think` — which
-            // surfaces as a `/chat/completions` error. The swarm worker already
-            // defaults to this; the single-run GUI does too so it works out of the
-            // box. Editable in settings for models that don't need it.
-            system_suffix: Some("/no_think".to_string()),
+            // No system suffix. The historical `/no_think` was for early Qwen3 reasoning
+            // models that burned the budget on a `<think>` block; the current coder model
+            // (qwen3-coder-30b) has NO thinking mode — confirmed live: zero <think> tags in
+            // a full ladder run — so `/no_think` was dead text bloating every system prompt
+            // and the model ignored it anyway. Editable in settings if a thinking model is used.
+            system_suffix: None,
             max_workers: 2,
             max_subtask_retries: 2,
             frozen_paths: Vec::new(),

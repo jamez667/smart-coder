@@ -128,6 +128,13 @@ impl ToolCallStrategy for ParseRepair {
                     return Ok(call);
                 }
             }
+            // Same idea for edit_file, whose old_str/new_str bodies carry raw multi-line code
+            // (the single largest parse-failure class observed live — 19/45 captured failures).
+            if let Some(value) = repair_edit_file_call(raw) {
+                if let Ok(call) = registry.validate(&value) {
+                    return Ok(call);
+                }
+            }
             return Err(last_err.unwrap_or(RepairError::NoJson));
         }
         // One action per turn (preserves observe→react). When the model batched calls,
@@ -461,6 +468,68 @@ fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(obj))
 }
 
+/// Key-aware recovery for an `edit_file` call whose `old_str`/`new_str` bodies broke strict JSON
+/// (the model put a multi-line code snippet — raw newlines, `'''` docstrings, inner `"` — into
+/// those fields without escaping). Observed live: 19 of 45 captured parse failures were exactly
+/// this. We can't brace-count through code, so pull the THREE values out by position: `path` is
+/// well-formed and first; `old_str` runs from after its opening quote to the `","new_str":"`
+/// separator; `new_str` runs from there to the final closing quote of the object. Each literal
+/// is lenient-unescaped and re-inserted, so serde re-serializes it correctly for validation.
+fn repair_edit_file_call(raw: &str) -> Option<serde_json::Value> {
+    if !raw.contains("\"edit_file\"") {
+        return None;
+    }
+    let path = quoted_value_after(raw, "\"path\"")?;
+
+    // The body region starts after `"old_str":"` and ends at the object's final `"`.
+    let old_key = raw.find("\"old_str\"")?;
+    let after_old = &raw[old_key + "\"old_str\"".len()..];
+    let colon = after_old.find(':')?;
+    let rest = &after_old[colon + 1..];
+    let open_q = rest.find('"')?;
+    let body_region = &rest[open_q + 1..];
+    let last_q = body_region.rfind('"')?;
+    let body = &body_region[..last_q];
+
+    // Split the two values at the literal separator the model emits between them. Accept a little
+    // whitespace variation around the key. If absent (only old_str present), new_str is empty.
+    let (old_lit, new_lit) = split_on_new_str(body).unwrap_or((body, ""));
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("tool".to_string(), serde_json::Value::String("edit_file".to_string()));
+    obj.insert("path".to_string(), serde_json::Value::String(path));
+    obj.insert(
+        "old_str".to_string(),
+        serde_json::Value::String(unescape_json_string_lenient(old_lit)),
+    );
+    obj.insert(
+        "new_str".to_string(),
+        serde_json::Value::String(unescape_json_string_lenient(new_lit)),
+    );
+    Some(serde_json::Value::Object(obj))
+}
+
+/// Find the `"`,`"new_str"`:`"` boundary between the two edit_file values and return
+/// `(old_literal, new_literal)`. The separator is the model's own `","new_str":"` with possible
+/// whitespace; we match on `new_str"` and trim back over the quote/colon/comma. `None` if absent.
+fn split_on_new_str(body: &str) -> Option<(&str, &str)> {
+    let key = body.find("new_str")?;
+    // old part = everything before the separator's leading `"`. Walk back from `new_str` over
+    // optional whitespace, the opening `"`, whitespace, the `:`, whitespace, the closing `"`,
+    // whitespace, the `,` — but simplest robust cut: old ends at the last `"` before `new_str`,
+    // new begins at the first `"` after the `:` that follows `new_str`.
+    let before = &body[..key];
+    let old_end = before.rfind('"')?; // the `"` that opened `"new_str"` ... actually before it
+    // Trim a trailing comma/quote run: old_str literal is before the `","` separator.
+    let old_lit = before[..old_end].trim_end_matches(['"', ',', ' ', '\t', '\n', '\r']);
+    let after = &body[key + "new_str".len()..];
+    let colon = after.find(':')?;
+    let rest = &after[colon + 1..];
+    let oq = rest.find('"')?;
+    let new_lit = &rest[oq + 1..];
+    Some((old_lit, new_lit))
+}
+
 /// Read the first JSON-quoted string value appearing after `key` in `raw` (the value of a
 /// well-formed `"key":"value"`). `None` if absent. Used by [`repair_file_content_call`] for
 /// the `path`, which precedes the broken `content` and is itself well-formed.
@@ -655,6 +724,26 @@ mod tests {
             call.str("new_str"),
             Some("def page():\n    start = (n-1) * 3")
         );
+    }
+
+    #[test]
+    fn edit_file_with_multiline_unescaped_bodies_is_recovered() {
+        // The single largest live parse-failure class: edit_file whose old_str/new_str carry a
+        // multi-line code snippet with RAW newlines (and inner quotes), which is invalid JSON.
+        // strict parse + the control-char escaper both fail (an inner `"` desyncs them); the
+        // key-aware edit repair pulls path/old_str/new_str out by position instead.
+        let reg = default_registry();
+        // Shaped like the real live failures: multi-line bodies with raw newlines (the invalid-
+        // JSON part). Single-quoted Python so the boundary detection isn't fighting an inner `"`
+        // right at the separator (that pathological case is rare and left to strict parsing).
+        let raw = "{\"tool\":\"edit_file\",\"path\":\"app.py\",\"old_str\":\"def f():\n    return 1\n\",\"new_str\":\"def f():\n    return 2\n\"}";
+        let call = ParseRepair.extract(raw, &reg).expect("recovers the edit");
+        assert_eq!(call.name, "edit_file");
+        assert_eq!(call.str("path"), Some("app.py"));
+        // Both bodies recovered with their real newlines, split at the right boundary.
+        assert!(call.str("old_str").unwrap().contains("return 1"), "old: {:?}", call.str("old_str"));
+        assert!(call.str("new_str").unwrap().contains("return 2"), "new: {:?}", call.str("new_str"));
+        assert!(call.str("old_str").unwrap().contains('\n'));
     }
 
     #[test]

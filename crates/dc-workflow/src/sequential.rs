@@ -37,6 +37,10 @@ pub struct SequentialReport {
     pub fell_back_whole_task: bool,
     /// Per-file step outcomes, in execution order: (subtask id, its agent report).
     pub per_file: Vec<(String, AgentReport)>,
+    /// Incremental integration steps in order: (label e.g. "slice:author or book", report).
+    /// Empty when slicing wasn't applicable (single-file app / no keyworded tests → the single
+    /// full pass below was used instead).
+    pub incremental: Vec<(String, AgentReport)>,
     /// The final whole-suite integration pass (the one place cross-file glue is fixed).
     pub final_pass: AgentReport,
     /// Whether the final whole-suite verification was green.
@@ -104,6 +108,133 @@ fn read_frozen_contract(workspace: &Path, frozen_paths: &[String]) -> String {
     parts.join("\n\n")
 }
 
+/// A feature slice: a pytest `-k` keyword derived from a route file's name, plus that file.
+/// The incremental integration walks these in dependency order, making each cumulative slice
+/// (`-k "author or book"`) green before adding the next — so the model only ever closes a SMALL
+/// new slice on a green base, never the whole multi-file graph at once.
+#[derive(Debug, Clone, PartialEq)]
+struct FeatureSlice {
+    keyword: String,
+    #[allow(dead_code)] // kept for reporting/debugging; the keyword is what drives -k
+    file: String,
+}
+
+/// Map a source file to its pytest `-k` keyword, by FILENAME convention (not prose). A
+/// `routes_<feature>.py` blueprint → `<feature>` (singularized): `routes_authors.py` → "author".
+/// Infrastructure (`store`/`service`/`app`) and glue (templates/static) → `None`: they aren't a
+/// testable feature on their own — they're folded into the first feature's base or caught by the
+/// final full-suite pass. Returns `None` for anything not matching `routes_*.py`, which is what
+/// makes single-`routes.py` apps (S1/S2) fall back to today's single integration pass.
+fn feature_keyword(file: &str) -> Option<String> {
+    let name = std::path::Path::new(file)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file);
+    let stem = name.strip_suffix(".py")?;
+    let feature = stem.strip_prefix("routes_")?;
+    if feature.is_empty() {
+        return None;
+    }
+    // Singularize a trailing plural so the keyword matches test names (`test_create_author`,
+    // not `authors`). Only the simple `s` case — the test oracles use singular feature nouns.
+    let singular = feature.strip_suffix('s').unwrap_or(feature);
+    if singular.is_empty() {
+        return None;
+    }
+    Some(singular.to_string())
+}
+
+/// Extract `def test_<name>` names from the frozen contract string (already loaded — no I/O).
+fn parse_test_names(contract: &str) -> Vec<String> {
+    contract
+        .lines()
+        .filter_map(|line| {
+            let t = line.trim_start();
+            let rest = t.strip_prefix("def ")?;
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.starts_with("test_") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Subtask ids in dependency order — a topological walk over `deps`, INDEPENDENT of current
+/// status (the build loop has already marked everything Complete by the time slices are derived,
+/// so we can't reuse `ready()`, which keys off Pending). Emits a subtask once all its deps have
+/// been emitted; falls back to the lowest remaining id to break a cycle/dangling dep. Order
+/// matches the build walk's because both follow deps.
+fn ordered_subtask_ids(board: &TaskBoard) -> Vec<String> {
+    let ids: Vec<String> = board.subtasks().iter().map(|s| s.id.clone()).collect();
+    let mut emitted: Vec<String> = Vec::new();
+    while emitted.len() < ids.len() {
+        let next = board
+            .subtasks()
+            .iter()
+            .filter(|s| !emitted.contains(&s.id))
+            .find(|s| s.deps.iter().all(|d| emitted.contains(d)))
+            .map(|s| s.id.clone())
+            .or_else(|| {
+                // cycle / dep on a missing id: take the lowest remaining id, don't strand it.
+                ids.iter().filter(|id| !emitted.contains(*id)).min().cloned()
+            });
+        match next {
+            Some(id) => emitted.push(id),
+            None => break,
+        }
+    }
+    emitted
+}
+
+/// Derive the ordered feature slices for incremental integration: each `routes_<feature>.py` in
+/// dependency order whose keyword actually appears in a frozen test name. A keyword with no
+/// matching test is skipped (nothing to verify); duplicates are de-duped preserving dep order.
+/// Empty ⇒ the app has no `routes_<feature>.py` files (or no tests for them) ⇒ caller falls back
+/// to today's single full integration pass.
+fn derive_slices(board: &TaskBoard, test_names: &[String]) -> Vec<FeatureSlice> {
+    let has_test = |kw: &str| {
+        let kw = kw.to_lowercase();
+        test_names.iter().any(|t| t.to_lowercase().contains(&kw))
+    };
+    let mut slices: Vec<FeatureSlice> = Vec::new();
+    for id in ordered_subtask_ids(board) {
+        let Some(st) = board.subtasks().iter().find(|s| s.id == id) else {
+            continue;
+        };
+        for file in &st.files {
+            if let Some(keyword) = feature_keyword(file) {
+                if has_test(&keyword) && !slices.iter().any(|s| s.keyword == keyword) {
+                    slices.push(FeatureSlice {
+                        keyword,
+                        file: file.clone(),
+                    });
+                }
+            }
+        }
+    }
+    slices
+}
+
+/// The cumulative `-k` expression for slices `0..=upto`: `"author"`, `"author or book"`, …
+fn cumulative_k(slices: &[FeatureSlice], upto: usize) -> String {
+    slices[..=upto]
+        .iter()
+        .map(|s| s.keyword.as_str())
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// Append a pytest `-k "<expr>"` filter to the base verify command, so a slice runs only the
+/// tests for the features built so far: `python -m pytest -q 'test_app.py'` → `… -k "author"`.
+fn slice_command(base: &str, k: &str) -> String {
+    format!("{base} -k \"{k}\"")
+}
+
 /// Full entry point: run the staged workflow to get the decomposition, then drive it
 /// sequentially. For callers (GUI/CLI) that want the whole pipeline. The benchmark uses
 /// [`build_sequential_with_board`] instead, so it can inject a frozen oracle between
@@ -157,6 +288,7 @@ pub fn build_sequential_with_board(
             board_rendered,
             fell_back_whole_task: true,
             per_file: Vec::new(),
+            incremental: Vec::new(),
             final_pass,
             verified,
         });
@@ -224,10 +356,25 @@ pub fn build_sequential_with_board(
         per_file.push((st.id, report));
     }
 
-    // Final integration pass: ONE unfocused agent loop over the FULL frozen suite. This is
-    // the only place cross-file glue (a wrong import name, a route path, a return-shape
-    // mismatch between files) gets reconciled. All source files already exist now, so the
-    // model is fixing glue, not emitting N files — the batch-discard doesn't bite here.
+    // Integration. Instead of asking the model to make the WHOLE suite green at once (which
+    // oscillates on many-file apps — fixing one cross-file bug reveals another, observed flat
+    // at 9-failed for 80 cycles on the 8-file S3), build the app up one FEATURE at a time and
+    // keep it green — standard engineering practice. The frozen tests slice by feature in
+    // dependency order (`routes_authors.py` → `-k author`, …), so each step closes a SMALL new
+    // slice on an already-green base. When the app has no `routes_<feature>.py` files (or no
+    // tests for them) — S1/S2, non-Flask — `derive_slices` is empty and we fall back to today's
+    // single full pass, so the passing rungs don't regress.
+    let test_names = parse_test_names(&contract);
+    let slices = derive_slices(&board, &test_names);
+    let incremental = if slices.is_empty() || base_cfg.verify_command.is_none() {
+        Vec::new()
+    } else {
+        run_incremental_integration(worker, task, workspace, base_cfg, &slices, sink)?
+    };
+
+    // The final full-suite pass always runs: it's the last feature's closer (catalog/glue) AND
+    // the backstop if an incremental slice didn't fully converge. After the slices, the earlier
+    // features are green, so it only has the residue to fix.
     let final_pass = run_integration_pass(worker, task, workspace, base_cfg, sink)?;
     let verified = final_pass.verified == Some(true);
 
@@ -235,6 +382,7 @@ pub fn build_sequential_with_board(
         board_rendered,
         fell_back_whole_task: false,
         per_file,
+        incremental,
         final_pass,
         verified,
     })
@@ -333,6 +481,72 @@ fn run_integration_pass(
         &cfg,
         sink,
     )
+}
+
+/// Per-slice integration budget: a slice is a SMALL goal (make one feature's tests pass on a
+/// green base), so it needs less than the full convergence loop but more than a single write.
+const PER_SLICE_MAX_STEPS: usize = 25;
+
+/// Incremental integration: walk the feature slices in dependency order, making each cumulative
+/// `-k` slice green before adding the next. Each step pins all source files (the file-handing
+/// fix — the model SEES every file; the `-k` only narrows the GOAL) and gates on the SLICED
+/// pytest, so the model converges a small feature at a time instead of the whole graph at once.
+/// A slice that pre-checks green is skipped (no agent loop); a slice that can't converge in its
+/// budget is left for the final full pass (best-effort, like a failed per-file step).
+fn run_incremental_integration(
+    worker: &dyn ModelBackend,
+    task: &str,
+    workspace: &Path,
+    base_cfg: &AgentConfig,
+    slices: &[FeatureSlice],
+    sink: &dyn EventSink,
+) -> Result<Vec<(String, AgentReport)>> {
+    let strategy = select_strategy(&worker.capabilities());
+    let registry = default_registry();
+    let base_verify = base_cfg
+        .verify_command
+        .as_deref()
+        .expect("caller guards verify_command.is_some()");
+    let mut steps: Vec<(String, AgentReport)> = Vec::new();
+
+    for i in 0..slices.len() {
+        let k = cumulative_k(slices, i);
+        let slice_cmd = slice_command(base_verify, &k);
+
+        // Pre-check: if everything built so far already satisfies this slice, advance cheaply
+        // (no model turns). Common once an earlier slice's work already covered this feature.
+        if dc_verify::run_verification_in(&base_cfg.sandbox, workspace, &slice_cmd).all_green() {
+            continue;
+        }
+
+        let mut cfg = base_cfg.clone();
+        cfg.focus_files = dc_core::source_files(workspace); // see every file in full
+        cfg.plan_first = false;
+        cfg.max_steps = PER_SLICE_MAX_STEPS;
+        cfg.verify_command = Some(slice_cmd); // gate on THIS slice only
+        let instruction = format!(
+            "All the source files for this project are shown below in full (they update after \
+             each edit). Make the tests matching `-k \"{k}\"` pass — this is a GROWING SLICE of \
+             the suite (the features built so far). The tests are FROZEN — do not edit any test \
+             file, and do NOT read_file the source files (they are already shown). Run \
+             run_verification (it is already scoped to this slice), read the failures, and fix \
+             the SOURCE files — most failures are cross-file glue: a wrong import name between \
+             files, a route at the wrong path, or a return-shape mismatch. Keep editing until \
+             this slice is green, then finish.\n\nProject: {task}"
+        );
+        let report = run_agent_observed(
+            worker,
+            None,
+            &registry,
+            strategy.as_ref(),
+            &instruction,
+            workspace,
+            &cfg,
+            sink,
+        )?;
+        steps.push((format!("slice:{k}"), report));
+    }
+    Ok(steps)
 }
 
 /// The whole-task fallback for a degenerate board: today's single-agent behavior over the
@@ -641,6 +855,123 @@ mod tests {
             "must NOT have run_verification (the dead-end that stalled per-file steps)"
         );
         assert!(!names.contains(&"run_command"));
+    }
+
+    #[test]
+    fn feature_keyword_maps_route_files_and_skips_infra() {
+        assert_eq!(feature_keyword("routes_authors.py").as_deref(), Some("author"));
+        assert_eq!(feature_keyword("routes_books.py").as_deref(), Some("book"));
+        assert_eq!(feature_keyword("routes_loans.py").as_deref(), Some("loan"));
+        // Infrastructure + glue are not their own feature slice.
+        for f in ["store.py", "service.py", "app.py", "templates/catalog.html", "static/catalog.js", "routes.py"] {
+            assert_eq!(feature_keyword(f), None, "{f} should not be a slice");
+        }
+    }
+
+    #[test]
+    fn parse_test_names_extracts_def_test_lines() {
+        let contract = "from app import app\n\ndef c():\n    return app\n\ndef test_create_author_and_book():\n    pass\n\ndef test_loan_book_ok():\n    pass\ndef test_catalog_page():\n    pass\n";
+        let names = parse_test_names(contract);
+        assert_eq!(
+            names,
+            vec!["test_create_author_and_book", "test_loan_book_ok", "test_catalog_page"]
+        );
+        // `def c()` (not a test) is excluded.
+        assert!(!names.iter().any(|n| n == "c"));
+    }
+
+    #[test]
+    fn derive_slices_yields_features_in_dep_order_with_tests() {
+        // An S3-shaped board: store→service→routes_authors→routes_books→routes_loans→app→template.
+        let board = TaskBoard::new(vec![
+            Subtask::new("t1", "store").with_files(vec!["store.py".into()]),
+            Subtask::new("t2", "service").with_files(vec!["service.py".into()]).with_deps(vec!["t1".into()]),
+            Subtask::new("t3", "authors").with_files(vec!["routes_authors.py".into()]).with_deps(vec!["t2".into()]),
+            Subtask::new("t4", "books").with_files(vec!["routes_books.py".into()]).with_deps(vec!["t3".into()]),
+            Subtask::new("t5", "loans").with_files(vec!["routes_loans.py".into()]).with_deps(vec!["t4".into()]),
+            Subtask::new("t6", "app").with_files(vec!["app.py".into()]).with_deps(vec!["t5".into()]),
+        ]);
+        let names: Vec<String> = ["test_create_author", "test_book_requires_author", "test_loan_book_ok", "test_catalog_page"]
+            .iter().map(|s| s.to_string()).collect();
+        let slices = derive_slices(&board, &names);
+        let kws: Vec<&str> = slices.iter().map(|s| s.keyword.as_str()).collect();
+        // author/book/loan in dep order; app/store/service yield no slice; "catalog" has a test
+        // but no routes_catalog.py, so no slice (the final full pass catches it).
+        assert_eq!(kws, vec!["author", "book", "loan"]);
+    }
+
+    #[test]
+    fn derive_slices_empty_when_no_route_files() {
+        // A single-routes.py app (S1/S2 shape) → no feature slices → caller falls back.
+        let board = TaskBoard::new(vec![
+            Subtask::new("t1", "store").with_files(vec!["store.py".into()]),
+            Subtask::new("t2", "app").with_files(vec!["app.py".into()]).with_deps(vec!["t1".into()]),
+        ]);
+        let names = vec!["test_create".to_string(), "test_resolve".to_string()];
+        assert!(derive_slices(&board, &names).is_empty());
+    }
+
+    #[test]
+    fn cumulative_k_and_slice_command_build_growing_filters() {
+        let slices = vec![
+            FeatureSlice { keyword: "author".into(), file: "routes_authors.py".into() },
+            FeatureSlice { keyword: "book".into(), file: "routes_books.py".into() },
+            FeatureSlice { keyword: "loan".into(), file: "routes_loans.py".into() },
+        ];
+        assert_eq!(cumulative_k(&slices, 0), "author");
+        assert_eq!(cumulative_k(&slices, 1), "author or book");
+        assert_eq!(cumulative_k(&slices, 2), "author or book or loan");
+        assert_eq!(
+            slice_command("python -m pytest -q 'test_app.py'", "author or book"),
+            "python -m pytest -q 'test_app.py' -k \"author or book\""
+        );
+    }
+
+    #[test]
+    fn incremental_integration_runs_slices_in_order_then_full_pass() {
+        // With route files + matching tests + a verify command, the driver runs each cumulative
+        // slice (author, author or book, author or book or loan) THEN the full pass. We use an
+        // always-failing verify command so each slice pre-check is red (the agent loop runs and
+        // records its sliced instruction) — we assert the ORDER of instructions, not greenness.
+        let dir = ws("incr");
+        let board = TaskBoard::new(vec![
+            Subtask::new("t1", "authors").with_files(vec!["routes_authors.py".into()]),
+            Subtask::new("t2", "books").with_files(vec!["routes_books.py".into()]).with_deps(vec!["t1".into()]),
+            Subtask::new("t3", "loans").with_files(vec!["routes_loans.py".into()]).with_deps(vec!["t2".into()]),
+        ]);
+        // Frozen contract drives parse_test_names; write it so read_frozen_contract finds it.
+        std::fs::write(
+            dir.join("test_app.py"),
+            "def test_author():\n    pass\ndef test_book():\n    pass\ndef test_loan():\n    pass\n",
+        ).unwrap();
+        let mut cfg = AgentConfig {
+            // An unknown program → shell exits non-zero → not all_green → each slice loop runs.
+            verify_command: Some("dc_nonexistent_verify_cmd_xyz".to_string()),
+            ..AgentConfig::default()
+        };
+        cfg.permission.frozen_paths = vec!["test_app.py".to_string()];
+        let spy = SpyBackend::new();
+        let sink = FnSink(|_e: &dc_core::AgentEvent| {});
+        let rep = build_sequential_with_board(board, &spy, "lib", &dir, &cfg, 1, &sink).unwrap();
+
+        // The incremental steps were recorded in cumulative order.
+        let labels: Vec<&str> = rep.incremental.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["slice:author", "slice:author or book", "slice:author or book or loan"]
+        );
+        // The model saw the sliced instructions in order, then the full-suite pass last.
+        let seen = spy.seen_instructions.lock().unwrap();
+        let slice_positions: Vec<usize> = seen
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.contains("GROWING SLICE"))
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(slice_positions.len() >= 3, true, "ran the slice loops");
+        let last = seen.last().unwrap();
+        assert!(last.contains("Make the FULL frozen test suite pass"), "full pass is last: {last}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

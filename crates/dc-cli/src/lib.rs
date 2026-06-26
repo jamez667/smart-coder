@@ -359,12 +359,10 @@ impl Cli {
             }
         }
 
-        // Qwen3 models default to a reasoning mode that eats the token budget and
-        // returns empty content; `/no_think` disables it. Auto-apply unless the
-        // user set a suffix explicitly.
-        if system_suffix.is_none() && model.to_ascii_lowercase().contains("qwen3") {
-            system_suffix = Some("/no_think".to_string());
-        }
+        // No auto `/no_think`. Early Qwen3 reasoning models needed it to avoid burning the
+        // budget on a `<think>` block, but the current coder model (qwen3-coder-30b) has no
+        // thinking mode (confirmed live: zero <think> tags) — so it was dead prompt text the
+        // model ignored. Pass `--no-think` explicitly if you run a thinking model that needs it.
 
         Ok(Cli {
             command: command.unwrap_or(Command::Chat),

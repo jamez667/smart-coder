@@ -11,5 +11,6 @@ dc-proto = { path = "../dc-proto" }
 dc-model = { path = "../dc-model" }
 dc-core = { path = "../dc-core" }
 dc-swarm = { path = "../dc-swarm" }
+dc-verify = { path = "../dc-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }
