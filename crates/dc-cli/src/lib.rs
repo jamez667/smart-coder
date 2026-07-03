@@ -461,7 +461,7 @@ impl Cli {
 
     /// Build the configured backend, applying the requested enforcement (spec 02).
     pub fn backend(&self) -> OpenAiBackend {
-        match self.tool_calling {
+        let b = match self.tool_calling {
             ToolCallingArg::None => OpenAiBackend::new(self.base_url.clone(), self.model.clone()),
             ToolCallingArg::Native => {
                 OpenAiBackend::new(self.base_url.clone(), self.model.clone()).with_native_tools()
@@ -469,7 +469,12 @@ impl Cli {
             ToolCallingArg::Gbnf => {
                 OpenAiBackend::llama_cpp(self.base_url.clone(), self.model.clone())
             }
-        }
+        };
+        // Adopt the real context window the server serves the model at (e.g. 12288/slot)
+        // instead of the conservative 8192 default — best-effort, falls back to the default
+        // if the server doesn't advertise it. Mirrors `dc_win::config::backend()`; without
+        // it the prompt budget is squeezed to 5120 even on a pool served at -c 36864.
+        b.with_detected_context()
     }
 }
 
