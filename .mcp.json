@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "dumb-coder": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "C:/Users/mail/working/Personal/dumb-coder:/workspace",
+        "--add-host", "host.docker.internal:host-gateway",
+        "-e", "DC_BASE_URLS=http://host.docker.internal:11439/v1,http://host.docker.internal:11440/v1",
+        "-e", "DC_MODEL=qwen3-8b",
+        "dumb-coder-mcp"
+      ]
+    }
+  }
+}
