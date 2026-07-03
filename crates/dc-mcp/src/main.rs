@@ -8,8 +8,11 @@ fn main() -> io::Result<()> {
     let cfg = dc_mcp::Config::from_env();
     // A one-line banner on stderr (stdout is the JSON-RPC channel — must stay clean).
     eprintln!(
-        "dumb-coder-mcp: backend {} ({}), binary {}, yolo={}",
-        cfg.base_url, cfg.model, cfg.binary, cfg.yolo
+        "dumb-coder-mcp: backends [{}] ({}), binary {}, yolo={}",
+        cfg.base_urls.join(", "),
+        cfg.model,
+        cfg.binary,
+        cfg.yolo
     );
     let tools = dc_mcp::build_tools(cfg);
 

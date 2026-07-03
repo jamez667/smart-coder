@@ -54,8 +54,10 @@ impl State {
 pub struct JobConfig {
     /// Path to the `dumb-coder` binary to invoke.
     pub binary: String,
-    /// OpenAI-compatible backend URL passed as `--base-url`.
-    pub base_url: String,
+    /// One or more OpenAI-compatible backend URLs. Each new job is assigned one by
+    /// round-robin, so several backend pools (e.g. one llama.cpp server per GPU)
+    /// are used evenly without an external load balancer. Always has ≥1 entry.
+    pub base_urls: Vec<String>,
     /// Model tag passed as `--model`.
     pub model: String,
     /// Pre-approve `run_command` shell calls (`--yolo`) — a headless run can't
@@ -68,6 +70,8 @@ pub struct JobConfig {
 #[derive(Debug)]
 struct Job {
     state: State,
+    /// Which backend URL this job was dispatched to (for the status snapshot).
+    backend: String,
     /// The last N raw NDJSON event lines, for a compact status tail.
     recent: Vec<String>,
     /// The `Stopped { reason }` payload once the run ends (e.g. "Finished").
@@ -79,9 +83,10 @@ struct Job {
 }
 
 impl Job {
-    fn new() -> Self {
+    fn new(backend: String) -> Self {
         Self {
             state: State::Running,
+            backend,
             recent: Vec::new(),
             stop_reason: None,
             exit_code: None,
@@ -94,6 +99,7 @@ impl Job {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobStatus {
     pub state: State,
+    pub backend: String,
     pub stop_reason: Option<String>,
     pub recent_events: Vec<String>,
     pub exit_code: Option<i32>,
@@ -123,14 +129,18 @@ impl JobStore {
     /// immediately. A background thread drains the child's NDJSON stream into the
     /// job record; the caller polls with [`JobStore::status`].
     pub fn start(&self, task: &str, workspace: &str, mode: Mode) -> Result<String, String> {
-        let id = format!("j{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = format!("j{seq}");
+        // Round-robin across the configured backends: job N goes to pool N % len.
+        // (seq is 1-based, so the first job lands on index 0.)
+        let base_url = &self.cfg.base_urls[(seq as usize - 1) % self.cfg.base_urls.len()];
 
         let mut cmd = Command::new(&self.cfg.binary);
         cmd.arg(mode.subcommand())
             .arg(task)
             .arg("--json")
             .arg("--base-url")
-            .arg(&self.cfg.base_url)
+            .arg(base_url)
             .arg("--model")
             .arg(&self.cfg.model)
             .current_dir(workspace)
@@ -151,7 +161,7 @@ impl JobStore {
             .take()
             .ok_or_else(|| "child produced no stdout pipe".to_string())?;
 
-        let job = Arc::new(Mutex::new(Job::new()));
+        let job = Arc::new(Mutex::new(Job::new(base_url.clone())));
         self.jobs
             .lock()
             .expect("jobs lock")
@@ -169,6 +179,7 @@ impl JobStore {
         let j = job.lock().expect("job lock");
         Some(JobStatus {
             state: j.state,
+            backend: j.backend.clone(),
             stop_reason: j.stop_reason.clone(),
             recent_events: j.recent.clone(),
             exit_code: j.exit_code,
@@ -262,7 +273,20 @@ mod tests {
     use super::*;
 
     fn blank() -> Job {
-        Job::new()
+        Job::new("test-backend".to_string())
+    }
+
+    #[test]
+    fn round_robin_spreads_jobs_across_backends() {
+        // The dispatch index is (seq-1) % len, seq being the 1-based job counter.
+        // With two backends, jobs alternate; with one, all land on it.
+        let two = ["a", "b"];
+        let picks: Vec<&str> = (1..=5).map(|seq| two[(seq - 1) % two.len()]).collect();
+        assert_eq!(picks, ["a", "b", "a", "b", "a"]);
+
+        let one = ["only"];
+        let picks: Vec<&str> = (1..=3).map(|seq| one[(seq - 1) % one.len()]).collect();
+        assert_eq!(picks, ["only", "only", "only"]);
     }
 
     #[test]

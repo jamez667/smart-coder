@@ -143,6 +143,7 @@ impl StoreTools {
         Ok(json!({
             "job_id": id,
             "state": st.state.as_str(),
+            "backend": st.backend,
             "stop_reason": st.stop_reason,
             "finished_ok": st.state == State::Done
                 && st.stop_reason.as_deref() == Some("Finished"),

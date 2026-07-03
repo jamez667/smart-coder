@@ -22,7 +22,9 @@ use tools::StoreTools;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub binary: String,
-    pub base_url: String,
+    /// One or more backend URLs. Jobs round-robin across them (one llama.cpp pool
+    /// per GPU, say). Always non-empty. The health check uses the first.
+    pub base_urls: Vec<String>,
     pub model: String,
     pub yolo: bool,
     pub default_workspace: String,
@@ -33,7 +35,10 @@ impl Config {
     ///
     /// * `DC_MCP_BINARY`  — path to the `dumb-coder` binary (default: `dumb-coder`
     ///   on `PATH`).
-    /// * `DC_BASE_URL`    — backend URL (default: the Docker llama.cpp rig).
+    /// * `DC_BASE_URLS`   — comma-separated backend URLs; jobs round-robin across
+    ///   them (e.g. one pool per GPU: `…:11439/v1,…:11440/v1`). Falls back to the
+    ///   single `DC_BASE_URL`, then to the default rig.
+    /// * `DC_BASE_URL`    — a single backend URL (used when `DC_BASE_URLS` is unset).
     /// * `DC_MODEL`       — model tag (default: `qwen3-8b`).
     /// * `DC_MCP_YOLO`    — `0`/`false` to *disable* shell auto-approval (default on:
     ///   a headless run can't prompt, so shell must be pre-approved or it stalls).
@@ -47,7 +52,7 @@ impl Config {
         });
         Config {
             binary: env_or("DC_MCP_BINARY", "dumb-coder"),
-            base_url: env_or("DC_BASE_URL", "http://localhost:11439/v1"),
+            base_urls: base_urls_from_env(),
             model: env_or("DC_MODEL", "qwen3-8b"),
             yolo: !matches!(
                 std::env::var("DC_MCP_YOLO").as_deref(),
@@ -65,11 +70,34 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Resolve the backend URL list: `DC_BASE_URLS` (comma-separated) wins; else the
+/// single `DC_BASE_URL`; else the default rig. Always returns ≥1 entry.
+fn base_urls_from_env() -> Vec<String> {
+    if let Ok(list) = std::env::var("DC_BASE_URLS") {
+        let urls = parse_url_list(&list);
+        if !urls.is_empty() {
+            return urls;
+        }
+    }
+    vec![env_or("DC_BASE_URL", "http://localhost:11439/v1")]
+}
+
+/// Split a comma-separated URL list, trimming whitespace and dropping empties.
+fn parse_url_list(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 /// Build the production tool set from resolved config.
 pub fn build_tools(cfg: Config) -> StoreTools {
+    // The health check probes a single backend — use the first pool.
+    let health_url = cfg.base_urls[0].clone();
     let store = JobStore::new(JobConfig {
         binary: cfg.binary.clone(),
-        base_url: cfg.base_url.clone(),
+        base_urls: cfg.base_urls,
         model: cfg.model.clone(),
         yolo: cfg.yolo,
     });
@@ -77,7 +105,7 @@ pub fn build_tools(cfg: Config) -> StoreTools {
         store,
         default_workspace: cfg.default_workspace,
         binary: cfg.binary,
-        base_url: cfg.base_url,
+        base_url: health_url,
         model: cfg.model,
     }
 }
@@ -121,6 +149,17 @@ mod tests {
         fn call(&self, name: &str, _args: &Value) -> Result<String, String> {
             Ok(format!("called {name}"))
         }
+    }
+
+    #[test]
+    fn parses_comma_separated_url_list() {
+        assert_eq!(
+            parse_url_list("http://a:1/v1, http://b:2/v1 ,http://c:3/v1"),
+            vec!["http://a:1/v1", "http://b:2/v1", "http://c:3/v1"]
+        );
+        // Trailing commas / blank entries are dropped, not turned into empties.
+        assert_eq!(parse_url_list("http://a:1/v1,,"), vec!["http://a:1/v1"]);
+        assert!(parse_url_list("   ").is_empty());
     }
 
     #[test]

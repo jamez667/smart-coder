@@ -18,22 +18,24 @@ Three separate pieces, three separate homes:
 │  dumb-coder-mcp  ──spawns──▶  dumb-coder run/swarm --json    │
 │  workspace bind-mounted at /workspace  (edits land here)     │
 └───────────────┬─────────────────────────────────────────────┘
-                │ HTTP (DC_BASE_URL)
-┌───────────────▼──────── llama.cpp container ────────────────┐
-│  the model backend (e.g. Qwen3-8B) on :11439                │
+                │ HTTP — round-robin over DC_BASE_URLS
+┌──────────────┴──────────── llama.cpp pools ─────────────────┐
+│  pool 0: Qwen3-8B on :11439 (GPU 0, 3 slots)                │
+│  pool 1: Qwen3-8B on :11440 (GPU 1, 2 slots)   = 5 agents   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-* The **model backend** is its own container (unchanged — llama.cpp on `:11439`).
+* The **model backends** are their own containers (one llama.cpp pool per GPU).
 * The **MCP server + the `dumb-coder` agent** run in *this* container.
 * The **workspace** (your repo on the host) is bind-mounted at `/workspace`; that
   is where the agent's edits land, visible immediately on the host.
 
-The MCP container reaches the model over the network via `DC_BASE_URL`. The default
-`host.docker.internal:11439` works when llama.cpp publishes `:11439` on the host;
-`--add-host host.docker.internal:host-gateway` makes that name resolve on Linux
-Docker. To instead share a docker network, put both on it and set
-`DC_BASE_URL=http://<llama-container-name>:11439/v1`.
+The MCP container reaches the models via `DC_BASE_URLS` (comma-separated) and
+**round-robins each new job across the pools**, so both GPUs are used evenly — no
+external load balancer. `--add-host host.docker.internal:host-gateway` makes that
+hostname resolve on Linux Docker. To instead share a docker network, put everything
+on it and use the container names in `DC_BASE_URLS`. (`DC_BASE_URL`, singular, still
+works for a one-pool setup.)
 
 ## Build
 
@@ -48,25 +50,34 @@ Copy `mcp.json.example` to your project's `.mcp.json` (VSCode expands
 Adjust `DC_MODEL` to the tag your llama.cpp container actually serves
 (`curl localhost:11439/v1/models`).
 
-## Backend: the 8B pool
+## Backend: the 8B pools
 
-Bring the model up with `pwsh scripts/pool-8b.ps1` (tear down with `-Down`). That
-runs **one** llama.cpp server with **three parallel slots** (`-np 3
---cont-batching`), pinned to GPU 0, serving `qwen3-8b` on `:11439`:
+Bring the models up with `pwsh scripts/pool-8b.ps1` (tear down with `-Down`). It
+launches **one llama.cpp server per GPU**, each with parallel slots (`-np N
+--cont-batching`), serving `qwen3-8b`:
 
-* Weights load **once** (~4.7GB) — three separate 8B servers would need ~14GB and
-  wouldn't fit the ~11GB free across the two (un-poolable) cards.
-* Context `36864 / 3 = 12288` tokens per slot. That total is sized to spend the
-  3080 Ti's spare VRAM on KV cache (bigger KV costs nothing in throughput — it
-  just widens each parallel job's window) while leaving a ~1.5GB buffer for the
-  Windows desktop. Retune with `-Slots` / `-Ctx`; the safe ceiling on the
-  desktop-shared 12GB Ti is ~36864 at 3 slots (49152 OOMs).
-* Pinned to the 3080 Ti so the whole model stays on one card (no cross-card KV
-  spill over the slow x4 link). The 3080 (GPU 1) is left free.
+| Pool | GPU | Port | Slots | Context | Per slot |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 3080 Ti | :11439 | 3 | 36864 | 12288 |
+| 1 | 3080 | :11440 | 2 | 32768 | 16384 |
 
-Three concurrent `dumb_coder_code` jobs decode in parallel across the three slots —
-no load-balancing needed in the MCP, since llama.cpp's batching scheduler handles
-it and every job points at the one URL.
+= **5 concurrent agents**. Design notes:
+
+* Weights load **once per server** (~4.7GB) — loading the 8B once per job wouldn't
+  fit. Each pool is pinned to one card (`CUDA_VISIBLE_DEVICES`), never tensor-split
+  across the slow x4 link.
+* Context is spent on KV cache to fill spare VRAM (bigger KV costs nothing in
+  throughput — it just widens each job's window). The 3080 Ti is shared with the
+  Windows desktop so it keeps a ~1.5GB buffer (49152 OOMs); the 3080 has no desktop
+  load so it pushes further. Retune the table in the script.
+* The MCP round-robins jobs across both pools; within a pool, llama.cpp's batching
+  scheduler runs the slots concurrently. Nothing else to configure — every job just
+  points at the URL it was assigned. A lone job gets a whole slot at near-full speed;
+  under contention each slot is ~20% slower but aggregate throughput is far higher.
+
+Concurrent `dumb_coder_code` jobs decode in parallel across all five slots — the
+MCP spreads them across the two pools and llama.cpp batches within each. `status`
+reports which `backend` a job landed on.
 
 ## Tools
 
@@ -86,7 +97,8 @@ stall).
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `DC_BASE_URL` | `http://host.docker.internal:11439/v1` | Model backend endpoint. |
+| `DC_BASE_URLS` | (falls back to `DC_BASE_URL`) | Comma-separated backend URLs; jobs round-robin across them. |
+| `DC_BASE_URL` | `http://host.docker.internal:11439/v1` | Single backend URL (used when `DC_BASE_URLS` is unset). |
 | `DC_MODEL` | `qwen3-8b` | Model tag to request. |
 | `DC_MCP_WORKSPACE` | `/workspace` | Default workspace when `code` omits one. |
 | `DC_MCP_BINARY` | `dumb-coder` | Path to the agent binary. |
