@@ -56,7 +56,11 @@ runs **one** llama.cpp server with **three parallel slots** (`-np 3
 
 * Weights load **once** (~4.7GB) — three separate 8B servers would need ~14GB and
   wouldn't fit the ~11GB free across the two (un-poolable) cards.
-* Context `24576 / 3 = 8192` tokens per slot, matching dumb-coder's per-run budget.
+* Context `36864 / 3 = 12288` tokens per slot. That total is sized to spend the
+  3080 Ti's spare VRAM on KV cache (bigger KV costs nothing in throughput — it
+  just widens each parallel job's window) while leaving a ~1.5GB buffer for the
+  Windows desktop. Retune with `-Slots` / `-Ctx`; the safe ceiling on the
+  desktop-shared 12GB Ti is ~36864 at 3 slots (49152 OOMs).
 * Pinned to the 3080 Ti so the whole model stays on one card (no cross-card KV
   spill over the slow x4 link). The 3080 (GPU 1) is left free.
 

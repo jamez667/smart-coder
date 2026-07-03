@@ -1,11 +1,16 @@
 # Launch the Qwen3-8B pool that backs the dumb-coder MCP server: ONE llama.cpp
-# server with 3 parallel slots (`-np 3 --cont-batching`), pinned to the 3080 Ti
-# (GPU 0). Weights load once (~4.7GB Q4) and three concurrent requests decode via
-# continuous batching — three MCP coding jobs run at the same time on one card,
-# instead of loading the 8B three times (which wouldn't fit our ~11GB free).
+# server with N parallel slots (`-np N --cont-batching`), pinned to the 3080 Ti
+# (GPU 0). Weights load once (~4.7GB Q4) and N concurrent requests decode via
+# continuous batching — N MCP coding jobs run at the same time on one card,
+# instead of loading the 8B N times (which wouldn't fit our ~11GB free).
 #
-# Context 24576 / 3 slots = 8192 tokens per slot, which matches dumb-coder's
-# per-run prompt budget exactly.
+# Context is split evenly across the slots: -c 36864 / 3 slots = 12288 tokens per
+# slot. That 36864 is sized to spend the 3080 Ti's spare VRAM on KV cache while
+# leaving a ~1.5GB buffer for the Windows desktop (measured: ~10.4GB used, ~1.6GB
+# free). Bigger KV costs nothing in throughput — it just gives each parallel job a
+# larger window (12288 vs. dumb-coder's 8192 budget = 50% headroom). Retune with
+# -Ctx / -Slots; the safe ceiling on a desktop-shared 12GB Ti is ~36864 at 3 slots
+# (44032 fits but leaves <1GB — risky when the desktop spikes; 49152 OOMs).
 #
 # Pinned to GPU 0 on purpose: the whole model fits on the Ti, so we never want KV
 # cache spilling onto the 3080 across the slow x4 link (that tanks throughput —
@@ -13,9 +18,15 @@
 #
 # Backs the MCP at http://host.docker.internal:11439/v1 (model alias qwen3-8b).
 #
-# Usage:  pwsh scripts/pool-8b.ps1          # bring up
-#         pwsh scripts/pool-8b.ps1 -Down    # tear down
-param([switch]$Down)
+# Usage:  pwsh scripts/pool-8b.ps1                 # bring up (3 slots, -c 36864)
+#         pwsh scripts/pool-8b.ps1 -Slots 2        # 2 slots -> ~18432 tokens/slot
+#         pwsh scripts/pool-8b.ps1 -Ctx 24576      # smaller total context
+#         pwsh scripts/pool-8b.ps1 -Down           # tear down
+param(
+    [switch]$Down,
+    [int]$Slots = 3,
+    [int]$Ctx = 36864
+)
 
 $name  = "dc-qwen8b-pool"
 $port  = 11439
@@ -37,9 +48,10 @@ docker run -d --name $name --gpus all `
     -p "$($port):8080" `
     -v $mount `
     $image `
-    -m $model -ngl 99 -c 24576 -np 3 --cont-batching --jinja `
+    -m $model -ngl 99 -c $Ctx -np $Slots --cont-batching --jinja `
     --host 0.0.0.0 --port 8080 --alias qwen3-8b | Out-Null
-"launched $name on :$port (GPU 0, 3 slots)"
+$perSlot = [math]::Floor($Ctx / $Slots)
+"launched $name on :$port (GPU 0, $Slots slots, -c $Ctx = $perSlot tokens/slot)"
 
 "`nwaiting for the server to serve..."
 $ok = $false
