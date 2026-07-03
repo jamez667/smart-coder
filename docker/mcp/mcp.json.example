@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "dumb-coder": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "${workspaceFolder}:/workspace",
+        "--add-host", "host.docker.internal:host-gateway",
+        "-e", "DC_BASE_URL=http://host.docker.internal:11439/v1",
+        "-e", "DC_MODEL=qwen3-8b",
+        "dumb-coder-mcp"
+      ]
+    }
+  }
+}

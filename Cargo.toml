@@ -13,6 +13,7 @@ members = [
     "crates/dc-tui",
     "crates/dc-win",
     "crates/dc-web",
+    "crates/dc-mcp",
     "crates/dc-cli",
     "crates/dc-eval",
     "crates/dc-android",

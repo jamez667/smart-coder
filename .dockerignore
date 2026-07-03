@@ -1,0 +1,7 @@
+# Keep the Docker build context small: the Rust build stage compiles from source,
+# so the host's build artifacts and VCS metadata must not be shipped in.
+target/
+.git/
+.dumb-coder/
+**/*.log
+grouped-query-attention.md
