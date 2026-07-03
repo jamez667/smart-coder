@@ -544,6 +544,14 @@ pub fn run_agent_observed(
                 Err(e)
             }
         });
+        // Did this turn's call come from truncation salvage (a write_file whose content was cut
+        // off mid-string)? If so, the file now holds only the partial head, and re-writing the
+        // whole thing next turn would just truncate at the same place — so we steer the model to
+        // append_file the remainder instead. Detected by the recovery firing on THIS raw reply.
+        let salvaged_truncated_write = extracted.as_ref().is_ok_and(|c| {
+            matches!(c.name.as_str(), "write_file" | "append_file")
+                && crate::strategy::is_truncated_write_salvage(&resp.content, registry)
+        });
         let (obs, action, changed, tool, arg) = match extracted {
             Ok(call) => {
                 metrics.record_valid();
@@ -742,6 +750,19 @@ pub fn run_agent_observed(
                                 o
                             } else {
                                 format!("{batch_note}{o}")
+                            };
+                            // If this write was salvaged from a truncated reply, only the partial
+                            // head landed. Tell the model to CONTINUE with append_file rather than
+                            // re-writing the whole file (which would truncate at the same place).
+                            let o = if salvaged_truncated_write {
+                                format!(
+                                    "{o}\nNOTE: your reply was cut off, so only the part above was \
+                                     saved. Do NOT re-send the whole file — continue it with \
+                                     append_file (same path), adding the NEXT chunk only. Repeat \
+                                     append_file until the file is complete."
+                                )
+                            } else {
+                                o
                             };
                             let changed = changed || !batch_note.is_empty();
                             (o, action, changed, tool, arg)

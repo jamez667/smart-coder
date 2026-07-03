@@ -128,6 +128,18 @@ impl ToolCallStrategy for ParseRepair {
                     return Ok(call);
                 }
             }
+            // Truncation salvage: a small model's `write_file` whose `content` string was cut
+            // off mid-body — the reply ends inside the string, so there's NO closing quote and
+            // the JSON never parses. The doomed retry re-emits the same over-long content and is
+            // truncated at the same place, looping until the stall detector kills it. Instead,
+            // land the partial content that DID arrive; the model can then `append_file` the
+            // rest in bounded chunks. Only fires after strict parse + the closed-quote repair
+            // above both fail, so a well-formed or merely-quote-broken call never reaches here.
+            if let Some(value) = repair_truncated_file_write(raw) {
+                if let Ok(call) = registry.validate(&value) {
+                    return Ok(call);
+                }
+            }
             // Same idea for edit_file, whose old_str/new_str bodies carry raw multi-line code
             // (the single largest parse-failure class observed live — 19/45 captured failures).
             if let Some(value) = repair_edit_file_call(raw) {
@@ -468,6 +480,92 @@ fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(obj))
 }
 
+/// Whether `raw` would be recovered by the truncation salvage — i.e. it's a `write_file`/
+/// `create_file` whose content was cut off mid-string, and neither strict parsing nor the
+/// closed-quote repair applies. The loop uses this to steer the model to `append_file` the
+/// remainder rather than re-writing (and re-truncating) the whole file. Mirrors the guard
+/// order in [`ParseRepair::extract`]: only true when the earlier paths would NOT have fired.
+pub fn is_truncated_write_salvage(raw: &str, registry: &ToolRegistry) -> bool {
+    let (valid, _) = validated_calls(raw, registry);
+    if !valid.is_empty() {
+        return false; // strict parse succeeded → not a salvage
+    }
+    if repair_file_content_call(raw).is_some_and(|v| registry.validate(&v).is_ok()) {
+        return false; // closed-quote repair handles it → not a truncation
+    }
+    repair_truncated_file_write(raw).is_some_and(|v| registry.validate(&v).is_ok())
+}
+
+/// Salvage a `write_file`/`create_file`/`append_file` whose `content` string was **truncated** —
+/// the model's reply was cut off mid-body, so the value has no closing quote and the object never
+/// closes. Distinct from [`repair_file_content_call`], which recovers a body with inner quotes but
+/// a present closer; here the closer is genuinely absent (the bytes never arrived). We take the
+/// entire remaining text from the content-open-quote to end-of-reply as the partial body.
+///
+/// The rebuilt tool preserves append semantics: a truncated `append_file` stays `append_file` (a
+/// partial chunk is safe to append — it's additive, and the model continues with the NEXT chunk),
+/// while `write_file`/`create_file` both rebuild as `write_file` (an idempotent overwrite; create
+/// would fail "already exists" if the head landed on a prior attempt). Either way the partial
+/// body lands, turning the truncation loop into forward progress.
+///
+/// Guard: only salvage when the content really is unterminated (a closing unescaped quote would
+/// mean a proper closer exists — leave those to the parser / closed-quote repair). Requires a
+/// non-trivial partial body so a bare `"content":"` cut isn't written as an empty file.
+fn repair_truncated_file_write(raw: &str) -> Option<serde_json::Value> {
+    // append_file is checked first so a reply mentioning it isn't mis-tagged as write_file.
+    let tool = ["append_file", "write_file", "create_file"]
+        .into_iter()
+        .find(|t| raw.contains(&format!("\"{t}\"")))?;
+    let path = quoted_value_after(raw, "\"path\"")?;
+
+    let key_pos = raw.find("\"content\"")?;
+    let after_key = &raw[key_pos + "\"content\"".len()..];
+    // Accept the JSON `:` and also a stray `=` a small model sometimes emits in its place
+    // (observed live: `"content"=` on an append turn). Take whichever separator comes first.
+    let sep = after_key
+        .find(':')
+        .into_iter()
+        .chain(after_key.find('='))
+        .min()?;
+    let rest = &after_key[sep + 1..];
+    let open_q = rest.find('"')?;
+    let body_region = &rest[open_q + 1..];
+
+    // Confirm the body is unterminated: scan for an unescaped `"` that would close the value.
+    // If one exists, this isn't a truncation — defer to the parser / closed-quote repair.
+    let mut escaped = false;
+    for ch in body_region.chars() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return None; // a real closer exists → not truncated
+        }
+    }
+
+    // The whole remaining reply is the partial content. Trim a dangling backslash that would
+    // have escaped the next (never-emitted) char, then lenient-unescape the escapes that DID
+    // arrive intact.
+    let literal = body_region.strip_suffix('\\').unwrap_or(body_region);
+    let content = unescape_json_string_lenient(literal);
+    if content.trim().is_empty() {
+        return None; // nothing meaningful arrived — don't write/append an empty body
+    }
+
+    // Preserve append semantics; collapse write/create to an idempotent write.
+    let rebuilt = if tool == "append_file" {
+        "append_file"
+    } else {
+        "write_file"
+    };
+    let mut obj = serde_json::Map::new();
+    obj.insert("tool".to_string(), serde_json::Value::String(rebuilt.to_string()));
+    obj.insert("path".to_string(), serde_json::Value::String(path));
+    obj.insert("content".to_string(), serde_json::Value::String(content));
+    Some(serde_json::Value::Object(obj))
+}
+
 /// Key-aware recovery for an `edit_file` call whose `old_str`/`new_str` bodies broke strict JSON
 /// (the model put a multi-line code snippet — raw newlines, `'''` docstrings, inner `"` — into
 /// those fields without escaping). Observed live: 19 of 45 captured parse failures were exactly
@@ -790,6 +888,74 @@ mod tests {
         let content = call.str("content").unwrap();
         assert!(content.contains("\"\"\"doc string\"\"\""), "got: {content:?}");
         assert!(content.contains("def f():") && content.contains("return 1"));
+    }
+
+    #[test]
+    fn truncated_write_file_is_salvaged_to_the_partial_body() {
+        // The css-truncation loop: a small model's write_file content runs past its output
+        // length and the reply is cut off mid-string — no closing quote, JSON never parses,
+        // and both the strict path and the closed-quote repair fail. The salvage must land the
+        // partial content that DID arrive (rebuilt as write_file) so the model can append the
+        // rest, instead of re-emitting the same over-long content forever.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"write_file\",\"path\":\"styles.css\",\"content\":\"body {\\n  color: #333;\\n}\\n\\n#home {\\n  padding: 4rem";
+        let call = ParseRepair
+            .extract(raw, &reg)
+            .expect("a truncated write_file must be salvaged, not looped");
+        assert_eq!(call.name, "write_file");
+        assert_eq!(call.str("path"), Some("styles.css"));
+        let content = call.str("content").unwrap();
+        // The head that arrived is preserved with real newlines applied.
+        assert!(content.starts_with("body {\n  color: #333;\n}"), "got: {content:?}");
+        assert!(content.contains("#home {\n  padding: 4rem"), "got: {content:?}");
+    }
+
+    #[test]
+    fn truncated_append_file_stays_append_not_write() {
+        // A truncated append_file must be salvaged as append_file (additive — the partial chunk
+        // is safe to add and the model continues), NOT rewritten as write_file (which would
+        // clobber everything appended so far). This is the site2 gap: append chunks truncated
+        // and had no salvage, dropping the #cta rule and leaving a dangling <span>.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"append_file\",\"path\":\"styles.css\",\"content\":\"#cta {\\n  padding: 15px;\\n}\\n\\n#menu li {\\n  display: flex";
+        let call = ParseRepair
+            .extract(raw, &reg)
+            .expect("a truncated append_file must be salvaged");
+        assert_eq!(call.name, "append_file", "append semantics preserved, not collapsed to write");
+        assert_eq!(call.str("path"), Some("styles.css"));
+        assert!(call.str("content").unwrap().starts_with("#cta {\n  padding: 15px;"));
+    }
+
+    #[test]
+    fn truncated_write_tolerates_equals_for_colon_separator() {
+        // Observed live on an append turn: the model emitted `"content"=` instead of `"content":`.
+        // Combined with truncation, strict parsing fails at the `=`; the salvage accepts either
+        // separator so the partial body still lands.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"append_file\",\"path\":\"a.html\",\"content\"=\"  <li>Latte</li>\\n  <li>Mocha";
+        let call = ParseRepair
+            .extract(raw, &reg)
+            .expect("the `=` separator variant must still be salvaged");
+        assert_eq!(call.name, "append_file");
+        assert!(call.str("content").unwrap().contains("<li>Latte</li>"));
+    }
+
+    #[test]
+    fn truncation_salvage_does_not_fire_when_content_is_properly_closed() {
+        // A complete, well-formed write_file must NOT be treated as truncated — it parses
+        // strictly and the salvage never runs. Byte-exact content proves no interference.
+        let reg = default_registry();
+        let raw = r#"{"tool":"write_file","path":"a.css","content":"body { color: red; }\n"}"#;
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.str("content"), Some("body { color: red; }\n"));
+    }
+
+    #[test]
+    fn truncation_salvage_ignores_an_empty_partial_body() {
+        // Cut off right at the opening quote — nothing meaningful arrived. Don't write an
+        // empty file; fall through to the normal error so the model retries cleanly.
+        let raw = "{\"tool\":\"write_file\",\"path\":\"a.css\",\"content\":\"";
+        assert!(repair_truncated_file_write(raw).is_none());
     }
 
     #[test]

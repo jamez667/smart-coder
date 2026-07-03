@@ -95,6 +95,22 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "append_file",
+            description: "Append content to the END of a file (creating it if absent). Use this \
+                          to build a large file in several turns: write the first part with \
+                          write_file, then append the rest in chunks so no single reply is too long.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new("content", ParamType::String, "text to append at the end of the file"),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "edit_file",
             description: "Replace an EXACT snippet in a file: old_str must occur exactly once.",
             params: vec![
@@ -227,6 +243,11 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
             arg(call, "content"),
         )),
         "create_file" => ToolOutcome::Observation(create_file(
+            workspace,
+            arg(call, "path"),
+            arg(call, "content"),
+        )),
+        "append_file" => ToolOutcome::Observation(append_file(
             workspace,
             arg(call, "path"),
             arg(call, "content"),
@@ -376,6 +397,35 @@ fn create_file(workspace: &Path, path: &str, content: &str) -> String {
             }
         }
         Err(e) => format!("create_file {path} rejected: {e}"),
+    }
+}
+
+/// Append `content` to the end of a file, creating it (and any parent dirs) if it
+/// doesn't exist. This is the escape hatch for building a file too large for a small
+/// model to emit in one `write_file` reply: the model writes the head, then appends
+/// the tail in bounded chunks so no single reply's JSON gets truncated mid-string.
+fn append_file(workspace: &Path, path: &str, content: &str) -> String {
+    use std::io::Write;
+    match safe_join(workspace, path) {
+        Ok(p) => {
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+                Ok(mut f) => match f.write_all(content.as_bytes()) {
+                    Ok(()) => {
+                        let total = std::fs::metadata(&p).map(|m| m.len()).unwrap_or_default();
+                        format!(
+                            "append_file {path} ok (+{} bytes, {total} total)",
+                            content.len()
+                        )
+                    }
+                    Err(e) => format!("append_file {path} error: {e}"),
+                },
+                Err(e) => format!("append_file {path} error: {e}"),
+            }
+        }
+        Err(e) => format!("append_file {path} rejected: {e}"),
     }
 }
 
@@ -641,6 +691,7 @@ mod tests {
                 "find_symbol",
                 "write_file",
                 "create_file",
+                "append_file",
                 "edit_file",
                 "run_command",
                 "run_verification",
@@ -681,6 +732,24 @@ mod tests {
         // Second create on the same path is refused, not silently overwritten.
         let again = obs(execute(&c, &ws));
         assert!(again.contains("already exists"), "got: {again}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn append_file_creates_then_appends() {
+        let ws = temp_dir("append");
+        // First append creates the file.
+        let a1 = call(json!({"tool":"append_file","path":"big.css","content":"a {}\n"}));
+        assert!(obs(execute(&a1, &ws)).contains("ok"));
+        // Second append adds to the end, not overwrites.
+        let a2 = call(json!({"tool":"append_file","path":"big.css","content":"b {}\n"}));
+        let o = obs(execute(&a2, &ws));
+        assert!(o.contains("ok") && o.contains("total"), "got: {o}");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("big.css")).unwrap(),
+            "a {}\nb {}\n",
+            "append concatenates in order"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
