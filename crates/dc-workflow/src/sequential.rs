@@ -181,7 +181,10 @@ fn ordered_subtask_ids(board: &TaskBoard) -> Vec<String> {
             .map(|s| s.id.clone())
             .or_else(|| {
                 // cycle / dep on a missing id: take the lowest remaining id, don't strand it.
-                ids.iter().filter(|id| !emitted.contains(*id)).min().cloned()
+                ids.iter()
+                    .filter(|id| !emitted.contains(*id))
+                    .min()
+                    .cloned()
             });
         match next {
             Some(id) => emitted.push(id),
@@ -279,8 +282,7 @@ pub fn build_sequential_with_board(
     // Degenerate board ⇒ decomposition gave us nothing to split across files (empty, or the
     // documented single whole-task fallback). Run today's whole-task behavior so we never
     // regress a simple single-file task into needless ceremony.
-    let degenerate =
-        board.is_empty() || (board.len() == 1 && board.subtasks()[0].files.is_empty());
+    let degenerate = board.is_empty() || (board.len() == 1 && board.subtasks()[0].files.is_empty());
     if degenerate {
         let final_pass = run_whole_task(worker, task, workspace, base_cfg, sink)?;
         let verified = final_pass.verified == Some(true);
@@ -660,9 +662,7 @@ mod tests {
             let content = match path {
                 Some(p) if !self.script.borrow().contains(&p) => {
                     self.script.borrow_mut().push(p.clone());
-                    format!(
-                        "{{\"tool\":\"write_file\",\"path\":\"{p}\",\"content\":\"# {p}\\n\"}}"
-                    )
+                    format!("{{\"tool\":\"write_file\",\"path\":\"{p}\",\"content\":\"# {p}\\n\"}}")
                 }
                 _ => "{\"tool\":\"finish\"}".to_string(),
             };
@@ -696,9 +696,13 @@ mod tests {
     fn walks_the_board_in_dependency_order_one_file_each() {
         let dir = ws("order");
         let board = TaskBoard::new(vec![
-            Subtask::new("t3", "build c").with_files(vec!["c.py".into()]).with_deps(vec!["t1".into(), "t2".into()]),
+            Subtask::new("t3", "build c")
+                .with_files(vec!["c.py".into()])
+                .with_deps(vec!["t1".into(), "t2".into()]),
             Subtask::new("t1", "build a").with_files(vec!["a.py".into()]),
-            Subtask::new("t2", "build b").with_files(vec!["b.py".into()]).with_deps(vec!["t1".into()]),
+            Subtask::new("t2", "build b")
+                .with_files(vec!["b.py".into()])
+                .with_deps(vec!["t1".into()]),
         ]);
         let spy = SpyBackend::new();
         let sink = FnSink(|_e: &dc_core::AgentEvent| {});
@@ -715,7 +719,9 @@ mod tests {
         assert!(seen.iter().any(|i| i.contains("`b.py`")));
         assert!(seen.iter().any(|i| i.contains("`c.py`")));
         // The files were actually written to disk by the per-file steps.
-        assert!(dir.join("a.py").exists() && dir.join("b.py").exists() && dir.join("c.py").exists());
+        assert!(
+            dir.join("a.py").exists() && dir.join("b.py").exists() && dir.join("c.py").exists()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -729,7 +735,10 @@ mod tests {
         let rep =
             build_sequential_with_board(board, &spy, "whole task", &dir, &base_cfg(), 1, &sink)
                 .unwrap();
-        assert!(rep.fell_back_whole_task, "degenerate board → whole-task fallback");
+        assert!(
+            rep.fell_back_whole_task,
+            "degenerate board → whole-task fallback"
+        );
         assert!(rep.per_file.is_empty(), "no per-file steps in fallback");
         // The whole-task instruction (not a per-file one) was used.
         let seen = spy.seen_instructions.lock().unwrap();
@@ -763,8 +772,12 @@ mod tests {
         // t1 ↔ t2 mutual deps: ready() is always empty, but the lowest-pending guard must
         // run them anyway so the loop terminates rather than hanging.
         let board = TaskBoard::new(vec![
-            Subtask::new("t1", "a").with_files(vec!["a.py".into()]).with_deps(vec!["t2".into()]),
-            Subtask::new("t2", "b").with_files(vec!["b.py".into()]).with_deps(vec!["t1".into()]),
+            Subtask::new("t1", "a")
+                .with_files(vec!["a.py".into()])
+                .with_deps(vec!["t2".into()]),
+            Subtask::new("t2", "b")
+                .with_files(vec!["b.py".into()])
+                .with_deps(vec!["t1".into()]),
         ]);
         let spy = SpyBackend::new();
         let sink = FnSink(|_e: &dc_core::AgentEvent| {});
@@ -783,8 +796,14 @@ mod tests {
             "build the store",
             "def test_save(): assert save('u') is not None",
         );
-        assert!(s.contains("`store.py`"), "names the file (SpyBackend parse): {s}");
-        assert!(s.contains("assert save('u')"), "embeds the contract asserts");
+        assert!(
+            s.contains("`store.py`"),
+            "names the file (SpyBackend parse): {s}"
+        );
+        assert!(
+            s.contains("assert save('u')"),
+            "embeds the contract asserts"
+        );
         assert!(s.contains("FROZEN"), "frames the tests as the contract");
         assert!(
             !s.contains("NOT your concern") && !s.contains("no tests to run"),
@@ -805,10 +824,9 @@ mod tests {
             "def test_save_returns_code():\n    assert save('u') is not None\n",
         )
         .unwrap();
-        let board =
-            TaskBoard::new(vec![
-                Subtask::new("t1", "build store").with_files(vec!["store.py".into()])
-            ]);
+        let board = TaskBoard::new(vec![
+            Subtask::new("t1", "build store").with_files(vec!["store.py".into()])
+        ]);
         let spy = SpyBackend::new();
         let sink = FnSink(|_e: &dc_core::AgentEvent| {});
         build_sequential_with_board(board, &spy, "task", &dir, &base_cfg(), 1, &sink).unwrap();
@@ -842,12 +860,11 @@ mod tests {
     fn per_file_registry_has_write_but_no_verification() {
         // The per-file registry must let a step CREATE a file (write_file) but NOT have
         // run_verification (which dead-ends on the intentionally-absent verify command).
-        let names: Vec<&str> = per_file_registry()
-            .specs()
-            .iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(names.contains(&"write_file"), "needs write_file to create files");
+        let names: Vec<&str> = per_file_registry().specs().iter().map(|s| s.name).collect();
+        assert!(
+            names.contains(&"write_file"),
+            "needs write_file to create files"
+        );
         assert!(names.contains(&"edit_file"));
         assert!(names.contains(&"finish"));
         assert!(
@@ -859,11 +876,21 @@ mod tests {
 
     #[test]
     fn feature_keyword_maps_route_files_and_skips_infra() {
-        assert_eq!(feature_keyword("routes_authors.py").as_deref(), Some("author"));
+        assert_eq!(
+            feature_keyword("routes_authors.py").as_deref(),
+            Some("author")
+        );
         assert_eq!(feature_keyword("routes_books.py").as_deref(), Some("book"));
         assert_eq!(feature_keyword("routes_loans.py").as_deref(), Some("loan"));
         // Infrastructure + glue are not their own feature slice.
-        for f in ["store.py", "service.py", "app.py", "templates/catalog.html", "static/catalog.js", "routes.py"] {
+        for f in [
+            "store.py",
+            "service.py",
+            "app.py",
+            "templates/catalog.html",
+            "static/catalog.js",
+            "routes.py",
+        ] {
             assert_eq!(feature_keyword(f), None, "{f} should not be a slice");
         }
     }
@@ -874,7 +901,11 @@ mod tests {
         let names = parse_test_names(contract);
         assert_eq!(
             names,
-            vec!["test_create_author_and_book", "test_loan_book_ok", "test_catalog_page"]
+            vec![
+                "test_create_author_and_book",
+                "test_loan_book_ok",
+                "test_catalog_page"
+            ]
         );
         // `def c()` (not a test) is excluded.
         assert!(!names.iter().any(|n| n == "c"));
@@ -885,14 +916,31 @@ mod tests {
         // An S3-shaped board: store→service→routes_authors→routes_books→routes_loans→app→template.
         let board = TaskBoard::new(vec![
             Subtask::new("t1", "store").with_files(vec!["store.py".into()]),
-            Subtask::new("t2", "service").with_files(vec!["service.py".into()]).with_deps(vec!["t1".into()]),
-            Subtask::new("t3", "authors").with_files(vec!["routes_authors.py".into()]).with_deps(vec!["t2".into()]),
-            Subtask::new("t4", "books").with_files(vec!["routes_books.py".into()]).with_deps(vec!["t3".into()]),
-            Subtask::new("t5", "loans").with_files(vec!["routes_loans.py".into()]).with_deps(vec!["t4".into()]),
-            Subtask::new("t6", "app").with_files(vec!["app.py".into()]).with_deps(vec!["t5".into()]),
+            Subtask::new("t2", "service")
+                .with_files(vec!["service.py".into()])
+                .with_deps(vec!["t1".into()]),
+            Subtask::new("t3", "authors")
+                .with_files(vec!["routes_authors.py".into()])
+                .with_deps(vec!["t2".into()]),
+            Subtask::new("t4", "books")
+                .with_files(vec!["routes_books.py".into()])
+                .with_deps(vec!["t3".into()]),
+            Subtask::new("t5", "loans")
+                .with_files(vec!["routes_loans.py".into()])
+                .with_deps(vec!["t4".into()]),
+            Subtask::new("t6", "app")
+                .with_files(vec!["app.py".into()])
+                .with_deps(vec!["t5".into()]),
         ]);
-        let names: Vec<String> = ["test_create_author", "test_book_requires_author", "test_loan_book_ok", "test_catalog_page"]
-            .iter().map(|s| s.to_string()).collect();
+        let names: Vec<String> = [
+            "test_create_author",
+            "test_book_requires_author",
+            "test_loan_book_ok",
+            "test_catalog_page",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let slices = derive_slices(&board, &names);
         let kws: Vec<&str> = slices.iter().map(|s| s.keyword.as_str()).collect();
         // author/book/loan in dep order; app/store/service yield no slice; "catalog" has a test
@@ -905,7 +953,9 @@ mod tests {
         // A single-routes.py app (S1/S2 shape) → no feature slices → caller falls back.
         let board = TaskBoard::new(vec![
             Subtask::new("t1", "store").with_files(vec!["store.py".into()]),
-            Subtask::new("t2", "app").with_files(vec!["app.py".into()]).with_deps(vec!["t1".into()]),
+            Subtask::new("t2", "app")
+                .with_files(vec!["app.py".into()])
+                .with_deps(vec!["t1".into()]),
         ]);
         let names = vec!["test_create".to_string(), "test_resolve".to_string()];
         assert!(derive_slices(&board, &names).is_empty());
@@ -914,9 +964,18 @@ mod tests {
     #[test]
     fn cumulative_k_and_slice_command_build_growing_filters() {
         let slices = vec![
-            FeatureSlice { keyword: "author".into(), file: "routes_authors.py".into() },
-            FeatureSlice { keyword: "book".into(), file: "routes_books.py".into() },
-            FeatureSlice { keyword: "loan".into(), file: "routes_loans.py".into() },
+            FeatureSlice {
+                keyword: "author".into(),
+                file: "routes_authors.py".into(),
+            },
+            FeatureSlice {
+                keyword: "book".into(),
+                file: "routes_books.py".into(),
+            },
+            FeatureSlice {
+                keyword: "loan".into(),
+                file: "routes_loans.py".into(),
+            },
         ];
         assert_eq!(cumulative_k(&slices, 0), "author");
         assert_eq!(cumulative_k(&slices, 1), "author or book");
@@ -936,8 +995,12 @@ mod tests {
         let dir = ws("incr");
         let board = TaskBoard::new(vec![
             Subtask::new("t1", "authors").with_files(vec!["routes_authors.py".into()]),
-            Subtask::new("t2", "books").with_files(vec!["routes_books.py".into()]).with_deps(vec!["t1".into()]),
-            Subtask::new("t3", "loans").with_files(vec!["routes_loans.py".into()]).with_deps(vec!["t2".into()]),
+            Subtask::new("t2", "books")
+                .with_files(vec!["routes_books.py".into()])
+                .with_deps(vec!["t1".into()]),
+            Subtask::new("t3", "loans")
+                .with_files(vec!["routes_loans.py".into()])
+                .with_deps(vec!["t2".into()]),
         ]);
         // Frozen contract drives parse_test_names; write it so read_frozen_contract finds it.
         std::fs::write(
@@ -958,7 +1021,11 @@ mod tests {
         let labels: Vec<&str> = rep.incremental.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["slice:author", "slice:author or book", "slice:author or book or loan"]
+            vec![
+                "slice:author",
+                "slice:author or book",
+                "slice:author or book or loan"
+            ]
         );
         // The model saw the sliced instructions in order, then the full-suite pass last.
         let seen = spy.seen_instructions.lock().unwrap();
@@ -970,21 +1037,21 @@ mod tests {
             .collect();
         assert_eq!(slice_positions.len() >= 3, true, "ran the slice loops");
         let last = seen.last().unwrap();
-        assert!(last.contains("Make the FULL frozen test suite pass"), "full pass is last: {last}");
+        assert!(
+            last.contains("Make the FULL frozen test suite pass"),
+            "full pass is last: {last}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn final_pass_runs_unfocused_after_the_per_file_steps() {
         let dir = ws("final");
-        let board = TaskBoard::new(vec![
-            Subtask::new("t1", "a").with_files(vec!["a.py".into()]),
-        ]);
+        let board = TaskBoard::new(vec![Subtask::new("t1", "a").with_files(vec!["a.py".into()])]);
         let spy = SpyBackend::new();
         let sink = FnSink(|_e: &dc_core::AgentEvent| {});
-        let _ =
-            build_sequential_with_board(board, &spy, "the task", &dir, &base_cfg(), 1, &sink)
-                .unwrap();
+        let _ = build_sequential_with_board(board, &spy, "the task", &dir, &base_cfg(), 1, &sink)
+            .unwrap();
         // The LAST instruction the model saw is the integration pass, not a per-file one.
         let seen = spy.seen_instructions.lock().unwrap();
         let last = seen.last().unwrap();

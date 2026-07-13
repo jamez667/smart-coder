@@ -162,9 +162,9 @@ fn idempotent_nudge_names_write_file_and_supersedes_the_stale_result() {
     //            file), not `edit_file` on a file that doesn't exist yet.
     //   Fix #2 — the PRIOR turn's successful result of the same call is superseded in the
     //            window, so the nudge isn't drowned by a visible "it worked".
-    use std::sync::Mutex;
-    use dc_core::{run_agent_observed, AgentEvent, FnSink};
     use dc_core::select_strategy;
+    use dc_core::{run_agent_observed, AgentEvent, FnSink};
+    use std::sync::Mutex;
 
     let ws = temp("nudge-text");
     std::fs::write(ws.join("a.txt"), "hello-from-a-txt").unwrap();
@@ -192,7 +192,14 @@ fn idempotent_nudge_names_write_file_and_supersedes_the_stale_result() {
     let registry = default_registry();
     let strategy = select_strategy(&backend.capabilities());
     let report = run_agent_observed(
-        &backend, None, &registry, strategy.as_ref(), "fix it", &ws, &cfg, &sink,
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        "fix it",
+        &ws,
+        &cfg,
+        &sink,
     )
     .unwrap();
 
@@ -223,11 +230,13 @@ fn idempotent_nudge_names_write_file_and_supersedes_the_stale_result() {
     // Fix #2: the prior identical result was superseded IN THE WINDOW. The marker lives in
     // `recent`, so it shows up in a later assembled prompt — and crucially the original
     // successful body ("hello-from-a-txt") must NOT still be sitting next to the nudge.
-    let superseded_in_prompt = evs.iter().any(|e| matches!(
-        e,
-        AgentEvent::PromptAssembled { messages, .. }
-            if messages.iter().any(|m| m.content.contains("superseded"))
-    ));
+    let superseded_in_prompt = evs.iter().any(|e| {
+        matches!(
+            e,
+            AgentEvent::PromptAssembled { messages, .. }
+                if messages.iter().any(|m| m.content.contains("superseded"))
+        )
+    });
     assert!(
         superseded_in_prompt,
         "the prior identical result should be superseded in the assembled window (Fix #2)"

@@ -408,8 +408,14 @@ pub fn extract_markdown_write(
         return None;
     }
     let mut obj = serde_json::Map::new();
-    obj.insert("tool".to_string(), serde_json::Value::String("write_file".to_string()));
-    obj.insert("path".to_string(), serde_json::Value::String(default_path.to_string()));
+    obj.insert(
+        "tool".to_string(),
+        serde_json::Value::String("write_file".to_string()),
+    );
+    obj.insert(
+        "path".to_string(),
+        serde_json::Value::String(default_path.to_string()),
+    );
     obj.insert("content".to_string(), serde_json::Value::String(body));
     registry.validate(&serde_json::Value::Object(obj)).ok()
 }
@@ -474,7 +480,10 @@ fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
     let content = unescape_json_string_lenient(literal);
 
     let mut obj = serde_json::Map::new();
-    obj.insert("tool".to_string(), serde_json::Value::String(tool.to_string()));
+    obj.insert(
+        "tool".to_string(),
+        serde_json::Value::String(tool.to_string()),
+    );
     obj.insert("path".to_string(), serde_json::Value::String(path));
     obj.insert("content".to_string(), serde_json::Value::String(content));
     Some(serde_json::Value::Object(obj))
@@ -560,7 +569,10 @@ fn repair_truncated_file_write(raw: &str) -> Option<serde_json::Value> {
         "write_file"
     };
     let mut obj = serde_json::Map::new();
-    obj.insert("tool".to_string(), serde_json::Value::String(rebuilt.to_string()));
+    obj.insert(
+        "tool".to_string(),
+        serde_json::Value::String(rebuilt.to_string()),
+    );
     obj.insert("path".to_string(), serde_json::Value::String(path));
     obj.insert("content".to_string(), serde_json::Value::String(content));
     Some(serde_json::Value::Object(obj))
@@ -594,7 +606,10 @@ fn repair_edit_file_call(raw: &str) -> Option<serde_json::Value> {
     let (old_lit, new_lit) = split_on_new_str(body).unwrap_or((body, ""));
 
     let mut obj = serde_json::Map::new();
-    obj.insert("tool".to_string(), serde_json::Value::String("edit_file".to_string()));
+    obj.insert(
+        "tool".to_string(),
+        serde_json::Value::String("edit_file".to_string()),
+    );
     obj.insert("path".to_string(), serde_json::Value::String(path));
     obj.insert(
         "old_str".to_string(),
@@ -618,7 +633,7 @@ fn split_on_new_str(body: &str) -> Option<(&str, &str)> {
     // new begins at the first `"` after the `:` that follows `new_str`.
     let before = &body[..key];
     let old_end = before.rfind('"')?; // the `"` that opened `"new_str"` ... actually before it
-    // Trim a trailing comma/quote run: old_str literal is before the `","` separator.
+                                      // Trim a trailing comma/quote run: old_str literal is before the `","` separator.
     let old_lit = before[..old_end].trim_end_matches(['"', ',', ' ', '\t', '\n', '\r']);
     let after = &body[key + "new_str".len()..];
     let colon = after.find(':')?;
@@ -773,7 +788,11 @@ mod tests {
                    {\"tool\":\"run_verification\"}";
         let batch = extract_write_batch(raw, &reg);
         let paths: Vec<_> = batch.iter().filter_map(|c| c.str("path")).collect();
-        assert_eq!(paths, vec!["store.py", "app.py", "util.py"], "stops at run_verification");
+        assert_eq!(
+            paths,
+            vec!["store.py", "app.py", "util.py"],
+            "stops at run_verification"
+        );
     }
 
     #[test]
@@ -839,8 +858,16 @@ mod tests {
         assert_eq!(call.name, "edit_file");
         assert_eq!(call.str("path"), Some("app.py"));
         // Both bodies recovered with their real newlines, split at the right boundary.
-        assert!(call.str("old_str").unwrap().contains("return 1"), "old: {:?}", call.str("old_str"));
-        assert!(call.str("new_str").unwrap().contains("return 2"), "new: {:?}", call.str("new_str"));
+        assert!(
+            call.str("old_str").unwrap().contains("return 1"),
+            "old: {:?}",
+            call.str("old_str")
+        );
+        assert!(
+            call.str("new_str").unwrap().contains("return 2"),
+            "new: {:?}",
+            call.str("new_str")
+        );
         assert!(call.str("old_str").unwrap().contains('\n'));
     }
 
@@ -863,11 +890,15 @@ mod tests {
         // The model replies with a ```python``` block instead of a JSON tool call. With a known
         // focus file, extract_markdown_write synthesizes the write_file it meant.
         let reg = default_registry();
-        let raw = "Here is the implementation:\n\n```python\ndef square(n):\n    return n * n\n```\n";
+        let raw =
+            "Here is the implementation:\n\n```python\ndef square(n):\n    return n * n\n```\n";
         let call = extract_markdown_write(raw, "mathlib.py", &reg).expect("recovered a write");
         assert_eq!(call.name, "write_file");
         assert_eq!(call.str("path"), Some("mathlib.py"));
-        assert_eq!(call.str("content"), Some("def square(n):\n    return n * n\n"));
+        assert_eq!(
+            call.str("content"),
+            Some("def square(n):\n    return n * n\n")
+        );
         // No fence → no recovery (don't invent a write from prose).
         assert!(extract_markdown_write("just prose, no code", "x.py", &reg).is_none());
     }
@@ -886,7 +917,10 @@ mod tests {
         assert_eq!(call.str("path"), Some("app.py"));
         // The literal body (triple quotes intact) is preserved.
         let content = call.str("content").unwrap();
-        assert!(content.contains("\"\"\"doc string\"\"\""), "got: {content:?}");
+        assert!(
+            content.contains("\"\"\"doc string\"\"\""),
+            "got: {content:?}"
+        );
         assert!(content.contains("def f():") && content.contains("return 1"));
     }
 
@@ -906,8 +940,14 @@ mod tests {
         assert_eq!(call.str("path"), Some("styles.css"));
         let content = call.str("content").unwrap();
         // The head that arrived is preserved with real newlines applied.
-        assert!(content.starts_with("body {\n  color: #333;\n}"), "got: {content:?}");
-        assert!(content.contains("#home {\n  padding: 4rem"), "got: {content:?}");
+        assert!(
+            content.starts_with("body {\n  color: #333;\n}"),
+            "got: {content:?}"
+        );
+        assert!(
+            content.contains("#home {\n  padding: 4rem"),
+            "got: {content:?}"
+        );
     }
 
     #[test]
@@ -921,9 +961,15 @@ mod tests {
         let call = ParseRepair
             .extract(raw, &reg)
             .expect("a truncated append_file must be salvaged");
-        assert_eq!(call.name, "append_file", "append semantics preserved, not collapsed to write");
+        assert_eq!(
+            call.name, "append_file",
+            "append semantics preserved, not collapsed to write"
+        );
         assert_eq!(call.str("path"), Some("styles.css"));
-        assert!(call.str("content").unwrap().starts_with("#cta {\n  padding: 15px;"));
+        assert!(call
+            .str("content")
+            .unwrap()
+            .starts_with("#cta {\n  padding: 15px;"));
     }
 
     #[test]

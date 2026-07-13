@@ -58,7 +58,9 @@ impl RunLog {
     /// diagnostic sub-agent reasons over. `None` if no failing verification was recorded.
     pub fn slice_for_diagnosis(&self) -> Option<&str> {
         self.events.iter().rev().find_map(|e| match e {
-            AgentEvent::Verification { green: false, full, .. } => Some(full.as_str()),
+            AgentEvent::Verification {
+                green: false, full, ..
+            } => Some(full.as_str()),
             _ => None,
         })
     }

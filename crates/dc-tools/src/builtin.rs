@@ -411,7 +411,11 @@ fn append_file(workspace: &Path, path: &str, content: &str) -> String {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            match std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
+            {
                 Ok(mut f) => match f.write_all(content.as_bytes()) {
                     Ok(()) => {
                         let total = std::fs::metadata(&p).map(|m| m.len()).unwrap_or_default();

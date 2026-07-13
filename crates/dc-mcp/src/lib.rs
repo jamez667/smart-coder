@@ -189,8 +189,16 @@ mod tests {
         );
         let mut out = Vec::new();
         serve(&Echo, std::io::Cursor::new(input), &mut out).unwrap();
-        let resp: Value = serde_json::from_str(out.strip_suffix(b"\n").map(|s| std::str::from_utf8(s).unwrap()).unwrap()).unwrap();
-        assert_eq!(resp["result"]["content"][0]["text"], "called dumb_coder_health");
+        let resp: Value = serde_json::from_str(
+            out.strip_suffix(b"\n")
+                .map(|s| std::str::from_utf8(s).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resp["result"]["content"][0]["text"],
+            "called dumb_coder_health"
+        );
     }
 
     #[test]

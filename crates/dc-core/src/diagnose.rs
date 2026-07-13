@@ -41,12 +41,17 @@ pub fn diagnose_failure(
         CAUSE: <one sentence — the actual defect>\n\
         FIX: <one short imperative — the direction, not the code>";
 
-    let mut user = format!("TASK: {task}\n\nFULL TEST OUTPUT (untruncated):\n{verify_output}\n\nSOURCE FILES:\n");
+    let mut user = format!(
+        "TASK: {task}\n\nFULL TEST OUTPUT (untruncated):\n{verify_output}\n\nSOURCE FILES:\n"
+    );
     for f in sources {
         user.push_str(&format!("\n=== {} ===\n{}\n", f.path, f.contents));
     }
 
-    let mut req = GenerateRequest::new(vec![Message::system(system.to_string()), Message::user(user)]);
+    let mut req = GenerateRequest::new(vec![
+        Message::system(system.to_string()),
+        Message::user(user),
+    ]);
     // Room to reason then answer (a thinking model spends tokens internally first — the same
     // rationale as the advisor's cap); terseness comes from the prompt, not the cap.
     req.max_tokens = 800;
@@ -126,19 +131,34 @@ mod tests {
                 })
             }
         }
-        let echoed = diagnose_failure(&Echo, "todo board", "E TypeError NoneType at test_app.py:12", &sources())
-            .unwrap();
-        assert!(echoed.contains("NoneType at test_app.py:12"), "full output missing");
+        let echoed = diagnose_failure(
+            &Echo,
+            "todo board",
+            "E TypeError NoneType at test_app.py:12",
+            &sources(),
+        )
+        .unwrap();
+        assert!(
+            echoed.contains("NoneType at test_app.py:12"),
+            "full output missing"
+        );
         assert!(echoed.contains("=== app.py ==="), "source filename missing");
-        assert!(echoed.contains("url_prefix='/tasks'"), "source contents missing");
+        assert!(
+            echoed.contains("url_prefix='/tasks'"),
+            "source contents missing"
+        );
     }
 
     #[test]
     fn empty_or_errored_diagnosis_is_none() {
         assert!(diagnose_failure(&MockBackend::new(["   "]), "t", "o", &sources()).is_none());
         // An exhausted MockBackend errors on generate.
-        assert!(
-            diagnose_failure(&MockBackend::new(Vec::<String>::new()), "t", "o", &sources()).is_none()
-        );
+        assert!(diagnose_failure(
+            &MockBackend::new(Vec::<String>::new()),
+            "t",
+            "o",
+            &sources()
+        )
+        .is_none());
     }
 }

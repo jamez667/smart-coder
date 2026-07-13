@@ -299,14 +299,20 @@ mod tests {
     #[test]
     fn ingests_detailed_stop_reason() {
         let mut j = blank();
-        ingest_event(r#"{"type":"Stopped","reason":{"Stalled":"looping on edit"}}"#, &mut j);
+        ingest_event(
+            r#"{"type":"Stopped","reason":{"Stalled":"looping on edit"}}"#,
+            &mut j,
+        );
         assert_eq!(j.stop_reason.as_deref(), Some("Stalled: looping on edit"));
     }
 
     #[test]
     fn ignores_unrelated_and_malformed_lines() {
         let mut j = blank();
-        ingest_event(r#"{"type":"ToolCall","tool":"read_file","arg":"x"}"#, &mut j);
+        ingest_event(
+            r#"{"type":"ToolCall","tool":"read_file","arg":"x"}"#,
+            &mut j,
+        );
         ingest_event("not json at all", &mut j);
         assert!(j.stop_reason.is_none());
     }

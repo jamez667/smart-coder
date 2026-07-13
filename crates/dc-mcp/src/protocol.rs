@@ -130,8 +130,7 @@ mod tests {
 
     #[test]
     fn tools_list_returns_the_manifest() {
-        let req =
-            Request::parse(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
+        let req = Request::parse(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
         let resp = dispatch(&req, &stub(Ok(String::new()))).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()

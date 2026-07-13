@@ -112,7 +112,11 @@ impl StoreTools {
             .get("workspace")
             .and_then(|w| w.as_str())
             .unwrap_or(&self.default_workspace);
-        let mode = if args.get("decompose").and_then(|d| d.as_bool()).unwrap_or(false) {
+        let mode = if args
+            .get("decompose")
+            .and_then(|d| d.as_bool())
+            .unwrap_or(false)
+        {
             Mode::Swarm
         } else {
             Mode::Run
