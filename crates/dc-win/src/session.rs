@@ -227,15 +227,34 @@ fn run_iterate(
 
     let touched: Vec<String> = edited.lock().unwrap().iter().cloned().collect();
 
+    // A comment/whitespace-only change can't break the build, so it's safe to accept even
+    // without a green verify (the agent is told it may skip cargo check for such edits). Only
+    // consider files that were CLEAN at start — a pre-dirty file's diff isn't this run's work.
+    let clean_touched: Vec<String> = touched
+        .iter()
+        .filter(|f| !dirty_at_start.contains(*f))
+        .cloned()
+        .collect();
+    let comment_only = !clean_touched.is_empty()
+        && crate::gitdiff::is_comment_only_change(&crate::gitdiff::files_diff(
+            &workspace,
+            &clean_touched,
+        ));
+
     match result {
         Ok(report) => {
             let verified_ok = report.verified != Some(false);
-            let ok = report.finished && verified_ok;
+            // Accept a comment-only change without requiring a green verify.
+            let ok = report.finished && (verified_ok || comment_only);
             let summary = if ok {
-                match report.verified {
-                    Some(true) => format!(
+                match (report.verified, comment_only) {
+                    (Some(true), _) => format!(
                         "done — verify green in {} steps ({} file(s) changed)",
                         report.steps,
+                        touched.len()
+                    ),
+                    (_, true) => format!(
+                        "done — comment-only change, skipped compile check ({} file(s))",
                         touched.len()
                     ),
                     _ => format!("done in {} steps", report.steps),

@@ -10,15 +10,18 @@
 use std::sync::mpsc::Receiver;
 use std::thread;
 
-use dc_model::{GenerateRequest, ModelBackend};
+use dc_model::GenerateRequest;
 
 use crate::config::UiConfig;
 
 /// The result of one chat turn streamed back to the UI.
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
-    /// The assistant's full reply text (v1 sends the whole reply at once; token streaming is
-    /// a later nicety).
+    /// A token delta as the model generates it — appended to the in-flight bubble live
+    /// (the "watch it type" effect).
+    Token(String),
+    /// The turn finished: the full concatenated reply. The app parses THIS for plan-file
+    /// blocks / `<think>` stripping (the streamed tokens were the raw live view).
     Reply(String),
     /// The turn failed (backend unreachable, etc.) — a human-readable reason.
     Failed(String),
@@ -39,7 +42,13 @@ impl ChatSession {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = thread::spawn(move || {
             let backend = cfg.backend();
-            match backend.generate(&req) {
+            // Stream tokens live (the "watch it type" effect); on completion send the full
+            // Reply so the app can parse plan-file blocks / strip <think> from the whole text.
+            let tok_tx = tx.clone();
+            let result = backend.generate_streaming(&req, |delta| {
+                let _ = tok_tx.send(ChatEvent::Token(delta.to_string()));
+            });
+            match result {
                 Ok(resp) => {
                     let _ = tx.send(ChatEvent::Reply(resp.content));
                 }

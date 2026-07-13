@@ -12,6 +12,7 @@ pub mod chat_session;
 pub mod codeview;
 pub mod config;
 pub mod filetree;
+pub mod gitdiff;
 pub mod linecomment;
 pub mod persist;
 pub mod plan;

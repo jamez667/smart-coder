@@ -145,6 +145,96 @@ impl OpenAiBackend {
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
+
+    /// Streaming completion: like [`ModelBackend::generate`], but sets `"stream": true` and
+    /// invokes `on_token` with each content delta as the server emits it (SSE). Returns the
+    /// full concatenated text at the end (so callers get the same result as `generate` plus a
+    /// live view). This is what powers the "watch it type" UI.
+    ///
+    /// Deliberately an inherent method (not on the trait) so it only exists where a real HTTP
+    /// server can stream; the agent loop still uses the blocking `generate`.
+    pub fn generate_streaming(
+        &self,
+        req: &GenerateRequest,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<GenerateResponse> {
+        use std::io::BufRead;
+
+        let messages: Vec<serde_json::Value> = req
+            .messages
+            .iter()
+            .map(|m| serde_json::json!({"role": role_str(m.role), "content": m.content}))
+            .collect();
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": req.temperature,
+            "max_tokens": req.max_tokens,
+            "stream": true,
+        });
+
+        let mut call = self.agent.post(&self.endpoint());
+        if let Some(key) = &self.api_key {
+            call = call.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut resp = call.send_json(&body).map_err(|e| {
+            DcError::Backend(format!("stream request to {} failed: {e}", self.endpoint()))
+        })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp
+                .body_mut()
+                .read_to_string()
+                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(DcError::Backend(format!(
+                "{} returned HTTP {}: {}",
+                self.endpoint(),
+                status.as_u16(),
+                detail.trim()
+            )));
+        }
+
+        // Read the SSE stream line by line. Each event is `data: {json}`; `data: [DONE]`
+        // ends it. We pull `choices[0].delta.content` from each chunk and stream it out.
+        let reader = std::io::BufReader::new(resp.body_mut().as_reader());
+        let mut full = String::new();
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let payload = match line.strip_prefix("data:") {
+                Some(p) => p.trim(),
+                None => continue, // blank line or non-data field
+            };
+            if payload == "[DONE]" {
+                break;
+            }
+            if let Some(delta) = parse_stream_delta(payload) {
+                if !delta.is_empty() {
+                    full.push_str(&delta);
+                    on_token(&delta);
+                }
+            }
+        }
+        Ok(GenerateResponse { content: full })
+    }
+}
+
+/// Pull the content delta out of one SSE chunk's JSON: `choices[0].delta.content`. Returns
+/// `None` for a chunk with no content (e.g. the role-announcing first chunk, or a finish
+/// chunk). Also handles reasoning models that stream into `reasoning_content`.
+fn parse_stream_delta(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let delta = v.get("choices")?.get(0)?.get("delta")?;
+    if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
+        return Some(c.to_string());
+    }
+    if let Some(r) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+        return Some(r.to_string());
+    }
+    None
 }
 
 // ---- wire types (a minimal slice of the OpenAI schema) ----
@@ -583,5 +673,32 @@ mod tests {
 
         let raw = rx.recv().unwrap();
         assert!(!raw.contains("tool_choice"), "must not force tools: {raw}");
+    }
+
+    #[test]
+    fn parses_content_and_reasoning_deltas_and_ignores_control_chunks() {
+        // A normal content delta.
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#).as_deref(),
+            Some("Hel")
+        );
+        // A reasoning-model delta streams into reasoning_content.
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{"reasoning_content":"think"}}]}"#)
+                .as_deref(),
+            Some("think")
+        );
+        // The role-announcing first chunk (no content) yields nothing.
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#),
+            None
+        );
+        // A finish chunk (empty delta) yields nothing.
+        assert_eq!(
+            parse_stream_delta(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
+            None
+        );
+        // Garbage doesn't panic.
+        assert_eq!(parse_stream_delta("not json"), None);
     }
 }

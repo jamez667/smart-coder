@@ -35,6 +35,8 @@ const FG_MUTED: Color = Color::from_rgb(0.52, 0.55, 0.66);
 const ACCENT: Color = Color::from_rgb(0.48, 0.65, 0.98);
 const GOOD: Color = Color::from_rgb(0.45, 0.78, 0.55);
 const BAD: Color = Color::from_rgb(0.93, 0.45, 0.50);
+/// Amber — the "agent is working on these lines" highlight (pulses while a fix is in flight).
+const AMBER: Color = Color::from_rgb(0.95, 0.72, 0.35);
 
 /// Card surface style: filled rounded panel with a thin border.
 fn card_style(_t: &Theme) -> container::Style {
@@ -132,22 +134,23 @@ fn menu_item_style(_t: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A code line as a clickable button: transparent, a faint hover wash so lines feel
-/// clickable, and an accent tint on the line whose comment box is open.
-fn code_line_style(commenting: bool, status: button::Status) -> button::Style {
-    let hovered = matches!(status, button::Status::Hovered);
-    let bg = if commenting {
-        Some(Background::Color(Color { a: 0.10, ..ACCENT }))
-    } else if hovered {
-        Some(Background::Color(Color { a: 0.05, ..ACCENT }))
+/// A code line container's wash, by state (precedence: selection → change → working):
+///  • `selected` → faint accent (you're commenting on it),
+///  • `changed` → faint GREEN (differs from HEAD — a git change, PR-style),
+///  • `working = Some(alpha)` → pulsing AMBER (the agent is working these lines right now),
+///  • else transparent.
+fn code_line_container(selected: bool, changed: bool, working: Option<f32>) -> container::Style {
+    let bg = if selected {
+        Some(Background::Color(Color { a: 0.14, ..ACCENT }))
+    } else if changed {
+        Some(Background::Color(Color { a: 0.12, ..GOOD }))
     } else {
-        None
+        working.map(|a| Background::Color(Color { a, ..AMBER }))
     };
-    button::Style {
+    container::Style {
         background: bg,
-        text_color: FG,
-        border: Border::default(),
-        ..Default::default()
+        text_color: Some(FG),
+        ..container::Style::default()
     }
 }
 
@@ -315,16 +318,34 @@ struct App {
     bottom_tab: BottomTab,
 
     // --- Line comments (PR-style) ------------------------------------------------
-    /// The line the user clicked to comment on (1-based), if a comment box is open.
-    comment_line: Option<usize>,
-    /// The comment text being typed for `comment_line`.
+    /// The committed line range being commented on (1-based, inclusive `(start, end)`), if a
+    /// comment box is open. A single-line comment is `(n, n)`.
+    comment_range: Option<(usize, usize)>,
+    /// The comment text being typed for `comment_range`.
     comment_draft: String,
+    /// Drag-select state: `Some((anchor, current))` while the mouse is pressed and dragging
+    /// across lines in the code view; `None` when not dragging. On release it becomes the
+    /// committed `comment_range`.
+    drag: Option<(usize, usize)>,
     /// A line-comment classification in flight (the small/big triage call), if any. Carries
     /// the comment so the result can be routed once the verdict arrives.
     triage: Option<TriageInFlight>,
     /// True when the current iterate run was triggered by a small line-comment fix, so its
     /// outcome (files changed + verify result) is reported back into the chat thread.
     iterate_from_comment: bool,
+    /// The in-flight assistant reply as it streams in token-by-token (the live "typing"
+    /// bubble). `None` when nothing is streaming; replaced by a finished turn on completion.
+    streaming: Option<String>,
+    /// Debug mode: when on, every prompt sent to the model is echoed into the chat as a
+    /// (dimmed, collapsible) debug turn, so you can see exactly what the agent receives.
+    debug: bool,
+    /// Lines of the currently-shown file that differ from HEAD right now (from `git diff`),
+    /// highlighted GitHub-PR-style. Refreshed as a fix edits the file, so you SEE changes land.
+    changed_lines: std::collections::BTreeSet<usize>,
+    /// The range the agent is actively working on (the lines you commented on), highlighted in
+    /// a pulsing amber from submit until the change lands — so the "thinking" gap feels active.
+    /// `(file, start, end)`; `None` when nothing is in flight.
+    working: Option<(String, usize, usize)>,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -399,10 +420,15 @@ impl Default for App {
             proposed_files: Vec::new(),
             think: false,
             bottom_tab: BottomTab::Verification,
-            comment_line: None,
+            comment_range: None,
             comment_draft: String::new(),
+            drag: None,
             triage: None,
             iterate_from_comment: false,
+            streaming: None,
+            debug: false,
+            changed_lines: std::collections::BTreeSet::new(),
+            working: None,
         }
     }
 }
@@ -440,11 +466,17 @@ pub(crate) enum Message {
     ApplyFile(usize),
     /// Toggle "think" mode for the next chat turn (reason vs. answer directly).
     ToggleThink(bool),
+    /// Toggle debug mode: echo every prompt sent to the model into the chat.
+    ToggleDebug(bool),
     /// Select a bottom-panel tab (Activity / Verification / Build).
     SelectBottomTab(BottomTab),
-    // Line comments (PR-style).
-    /// Click a code line (1-based) to open a comment box on it.
-    LineClick(usize),
+    // Line comments (PR-style) — drag to select a range, then comment.
+    /// Mouse pressed on line N: start a drag-selection anchored there.
+    LineDragStart(usize),
+    /// Mouse entered line N while dragging: extend the selection to N.
+    LineDragTo(usize),
+    /// Mouse released: commit the drag-selection and open the comment box for the range.
+    LineDragEnd,
     /// The comment draft text changed.
     CommentDraftChanged(String),
     /// Submit the line comment — triage it (small → fix now, big → plan).
@@ -489,6 +521,7 @@ impl App {
         if self.session.is_some()
             || self.chat_session.is_some()
             || self.triage.is_some()
+            || self.working.is_some()
             || !self.gatebar.is_empty()
             || glowing
         {
@@ -704,6 +737,21 @@ impl App {
         });
         self.proposed_files.clear();
         self.intent.clear();
+        self.spawn_chat("chat", req);
+    }
+
+    /// Spawn a chat/generate call, first echoing its prompt into the chat when debug mode is
+    /// on. Every model call that streams into the chat goes through here.
+    fn spawn_chat(&mut self, label: &str, req: dc_model::GenerateRequest) {
+        if self.debug {
+            let joined = req
+                .messages
+                .iter()
+                .map(|m| format!("[{:?}]\n{}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            self.debug_prompt(label, &joined);
+        }
         self.chat_session = Some(dc_win::chat_session::ChatSession::spawn(
             self.cfg.clone(),
             req,
@@ -714,42 +762,59 @@ impl App {
     /// classification (fast `/no_think`), and close the comment box. Routing happens in
     /// [`Self::pump_triage`] when the verdict arrives.
     fn submit_line_comment(&mut self) {
-        let (Some(line), Some(cv)) = (self.comment_line, self.code.as_ref()) else {
+        let (Some((start, end)), Some(cv)) = (self.comment_range, self.code.as_ref()) else {
             return;
         };
         let comment = self.comment_draft.trim().to_string();
         if comment.is_empty() {
             return;
         }
-        // The exact text of the commented line (the anchor for the agent).
-        let line_text = cv
-            .lines
-            .iter()
-            .find(|(n, _)| *n == line)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default();
+        // The IDE does the scoping: hand the model the selected code + a small window, so it
+        // doesn't slurp the whole file (what made a one-line fix slow + context-heavy).
+        let (selection, context) = dc_win::linecomment::scope_context(&cv.lines, start, end);
         let lc = dc_win::linecomment::LineComment {
             file: cv.rel.clone(),
-            line,
-            line_text,
+            start,
+            end,
+            selection,
+            context,
             comment,
         };
         // Commit connection settings so the triage/edit use the current backend.
         self.cfg.model = self.model_input.clone();
         self.cfg.base_url = self.url_input.clone();
-        // Echo the comment into the chat (before `lc` moves into the triage state).
-        let echo = format!("💬 {} line {}: {}", lc.file, lc.line, lc.comment);
+        // Keep the commented lines highlighted (pulsing amber) while the agent works on them,
+        // so the "thinking" gap between submit and the edit landing feels active. Cleared when
+        // the run/answer finishes.
+        self.working = Some((lc.file.clone(), start, end));
+        self.run_started = Some(Instant::now()); // (re)start the animation clock
+                                                 // Echo the comment into the chat (before `lc` moves into the triage state).
+        let span = if start == end {
+            format!("line {start}")
+        } else {
+            format!("lines {start}-{end}")
+        };
+        let echo = format!("💬 {} {span}: {}", lc.file, lc.comment);
+        self.chat_turns.push(dc_win::chat::Turn {
+            role: dc_win::chat::Speaker::You,
+            text: echo,
+        });
         let req = lc.classify_request();
+        if self.debug {
+            let joined = req
+                .messages
+                .iter()
+                .map(|m| format!("[{:?}]\n{}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            self.debug_prompt("triage", &joined);
+        }
         let session = dc_win::chat_session::ChatSession::spawn(self.cfg.clone(), req);
         self.triage = Some(TriageInFlight {
             comment: lc,
             session,
         });
-        self.chat_turns.push(dc_win::chat::Turn {
-            role: dc_win::chat::Speaker::You,
-            text: echo,
-        });
-        self.comment_line = None;
+        self.comment_range = None;
         self.comment_draft.clear();
     }
 
@@ -762,6 +827,8 @@ impl App {
         let events = t.session.drain();
         for ev in events {
             let reply = match ev {
+                // Triage is a one-word classify — ignore streamed tokens, act on the final.
+                dc_win::chat_session::ChatEvent::Token(_) => continue,
                 dc_win::chat_session::ChatEvent::Reply(r) => r,
                 dc_win::chat_session::ChatEvent::Failed(_) => {
                     // On a failed triage, fall back to planning (the safe route).
@@ -771,6 +838,14 @@ impl App {
             let verdict = dc_win::linecomment::parse_verdict(&reply);
             let comment = self.triage.take().expect("in flight").comment;
             match verdict {
+                dc_win::linecomment::Verdict::Question => {
+                    // A question about the code → ANSWER it (streamed into the chat), edit
+                    // nothing. Reuses the chat streaming path, so the answer types out live.
+                    self.cfg.model = self.model_input.clone();
+                    self.cfg.base_url = self.url_input.clone();
+                    let req = comment.question_request(self.think);
+                    self.spawn_chat("question", req);
+                }
                 dc_win::linecomment::Verdict::Small => {
                     self.chat_turns.push(dc_win::chat::Turn {
                         role: dc_win::chat::Speaker::Agent,
@@ -801,6 +876,7 @@ impl App {
         if self.session.is_some() {
             return;
         }
+        self.debug_prompt("fix (iterate)", &instruction);
         self.intent = instruction;
         self.start(RunKind::Iterate);
         self.intent.clear();
@@ -857,15 +933,26 @@ impl App {
         let root = self.workspace_root();
         self.code = Some(dc_win::codeview::load(&root, &rel));
         self.selected_file = Some(rel);
+        self.refresh_changed_lines();
     }
 
     /// Re-read the currently selected file from disk (after the agent edited it), so the
-    /// code panel reflects the latest bytes.
+    /// code panel reflects the latest bytes — and refresh which lines differ from HEAD.
     fn reload_selected(&mut self) {
         if let Some(rel) = self.selected_file.clone() {
             let root = self.workspace_root();
             self.code = Some(dc_win::codeview::load(&root, &rel));
         }
+        self.refresh_changed_lines();
+    }
+
+    /// Recompute which lines of the shown file differ from HEAD (git), for the PR-style
+    /// highlight. Cheap `git diff -U0` on the one file; empty when nothing's selected.
+    fn refresh_changed_lines(&mut self) {
+        self.changed_lines = match &self.selected_file {
+            Some(rel) => dc_win::gitdiff::file_changed_lines(&self.workspace_root(), rel),
+            None => std::collections::BTreeSet::new(),
+        };
     }
 
     /// Whether a swarm run is (or was) active — i.e. the topology has nodes to draw.
@@ -881,6 +968,9 @@ impl App {
     fn finish_run(&mut self, ok: bool, summary: &str) {
         // Surface the outcome: jump to the Build tab when a run ends.
         self.bottom_tab = BottomTab::Build;
+        // The agent's done working the selection — drop the amber "working" highlight (the
+        // green git-change highlight takes over).
+        self.working = None;
         if self.iterating {
             self.finish_iterate(ok, summary);
             return;
@@ -988,7 +1078,15 @@ impl App {
         let events = cs.drain();
         for ev in events {
             match ev {
+                dc_win::chat_session::ChatEvent::Token(delta) => {
+                    // Grow the live "typing" bubble. Strip <think> for display as it streams
+                    // (a reasoning delta shouldn't flash into the visible reply).
+                    let buf = self.streaming.get_or_insert_with(String::new);
+                    buf.push_str(&delta);
+                }
                 dc_win::chat_session::ChatEvent::Reply(raw) => {
+                    self.streaming = None; // the live bubble is replaced by the finished turn
+                    self.working = None; // a question answer is done → drop the amber highlight
                     let (prose, files) = dc_win::chat::parse_reply(&raw);
                     if let Some(convo) = self.conversation.as_mut() {
                         convo.record_reply(&raw);
@@ -1030,6 +1128,8 @@ impl App {
                     self.chat_session = None;
                 }
                 dc_win::chat_session::ChatEvent::Failed(msg) => {
+                    self.streaming = None;
+                    self.working = None;
                     self.chat_turns.push(dc_win::chat::Turn {
                         role: dc_win::chat::Speaker::Agent,
                         text: format!("⚠ {msg}"),
@@ -1044,6 +1144,12 @@ impl App {
     fn pump(&mut self) {
         self.pump_chat();
         self.pump_triage();
+        // While a fix run is in flight, keep the code view + change-highlight fresh from disk
+        // so edits land live (the agent edits the real files). Cheap: reload the one shown
+        // file + one `git diff` on it per tick. Done before borrowing `session` below.
+        if self.iterate_from_comment && self.session.is_some() {
+            self.reload_selected();
+        }
         let Some(session) = &self.session else {
             return;
         };
@@ -1064,6 +1170,17 @@ impl App {
                             if !self.edited_files.contains(&rel) {
                                 self.edited_files.push(rel);
                             }
+                        }
+                    }
+                    // During a line-comment fix, narrate the key steps into the chat so the
+                    // work is VISIBLE (a fix used to run silently). Only meaningful steps —
+                    // editing a file and the verify result — not every read.
+                    if self.iterate_from_comment {
+                        if let Some(line) = fix_feed_line(&e) {
+                            self.chat_turns.push(dc_win::chat::Turn {
+                                role: dc_win::chat::Speaker::Agent,
+                                text: line,
+                            });
                         }
                     }
                     // Follow the agent: when it touches a file and we're in follow mode,
@@ -1209,20 +1326,33 @@ impl App {
             Message::ChatSend => self.send_chat(),
             Message::ApplyFile(i) => self.apply_proposed_file(i),
             Message::ToggleThink(v) => self.think = v,
+            Message::ToggleDebug(v) => self.debug = v,
             Message::SelectBottomTab(t) => self.bottom_tab = t,
-            Message::LineClick(n) => {
-                // Open a comment box on this line (toggle off if it's already open there).
-                self.comment_line = if self.comment_line == Some(n) {
-                    None
-                } else {
-                    Some(n)
-                };
-                self.comment_draft.clear();
+            Message::LineDragStart(n) => {
+                // Begin a drag-selection anchored at line n. Clear any open comment box.
+                self.drag = Some((n, n));
+                self.comment_range = None;
+            }
+            Message::LineDragTo(n) => {
+                // Extend the drag to line n (only while a drag is active).
+                if let Some((anchor, _)) = self.drag {
+                    self.drag = Some((anchor, n));
+                }
+            }
+            Message::LineDragEnd => {
+                // Commit the drag into a comment range (normalized so start ≤ end) and open
+                // the comment box. A no-drag (just a click) yields a single-line range.
+                if let Some((a, b)) = self.drag.take() {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    self.comment_range = Some((lo, hi));
+                    self.comment_draft.clear();
+                }
             }
             Message::CommentDraftChanged(s) => self.comment_draft = s,
             Message::CommentSubmit => self.submit_line_comment(),
             Message::CommentCancel => {
-                self.comment_line = None;
+                self.comment_range = None;
+                self.drag = None;
                 self.comment_draft.clear();
             }
             Message::ConfirmAllow => self.answer_confirm(Confirmation::AllowOnce),
@@ -1416,6 +1546,16 @@ impl App {
             .into()
     }
 
+    /// The line range currently highlighted in the code view: the active drag (normalized so
+    /// lo ≤ hi) if dragging, else the committed comment range. `None` when neither.
+    fn selected_line_range(&self) -> Option<(usize, usize)> {
+        if let Some((a, b)) = self.drag {
+            Some(if a <= b { (a, b) } else { (b, a) })
+        } else {
+            self.comment_range
+        }
+    }
+
     /// The right CODE column: the selected/followed file with line numbers, read-only,
     /// rendered like a VS Code editor. The gutter (line numbers) and the code are TWO
     /// side-by-side columns; wrapping is disabled so a long line scrolls horizontally
@@ -1434,30 +1574,57 @@ impl App {
                 .color(FG_MUTED)
                 .into(),
             Some(cv) => {
-                // Per-line CLICKABLE rows so you can click a line to leave a PR-style comment.
-                // Each line is ONE no-wrap monospace string (number gutter + code) in a button
-                // that SHRINKS to its content — so a long line stays on one line and the whole
-                // column scrolls horizontally in the `Both` scrollable below (no wrapping, no
-                // broken gutter). `width(Fill)` on the button is what forced wrapping before.
+                // Per-line rows you can DRAG across to select a range, then comment (PR-style).
+                // Each line is a mouse_area (press=start drag, enter=extend, release=commit)
+                // wrapping ONE no-wrap monospace string; selected lines get an accent wash.
+                // The comment box renders after the last line of the committed range.
+                let sel = self.selected_line_range(); // active drag OR committed range
+                                                      // The amber "working" range applies only when the shown file is the one being
+                                                      // worked on. A pulsing alpha (sine on the animation clock) reads as "in progress".
+                let working_here = self
+                    .working
+                    .as_ref()
+                    .filter(|(f, _, _)| Some(f.as_str()) == self.selected_file.as_deref())
+                    .map(|(_, lo, hi)| (*lo, *hi));
+                let pulse = 0.10 + 0.10 * (0.5 + 0.5 * (self.now() * 3.0).sin());
                 let mut col = column![].spacing(0);
                 for (n, line) in &cv.lines {
-                    let commenting = self.comment_line == Some(*n);
-                    let row_text = format!("{n:>5}  {line}");
-                    let color = if commenting { ACCENT } else { FG };
+                    let in_sel = sel.is_some_and(|(lo, hi)| *n >= lo && *n <= hi);
+                    let working = working_here.is_some_and(|(lo, hi)| *n >= lo && *n <= hi);
+                    // A line that differs from HEAD (git) → GitHub-PR-style green highlight
+                    // with a `+` gutter marker, so you SEE what the agent changed, live.
+                    let changed = self.changed_lines.contains(n);
+                    let mark = if changed { "+" } else { " " };
+                    let row_text = format!("{mark}{n:>4}  {line}");
+                    let color = if in_sel {
+                        ACCENT
+                    } else if changed {
+                        GOOD
+                    } else if working {
+                        AMBER
+                    } else {
+                        FG
+                    };
+                    let line_el = container(
+                        text(row_text)
+                            .size(13)
+                            .font(iced::Font::MONOSPACE)
+                            .color(color)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                    )
+                    .padding([0, 4])
+                    .style(move |_t: &Theme| {
+                        code_line_container(in_sel, changed, working.then_some(pulse))
+                    });
                     col = col.push(
-                        button(
-                            text(row_text)
-                                .size(13)
-                                .font(iced::Font::MONOSPACE)
-                                .color(color)
-                                .wrapping(iced::widget::text::Wrapping::None),
-                        )
-                        .on_press(Message::LineClick(*n))
-                        .padding([0, 4])
-                        .style(move |_t, status| code_line_style(commenting, status)),
+                        iced::widget::mouse_area(line_el)
+                            .on_press(Message::LineDragStart(*n))
+                            .on_enter(Message::LineDragTo(*n))
+                            .on_release(Message::LineDragEnd),
                     );
-                    if commenting {
-                        col = col.push(self.view_comment_box(*n));
+                    // The comment box after the last line of the committed range.
+                    if self.comment_range.is_some_and(|(_, hi)| hi == *n) {
+                        col = col.push(self.view_comment_box());
                     }
                 }
                 if cv.truncated {
@@ -1497,10 +1664,14 @@ impl App {
             .into()
     }
 
-    /// The inline comment box shown under a clicked code line (PR-style): a text input +
+    /// The inline comment box shown under the selected range (PR-style): a text input +
     /// Comment / Cancel. Submitting triages small (fix now) vs. big (plan first).
-    fn view_comment_box(&self, line: usize) -> Element<'_, Message> {
-        let input = text_input("comment on this line…", &self.comment_draft)
+    fn view_comment_box(&self) -> Element<'_, Message> {
+        let placeholder = match self.comment_range {
+            Some((lo, hi)) if lo != hi => format!("comment on lines {lo}–{hi}…"),
+            _ => "comment on this line…".to_string(),
+        };
+        let input = text_input(&placeholder, &self.comment_draft)
             .on_input(Message::CommentDraftChanged)
             .on_submit(Message::CommentSubmit)
             .padding(8)
@@ -1516,7 +1687,6 @@ impl App {
         let hint = text("small fix → done inline · bigger → we'll plan it")
             .size(10)
             .color(FG_MUTED);
-        let _ = line;
         container(column![input, row![submit, cancel].spacing(6), hint].spacing(6))
             .width(Fill)
             .padding(8)
@@ -1856,9 +2026,28 @@ impl App {
         for (i, pf) in self.proposed_files.iter().enumerate() {
             thread = thread.push(self.view_proposed_file(i, pf));
         }
-        // A "thinking…" line while a reply is in flight.
+        // The live "typing" bubble while a reply streams in: show the growing text (with any
+        // <think> block hidden), or a thinking cue before the first token arrives.
         if self.chat_session.is_some() {
-            thread = thread.push(text("agent is thinking…").size(12).color(FG_MUTED));
+            let live = self
+                .streaming
+                .as_deref()
+                .map(dc_win::chat::visible_so_far)
+                .filter(|s| !s.is_empty());
+            match live {
+                Some(text_so_far) => {
+                    thread = thread.push(
+                        column![
+                            text("agent").size(11).color(GOOD),
+                            text(text_so_far).size(13).color(FG),
+                        ]
+                        .spacing(2),
+                    );
+                }
+                None => {
+                    thread = thread.push(text("agent is thinking…").size(12).color(FG_MUTED));
+                }
+            }
         }
         let thread = scrollable(thread).height(Fill);
 
@@ -1871,11 +2060,36 @@ impl App {
             .into()
     }
 
-    /// One chat bubble: a small role label + the text, coloured by speaker.
+    /// One chat bubble: a small role label + the text, coloured by speaker. A Debug turn (the
+    /// raw prompt echo) renders dimmed + monospace so it reads as diagnostic output, not chat.
     fn view_chat_turn<'a>(&self, turn: &'a dc_win::chat::Turn) -> Element<'a, Message> {
+        if turn.role == dc_win::chat::Speaker::Debug {
+            return container(
+                column![
+                    text("⛭ prompt sent to model").size(10).color(FG_MUTED),
+                    text(turn.text.clone())
+                        .size(11)
+                        .font(iced::Font::MONOSPACE)
+                        .color(FG_MUTED),
+                ]
+                .spacing(2),
+            )
+            .width(Fill)
+            .padding(6)
+            .style(|_t: &Theme| container::Style {
+                background: Some(Background::Color(Color::from_rgb(0.08, 0.09, 0.14))),
+                border: Border {
+                    color: CARD_BORDER,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .into();
+        }
         let (who, who_color) = match turn.role {
             dc_win::chat::Speaker::You => ("you", ACCENT),
-            dc_win::chat::Speaker::Agent => ("agent", GOOD),
+            _ => ("agent", GOOD),
         };
         column![
             text(who).size(11).color(who_color),
@@ -1883,6 +2097,17 @@ impl App {
         ]
         .spacing(2)
         .into()
+    }
+
+    /// If debug mode is on, echo `prompt` into the chat as a Debug turn (the raw text the
+    /// model received). `label` names the call (e.g. "triage", "fix", "chat").
+    fn debug_prompt(&mut self, label: &str, prompt: &str) {
+        if self.debug {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Debug,
+                text: format!("[{label}]\n{prompt}"),
+            });
+        }
     }
 
     /// An Apply card for a proposed plan-file: the filename + an Apply button (writes it to
@@ -1956,6 +2181,12 @@ impl App {
                     .on_toggle(Message::ToggleThink),
             );
         }
+        // Debug: echo every prompt sent to the model into the chat (always available).
+        bar = bar.push(
+            checkbox(self.debug)
+                .label("debug")
+                .on_toggle(Message::ToggleDebug),
+        );
         bar.into()
     }
 
@@ -2188,6 +2419,29 @@ impl App {
         .spacing(8);
 
         scrollable(form).height(Length::Fixed(440.0)).into()
+    }
+}
+
+/// Map a live `AgentEvent` to a concise chat line for the line-comment fix feed, or `None`
+/// for events too noisy to surface (plain reads, model turns, plan chatter). Keeps the feed
+/// to the steps a human cares about: editing a file, and the verify result.
+fn fix_feed_line(e: &dc_core::AgentEvent) -> Option<String> {
+    use dc_core::AgentEvent::*;
+    match e {
+        ToolCall { tool, arg } => match tool.as_str() {
+            "edit_file" | "write_file" | "append_file" | "create_file" => {
+                Some(format!("✎ editing {}", arg.trim()))
+            }
+            "read_file" => Some(format!("· reading {}", arg.trim())),
+            "run_verification" => Some("· checking it compiles…".to_string()),
+            _ => None,
+        },
+        Verification { green, .. } => Some(if *green {
+            "✓ compiles".to_string()
+        } else {
+            "✗ didn't compile — trying again".to_string()
+        }),
+        _ => None,
     }
 }
 

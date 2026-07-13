@@ -42,6 +42,8 @@ pub struct Turn {
 pub enum Speaker {
     You,
     Agent,
+    /// A debug echo (the raw prompt sent to the model), shown only in debug mode.
+    Debug,
 }
 
 /// How many most-recent user/assistant turns to keep verbatim in the request. The system
@@ -248,6 +250,28 @@ pub fn parse_reply(reply: &str) -> (String, Vec<ProposedFile>) {
     (prose.trim().to_string(), files)
 }
 
+/// What to show of a *partial* (mid-stream) reply: hide a `<think>` block (even if it hasn't
+/// closed yet — while the model is still reasoning, show nothing rather than the raw thought),
+/// and don't show a half-written `file:` block (its opening fence line + body would look like
+/// noise until complete). Used to render the live "typing" bubble as tokens arrive.
+pub fn visible_so_far(partial: &str) -> String {
+    // If a think block is open but not yet closed, the visible answer hasn't started.
+    let lower = partial.to_ascii_lowercase();
+    if let Some(open) = lower.find("<think>") {
+        if !lower[open..].contains("</think>") {
+            // Still thinking — show only whatever prose came BEFORE the <think> (usually none).
+            return partial[..open].trim().to_string();
+        }
+    }
+    let cleaned = strip_think(partial);
+    // Cut everything from the first ```file: fence onward (a plan file being written) — we show
+    // it as a proposal card once complete, not as raw streaming text.
+    if let Some(idx) = cleaned.find("```file:") {
+        return cleaned[..idx].trim().to_string();
+    }
+    cleaned.trim().to_string()
+}
+
 /// Remove a leading/embedded `<think>…</think>` reasoning block. Handles the common shape
 /// (one block, possibly unterminated if the model ran out of tokens mid-think). Returns the
 /// remaining visible text, trimmed.
@@ -409,6 +433,24 @@ mod tests {
             sys.contains("<think>"),
             "prompt channels reasoning into tags: {sys}"
         );
+    }
+
+    #[test]
+    fn visible_so_far_hides_open_think_and_partial_file_blocks() {
+        // Mid-think (unclosed) → nothing visible yet.
+        assert_eq!(visible_so_far("<think>reasoning still going"), "");
+        // Think closed → the answer after it shows.
+        assert_eq!(
+            visible_so_far("<think>done</think>Add lakes next."),
+            "Add lakes next."
+        );
+        // A half-written file block is cut off (shown as a card once complete).
+        assert_eq!(
+            visible_so_far("Here's the todo:\n```file:TODO.md\n- [ ] a"),
+            "Here's the todo:"
+        );
+        // Plain partial prose streams through as-is.
+        assert_eq!(visible_so_far("I'd sugg"), "I'd sugg");
     }
 
     #[test]
