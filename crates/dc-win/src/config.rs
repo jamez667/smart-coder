@@ -77,9 +77,11 @@ impl Default for UiConfig {
         // The live-test defaults from MEMORY: coder on :11435, advisor on :11434.
         Self {
             // ONE model does everything now (plan + implement) — no swarm, no advisor.
-            // The single Qwen3-8B backend (dc-qwen8b container, llama.cpp, :11435).
-            base_url: "http://localhost:11435/v1".to_string(),
-            model: "qwen3-coder-30b".to_string(),
+            // The Qwen3-8B pool (scripts/pool-8b.ps1): llama.cpp on :11439 (GPU 0), alias
+            // `qwen3-8b`. This is the pool that's actually maintained/started; edit in
+            // settings for a different endpoint/model.
+            base_url: "http://localhost:11439/v1".to_string(),
+            model: "qwen3-8b".to_string(),
             tool_calling: ToolCalling::None,
             // No separate advisor/orchestrator: the workflow planner and the implement
             // agent both use the single backend above (orchestrator()/advisor() fall back
@@ -233,12 +235,13 @@ pub fn repo_overview(workspace: &std::path::Path) -> String {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            // Skip VCS/hidden noise so the overview is the user's actual sources.
-            if path
+            let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with('.'))
-            {
+                .unwrap_or_default();
+            // Skip VCS/build/generated noise so the overview is the user's actual sources
+            // (and doesn't get swamped by e.g. a `screenshots/` folder full of PNGs).
+            if crate::filetree::is_noise_dir(name) {
                 continue;
             }
             match entry.file_type() {

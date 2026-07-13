@@ -8,7 +8,7 @@
 //! The confirm/gate decision seams live in [`crate::bridge`]; this module wires their
 //! request channel alongside the event channel.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -58,6 +58,11 @@ pub enum RunKind {
     /// map of the others) → a final integration pass. Avoids the whole-task file-juggling
     /// (and the re-read tax) by scoping each step to a single file.
     SequentialBuild,
+    /// Iterate on an EXISTING project in place (the daily-driver flow): no spec/test
+    /// ceremony — the single agent reads the relevant files, edits them, runs the configured
+    /// verify command (e.g. `cargo check`) until it's green, then finishes. This is the mode
+    /// the GUI uses when you've picked a project folder to work in.
+    Iterate,
 }
 
 /// A live run. Holds the receiving ends the UI drains; the worker thread owns the
@@ -84,6 +89,7 @@ impl Session {
             RunKind::SequentialBuild => {
                 run_sequential_build(cfg, task, workspace, ev_tx, pending_tx)
             }
+            RunKind::Iterate => run_iterate(cfg, task, workspace, ev_tx, pending_tx),
         });
 
         Self {
@@ -152,6 +158,239 @@ fn run_agent(
             let _ = ev_tx.send(UiEvent::Failed(format!("run failed: {e}")));
         }
     }
+}
+
+/// Drive an ITERATE run **safely, via git**: the agent edits the real files (fast — it reuses
+/// your `target/` cache for an incremental `cargo check`), but the harness tracks exactly
+/// which files it touches, and if the run ends **not green**, those files are `git checkout`-
+/// reverted. So a broken/truncated intermediate is never *left* on disk — either you get a
+/// verified change, or your files are restored to their committed state. (This replaces a
+/// full scratch copy, which would be painfully slow on a large repo.)
+///
+/// Verify runs on the HOST (`cargo check` needs the real toolchain); nothing is frozen.
+fn run_iterate(
+    cfg: UiConfig,
+    task: String,
+    workspace: PathBuf,
+    ev_tx: Sender<UiEvent>,
+    pending_tx: Sender<Pending>,
+) {
+    let backend = cfg.backend();
+    let advisor = cfg.advisor();
+    let registry = dc_tools::default_registry();
+    let strategy = dc_core::select_strategy(&backend.capabilities());
+    let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
+
+    let mut agent_cfg = cfg.agent_config(Some(confirmer));
+    agent_cfg.plan_first = false;
+    agent_cfg.sandbox = dc_verify::Sandbox::Host;
+    agent_cfg.permission.frozen_paths.clear();
+    agent_cfg.verify_command = iterate_verify_command(&cfg.verify_command, &workspace);
+    agent_cfg.max_steps = agent_cfg.max_steps.max(40);
+
+    let instruction = iterate_instruction(&task, &workspace);
+
+    // Files that already have uncommitted changes BEFORE this run. We must never auto-revert
+    // one of these (that would wipe the user's own work) — only files that were clean.
+    let dirty_at_start = git_dirty_files(&workspace);
+
+    // Track the files the agent edits (from the event stream), so on failure we revert
+    // exactly those — not the whole tree — leaving unrelated uncommitted work alone.
+    let edited: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        Default::default();
+    let edited_sink = edited.clone();
+    let ev_tx_sink = ev_tx.clone();
+    let sink = FnSink(move |e: &AgentEvent| {
+        if let AgentEvent::ToolCall { tool, arg } = e {
+            if matches!(
+                tool.as_str(),
+                "write_file" | "create_file" | "edit_file" | "append_file"
+            ) {
+                let p = arg.trim();
+                if !p.is_empty() {
+                    edited_sink.lock().unwrap().insert(p.replace('\\', "/"));
+                }
+            }
+        }
+        let _ = ev_tx_sink.send(UiEvent::Agent(e.clone()));
+    });
+    let result = dc_core::run_agent_observed(
+        &backend,
+        advisor.as_ref().map(|a| a as &dyn dc_model::ModelBackend),
+        &registry,
+        strategy.as_ref(),
+        &instruction,
+        &workspace,
+        &agent_cfg,
+        &sink,
+    );
+
+    let touched: Vec<String> = edited.lock().unwrap().iter().cloned().collect();
+
+    match result {
+        Ok(report) => {
+            let verified_ok = report.verified != Some(false);
+            let ok = report.finished && verified_ok;
+            let summary = if ok {
+                match report.verified {
+                    Some(true) => format!(
+                        "done — verify green in {} steps ({} file(s) changed)",
+                        report.steps,
+                        touched.len()
+                    ),
+                    _ => format!("done in {} steps", report.steps),
+                }
+            } else {
+                // FAILURE → revert the agent's mess. But ONLY files that were CLEAN before
+                // the run — reverting a file that already had uncommitted work would destroy
+                // it. Files that were already dirty when the agent touched them are left as-is
+                // and flagged so the user can sort them out.
+                let (safe, unsafe_dirty): (Vec<String>, Vec<String>) = touched
+                    .iter()
+                    .cloned()
+                    .partition(|f| !dirty_at_start.contains(f));
+                let reverted = git_revert_files(&workspace, &safe);
+                let base = match (report.finished, report.verified) {
+                    (true, Some(false)) => "stopped — the change didn't compile".to_string(),
+                    _ => format!(
+                        "stopped after {} steps without a clean result",
+                        report.steps
+                    ),
+                };
+                let revert_note = if !reverted && !safe.is_empty() {
+                    format!(
+                        " ⚠ couldn't auto-revert (not a git repo?) — check: {}.",
+                        safe.join(", ")
+                    )
+                } else if !safe.is_empty() {
+                    format!(" Reverted {} file(s) to committed state.", safe.len())
+                } else {
+                    " Your files are unchanged.".to_string()
+                };
+                let dirty_note = if unsafe_dirty.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " ⚠ {} file(s) had uncommitted changes and were NOT auto-reverted \
+                         (to protect your work) — please review: {}.",
+                        unsafe_dirty.len(),
+                        unsafe_dirty.join(", ")
+                    )
+                };
+                format!("{base}.{revert_note}{dirty_note}")
+            };
+            let _ = ev_tx.send(UiEvent::Done { ok, summary });
+        }
+        Err(e) => {
+            // A hard error mid-run: revert the files that were CLEAN before the run (never
+            // ones the user had uncommitted work in).
+            let safe: Vec<String> = touched
+                .iter()
+                .filter(|f| !dirty_at_start.contains(*f))
+                .cloned()
+                .collect();
+            git_revert_files(&workspace, &safe);
+            let _ = ev_tx.send(UiEvent::Failed(format!(
+                "iterate failed: {e} (reverted {} clean file(s))",
+                safe.len()
+            )));
+        }
+    }
+}
+
+/// The set of files with uncommitted changes in `workspace` (workspace-relative,
+/// `/`-separated), per `git status --porcelain`. Empty if the tree is clean or this isn't a
+/// git repo. Captured at run start so we know which files we must NOT auto-revert (reverting
+/// a file that was already dirty would destroy the user's uncommitted work).
+fn git_dirty_files(workspace: &Path) -> std::collections::BTreeSet<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("status")
+        .arg("--porcelain")
+        .output();
+    let mut set = std::collections::BTreeSet::new();
+    if let Ok(o) = out {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                // Porcelain: "XY <path>" (path starts at column 3); handle rename "-> ".
+                let path = line.get(3..).unwrap_or("").trim();
+                let path = path.rsplit(" -> ").next().unwrap_or(path);
+                if !path.is_empty() {
+                    set.insert(path.trim_matches('"').replace('\\', "/"));
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Revert `files` (workspace-relative) to their committed state via `git checkout --`.
+/// Returns true if git ran and reverted; false if this isn't a git repo or it failed. No-op
+/// (true) for an empty list.
+fn git_revert_files(workspace: &Path, files: &[String]) -> bool {
+    if files.is_empty() {
+        return true;
+    }
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("checkout")
+        .arg("--")
+        .args(files)
+        .output()
+    {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// The pytest default the from-scratch build ships with. In iterate mode this is a poor
+/// gate (existing projects are usually not fresh Python apps), so we treat leaving it as
+/// "unset" and pick a language-appropriate default instead.
+const PYTEST_DEFAULT: &str = "python -m pytest -q";
+
+/// Choose the verify command for an iterate run. If the user set an explicit command that
+/// isn't the pytest default, honor it. Otherwise detect the workspace language and pick a
+/// sensible gate: `cargo check` for a Rust project (fast, catches what a small model
+/// breaks), falling back to the pytest default only when nothing else is recognized.
+fn iterate_verify_command(configured: &Option<String>, workspace: &Path) -> Option<String> {
+    if let Some(cmd) = configured {
+        let c = cmd.trim();
+        if !c.is_empty() && c != PYTEST_DEFAULT {
+            return Some(c.to_string());
+        }
+    }
+    // No meaningful explicit command → detect the language from the workspace.
+    if workspace.join("Cargo.toml").is_file() {
+        return Some("cargo check".to_string());
+    }
+    if workspace.join("package.json").is_file() {
+        return Some("npm run build --if-present".to_string());
+    }
+    // Fall back to the configured value (or None) — e.g. a Python project keeps pytest.
+    configured.clone()
+}
+
+/// The instruction for an iterate run: the user's change, framed as an in-place edit of an
+/// existing project, with an overview of the files present so the agent edits them rather
+/// than recreating from scratch. Verifying with the configured command (e.g. `cargo check`)
+/// is called out so the model closes the loop.
+fn iterate_instruction(task: &str, workspace: &Path) -> String {
+    let overview = crate::config::repo_overview(workspace);
+    let overview_block = if overview.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{overview}")
+    };
+    format!(
+        "You are editing an EXISTING project in place. Make this change:\n\n{task}\n\n\
+         Work by reading the files that are relevant to the change, then editing them with \
+         edit_file (or write_file for a new file). Do NOT recreate the project from scratch \
+         and do NOT rewrite unrelated files. When you believe the change is complete, use \
+         run_verification to confirm it still compiles/passes; keep editing until it is \
+         green, then finish.{overview_block}"
+    )
 }
 
 /// Build the orchestrator/worker/advisor backends and drive a swarm run, forwarding
@@ -472,6 +711,84 @@ mod tests {
     use super::*;
     use dc_core::AgentEvent;
 
+    /// Run a git command in `dir`, ignoring failures (test setup).
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output();
+    }
+
+    #[test]
+    fn git_revert_restores_a_clean_file_and_dirty_detection_protects_uncommitted() {
+        // Build a tiny real git repo to exercise the safety helpers end to end.
+        let dir = std::env::temp_dir().join(format!("dc-git-safe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.email", "t@t"]);
+        git(&dir, &["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "committed-a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "committed-b\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+
+        // Tree is clean now.
+        assert!(git_dirty_files(&dir).is_empty(), "clean after commit");
+
+        // User has uncommitted work in b.txt; a.txt is clean.
+        std::fs::write(dir.join("b.txt"), "MY UNCOMMITTED WORK\n").unwrap();
+        let dirty = git_dirty_files(&dir);
+        assert!(dirty.contains("b.txt"), "b.txt seen dirty: {dirty:?}");
+        assert!(!dirty.contains("a.txt"), "a.txt still clean");
+
+        // Simulate the agent breaking BOTH files.
+        std::fs::write(dir.join("a.txt"), "BROKEN-a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "BROKEN-b\n").unwrap();
+
+        // On failure we revert ONLY the file that was clean (a.txt), never b.txt.
+        let touched = ["a.txt".to_string(), "b.txt".to_string()];
+        let safe: Vec<String> = touched
+            .iter()
+            .filter(|f| !dirty.contains(*f))
+            .cloned()
+            .collect();
+        assert_eq!(
+            safe,
+            vec!["a.txt".to_string()],
+            "only the clean file is safe"
+        );
+        assert!(git_revert_files(&dir, &safe));
+
+        // a.txt restored to committed; b.txt's uncommitted work is UNTOUCHED (not reverted).
+        // (Compare trimmed — git may normalize line endings on Windows checkout.)
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap().trim(),
+            "committed-a",
+            "clean file reverted to committed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap().trim(),
+            "BROKEN-b",
+            "dirty file left as-is (its uncommitted work not destroyed by a blind revert)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_helpers_are_safe_outside_a_repo() {
+        let dir = std::env::temp_dir().join(format!("dc-nogit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not a git repo → dirty set empty, revert reports false (caller warns).
+        assert!(git_dirty_files(&dir).is_empty());
+        assert!(!git_revert_files(&dir, &["x.txt".to_string()]));
+        // Empty list is a no-op success.
+        assert!(git_revert_files(&dir, &[]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A spawned agent run against an unreachable backend still streams a terminal
     /// `UiEvent` (Failed) rather than hanging — the UI always learns the run ended.
     #[test]
@@ -533,6 +850,64 @@ mod tests {
     fn py_only_verify_is_scoped() {
         let cmd = combined_verify_command(&["test_app.py".to_string()]);
         assert_eq!(cmd, "python -m pytest -q 'test_app.py'");
+    }
+
+    #[test]
+    fn iterate_verify_prefers_cargo_check_for_a_rust_workspace() {
+        let dir = std::env::temp_dir().join(format!("dc-win-iv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+
+        // The pytest default is treated as unset ⇒ detect Rust ⇒ cargo check.
+        let cmd = iterate_verify_command(&Some(PYTEST_DEFAULT.to_string()), &dir);
+        assert_eq!(cmd.as_deref(), Some("cargo check"));
+
+        // An explicit, non-default command is always honored (e.g. scoping to the game crate).
+        let explicit = iterate_verify_command(&Some("cargo check -p city".to_string()), &dir);
+        assert_eq!(explicit.as_deref(), Some("cargo check -p city"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iterate_verify_falls_back_when_no_language_detected() {
+        let dir = std::env::temp_dir().join(format!("dc-win-iv-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No Cargo.toml / package.json, pytest default ⇒ keep the configured (pytest) value.
+        let cmd = iterate_verify_command(&Some(PYTEST_DEFAULT.to_string()), &dir);
+        assert_eq!(cmd.as_deref(), Some(PYTEST_DEFAULT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iterate_instruction_frames_an_in_place_edit_with_overview() {
+        // A workspace with a file present ⇒ the instruction carries the overview so the
+        // agent edits existing files rather than starting from scratch.
+        let dir = std::env::temp_dir().join(format!("dc-win-iter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/city/src")).unwrap();
+        std::fs::write(dir.join("crates/city/src/main.rs"), "fn main() {}").unwrap();
+
+        let instr = iterate_instruction("rename the window title", &dir);
+        assert!(
+            instr.contains("EXISTING project"),
+            "framed as in-place: {instr}"
+        );
+        assert!(
+            instr.contains("rename the window title"),
+            "carries the task: {instr}"
+        );
+        assert!(
+            instr.contains("crates/city/src/main.rs"),
+            "carries the file overview: {instr}"
+        );
+        assert!(
+            instr.contains("run_verification"),
+            "tells the model to verify: {instr}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -7,15 +7,24 @@
 
 pub mod board;
 pub mod bridge;
+pub mod chat;
+pub mod chat_session;
+pub mod codeview;
 pub mod config;
+pub mod filetree;
+pub mod linecomment;
+pub mod persist;
 pub mod plan;
 pub mod session;
 pub mod topology;
 pub mod view;
+pub mod welcome;
 
 pub use board::{BoardRow, SubtaskStatus, SwarmBoard};
 pub use bridge::{ChannelConfirmer, ChannelGate, Pending};
+pub use codeview::{file_touched_by, is_mutating_touch, CodeView};
 pub use config::{ToolCalling, UiConfig};
+pub use filetree::{build_rows, TreeRow};
 pub use plan::{Plan, PlanStep};
 pub use session::{RunKind, Session, UiEvent};
 pub use topology::{Coder, CoderState, Flow, Peer, Topology};
