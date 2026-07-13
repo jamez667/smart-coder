@@ -116,6 +116,15 @@ pub struct AgentConfig {
     /// extra suite run + model call per stall, so it ships dark and is enabled once proven
     /// on the ladder. Bounded by `DIAGNOSIS_LIMIT` and gated on a configured verify command.
     pub diagnose: bool,
+    /// Stream each turn's generation, emitting [`AgentEvent::ContentDelta`] per token so a UI
+    /// can show the reply — including a file edit being written — appear live, word by word.
+    /// Off by default (the blocking `generate` path); the GUI's iterate/fix runs turn it on.
+    pub stream: bool,
+    /// Cooperative cancellation: when set and flipped to `true`, the loop stops at the next
+    /// turn boundary with `StopReason::Cancelled` (it can't interrupt an in-flight model call,
+    /// but won't start another). The GUI's Cancel button flips this. `Arc` keeps
+    /// `AgentConfig: Clone` and lets the flag cross to the worker thread.
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -172,6 +181,8 @@ impl Default for AgentConfig {
             confirmer: None,
             sandbox: dc_verify::Sandbox::default(),
             diagnose: false,
+            stream: false,
+            cancel: None,
         }
     }
 }
@@ -414,6 +425,28 @@ pub fn run_agent_observed(
     let mut session_allow: Vec<String> = Vec::new();
 
     for step in 0..cfg.max_steps {
+        // Cooperative cancel: if the user hit Cancel, stop cleanly at this turn boundary
+        // (we can't interrupt an in-flight model call, but we won't start another).
+        if cfg
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            sink.record(&AgentEvent::Stopped {
+                reason: StopReason::Cancelled,
+            });
+            return Ok(AgentReport {
+                finished: false,
+                steps: step,
+                metrics,
+                peak_prompt_tokens,
+                prompt_budget: budget,
+                verified: None,
+                change_summary: journal.change_summary(),
+                stop_reason: StopReason::Cancelled,
+                interventions,
+            });
+        }
         // Compact older turns; keep the recent ones verbatim.
         let (older, _recent_records) =
             dc_context::split_for_compaction(&history, cfg.keep_recent_turns);
@@ -516,7 +549,23 @@ pub fn run_agent_observed(
 
         let mut req = GenerateRequest::new(built.messages);
         strategy.prepare_request(&mut req, registry);
-        let resp = backend.generate(&req)?;
+        // Stream the turn when enabled, emitting a ContentDelta per token so a UI can show the
+        // reply (incl. a file edit being written) appear live. Falls back to blocking generate
+        // when off. Streaming is pure observation — the decode/apply path below is unchanged.
+        let resp = if cfg.stream {
+            let step_num = step + 1;
+            let mut cumulative = String::new();
+            let mut on_token = |delta: &str| {
+                cumulative.push_str(delta);
+                sink.record(&AgentEvent::ContentDelta {
+                    step: step_num,
+                    cumulative: cumulative.clone(),
+                });
+            };
+            backend.generate_streaming(&req, &mut on_token)?
+        } else {
+            backend.generate(&req)?
+        };
         // Emit the model's full raw output for this turn (spec 06 — show what the
         // model actually said).
         sink.record(&AgentEvent::ModelTurn {
@@ -609,7 +658,9 @@ pub fn run_agent_observed(
                         }
                     }
                 } else if call.name == "read_file"
-                    && pinned_full_files.iter().any(|f| Some(f.as_str()) == call.str("path"))
+                    && pinned_full_files
+                        .iter()
+                        .any(|f| Some(f.as_str()) == call.str("path"))
                 {
                     // Short-circuit a read of a file whose CURRENT contents are already pinned
                     // in this turn's prompt (the focus file or an imported one). The model
@@ -1115,8 +1166,10 @@ fn gather_sources(workspace: &Path) -> Vec<crate::diagnose::SourceFile> {
         .into_iter()
         .filter_map(|rel| {
             let contents = std::fs::read_to_string(workspace.join(&rel)).ok()?;
-            (contents.len() <= MAX_BYTES)
-                .then(|| crate::diagnose::SourceFile { path: rel, contents })
+            (contents.len() <= MAX_BYTES).then(|| crate::diagnose::SourceFile {
+                path: rel,
+                contents,
+            })
         })
         .collect()
 }
@@ -1386,7 +1439,10 @@ fn pre_apply_batched_writes(
         };
         // Respect the permission gate (e.g. frozen test files are never written).
         if let Some(spec) = registry.get(&call.name) {
-            if matches!(policy.check(call, spec.side_effect), dc_tools::Decision::Deny(_)) {
+            if matches!(
+                policy.check(call, spec.side_effect),
+                dc_tools::Decision::Deny(_)
+            ) {
                 continue;
             }
         }
@@ -1517,7 +1573,9 @@ fn imported_files(workspace: &Path, focus: &[String]) -> Vec<String> {
             let mods: Vec<&str> = if let Some(rest) = t.strip_prefix("from ") {
                 rest.split_whitespace().next().into_iter().collect()
             } else if let Some(rest) = t.strip_prefix("import ") {
-                rest.split(',').map(|m| m.split_whitespace().next().unwrap_or("")).collect()
+                rest.split(',')
+                    .map(|m| m.split_whitespace().next().unwrap_or(""))
+                    .collect()
             } else {
                 continue;
             };
@@ -1646,7 +1704,9 @@ fn render_context_files(workspace: &Path, files: &[String]) -> String {
     for f in files {
         if let Ok(content) = std::fs::read_to_string(workspace.join(f)) {
             any = true;
-            s.push_str(&format!("\n--- {f} (read-only) ---\n{content}\n--- end {f} ---\n"));
+            s.push_str(&format!(
+                "\n--- {f} (read-only) ---\n{content}\n--- end {f} ---\n"
+            ));
         }
     }
     if any {
@@ -1791,7 +1851,10 @@ mod tests {
             "the underlying exception must survive truncation"
         );
         // And the tight log cap would have been at risk — document the contrast.
-        assert_eq!(observation_cap_for("run_verification", &cfg), cfg.read_file_line_cap);
+        assert_eq!(
+            observation_cap_for("run_verification", &cfg),
+            cfg.read_file_line_cap
+        );
     }
 
     #[test]
@@ -1924,7 +1987,14 @@ mod tests {
             ..AgentConfig::default()
         };
         run_agent_observed(
-            &backend, None, &registry, strategy.as_ref(), "fix it", &ws, &cfg, &sink,
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "fix it",
+            &ws,
+            &cfg,
+            &sink,
         )
         .unwrap();
 
@@ -1983,7 +2053,14 @@ mod tests {
                 ..AgentConfig::default()
             };
             run_agent_observed(
-                &backend, None, &registry, strategy.as_ref(), "x", &ws, &cfg, &sink,
+                &backend,
+                None,
+                &registry,
+                strategy.as_ref(),
+                "x",
+                &ws,
+                &cfg,
+                &sink,
             )
             .unwrap();
             let n = events
@@ -2026,7 +2103,14 @@ mod tests {
             ..AgentConfig::default()
         };
         run_agent_observed(
-            &backend, None, &registry, strategy.as_ref(), "edit app.py", &ws, &cfg, &sink,
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "edit app.py",
+            &ws,
+            &cfg,
+            &sink,
         )
         .unwrap();
 
@@ -2067,7 +2151,7 @@ mod tests {
         std::fs::write(ws.join("store.py"), "").unwrap();
         std::fs::write(ws.join("service.py"), "").unwrap();
         std::fs::write(ws.join("pkg.py"), "").unwrap(); // `from pkg.sub` → top-level pkg.py
-        // missingmod has no file → not resolved.
+                                                        // missingmod has no file → not resolved.
         let mut got = imported_files(&ws, &["app.py".to_string()]);
         got.sort();
         assert_eq!(got, vec!["pkg.py", "service.py", "store.py"]);
@@ -2111,7 +2195,14 @@ mod tests {
             ..AgentConfig::default()
         };
         run_agent_observed(
-            &backend, None, &registry, strategy.as_ref(), "edit app.py", &ws, &cfg, &sink,
+            &backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            "edit app.py",
+            &ws,
+            &cfg,
+            &sink,
         )
         .unwrap();
 
@@ -2131,7 +2222,10 @@ mod tests {
             .expect("a verbose run emits the assembled prompt");
 
         // The focused file's full body IS shown.
-        assert!(prompt.contains("def handler():"), "focus file body must be pinned");
+        assert!(
+            prompt.contains("def handler():"),
+            "focus file body must be pinned"
+        );
         // The IMPORTED file (store) is shown IN FULL — app.py does `from store import add`.
         assert!(
             prompt.contains("IMPORTED_BODY_MARKER"),
@@ -2142,7 +2236,10 @@ mod tests {
             !prompt.contains("UNIMPORTED_BODY_MARKER"),
             "an unimported file's body must NOT be pinned (signature only): {prompt}"
         );
-        assert!(prompt.contains("util.py:"), "the unimported file appears as a signature");
+        assert!(
+            prompt.contains("util.py:"),
+            "the unimported file appears as a signature"
+        );
         // The prompt frames the imported files as read-only context.
         assert!(prompt.contains("IMPORTS FROM"));
         let _ = std::fs::remove_dir_all(&ws);

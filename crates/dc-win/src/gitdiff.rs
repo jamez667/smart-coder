@@ -93,6 +93,89 @@ pub fn file_changed_lines(workspace: &Path, rel: &str) -> BTreeSet<usize> {
     }
 }
 
+/// A file's working-tree status vs HEAD, for the PR-style file tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    /// New / untracked (GitHub green "A").
+    Added,
+    /// Modified (amber "M").
+    Modified,
+    /// Deleted (red "D").
+    Deleted,
+}
+
+impl FileStatus {
+    /// The single-letter badge (A/M/D).
+    pub fn badge(self) -> &'static str {
+        match self {
+            FileStatus::Added => "A",
+            FileStatus::Modified => "M",
+            FileStatus::Deleted => "D",
+        }
+    }
+}
+
+/// Parse `git status --porcelain` into a map of workspace-relative path → [`FileStatus`].
+/// The XY code: `??` = untracked (Added), any `D` = Deleted, else Modified. Handles rename
+/// (`R  old -> new`) by marking the new path Modified.
+pub fn parse_status(porcelain: &str) -> std::collections::BTreeMap<String, FileStatus> {
+    let mut map = std::collections::BTreeMap::new();
+    for line in porcelain.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let code = &line[..2];
+        let path = line[3..].trim();
+        let path = path.rsplit(" -> ").next().unwrap_or(path);
+        let path = path.trim_matches('"').replace('\\', "/");
+        if path.is_empty() {
+            continue;
+        }
+        let status = if code == "??" || code.contains('A') {
+            FileStatus::Added
+        } else if code.contains('D') {
+            FileStatus::Deleted
+        } else {
+            FileStatus::Modified
+        };
+        map.insert(path, status);
+    }
+    map
+}
+
+/// The working-tree status of every changed file in `workspace` (path → status). Empty if the
+/// tree is clean or git isn't present.
+pub fn statuses(workspace: &Path) -> std::collections::BTreeMap<String, FileStatus> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["status", "--porcelain"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => parse_status(&String::from_utf8_lossy(&o.stdout)),
+        _ => std::collections::BTreeMap::new(),
+    }
+}
+
+/// The current branch name (e.g. `main`), or `None` if detached / not a git repo.
+pub fn current_branch(workspace: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() || name == "HEAD" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 /// The raw `git diff` for `files` in `workspace` (with content lines), for content analysis
 /// like [`is_comment_only_change`]. Empty string if git isn't present / nothing changed.
 pub fn files_diff(workspace: &Path, files: &[String]) -> String {
@@ -204,5 +287,25 @@ diff --git a/x b/x
     fn block_comment_lines_count_as_comments() {
         let diff = "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n+/* a block\n+ * comment\n+ */\n";
         assert!(is_comment_only_change(diff));
+    }
+
+    #[test]
+    fn parse_status_maps_added_modified_deleted() {
+        let porcelain = "\
+?? new.rs
+ M edited.rs
+ D gone.rs
+R  old.rs -> renamed.rs
+";
+        let m = parse_status(porcelain);
+        assert_eq!(m.get("new.rs"), Some(&FileStatus::Added));
+        assert_eq!(m.get("edited.rs"), Some(&FileStatus::Modified));
+        assert_eq!(m.get("gone.rs"), Some(&FileStatus::Deleted));
+        assert_eq!(
+            m.get("renamed.rs"),
+            Some(&FileStatus::Modified),
+            "rename → new path"
+        );
+        assert_eq!(FileStatus::Added.badge(), "A");
     }
 }

@@ -57,6 +57,11 @@ pub enum AgentEvent {
         prompt_tokens: usize,
         raw: String,
     },
+    /// A token delta as the model generates the current turn (only emitted when streaming is
+    /// enabled via `AgentConfig::stream`). Lets a UI show the turn — including a file edit
+    /// being written — appear live, word by word. `cumulative` is the full text so far this
+    /// turn, so a renderer can just replace its preview rather than concatenate.
+    ContentDelta { step: usize, cumulative: String },
     /// A valid tool call was decoded and is about to run (shown before it runs,
     /// spec 06). `arg` is the key argument (path/query/command), for a tight line.
     ToolCall { tool: String, arg: String },
@@ -182,14 +187,21 @@ impl<W: Write> TranscriptSink<W> {
     /// surface in a prompt transcript — e.g. `ToolCall`, which is implied by the reply).
     fn render(event: &AgentEvent) -> String {
         match event {
-            AgentEvent::RunStarted { task, prompt_budget } => {
+            AgentEvent::RunStarted {
+                task,
+                prompt_budget,
+            } => {
                 let head: String = task.chars().take(120).collect();
                 format!(
                     "\n\n========================= NEW RUN =========================\n\
                      task: {head}\nprompt_budget: {prompt_budget}\n"
                 )
             }
-            AgentEvent::PromptAssembled { step, tokens, messages } => {
+            AgentEvent::PromptAssembled {
+                step,
+                tokens,
+                messages,
+            } => {
                 let mut s = format!(
                     "\n---------------- TURN {step} — ASSEMBLED PROMPT ({tokens} tokens) ----------------\n"
                 );
@@ -202,7 +214,11 @@ impl<W: Write> TranscriptSink<W> {
                 format!("\n>>> TURN {step} — MODEL REPLY:\n{raw}\n")
             }
             AgentEvent::ToolResult { full, is_error, .. } => {
-                let tag = if *is_error { "OBSERVATION (error)" } else { "OBSERVATION" };
+                let tag = if *is_error {
+                    "OBSERVATION (error)"
+                } else {
+                    "OBSERVATION"
+                };
                 format!("<<< {tag}:\n{full}\n")
             }
             AgentEvent::Verification { green, full, .. } => {
@@ -217,10 +233,12 @@ impl<W: Write> TranscriptSink<W> {
                 format!("** DIAGNOSIS ({trigger}):\n{report}\n")
             }
             AgentEvent::Stopped { reason } => format!("** STOPPED: {reason:?}\n"),
-            // Not surfaced in a prompt transcript (covered by the reply / prompt blocks).
+            // Not surfaced in a prompt transcript (covered by the reply / prompt blocks; a
+            // ContentDelta is just the live-view increment of the ModelTurn reply).
             AgentEvent::ToolCall { .. }
             | AgentEvent::Planned { .. }
-            | AgentEvent::PlanRevised { .. } => String::new(),
+            | AgentEvent::PlanRevised { .. }
+            | AgentEvent::ContentDelta { .. } => String::new(),
         }
     }
 }
@@ -371,8 +389,14 @@ mod tests {
                 step: 1,
                 tokens: 790,
                 messages: vec![
-                    PromptMessage { role: "system".into(), content: "you are an agent".into() },
-                    PromptMessage { role: "user".into(), content: "write store.py".into() },
+                    PromptMessage {
+                        role: "system".into(),
+                        content: "you are an agent".into(),
+                    },
+                    PromptMessage {
+                        role: "user".into(),
+                        content: "write store.py".into(),
+                    },
                 ],
             });
             sink.record(&AgentEvent::ModelTurn {
@@ -386,8 +410,13 @@ mod tests {
                 is_error: false,
             });
             // A ToolCall is intentionally NOT surfaced (implied by the reply).
-            sink.record(&AgentEvent::ToolCall { tool: "write_file".into(), arg: "store.py".into() });
-            sink.record(&AgentEvent::Stopped { reason: StopReason::Finished });
+            sink.record(&AgentEvent::ToolCall {
+                tool: "write_file".into(),
+                arg: "store.py".into(),
+            });
+            sink.record(&AgentEvent::Stopped {
+                reason: StopReason::Finished,
+            });
         }
         let text = String::from_utf8(buf).unwrap();
         // The assembled prompt (both roles) is present verbatim — the whole point.

@@ -160,6 +160,7 @@ fn status_color(state: &TuiState) -> Color {
         Some(Finished) => Color::Green,
         Some(BudgetExhausted) => Color::Yellow,
         Some(Stalled(_)) | Some(Escalated(_)) => Color::Yellow,
+        Some(Cancelled) => Color::Yellow,
     }
 }
 

@@ -10,6 +10,7 @@ pub mod bridge;
 pub mod chat;
 pub mod chat_session;
 pub mod codeview;
+pub mod comments;
 pub mod config;
 pub mod filetree;
 pub mod gitdiff;

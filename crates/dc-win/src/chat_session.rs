@@ -45,9 +45,10 @@ impl ChatSession {
             // Stream tokens live (the "watch it type" effect); on completion send the full
             // Reply so the app can parse plan-file blocks / strip <think> from the whole text.
             let tok_tx = tx.clone();
-            let result = backend.generate_streaming(&req, |delta| {
+            let mut on_token = |delta: &str| {
                 let _ = tok_tx.send(ChatEvent::Token(delta.to_string()));
-            });
+            };
+            let result = backend.generate_streaming(&req, &mut on_token);
             match result {
                 Ok(resp) => {
                     let _ = tx.send(ChatEvent::Reply(resp.content));

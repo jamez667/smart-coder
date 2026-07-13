@@ -96,6 +96,125 @@ pub fn from_text(rel: &str, text: &str) -> CodeView {
     }
 }
 
+/// A live preview extracted from a *partial* streamed tool call: the file being written and
+/// the content produced so far. Used to show a `write_file`/`edit_file` appear word-by-word
+/// in the code view before the call completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditPreview {
+    /// The target file path, if it's been emitted yet.
+    pub file: Option<String>,
+    /// The in-progress new content (the `new_str` / `content` / code-fence body so far).
+    pub content: String,
+}
+
+/// Extract a live edit preview from the model's growing turn text `cumulative`. Handles the
+/// two shapes a small coder emits: a JSON tool call (`"path": "...", "new_str"/"content": "…`)
+/// and a plain code fence (```lang\n…). Returns `None` until there's a file path or content
+/// worth showing. Best-effort and tolerant of half-written JSON — it just shows what's there.
+pub fn partial_edit_preview(cumulative: &str) -> Option<EditPreview> {
+    // The file path: first "path": "…" (may be unterminated).
+    let file = json_string_after(cumulative, "\"path\"");
+    // The content: whatever follows the LAST of new_str/content/append content key; if the
+    // closing quote hasn't streamed yet we take the rest of the buffer (unescaped).
+    let content = json_string_after_open(cumulative, "\"new_str\"")
+        .or_else(|| json_string_after_open(cumulative, "\"content\""))
+        .or_else(|| code_fence_body(cumulative));
+    match (file, content) {
+        (None, None) => None,
+        (file, content) => Some(EditPreview {
+            file,
+            content: content.unwrap_or_default(),
+        }),
+    }
+}
+
+/// The fully-quoted string value after `key` (`key" : "value"`), unescaped. `None` if the
+/// value's closing quote hasn't arrived yet.
+fn json_string_after(s: &str, key: &str) -> Option<String> {
+    let (rest, _) = open_value(s, key)?;
+    let end = find_unescaped_quote(rest)?;
+    Some(unescape(&rest[..end]))
+}
+
+/// The string value after `key`, taking everything up to the closing quote OR the end of the
+/// buffer if it hasn't streamed yet (so a still-writing value previews live). Unescaped.
+fn json_string_after_open(s: &str, key: &str) -> Option<String> {
+    let (rest, _) = open_value(s, key)?;
+    let body = match find_unescaped_quote(rest) {
+        Some(end) => &rest[..end],
+        None => rest, // value still streaming
+    };
+    Some(unescape(body))
+}
+
+/// Advance past `key`, its `:`, and the opening quote of the value; return the remainder
+/// (the value's body, possibly unterminated) — the LAST occurrence of `key` wins so a retry
+/// or later field is what we preview.
+fn open_value<'a>(s: &'a str, key: &str) -> Option<(&'a str, usize)> {
+    let idx = s.rfind(key)?;
+    let after = &s[idx + key.len()..];
+    let colon = after.find(':')?;
+    let after_colon = &after[colon + 1..];
+    let q = after_colon.find('"')?;
+    Some((&after_colon[q + 1..], idx))
+}
+
+/// Index of the first unescaped `"` in `s` (the JSON string terminator).
+fn find_unescaped_quote(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2, // skip the escaped char
+            b'"' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Unescape the common JSON string escapes a model emits (`\n \t \" \\`).
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The body of a plain code fence (```lang\n…), for a model that "thinks out loud" and writes
+/// the file as a fenced block instead of JSON. Takes everything after the opening fence's
+/// newline, up to a closing ``` or the end of the buffer.
+fn code_fence_body(s: &str) -> Option<String> {
+    let open = s.find("```")?;
+    let after = &s[open + 3..];
+    let nl = after.find('\n')?; // skip the info string line
+    let body = &after[nl + 1..];
+    let end = body.find("```").unwrap_or(body.len());
+    let body = &body[..end];
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(body.to_string())
+    }
+}
+
 /// If this event is a tool call that *touches a file*, return the workspace-relative
 /// path it touched — so the code pane can follow the agent to it. Covers the file-bearing
 /// tools (read/write/edit/create); returns `None` for everything else.
@@ -173,6 +292,36 @@ mod tests {
         let cv = load(&dir, "blob.bin");
         assert_eq!(cv.note.as_deref(), Some("(binary file — not shown)"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partial_edit_preview_extracts_growing_content() {
+        // A write_file JSON whose content is still streaming (no closing quote yet).
+        let partial = r#"{"tool":"write_file","path":"src/a.rs","content":"fn main() {\n    let x"#;
+        let p = partial_edit_preview(partial).unwrap();
+        assert_eq!(p.file.as_deref(), Some("src/a.rs"));
+        assert_eq!(p.content, "fn main() {\n    let x", "unescaped, live");
+    }
+
+    #[test]
+    fn partial_edit_preview_handles_new_str_and_completed_value() {
+        let done = r#"{"tool":"edit_file","path":"x.rs","old_str":"a","new_str":"b\nc"}"#;
+        let p = partial_edit_preview(done).unwrap();
+        assert_eq!(p.file.as_deref(), Some("x.rs"));
+        assert_eq!(p.content, "b\nc");
+    }
+
+    #[test]
+    fn partial_edit_preview_reads_a_code_fence() {
+        let fence = "Sure:\n```rust\nfn main() {}\n";
+        let p = partial_edit_preview(fence).unwrap();
+        assert!(p.content.contains("fn main() {}"), "{:?}", p.content);
+    }
+
+    #[test]
+    fn partial_edit_preview_none_before_anything_useful() {
+        assert!(partial_edit_preview("{\"tool\":\"wri").is_none());
+        assert!(partial_edit_preview("").is_none());
     }
 
     #[test]

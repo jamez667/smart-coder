@@ -121,6 +121,21 @@ pub trait ModelBackend {
     fn capabilities(&self) -> Capabilities;
     /// Produce a single assistant turn for the request.
     fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse>;
+    /// Like [`generate`], but invokes `on_token` with each content delta as it is produced
+    /// (for a live "watch it type" view). The default falls back to a blocking `generate`
+    /// and delivers the whole result as one delta — so a backend that can't stream still
+    /// works, just without the incremental view. A real HTTP backend overrides this with SSE.
+    ///
+    /// [`generate`]: ModelBackend::generate
+    fn generate_streaming(
+        &self,
+        req: &GenerateRequest,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<GenerateResponse> {
+        let resp = self.generate(req)?;
+        on_token(&resp.content);
+        Ok(resp)
+    }
     /// Exact token count for `text`, when the backend has a tokenizer (spec 02).
     /// `None` means "no exact count available" — the Context Manager then falls
     /// back to a heuristic estimator with a safety margin (spec 05). Defaulted so

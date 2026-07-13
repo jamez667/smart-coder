@@ -71,6 +71,9 @@ pub enum RunKind {
 pub struct Session {
     events: Receiver<UiEvent>,
     pending: Receiver<Pending>,
+    /// Cooperative cancel flag shared with the run: `cancel()` flips it and the agent loop
+    /// stops at its next turn boundary.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _handle: thread::JoinHandle<()>,
 }
 
@@ -81,6 +84,8 @@ impl Session {
     pub fn spawn(kind: RunKind, cfg: UiConfig, task: String, workspace: PathBuf) -> Self {
         let (ev_tx, ev_rx) = std::sync::mpsc::channel();
         let (pending_tx, pending_rx) = crate::bridge::pending_channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_worker = cancel.clone();
 
         let handle = thread::spawn(move || match kind {
             RunKind::Agent => run_agent(cfg, task, workspace, ev_tx, pending_tx),
@@ -89,14 +94,21 @@ impl Session {
             RunKind::SequentialBuild => {
                 run_sequential_build(cfg, task, workspace, ev_tx, pending_tx)
             }
-            RunKind::Iterate => run_iterate(cfg, task, workspace, ev_tx, pending_tx),
+            RunKind::Iterate => run_iterate(cfg, task, workspace, ev_tx, pending_tx, cancel_worker),
         });
 
         Self {
             events: ev_rx,
             pending: pending_rx,
+            cancel,
             _handle: handle,
         }
+    }
+
+    /// Request cancellation: the agent loop stops at its next turn boundary. Idempotent.
+    pub fn cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Non-blocking drain of any events that have arrived since the last call.
@@ -174,6 +186,7 @@ fn run_iterate(
     workspace: PathBuf,
     ev_tx: Sender<UiEvent>,
     pending_tx: Sender<Pending>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let backend = cfg.backend();
     let advisor = cfg.advisor();
@@ -187,6 +200,10 @@ fn run_iterate(
     agent_cfg.permission.frozen_paths.clear();
     agent_cfg.verify_command = iterate_verify_command(&cfg.verify_command, &workspace);
     agent_cfg.max_steps = agent_cfg.max_steps.max(40);
+    // Stream the generation so the GUI can show the edit being written live (word for word).
+    agent_cfg.stream = true;
+    // Wire the Cancel button's flag so the loop can stop between turns.
+    agent_cfg.cancel = Some(cancel);
 
     let instruction = iterate_instruction(&task, &workspace);
 

@@ -66,6 +66,7 @@ impl TuiState {
             Some(StopReason::BudgetExhausted) => "⏹ stopped — step budget exhausted".to_string(),
             Some(StopReason::Stalled(why)) => format!("⚠ stalled — {why}"),
             Some(StopReason::Escalated(q)) => format!("⤴ escalated — {q}"),
+            Some(StopReason::Cancelled) => "⏹ cancelled".to_string(),
         }
     }
 
@@ -161,6 +162,8 @@ impl TuiState {
                 self.stop = Some(reason.clone());
                 self.push(LineKind::Stop, format!("■ {}", self.status_line()));
             }
+            // The live streaming increment isn't a discrete TUI line.
+            AgentEvent::ContentDelta { .. } => {}
         }
     }
 

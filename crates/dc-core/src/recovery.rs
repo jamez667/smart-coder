@@ -23,6 +23,9 @@ pub enum StopReason {
     Stalled(String),
     /// Escalated to the advisor and still could not proceed (or no advisor).
     Escalated(String),
+    /// The user cancelled the run (via the GUI Cancel button). The loop stopped at a turn
+    /// boundary; any partial edits are handled by the caller (the GUI reverts them).
+    Cancelled,
 }
 
 impl StopReason {

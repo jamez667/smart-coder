@@ -151,12 +151,12 @@ impl OpenAiBackend {
     /// full concatenated text at the end (so callers get the same result as `generate` plus a
     /// live view). This is what powers the "watch it type" UI.
     ///
-    /// Deliberately an inherent method (not on the trait) so it only exists where a real HTTP
-    /// server can stream; the agent loop still uses the blocking `generate`.
+    /// The real SSE implementation of [`ModelBackend::generate_streaming`] (kept as an
+    /// inherent method too so existing callers with a concrete `OpenAiBackend` keep working).
     pub fn generate_streaming(
         &self,
         req: &GenerateRequest,
-        mut on_token: impl FnMut(&str),
+        on_token: &mut dyn FnMut(&str),
     ) -> Result<GenerateResponse> {
         use std::io::BufRead;
 
@@ -331,6 +331,15 @@ impl ModelBackend for OpenAiBackend {
 
     fn capabilities(&self) -> Capabilities {
         self.caps.clone()
+    }
+
+    fn generate_streaming(
+        &self,
+        req: &GenerateRequest,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<GenerateResponse> {
+        // Route the trait method to the real SSE implementation (the inherent method).
+        OpenAiBackend::generate_streaming(self, req, on_token)
     }
 
     fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse> {

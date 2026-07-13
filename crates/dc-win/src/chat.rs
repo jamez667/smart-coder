@@ -179,17 +179,21 @@ impl Conversation {
             ),
         }
         s.push_str(
-            "CRITICAL — answering vs. editing:\n\
-             • A QUESTION (\"what's next?\", \"which is smallest?\", \"why did we…?\", \
-             \"what do you think of…?\") → reply in PLAIN PROSE only. Do NOT output a file \
-             block. Just answer.\n\
-             • An EDIT REQUEST (\"add X to the todo\", \"remove Y\", \"update the readme to…\", \
-             \"reprioritize\") → output the FULL new contents of the affected file in a fenced \
-             block whose info string is `file:<name>`, e.g.\n\
+            "CRITICAL — three cases:\n\
+             • A CODE-CHANGE request (\"shorten this comment\", \"rename X\", \"fix this \
+             function\", \"change the code to…\") → you CANNOT edit source code from this chat; \
+             it only edits the plan (README/TODO). Reply in prose telling the user: to change \
+             code, select the lines in the code view on the right and comment on them. Do NOT \
+             edit the TODO/README for a code request.\n\
+             • A QUESTION about the plan (\"what's next?\", \"which is smallest?\", \"why did \
+             we…?\") → reply in PLAIN PROSE only. No file block.\n\
+             • A PLAN-EDIT request (\"add X to the todo\", \"remove Y\", \"update the readme \
+             to…\", \"reprioritize\") → output the FULL new contents of the affected plan file \
+             in a fenced block whose info string is `file:<name>`, e.g.\n\
              ```file:TODO.md\n- [ ] first task\n- [ ] second task\n```\n\
-             Default to PROSE. Only produce a file block when the user clearly asked you to \
-             CHANGE a plan file. When unsure, answer in prose and ask if they want it written \
-             down. Never reply with a file block and no prose.\n\n",
+             Default to PROSE. Only produce a file block for a clear PLAN-file change (README/\
+             TODO). When unsure, answer in prose and ask. Never reply with a file block and no \
+             prose.\n\n",
         );
         // Channel any reasoning into <think> tags so the user sees only the conclusion —
         // thinking is welcome (it makes the plan better), but it must not be the visible

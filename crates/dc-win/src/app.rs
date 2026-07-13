@@ -173,6 +173,44 @@ fn section(label: &str) -> iced::widget::Text<'_> {
     text(label).size(12).color(FG_MUTED)
 }
 
+/// One stored inline comment rendered under its line (PR-style): a pending one shows the text
+/// + a dismiss ✕; a resolved one shows a ✓ and dimmer text (the running "done" record).
+fn view_inline_comment(i: usize, c: dc_win::comments::Comment) -> Element<'static, Message> {
+    let (mark, mark_color, txt_color) = if c.resolved {
+        ("✓", GOOD, FG_MUTED)
+    } else {
+        ("💬", ACCENT, FG)
+    };
+    let resolved = c.resolved;
+    let head = row![
+        text(mark).size(12).color(mark_color),
+        text(c.text.clone()).size(12).color(txt_color),
+        Space::new().width(Fill),
+        button(text("✕").size(11))
+            .on_press(Message::DismissComment(i))
+            .padding([0, 6])
+            .style(menu_item_style),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    container(head)
+        .width(Fill)
+        .padding([4, 8])
+        .style(move |_t: &Theme| container::Style {
+            background: Some(Background::Color(Color {
+                a: 0.06,
+                ..if resolved { GOOD } else { ACCENT }
+            })),
+            border: Border {
+                color: CARD_BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
 /// Launch the desktop app.
 pub fn run() -> iced::Result {
     // iced 0.14: `application(boot, update, view)` where boot returns the initial
@@ -346,6 +384,16 @@ struct App {
     /// a pulsing amber from submit until the change lands — so the "thinking" gap feels active.
     /// `(file, start, end)`; `None` when nothing is in flight.
     working: Option<(String, usize, usize)>,
+
+    // --- PR-review state ---------------------------------------------------------
+    /// Persisted inline code comments (`.dc/comments.json`), rendered under their lines and
+    /// marked resolved when the agent finishes the change.
+    comments: dc_win::comments::Comments,
+    /// Working-tree file statuses (path → M/A/D) for the PR-style file tree, refreshed as
+    /// fixes land.
+    file_status: std::collections::BTreeMap<String, dc_win::gitdiff::FileStatus>,
+    /// The current git branch (shown in the explorer header), if any.
+    branch: Option<String>,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -429,6 +477,9 @@ impl Default for App {
             debug: false,
             changed_lines: std::collections::BTreeSet::new(),
             working: None,
+            comments: dc_win::comments::Comments::default(),
+            file_status: std::collections::BTreeMap::new(),
+            branch: None,
         }
     }
 }
@@ -468,6 +519,12 @@ pub(crate) enum Message {
     ToggleThink(bool),
     /// Toggle debug mode: echo every prompt sent to the model into the chat.
     ToggleDebug(bool),
+    /// Undo the last fix: git-revert exactly the files it changed, back to committed state.
+    UndoLastChange,
+    /// Dismiss the stored inline comment at this index (remove it from the review list).
+    DismissComment(usize),
+    /// Cancel the in-flight run/fix (stops the agent at its next turn; reverts partial edits).
+    CancelRun,
     /// Select a bottom-panel tab (Activity / Verification / Build).
     SelectBottomTab(BottomTab),
     // Line comments (PR-style) — drag to select a range, then comment.
@@ -671,6 +728,11 @@ impl App {
     /// mode (scratch vs existing), and seed the thread with the agent's opening line.
     fn open_conversation(&mut self) {
         let root = self.workspace_root();
+        // Load persisted inline comments, ensure .dc/ is git-ignored, and pull the initial
+        // git view (branch + file statuses) for the PR-style tree.
+        self.comments = dc_win::comments::load(&root);
+        dc_win::comments::ensure_gitignored(&root);
+        self.refresh_git_view();
         let (readme, todo) = self.read_plan_files(&root);
         let convo = dc_win::chat::Conversation::open(&readme, &todo);
         self.chat_turns.clear();
@@ -780,6 +842,16 @@ impl App {
             context,
             comment,
         };
+        // Persist the comment inline (pending) — it stays visible in the code view and gets
+        // marked resolved when the agent finishes. A Question is removed again in pump_triage
+        // (it's answered, not a change to track).
+        self.comments.add(dc_win::comments::Comment::new(
+            lc.file.clone(),
+            start,
+            end,
+            lc.comment.clone(),
+        ));
+        dc_win::comments::save(&self.workspace_root(), &self.comments);
         // Commit connection settings so the triage/edit use the current backend.
         self.cfg.model = self.model_input.clone();
         self.cfg.base_url = self.url_input.clone();
@@ -840,7 +912,17 @@ impl App {
             match verdict {
                 dc_win::linecomment::Verdict::Question => {
                     // A question about the code → ANSWER it (streamed into the chat), edit
-                    // nothing. Reuses the chat streaming path, so the answer types out live.
+                    // nothing. It's not a change to track, so drop the pending inline comment
+                    // we stored on submit.
+                    if let Some((i, _)) = self
+                        .comments
+                        .on_file(&comment.file)
+                        .filter(|(_, c)| !c.resolved)
+                        .last()
+                    {
+                        self.comments.remove(i);
+                        dc_win::comments::save(&self.workspace_root(), &self.comments);
+                    }
                     self.cfg.model = self.model_input.clone();
                     self.cfg.base_url = self.url_input.clone();
                     let req = comment.question_request(self.think);
@@ -955,6 +1037,14 @@ impl App {
         };
     }
 
+    /// Refresh the PR-view git state: the current branch and per-file M/A/D statuses. Called on
+    /// project open and after a fix lands, so the file tree tracks working-tree changes.
+    fn refresh_git_view(&mut self) {
+        let root = self.workspace_root();
+        self.file_status = dc_win::gitdiff::statuses(&root);
+        self.branch = dc_win::gitdiff::current_branch(&root);
+    }
+
     /// Whether a swarm run is (or was) active — i.e. the topology has nodes to draw.
     fn is_swarm(&self) -> bool {
         !self.topology.is_empty()
@@ -1014,11 +1104,63 @@ impl App {
         });
     }
 
+    /// Undo the last fix: `git checkout --` exactly the files it changed, restoring them to
+    /// their committed state. A deliberate "I don't like this change" action — the safe way to
+    /// reject a fix, instead of hand-reverting. No-op if there's no finished result with files.
+    fn undo_last_change(&mut self) {
+        let files: Vec<String> = self
+            .result
+            .as_ref()
+            .map(|r| r.files.clone())
+            .unwrap_or_default();
+        if files.is_empty() {
+            return;
+        }
+        let root = self.workspace_root();
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("checkout")
+            .arg("--")
+            .args(&files)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        self.chat_turns.push(dc_win::chat::Turn {
+            role: dc_win::chat::Speaker::Agent,
+            text: if ok {
+                format!(
+                    "↩ Undid the change — reverted {} file(s) to committed state.",
+                    files.len()
+                )
+            } else {
+                "⚠ Couldn't undo (not a git repo, or the file was already committed).".to_string()
+            },
+        });
+        if ok {
+            // Clear the result banner + refresh the code view to the reverted content.
+            self.result = None;
+            self.reload_selected();
+        }
+    }
+
     /// The iterate outcome: report only the files the agent edited this run, and whether it
     /// finished green. No repo scan, no open-folder button.
     fn finish_iterate(&mut self, ok: bool, summary: &str) {
         let files = self.edited_files.clone();
         let n = files.len();
+        // On a successful comment-driven fix, mark the comment resolved (in place) and refresh
+        // the PR file-tree statuses. The resolved comment stays visible as a "done" record.
+        if ok && self.iterate_from_comment {
+            let mut changed = false;
+            for f in &files {
+                changed |= self.comments.resolve_latest_on(f);
+            }
+            if changed {
+                dc_win::comments::save(&self.workspace_root(), &self.comments);
+            }
+        }
+        self.refresh_git_view();
         let (headline, reason) = if ok && n > 0 {
             (
                 format!("done — {n} file{} changed", plural(n)),
@@ -1156,6 +1298,25 @@ impl App {
         for ev in session.drain_events() {
             match ev {
                 UiEvent::Agent(e) => {
+                    // Live "watch it type": as the model streams a write/edit, preview the
+                    // growing file content in the code view, word by word, before it lands.
+                    if let dc_core::AgentEvent::ContentDelta { cumulative, .. } = &e {
+                        if let Some(p) = dc_win::codeview::partial_edit_preview(cumulative) {
+                            if !p.content.is_empty() {
+                                let name = p
+                                    .file
+                                    .clone()
+                                    .or_else(|| self.selected_file.clone())
+                                    .unwrap_or_else(|| "(writing…)".to_string());
+                                if p.file.is_some() {
+                                    self.selected_file = p.file.clone();
+                                    self.follow_agent = false;
+                                }
+                                self.code = Some(dc_win::codeview::from_text(&name, &p.content));
+                            }
+                        }
+                        continue; // a delta is preview-only; nothing else to fold
+                    }
                     if let dc_core::AgentEvent::Planned { steps }
                     | dc_core::AgentEvent::PlanRevised { steps } = &e
                     {
@@ -1327,6 +1488,20 @@ impl App {
             Message::ApplyFile(i) => self.apply_proposed_file(i),
             Message::ToggleThink(v) => self.think = v,
             Message::ToggleDebug(v) => self.debug = v,
+            Message::UndoLastChange => self.undo_last_change(),
+            Message::DismissComment(i) => {
+                self.comments.remove(i);
+                dc_win::comments::save(&self.workspace_root(), &self.comments);
+            }
+            Message::CancelRun => {
+                if let Some(s) = &self.session {
+                    s.cancel();
+                    self.chat_turns.push(dc_win::chat::Turn {
+                        role: dc_win::chat::Speaker::Agent,
+                        text: "⏹ cancelling — stopping at the next step…".to_string(),
+                    });
+                }
+            }
             Message::SelectBottomTab(t) => self.bottom_tab = t,
             Message::LineDragStart(n) => {
                 // Begin a drag-selection anchored at line n. Clear any open comment box.
@@ -1494,13 +1669,27 @@ impl App {
     /// pin it in the code panel, click a dir to collapse/expand. Empty-state hint before
     /// a project folder is picked.
     fn view_explorer(&self) -> Element<'_, Message> {
+        use dc_win::gitdiff::FileStatus;
         let root = self.workspace_root();
         let rows = dc_win::filetree::build_rows(&root, &self.collapsed_dirs);
 
-        let mut col = column![section("EXPLORER")].spacing(1);
+        // GitHub-PR-style header: the current branch and what it's compared against (HEAD/the
+        // working tree). Plus a count of changed files.
+        let n_changed = self.file_status.len();
+        let branch_line = match &self.branch {
+            Some(b) => format!("⎇ {b}  ·  {n_changed} changed vs HEAD"),
+            None => "not a git repo".to_string(),
+        };
+        let mut col = column![
+            section("EXPLORER"),
+            text(branch_line)
+                .size(11)
+                .color(iced::Color::from_rgb(0.55, 0.58, 0.70)),
+        ]
+        .spacing(2);
         if rows.is_empty() {
             col = col.push(
-                text("pick a project folder (📁) to work in")
+                text("File ▸ Open folder to work in")
                     .size(11)
                     .color(FG_MUTED),
             );
@@ -1517,9 +1706,22 @@ impl App {
             } else {
                 " "
             };
-            let label = format!("{glyph} {}", r.name);
-            let color = if is_selected {
+            // PR-style file status badge (M/A/D) + colouring for changed files.
+            let status = (!r.is_dir).then(|| self.file_status.get(&r.rel)).flatten();
+            let (badge, badge_color) = match status {
+                Some(FileStatus::Added) => ("A", GOOD),
+                Some(FileStatus::Modified) => ("M", AMBER),
+                Some(FileStatus::Deleted) => ("D", BAD),
+                None => (" ", FG_MUTED),
+            };
+            let name_color = if is_selected {
                 ACCENT
+            } else if let Some(s) = status {
+                match s {
+                    FileStatus::Added => GOOD,
+                    FileStatus::Modified => AMBER,
+                    FileStatus::Deleted => BAD,
+                }
             } else if r.is_dir {
                 FG
             } else {
@@ -1530,11 +1732,22 @@ impl App {
             } else {
                 Message::SelectFile(r.rel.clone())
             };
-            let btn = button(text(label).size(12).color(color))
-                .on_press(msg)
-                .padding([1, 4])
-                .style(tree_button)
-                .width(Fill);
+            let btn = button(
+                row![
+                    text(badge.to_string())
+                        .size(11)
+                        .font(iced::Font::MONOSPACE)
+                        .color(badge_color),
+                    text(format!("{glyph} {}", r.name))
+                        .size(12)
+                        .color(name_color),
+                ]
+                .spacing(4),
+            )
+            .on_press(msg)
+            .padding([1, 4])
+            .style(tree_button)
+            .width(Fill);
             col = col.push(row![Space::new().width(Length::Fixed(indent)), btn]);
         }
 
@@ -1622,7 +1835,20 @@ impl App {
                             .on_enter(Message::LineDragTo(*n))
                             .on_release(Message::LineDragEnd),
                     );
-                    // The comment box after the last line of the committed range.
+                    // Stored inline comments whose range ENDS on this line — render them (PR
+                    // style), struck-through + ✓ once resolved.
+                    if let Some(file) = self.selected_file.clone() {
+                        let here: Vec<(usize, dc_win::comments::Comment)> = self
+                            .comments
+                            .on_file(&file)
+                            .filter(|(_, c)| c.end == *n)
+                            .map(|(i, c)| (i, c.clone()))
+                            .collect();
+                        for (i, c) in here {
+                            col = col.push(view_inline_comment(i, c));
+                        }
+                    }
+                    // The (new) comment box after the last line of the committed range.
                     if self.comment_range.is_some_and(|(_, hi)| hi == *n) {
                         col = col.push(self.view_comment_box());
                     }
@@ -1790,6 +2016,31 @@ impl App {
                 button(text("📂 open output folder"))
                     .on_press(Message::OpenOutputFolder)
                     .style(menu_item_style),
+            );
+        }
+        // "I don't like this change" — undo an in-place fix's edits (git-revert its files).
+        // Only for iterate runs that changed files (from-scratch builds have no committed base).
+        if self.iterating && !r.files.is_empty() {
+            col = col.push(Space::new().height(Length::Fixed(6.0)));
+            col = col.push(
+                button(text("↩ Undo this change").size(13))
+                    .on_press(Message::UndoLastChange)
+                    .padding([4, 12])
+                    .style(|_t: &Theme, status| {
+                        let hov = matches!(status, button::Status::Hovered);
+                        button::Style {
+                            background: Some(Background::Color(Color {
+                                a: if hov { 0.22 } else { 0.14 },
+                                ..BAD
+                            })),
+                            text_color: FG,
+                            border: Border {
+                                radius: 5.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    }),
             );
         }
         scrollable(col).height(Fill).into()
@@ -2155,12 +2406,36 @@ impl App {
                 self.run_label(),
             )
         };
+        // A fix/iterate run in flight → a Cancel button (the run is the slow, cancellable
+        // thing). A quick chat/triage reply just shows a busy "…".
+        let run_active = self.session.is_some();
         let input = text_input(placeholder, &self.intent)
             .on_input(Message::IntentChanged)
             .on_submit(send_msg.clone())
             .padding(10)
             .width(Fill);
-        let btn = if sending {
+        let btn = if run_active {
+            button(text("⏹ cancel").size(15))
+                .on_press(Message::CancelRun)
+                .width(Length::Fixed(110.0))
+                .padding([8, 12])
+                .style(|_t: &Theme, status| {
+                    let hov = matches!(status, button::Status::Hovered);
+                    button::Style {
+                        background: Some(Background::Color(if hov {
+                            Color::from_rgb(0.80, 0.35, 0.40)
+                        } else {
+                            BAD
+                        })),
+                        text_color: Color::from_rgb(0.06, 0.07, 0.11),
+                        border: Border {
+                            radius: 6.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                })
+        } else if sending {
             button(text("…"))
                 .width(Length::Fixed(90.0))
                 .padding([8, 12])

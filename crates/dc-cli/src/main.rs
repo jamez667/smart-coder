@@ -805,6 +805,8 @@ fn print_event(ev: &dc_core::AgentEvent) {
         Stopped { reason } => {
             println!("■ stopped — {reason:?}");
         }
+        // The streaming increment isn't a CLI line (the ModelTurn carries the full reply).
+        ContentDelta { .. } => {}
     }
 }
 
