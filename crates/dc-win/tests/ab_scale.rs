@@ -594,9 +594,16 @@ fn ab_scale_ladder() {
             "[{}] WHOLE-TASK v1 green={} {}/{}  |  SEQUENTIAL build green={} {}/{} (files {})  \
              |  v2 green={} {}/{}",
             r.name,
-            v1.0, v1.2, v1.3,
-            seq_build.0, seq_build.2, seq_build.3, seq_files,
-            v2.0, v2.2, v2.3
+            v1.0,
+            v1.2,
+            v1.3,
+            seq_build.0,
+            seq_build.2,
+            seq_build.3,
+            seq_files,
+            v2.0,
+            v2.2,
+            v2.3
         );
         rows.push(Row {
             name: r.name.into(),
@@ -795,11 +802,25 @@ fn run_pass(
             let ts = dc_core::TranscriptSink::new(file);
             let tee = dc_core::TeeSink::new(vec![&eprint, &ts]);
             dc_core::run_agent_observed(
-                worker, None, &registry, strategy.as_ref(), instruction, ws, &agent_cfg, &tee,
+                worker,
+                None,
+                &registry,
+                strategy.as_ref(),
+                instruction,
+                ws,
+                &agent_cfg,
+                &tee,
             )
         }
         None => dc_core::run_agent_observed(
-            worker, None, &registry, strategy.as_ref(), instruction, ws, &agent_cfg, &eprint,
+            worker,
+            None,
+            &registry,
+            strategy.as_ref(),
+            instruction,
+            ws,
+            &agent_cfg,
+            &eprint,
         ),
     };
     let (pass, total) = run_and_count(cfg, ws);

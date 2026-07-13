@@ -20,6 +20,12 @@ pub struct Comment {
     pub text: String,
     /// True once the agent has made the requested change.
     pub resolved: bool,
+    /// The exact text of the range BEFORE the fix (captured when the change is applied), so a
+    /// per-comment Revert can splice the original lines back. `None` until a fix resolves it.
+    pub before: Option<String>,
+    /// The number of lines the replacement produced (so Revert knows what range to swap back).
+    /// `None` until resolved.
+    pub after_len: Option<usize>,
 }
 
 impl Comment {
@@ -30,6 +36,8 @@ impl Comment {
             end,
             text: text.into(),
             resolved: false,
+            before: None,
+            after_len: None,
         }
     }
 }
@@ -112,6 +120,8 @@ fn serialize(c: &Comments) -> String {
                 "end": c.end,
                 "text": c.text,
                 "resolved": c.resolved,
+                "before": c.before,
+                "after_len": c.after_len,
             })
         })
         .collect();
@@ -132,6 +142,11 @@ fn parse(text: &str) -> Comments {
                 end: v.get("end")?.as_u64()? as usize,
                 text: v.get("text")?.as_str()?.to_string(),
                 resolved: v.get("resolved").and_then(|r| r.as_bool()).unwrap_or(false),
+                before: v.get("before").and_then(|b| b.as_str()).map(str::to_string),
+                after_len: v
+                    .get("after_len")
+                    .and_then(|a| a.as_u64())
+                    .map(|n| n as usize),
             })
         })
         .collect();

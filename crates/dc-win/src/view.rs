@@ -48,6 +48,8 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
         Planned { steps } => plan_rows("plan", steps),
         PlanRevised { steps } => plan_rows("plan revised", steps),
         PromptAssembled { .. } => Vec::new(),
+        // The live streaming increment — shown as a growing preview elsewhere, not a row.
+        ContentDelta { .. } => Vec::new(),
         ModelTurn {
             step,
             prompt_tokens,

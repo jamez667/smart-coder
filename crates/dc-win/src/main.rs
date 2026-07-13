@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod minimap;
 
 fn main() -> iced::Result {
     app::run()

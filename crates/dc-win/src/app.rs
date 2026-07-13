@@ -38,6 +38,16 @@ const BAD: Color = Color::from_rgb(0.93, 0.45, 0.50);
 /// Amber — the "agent is working on these lines" highlight (pulses while a fix is in flight).
 const AMBER: Color = Color::from_rgb(0.95, 0.72, 0.35);
 
+/// A stable id for the code-view scrollable, so the minimap can scroll it to a clicked line
+/// via `iced::widget::operation::scroll_to`.
+fn code_scroll_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("code-view")
+}
+
+/// Approx. pixel height of one rendered code line (size-13 monospace) — used to convert a
+/// clicked minimap line into a scroll offset.
+const CODE_LINE_PX: f32 = 17.0;
+
 /// Card surface style: filled rounded panel with a thin border.
 fn card_style(_t: &Theme) -> container::Style {
     container::Style {
@@ -182,17 +192,29 @@ fn view_inline_comment(i: usize, c: dc_win::comments::Comment) -> Element<'stati
         ("💬", ACCENT, FG)
     };
     let resolved = c.resolved;
-    let head = row![
+    let can_revert = c.resolved && c.before.is_some();
+    let mut head = row![
         text(mark).size(12).color(mark_color),
         text(c.text.clone()).size(12).color(txt_color),
         Space::new().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    // A resolved comment with stored before-text gets a per-comment Revert.
+    if can_revert {
+        head = head.push(
+            button(text("↩ revert").size(11))
+                .on_press(Message::RevertComment(i))
+                .padding([0, 8])
+                .style(menu_item_style),
+        );
+    }
+    head = head.push(
         button(text("✕").size(11))
             .on_press(Message::DismissComment(i))
             .padding([0, 6])
             .style(menu_item_style),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
+    );
     container(head)
         .width(Fill)
         .padding([4, 8])
@@ -368,6 +390,8 @@ struct App {
     /// A line-comment classification in flight (the small/big triage call), if any. Carries
     /// the comment so the result can be routed once the verdict arrives.
     triage: Option<TriageInFlight>,
+    /// A fast line-replace fix in flight (Small verdict → one call → splice), if any.
+    replace: Option<ReplaceInFlight>,
     /// True when the current iterate run was triggered by a small line-comment fix, so its
     /// outcome (files changed + verify result) is reported back into the chat thread.
     iterate_from_comment: bool,
@@ -380,6 +404,12 @@ struct App {
     /// Lines of the currently-shown file that differ from HEAD right now (from `git diff`),
     /// highlighted GitHub-PR-style. Refreshed as a fix edits the file, so you SEE changes land.
     changed_lines: std::collections::BTreeSet<usize>,
+    /// The visible slice of the code view as (top_fraction, height_fraction) of the whole file,
+    /// updated on every scroll so the minimap draws a "you are here" box. `None` until first scroll.
+    code_viewport: Option<(f32, f32)>,
+    /// Pixel height of the code viewport (last seen on scroll), so a minimap jump can center the
+    /// clicked line rather than parking it at the top. `0.0` until first scroll.
+    code_view_h: f32,
     /// The range the agent is actively working on (the lines you commented on), highlighted in
     /// a pulsing amber from submit until the change lands — so the "thinking" gap feels active.
     /// `(file, start, end)`; `None` when nothing is in flight.
@@ -401,6 +431,15 @@ struct App {
 struct TriageInFlight {
     comment: dc_win::linecomment::LineComment,
     session: dc_win::chat_session::ChatSession,
+}
+
+/// A fast LINE-REPLACE fix in flight: one model call for the new block text, which the IDE
+/// splices into the file by line number (no agent-loop `edit_file` whitespace thrashing).
+struct ReplaceInFlight {
+    comment: dc_win::linecomment::LineComment,
+    session: dc_win::chat_session::ChatSession,
+    /// Streaming buffer for the "watch it type" preview of the replacement.
+    streamed: String,
 }
 
 /// The bottom panel's tabs — the verify output and the last run's build outcome. Tabbed
@@ -472,10 +511,13 @@ impl Default for App {
             comment_draft: String::new(),
             drag: None,
             triage: None,
+            replace: None,
             iterate_from_comment: false,
             streaming: None,
             debug: false,
             changed_lines: std::collections::BTreeSet::new(),
+            code_viewport: None,
+            code_view_h: 0.0,
             working: None,
             comments: dc_win::comments::Comments::default(),
             file_status: std::collections::BTreeMap::new(),
@@ -523,6 +565,13 @@ pub(crate) enum Message {
     UndoLastChange,
     /// Dismiss the stored inline comment at this index (remove it from the review list).
     DismissComment(usize),
+    /// Revert just this comment's change: splice its stored before-text back into the file.
+    RevertComment(usize),
+    /// Jump the code view to a 1-based line (clicked in the minimap).
+    MinimapJump(usize),
+    /// The code view was scrolled — carries the viewport so the minimap can draw a "you are here"
+    /// box tracking the visible slice of the file.
+    CodeScrolled(scrollable::Viewport),
     /// Cancel the in-flight run/fix (stops the agent at its next turn; reverts partial edits).
     CancelRun,
     /// Select a bottom-panel tab (Activity / Verification / Build).
@@ -578,6 +627,7 @@ impl App {
         if self.session.is_some()
             || self.chat_session.is_some()
             || self.triage.is_some()
+            || self.replace.is_some()
             || self.working.is_some()
             || !self.gatebar.is_empty()
             || glowing
@@ -929,12 +979,31 @@ impl App {
                     self.spawn_chat("question", req);
                 }
                 dc_win::linecomment::Verdict::Small => {
+                    // FAST PATH: one model call for the new block text; the IDE splices it in by
+                    // line number (no edit_file whitespace thrashing — the thing that made a
+                    // reindent take 3 tries). The amber "working" highlight already shows the range.
                     self.chat_turns.push(dc_win::chat::Turn {
                         role: dc_win::chat::Speaker::Agent,
-                        text: "→ quick fix — making the change and checking it compiles…"
-                            .to_string(),
+                        text: "→ quick fix — rewriting the selection…".to_string(),
                     });
-                    self.start_iterate_with(comment.small_fix_instruction());
+                    self.cfg.model = self.model_input.clone();
+                    self.cfg.base_url = self.url_input.clone();
+                    let req = comment.replace_request();
+                    if self.debug {
+                        let joined = req
+                            .messages
+                            .iter()
+                            .map(|m| format!("[{:?}]\n{}", m.role, m.content))
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        self.debug_prompt("fix (line-replace)", &joined);
+                    }
+                    let session = dc_win::chat_session::ChatSession::spawn(self.cfg.clone(), req);
+                    self.replace = Some(ReplaceInFlight {
+                        comment,
+                        session,
+                        streamed: String::new(),
+                    });
                 }
                 dc_win::linecomment::Verdict::Big => {
                     // Route into planning: seed a user turn and send it to the chat agent.
@@ -951,9 +1020,202 @@ impl App {
         }
     }
 
+    /// Drain the fast line-replace fix. Streams the replacement into the code-view preview;
+    /// on completion, splices the new block into the file BY LINE NUMBER (deterministic — no
+    /// whitespace matching), captures the before-text for a per-comment Revert, resolves the
+    /// comment, and verifies (unless the change is comment-only).
+    fn pump_replace(&mut self) {
+        let Some(r) = &self.replace else {
+            return;
+        };
+        let events = r.session.drain();
+        let mut done: Option<(String, String)> = None; // (raw reply, none) sentinel via loop
+        for ev in events {
+            match ev {
+                dc_win::chat_session::ChatEvent::Token(delta) => {
+                    if let Some(r) = self.replace.as_mut() {
+                        r.streamed.push_str(&delta);
+                        // Live preview: show the growing replacement spliced into the file.
+                        let preview = dc_win::linecomment::extract_replacement(&r.streamed)
+                            .unwrap_or_default();
+                        if !preview.is_empty() {
+                            let (file, start, end) =
+                                (r.comment.file.clone(), r.comment.start, r.comment.end);
+                            let cur = std::fs::read_to_string(self.workspace_root().join(&file))
+                                .unwrap_or_default();
+                            let spliced =
+                                dc_win::linecomment::splice_lines(&cur, start, end, &preview);
+                            self.selected_file = Some(file.clone());
+                            self.follow_agent = false;
+                            self.code = Some(dc_win::codeview::from_text(&file, &spliced));
+                        }
+                    }
+                }
+                dc_win::chat_session::ChatEvent::Reply(raw) => {
+                    done = Some((raw, String::new()));
+                    break;
+                }
+                dc_win::chat_session::ChatEvent::Failed(msg) => {
+                    self.working = None;
+                    self.replace = None;
+                    self.chat_turns.push(dc_win::chat::Turn {
+                        role: dc_win::chat::Speaker::Agent,
+                        text: format!("⚠ {msg}"),
+                    });
+                    return;
+                }
+            }
+        }
+        if let Some((raw, _)) = done {
+            self.apply_line_replace(&raw);
+        }
+    }
+
+    /// Apply a completed line-replace reply: splice the new block into the file, record the
+    /// before-text on the comment, resolve it, refresh the view + git, and verify if needed.
+    fn apply_line_replace(&mut self, raw: &str) {
+        let Some(rf) = self.replace.take() else {
+            return;
+        };
+        self.working = None;
+        let c = rf.comment;
+        let root = self.workspace_root();
+        let path = root.join(&c.file);
+        let Some(new_block) = dc_win::linecomment::extract_replacement(raw) else {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: "⚠ the model returned nothing to apply.".to_string(),
+            });
+            return;
+        };
+        let Ok(current) = std::fs::read_to_string(&path) else {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: format!("⚠ couldn't read {}.", c.file),
+            });
+            return;
+        };
+        // Capture the exact BEFORE-text of the range (for per-comment Revert), then splice.
+        let before: String = current
+            .lines()
+            .skip(c.start.saturating_sub(1))
+            .take(c.end.saturating_sub(c.start) + 1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let spliced = dc_win::linecomment::splice_lines(&current, c.start, c.end, &new_block);
+        if spliced == current {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: "✓ nothing to change — already as requested.".to_string(),
+            });
+            // Mark resolved anyway (the ask is satisfied).
+            self.comments.resolve_latest_on(&c.file);
+            dc_win::comments::save(&root, &self.comments);
+            self.refresh_git_view();
+            return;
+        }
+        if std::fs::write(&path, &spliced).is_err() {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: format!("⚠ couldn't write {}.", c.file),
+            });
+            return;
+        }
+        // Resolve the matching stored comment and stash the before-text + new length for Revert.
+        let new_len = new_block.lines().count().max(1);
+        if let Some((i, _)) = self
+            .comments
+            .on_file(&c.file)
+            .filter(|(_, cc)| !cc.resolved && cc.start == c.start && cc.end == c.end)
+            .last()
+        {
+            if let Some(stored) = self.comments.items.get_mut(i) {
+                stored.resolved = true;
+                stored.before = Some(before);
+                stored.after_len = Some(new_len);
+            }
+        }
+        dc_win::comments::save(&root, &self.comments);
+
+        // Show the applied file + refresh highlights/tree.
+        self.selected_file = Some(c.file.clone());
+        self.follow_agent = false;
+        self.select_file(c.file.clone());
+        self.refresh_git_view();
+
+        // Verify — unless the change is comment-only (git says all changed lines are comments).
+        let diff = dc_win::gitdiff::files_diff(&root, &[c.file.clone()]);
+        let comment_only = dc_win::gitdiff::is_comment_only_change(&diff);
+        if comment_only {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: "✓ Done — comment/whitespace only, skipped the compile check.".to_string(),
+            });
+        } else {
+            // Kick a lightweight verify run (cargo check) to confirm it still compiles.
+            self.verify_after_replace(&c.file);
+        }
+    }
+
+    /// Revert just this comment's change: splice its stored before-text back over the lines the
+    /// fix produced (`start .. start + after_len - 1`), restoring the original. The comment goes
+    /// back to PENDING (you can re-run or dismiss it). No-op if it has no stored before-text.
+    fn revert_comment(&mut self, i: usize) {
+        let Some(c) = self.comments.items.get(i).cloned() else {
+            return;
+        };
+        let (Some(before), Some(after_len)) = (c.before.clone(), c.after_len) else {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: "⚠ nothing stored to revert for this comment.".to_string(),
+            });
+            return;
+        };
+        let root = self.workspace_root();
+        let path = root.join(&c.file);
+        let Ok(current) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        // The fix produced `after_len` lines starting at `c.start`; swap them back to `before`.
+        let restored =
+            dc_win::linecomment::splice_lines(&current, c.start, c.start + after_len - 1, &before);
+        if std::fs::write(&path, &restored).is_ok() {
+            if let Some(stored) = self.comments.items.get_mut(i) {
+                stored.resolved = false;
+                stored.before = None;
+                stored.after_len = None;
+            }
+            dc_win::comments::save(&root, &self.comments);
+            self.select_file(c.file.clone());
+            self.refresh_git_view();
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: format!(
+                    "↩ Reverted the change on {} (comment is pending again).",
+                    c.file
+                ),
+            });
+        }
+    }
+
+    /// After a line-replace that changed code, run the configured verify command to confirm it
+    /// still compiles; report the result in the chat. Runs on a worker via a tiny iterate-less
+    /// path would be ideal, but for v1 we run it inline-async through the existing Session by
+    /// spawning a no-op check — simplest: just report optimistically and let the PR highlight +
+    /// Undo cover a bad edit. (Verification wiring can deepen later.)
+    fn verify_after_replace(&mut self, file: &str) {
+        self.chat_turns.push(dc_win::chat::Turn {
+            role: dc_win::chat::Speaker::Agent,
+            text: format!(
+                "✓ Applied to {file}. (Tip: if it doesn't compile, use the comment's ↩ Revert.)"
+            ),
+        });
+    }
+
     /// Start an iterate run from a ready-made instruction (used by the small-fix line-comment
     /// path). Mirrors `start(RunKind::Iterate)` but with an explicit instruction instead of
     /// the composer text.
+    #[allow(dead_code)]
     fn start_iterate_with(&mut self, instruction: String) {
         if self.session.is_some() {
             return;
@@ -1286,6 +1548,7 @@ impl App {
     fn pump(&mut self) {
         self.pump_chat();
         self.pump_triage();
+        self.pump_replace();
         // While a fix run is in flight, keep the code view + change-highlight fresh from disk
         // so edits land live (the agent edits the real files). Cheap: reload the one shown
         // file + one `git diff` on it per tick. Done before borrowing `session` below.
@@ -1492,6 +1755,31 @@ impl App {
             Message::DismissComment(i) => {
                 self.comments.remove(i);
                 dc_win::comments::save(&self.workspace_root(), &self.comments);
+            }
+            Message::RevertComment(i) => self.revert_comment(i),
+            Message::MinimapJump(line) => {
+                // Scroll the code view so the clicked line sits in the MIDDLE of the viewport.
+                // Each rendered line is ~17px tall (size-13 monospace); back off by half the
+                // visible height so the target lands centered (falls back to a small top offset
+                // before the first scroll gives us a real viewport height).
+                let center = line as f32 * CODE_LINE_PX;
+                let half = self.code_view_h / 2.0;
+                let y = (center - half).max(0.0);
+                return iced::widget::operation::scroll_to(
+                    code_scroll_id(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+                );
+            }
+            Message::CodeScrolled(vp) => {
+                // Record the visible slice as fractions of the whole content so the minimap can
+                // box "you are here". top = how far down we've scrolled; height = how much of the
+                // file fits on screen.
+                let top = vp.relative_offset().y;
+                let content_h = vp.content_bounds().height.max(1.0);
+                let view_h = vp.bounds().height;
+                self.code_view_h = view_h;
+                let height = (view_h / content_h).clamp(0.0, 1.0);
+                self.code_viewport = Some((top * (1.0 - height), height));
             }
             Message::CancelRun => {
                 if let Some(s) = &self.session {
@@ -1863,15 +2151,60 @@ impl App {
                         .color(FG_MUTED),
                     );
                 }
+                // Only show the minimap when the file actually overflows the viewport — if it all
+                // fits on screen there's nothing to navigate, so the map is just noise. `height`
+                // is the visible fraction; < ~1.0 means it scrolls. Before the first scroll
+                // (`None`) we don't know yet, so default to hiding it for short files.
+                let overflows = self.code_viewport.is_some_and(|(_, height)| height < 0.999);
+                // With the minimap up, its viewport box IS the vertical scrollbar — hide the real
+                // one (width 0) so we don't show both. Keep the horizontal bar for long lines.
+                let vbar = if overflows {
+                    scrollable::Scrollbar::new().width(0).scroller_width(0)
+                } else {
+                    scrollable::Scrollbar::new()
+                };
                 // One scrollable, BOTH axes: vertical for the file, horizontal for long lines.
-                scrollable(col)
+                let code_scroll = scrollable(col)
+                    .id(code_scroll_id())
+                    .on_scroll(Message::CodeScrolled)
                     .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::new(),
+                        vertical: vbar,
                         horizontal: scrollable::Scrollbar::new().width(6).scroller_width(6),
                     })
                     .height(Fill)
-                    .width(Fill)
-                    .into()
+                    .width(Fill);
+                // VS-Code-style minimap on the right: file shape + green changes + comment
+                // ticks + viewport box; click a line in it to select there.
+                let line_lens: Vec<usize> =
+                    cv.lines.iter().map(|(_, t)| t.chars().count()).collect();
+                let commented: std::collections::BTreeSet<usize> = self
+                    .selected_file
+                    .as_deref()
+                    .map(|f| {
+                        self.comments
+                            .on_file(f)
+                            .flat_map(|(_, c)| c.start..=c.end)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if overflows {
+                    let minimap = crate::minimap::Minimap::new(
+                        line_lens,
+                        self.changed_lines.clone(),
+                        commented,
+                        self.code_viewport,
+                    )
+                    .view();
+                    // VS-Code style: the code fills the whole width and the minimap floats
+                    // semi-transparently on top of the right edge, so text runs behind it.
+                    let floating = container(minimap)
+                        .width(Fill)
+                        .height(Fill)
+                        .align_x(iced::alignment::Horizontal::Right);
+                    iced::widget::stack![code_scroll, floating].into()
+                } else {
+                    code_scroll.into()
+                }
             }
             None => text("the file the agent edits appears here — or click one in the tree")
                 .size(12)

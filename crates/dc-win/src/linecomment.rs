@@ -129,6 +129,37 @@ impl LineComment {
         req
     }
 
+    /// Build a request for a fast LINE-ANCHORED edit: the model returns ONLY the new text for
+    /// the selected lines (inside a plain code fence), and the IDE splices it in by line number.
+    /// No `edit_file`, no whitespace/old_str matching — the thing small models fumble. This is
+    /// the fast path for a localized change on a known range (a reindent, a small tweak).
+    pub fn replace_request(&self) -> GenerateRequest {
+        let sys = "You rewrite a specific block of code to satisfy a review comment. Output ONLY \
+             the new version of THAT block — the same lines, edited — inside a single plain code \
+             fence (```), nothing else. Preserve everything not mentioned by the comment; match \
+             the surrounding indentation. No explanation, no extra lines. /no_think";
+        let ctx = if self.context.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nSurrounding context (for indentation/reference — do not include it):\n{}",
+                self.context
+            )
+        };
+        let user = format!(
+            "File `{}`. The reviewer selected these lines:\n\n{}\n\nComment: {}\n\n\
+             Return ONLY the rewritten version of those lines in a ``` fence.{ctx}",
+            self.anchor(),
+            self.selection.trim_end_matches('\n'),
+            self.comment.trim(),
+        );
+        let mut req = GenerateRequest::new(vec![Message::system(sys), Message::user(user)]);
+        // Enough for the block + a little; a localized edit is small.
+        req.max_tokens = 900;
+        req.temperature = 0.1;
+        req
+    }
+
     /// The instruction for a SMALL fix. **Feeds the model the selected code + a small context
     /// window directly** — so it does NOT read the whole file (that's what made a one-line fix
     /// slow and context-heavy). It still tells the agent to update references if the change is
@@ -169,6 +200,53 @@ impl LineComment {
             comment = self.comment.trim(),
         )
     }
+}
+
+/// Extract the replacement block from a [`replace_request`] reply: the body of the first ```
+/// code fence, or — if the model skipped the fence — the whole trimmed reply. Returns `None`
+/// only for an empty reply.
+///
+/// [`replace_request`]: LineComment::replace_request
+pub fn extract_replacement(reply: &str) -> Option<String> {
+    // Strip a leaked <think> block first (reuse chat's stripper via a local minimal version).
+    let reply = reply.trim();
+    if let Some(open) = reply.find("```") {
+        let after = &reply[open + 3..];
+        // Skip the info-string line (```rust\n…).
+        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
+        let body = &after[body_start..];
+        let end = body.find("```").unwrap_or(body.len());
+        let block = body[..end].trim_end_matches('\n');
+        if !block.is_empty() {
+            return Some(block.to_string());
+        }
+    }
+    if reply.is_empty() {
+        None
+    } else {
+        Some(reply.to_string())
+    }
+}
+
+/// Splice `replacement` into `file_contents` in place of the 1-based line range `start..=end`
+/// (inclusive). Returns the new file contents. Preserves the file's other lines exactly. The
+/// replacement may be any number of lines (so a 1-line selection can become several, or fewer).
+pub fn splice_lines(file_contents: &str, start: usize, end: usize, replacement: &str) -> String {
+    // Work on lines, preserving a trailing newline if the file had one.
+    let had_trailing_nl = file_contents.ends_with('\n');
+    let lines: Vec<&str> = file_contents.lines().collect();
+    let (lo, hi) = (start.saturating_sub(1), end.min(lines.len()));
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.extend(lines[..lo.min(lines.len())].iter().map(|s| s.to_string()));
+    out.extend(replacement.lines().map(|s| s.to_string()));
+    if hi < lines.len() {
+        out.extend(lines[hi..].iter().map(|s| s.to_string()));
+    }
+    let mut joined = out.join("\n");
+    if had_trailing_nl {
+        joined.push('\n');
+    }
+    joined
 }
 
 /// Parse the classifier's reply into a [`Verdict`]. Robust to casing/punctuation/extra words.
@@ -268,6 +346,53 @@ mod tests {
             seed.to_lowercase().contains("plan"),
             "big comments go to planning first: {seed}"
         );
+    }
+
+    #[test]
+    fn replace_request_asks_for_only_the_block() {
+        let req = comment("un-indent this").replace_request();
+        let joined: String = req.messages.iter().map(|m| m.content.clone()).collect();
+        assert!(
+            joined.to_lowercase().contains("only"),
+            "asks for only the block: {joined}"
+        );
+        assert!(joined.contains("let pop = level * 10;"), "selection fed in");
+    }
+
+    #[test]
+    fn extract_replacement_pulls_the_fence_body() {
+        assert_eq!(
+            extract_replacement("Sure:\n```rust\nlet pop = level * 10;\n```").as_deref(),
+            Some("let pop = level * 10;")
+        );
+        // Multi-line block.
+        assert_eq!(
+            extract_replacement("```\na\nb\n```").as_deref(),
+            Some("a\nb")
+        );
+        // No fence → the whole trimmed reply.
+        assert_eq!(
+            extract_replacement("  let x = 1;  ").as_deref(),
+            Some("let x = 1;")
+        );
+        assert!(extract_replacement("").is_none());
+    }
+
+    #[test]
+    fn splice_replaces_the_exact_line_range() {
+        let file = "line1\nline2\nline3\nline4\n";
+        // Replace lines 2-3 with one new line.
+        let out = splice_lines(file, 2, 3, "NEW");
+        assert_eq!(
+            out, "line1\nNEW\nline4\n",
+            "range replaced, trailing nl kept"
+        );
+        // Replace a single line (2) with two lines.
+        let out2 = splice_lines(file, 2, 2, "A\nB");
+        assert_eq!(out2, "line1\nA\nB\nline3\nline4\n");
+        // A file with no trailing newline stays that way.
+        let out3 = splice_lines("a\nb", 1, 1, "X");
+        assert_eq!(out3, "X\nb");
     }
 
     #[test]

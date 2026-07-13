@@ -22,7 +22,7 @@ dc-model = { path = "../dc-model" }
 dc-tools = { path = "../dc-tools" }
 dc-verify = { path = "../dc-verify" }
 dc-proto = { path = "../dc-proto" }
-iced = { version = "0.14", features = ["tokio", "canvas"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "advanced"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde_json = { workspace = true }
