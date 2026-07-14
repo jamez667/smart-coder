@@ -127,6 +127,27 @@ fn menu_title_style(open: bool, status: button::Status) -> button::Style {
 
 /// A Windows-style menu item button: transparent, full accent-wash highlight on hover
 /// (the classic "whole row highlights" behaviour), square corners for a native feel.
+/// The little ＋ / − stage-toggle button on a git file row: a visible lighter surface with a
+/// border so it reads as a clickable chip (the plain tree_button was nearly invisible), brightening
+/// on hover.
+fn stage_toggle_button(_t: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    let a = if hovered { 0.28 } else { 0.16 };
+    button::Style {
+        background: Some(Background::Color(Color {
+            a,
+            ..Color::from_rgb(0.6, 0.64, 0.78)
+        })),
+        text_color: if hovered { FG } else { Color::from_rgb(0.85, 0.87, 0.94) },
+        border: Border {
+            color: Color { a: 0.35, ..CARD_BORDER },
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 fn menu_item_style(_t: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
@@ -164,6 +185,15 @@ fn code_line_container(selected: bool, changed: bool, working: Option<f32>) -> c
     }
 }
 
+/// A GitHub-PR-style RED "removed line" row: a red wash behind the deleted (HEAD-only) text.
+fn code_removed_line_container() -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.12, ..BAD })),
+        text_color: Some(BAD),
+        ..container::Style::default()
+    }
+}
+
 /// The floating dropdown card: an opaque surface with a border so it reads above the body.
 fn dropdown_style(_t: &Theme) -> container::Style {
     container::Style {
@@ -183,46 +213,31 @@ fn section(label: &str) -> iced::widget::Text<'_> {
     text(label).size(12).color(FG_MUTED)
 }
 
-/// One stored inline comment rendered under its line (PR-style): a pending one shows the text
-/// + a dismiss ✕; a resolved one shows a ✓ and dimmer text (the running "done" record).
-fn view_inline_comment(i: usize, c: dc_win::comments::Comment) -> Element<'static, Message> {
-    let (mark, mark_color, txt_color) = if c.resolved {
-        ("✓", GOOD, FG_MUTED)
-    } else {
-        ("💬", ACCENT, FG)
-    };
-    let resolved = c.resolved;
-    let can_revert = c.resolved && c.before.is_some();
-    let mut head = row![
-        text(mark).size(12).color(mark_color),
-        text(c.text.clone()).size(12).color(txt_color),
-        Space::new().width(Fill),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
-    // A resolved comment with stored before-text gets a per-comment Revert.
-    if can_revert {
-        head = head.push(
-            button(text("↩ revert").size(11))
-                .on_press(Message::RevertComment(i))
-                .padding([0, 8])
-                .style(menu_item_style),
-        );
-    }
-    head = head.push(
-        button(text("✕").size(11))
-            .on_press(Message::DismissComment(i))
-            .padding([0, 6])
-            .style(menu_item_style),
-    );
-    container(head)
-        .width(Fill)
+/// The shared "↩ revert" button used on both the standalone revert bar and inline-comment rows,
+/// so they look and behave identically. Reverts the diff block starting at `cur_start`.
+fn revert_button(cur_start: usize) -> Element<'static, Message> {
+    button(text("↩ revert").size(11).color(GOOD))
+        .on_press(Message::RevertBlock(cur_start))
+        .padding([0, 8])
+        .style(menu_item_style)
+        .into()
+}
+
+/// The shared rounded, bordered bar chrome used by BOTH the standalone revert bar and inline
+/// comments — one component so they're visually identical. Sized to the viewport (`bar_width`) so
+/// the row ends before the minimap and its buttons stay visible without scrolling horizontally;
+/// `tint` colours the faint background wash.
+fn bar_container<'a>(
+    content: impl Into<Element<'a, Message>>,
+    bar_width: Option<f32>,
+    tint: Color,
+) -> Element<'a, Message> {
+    let width = bar_width.map(Length::Fixed).unwrap_or(Fill);
+    container(content)
+        .width(width)
         .padding([4, 8])
         .style(move |_t: &Theme| container::Style {
-            background: Some(Background::Color(Color {
-                a: 0.06,
-                ..if resolved { GOOD } else { ACCENT }
-            })),
+            background: Some(Background::Color(Color { a: 0.07, ..tint })),
             border: Border {
                 color: CARD_BORDER,
                 width: 1.0,
@@ -231,6 +246,64 @@ fn view_inline_comment(i: usize, c: dc_win::comments::Comment) -> Element<'stati
             ..container::Style::default()
         })
         .into()
+}
+
+/// A standalone revert bar: the shared bar chrome carrying ONLY the "↩ revert" button (no comment
+/// text). Rendered under a changed diff block that has no comment on it.
+fn view_revert_block_bar(cur_start: usize, bar_width: Option<f32>) -> Element<'static, Message> {
+    let head = row![Space::new().width(Fill), revert_button(cur_start)].align_y(iced::Alignment::Center);
+    bar_container(head, bar_width, GOOD)
+}
+
+/// One stored inline comment rendered under its line (PR-style): a pending one shows the text + a
+/// dismiss ✕; a resolved one shows a ✓ and dimmer text (the running "done" record). Uses the SAME
+/// [`bar_container`] chrome + [`revert_button`] as the standalone bar. `revert_block_start`: if the
+/// comment sits on a changed diff block, its `cur_start` so the row can offer a "↩ revert".
+fn view_inline_comment(
+    i: usize,
+    c: dc_win::comments::Comment,
+    bar_width: Option<f32>,
+    revert_block_start: Option<usize>,
+) -> Element<'static, Message> {
+    let (mark, mark_color, txt_color) = if c.resolved {
+        ("✓", GOOD, FG_MUTED)
+    } else {
+        ("💬", ACCENT, FG)
+    };
+    let tint = if c.resolved { GOOD } else { ACCENT };
+    let can_revert = c.resolved && c.before.is_some();
+    let mut head = row![
+        text(mark).size(12).color(mark_color),
+        text(c.text.clone()).size(12).color(txt_color),
+        Space::new().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center);
+    // If the comment is on a changed git block, offer to revert that block right here — the same
+    // shared button as the standalone bar.
+    if let Some(cur_start) = revert_block_start {
+        head = head.push(revert_button(cur_start));
+    }
+    // A resolved comment with stored before-text gets a per-comment Revert. While a revert is
+    // available, that's the action to take — so we HIDE the ✕ (dismiss) until then, to steer you
+    // to undo the change rather than silently drop the record. The ✕ shows on pending comments
+    // (nothing applied yet) and on resolved ones with no revert available.
+    if can_revert {
+        head = head.push(
+            button(text("↩ revert").size(11))
+                .on_press(Message::RevertComment(i))
+                .padding([0, 8])
+                .style(menu_item_style),
+        );
+    } else {
+        head = head.push(
+            button(text("✕").size(11))
+                .on_press(Message::DismissComment(i))
+                .padding([0, 6])
+                .style(menu_item_style),
+        );
+    }
+    bar_container(head, bar_width, tint)
 }
 
 /// Launch the desktop app.
@@ -404,12 +477,24 @@ struct App {
     /// Lines of the currently-shown file that differ from HEAD right now (from `git diff`),
     /// highlighted GitHub-PR-style. Refreshed as a fix edits the file, so you SEE changes land.
     changed_lines: std::collections::BTreeSet<usize>,
+    /// The full PR-style diff of the shown file vs HEAD: `.added` (green, == `changed_lines`) plus
+    /// `.removed_before` (red deleted lines, anchored to the current line they sat before). Drives
+    /// the GitHub-diff rendering in the code view. Refreshed alongside `changed_lines`.
+    file_diff: dc_win::gitdiff::FileDiff,
     /// The visible slice of the code view as (top_fraction, height_fraction) of the whole file,
     /// updated on every scroll so the minimap draws a "you are here" box. `None` until first scroll.
     code_viewport: Option<(f32, f32)>,
     /// Pixel height of the code viewport (last seen on scroll), so a minimap jump can center the
     /// clicked line rather than parking it at the top. `0.0` until first scroll.
     code_view_h: f32,
+    /// Absolute vertical scroll offset (px) of the code view, last seen on scroll. Drives line
+    /// virtualization: only lines within `[code_scroll_y, code_scroll_y + code_view_h]` (plus
+    /// overscan) are turned into widgets. `0.0` until first scroll.
+    code_scroll_y: f32,
+    /// Pixel WIDTH of the code viewport, last seen on scroll. Sizes the comment/revert bars to the
+    /// viewport (not the horizontally-scrollable content width) so they end before the minimap and
+    /// stay visible without scrolling right. `0.0` until first scroll (→ fall back to Fill).
+    code_view_w: f32,
     /// The range the agent is actively working on (the lines you commented on), highlighted in
     /// a pulsing amber from submit until the change lands — so the "thinking" gap feels active.
     /// `(file, start, end)`; `None` when nothing is in flight.
@@ -424,6 +509,29 @@ struct App {
     file_status: std::collections::BTreeMap<String, dc_win::gitdiff::FileStatus>,
     /// The current git branch (shown in the explorer header), if any.
     branch: Option<String>,
+    /// Ahead/behind vs the upstream tracking branch (for the ↑↓ header + push/pull buttons).
+    /// Refreshed alongside the branch; `behind` reflects the last fetch (Pull/Fetch updates it).
+    upstream: dc_win::gitdiff::UpstreamStatus,
+    /// Which explorer tab is selected (Files tree / Git changes). Defaults to Files.
+    explorer_tab: ExplorerTab,
+    /// Last cursor position seen over the git list, so a right-click can pop the context menu
+    /// at the cursor. Updated on mouse-move within the git rows.
+    cursor_pos: iced::Point,
+    /// The open git-row context menu: the file it targets + its status. `None` when closed.
+    git_menu: Option<(String, dc_win::gitdiff::FileStatus)>,
+    /// Where to draw the open git context menu (the cursor position at right-click time).
+    git_menu_at: iced::Point,
+    /// Per-file staged/unstaged state (from `git status` XY codes), for the Staged section and
+    /// the Stage/Unstage menu items. Refreshed alongside `file_status`.
+    stage_states: std::collections::BTreeMap<String, dc_win::gitdiff::StageState>,
+    /// Per-file unstaged +added/−removed line counts (`git diff --numstat`), shown on the right
+    /// of each Changes row. Untracked files are counted directly (git won't diff them).
+    unstaged_deltas: std::collections::BTreeMap<String, dc_win::gitdiff::LineDelta>,
+    /// Per-file STAGED +added/−removed line counts (`git diff --cached --numstat`), for the
+    /// right of each Staged Changes row.
+    staged_deltas: std::collections::BTreeMap<String, dc_win::gitdiff::LineDelta>,
+    /// The commit-message draft typed in the git tab's VS-Code-style commit box.
+    commit_msg: String,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -449,6 +557,15 @@ struct ReplaceInFlight {
 pub(crate) enum BottomTab {
     Verification,
     Build,
+}
+
+/// The left explorer column's tabs — the workspace file tree (Files) vs. a PR-style list of
+/// just the changed files grouped by status (Git). Tabbed so the git view isn't buried inside
+/// the full tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExplorerTab {
+    Files,
+    Git,
 }
 
 /// The top menu-bar dropdowns.
@@ -518,12 +635,24 @@ impl Default for App {
             streaming: None,
             debug: false,
             changed_lines: std::collections::BTreeSet::new(),
+            file_diff: dc_win::gitdiff::FileDiff::default(),
             code_viewport: None,
             code_view_h: 0.0,
             working: None,
             comments: dc_win::comments::Comments::default(),
+            code_scroll_y: 0.0,
+            code_view_w: 0.0,
             file_status: std::collections::BTreeMap::new(),
             branch: None,
+            upstream: dc_win::gitdiff::UpstreamStatus::default(),
+            explorer_tab: ExplorerTab::Files,
+            cursor_pos: iced::Point::ORIGIN,
+            git_menu: None,
+            git_menu_at: iced::Point::ORIGIN,
+            stage_states: std::collections::BTreeMap::new(),
+            unstaged_deltas: std::collections::BTreeMap::new(),
+            staged_deltas: std::collections::BTreeMap::new(),
+            commit_msg: String::new(),
         }
     }
 }
@@ -569,6 +698,9 @@ pub(crate) enum Message {
     DismissComment(usize),
     /// Revert just this comment's change: splice its stored before-text back into the file.
     RevertComment(usize),
+    /// Revert a single diff block (VS-Code-style) back to its HEAD text. Carries the hunk's
+    /// current start line, which identifies the block to restore.
+    RevertBlock(usize),
     /// Jump the code view to a 1-based line (clicked in the minimap).
     MinimapJump(usize),
     /// The code view was scrolled — carries the viewport so the minimap can draw a "you are here"
@@ -578,6 +710,40 @@ pub(crate) enum Message {
     CancelRun,
     /// Select a bottom-panel tab (Activity / Verification / Build).
     SelectBottomTab(BottomTab),
+    /// Select a left-explorer tab (Files tree / Git changes).
+    SelectExplorerTab(ExplorerTab),
+    /// Cursor moved over the git list — track it so a right-click can place the context menu.
+    GitCursorMoved(iced::Point),
+    /// Right-clicked a git-tab row: open its context menu (stage / unstage / discard …).
+    GitRowMenu(String, dc_win::gitdiff::FileStatus),
+    /// Close the open git context menu without acting.
+    CloseGitMenu,
+    /// Stage this file (`git add -- <path>`).
+    GitStage(String),
+    /// Unstage this file (`git restore --staged -- <path>`).
+    GitUnstage(String),
+    /// Discard this file's working-tree changes (`git checkout -- <path>`); restores a deleted
+    /// file or reverts a modified one to its committed state.
+    GitDiscard(String),
+    /// Select a file from the git tab → open it AND jump to its first changed line.
+    SelectGitFile(String),
+    /// Deferred second step of `SelectGitFile`: scroll to the first changed line once the new
+    /// file's content has actually been laid out (avoids scrolling against the old file's tree).
+    JumpToFirstChange,
+    /// The commit-message draft in the git tab changed.
+    CommitMsgChanged(String),
+    /// Commit the staged files with the draft message (`git commit -m …`).
+    GitCommit,
+    /// Stage every changed file (`git add -A`) — the "Stage All Changes" ＋ on the Changes header.
+    GitStageAll,
+    /// Unstage every staged file (`git reset`) — the "− All" on the Staged Changes header.
+    GitUnstageAll,
+    /// Push HEAD to its upstream (`git push`). If the branch has no upstream, sets it on first push.
+    GitPush,
+    /// Pull from upstream (`git pull --ff-only`) — fast-forward only, so it never auto-merges.
+    GitPull,
+    /// Fetch from the remote (`git fetch`) to refresh the behind-count without changing the tree.
+    GitFetch,
     // Line comments (PR-style) — drag to select a range, then comment.
     /// Mouse pressed on line N: start a drag-selection anchored there.
     LineDragStart(usize),
@@ -626,7 +792,7 @@ impl App {
         // even after the run ends). iced delivers the tick on the UI thread, so
         // draining the std::mpsc Receiver here is safe.
         let glowing = !self.topology.active_flows(self.now()).is_empty();
-        if self.session.is_some()
+        let tick = if self.session.is_some()
             || self.chat_session.is_some()
             || self.triage.is_some()
             || self.replace.is_some()
@@ -637,7 +803,17 @@ impl App {
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick)
         } else {
             Subscription::none()
-        }
+        };
+        // Track the window-absolute cursor position so a right-click in the git tab can pop its
+        // context menu exactly at the pointer. `mouse_area::on_move` reports widget-relative
+        // coordinates (useless for placing a window overlay); this window event is absolute.
+        let cursor = iced::event::listen_with(|event, _status, _window| match event {
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                Some(Message::GitCursorMoved(position))
+            }
+            _ => None,
+        });
+        Subscription::batch([tick, cursor])
     }
 
     /// The run action for the primary button / intent submit, chosen by context: a
@@ -883,11 +1059,22 @@ impl App {
         if comment.is_empty() {
             return;
         }
+        let rel = cv.rel.clone();
+        // Scope from the CURRENT on-disk file, freshly numbered — NOT from `self.code`, which can
+        // be a stale streamed *preview* (renumbered/spliced) left by an earlier fix. Reading disk
+        // here guarantees `start`/`end`/`selection` all refer to the same real bytes we'll splice,
+        // so the fix lands on the lines you actually selected.
+        let disk = dc_win::codeview::load(&self.workspace_root(), &rel);
+        let lines = if disk.note.is_none() {
+            &disk.lines
+        } else {
+            &cv.lines // fall back to the view if the file can't be re-read
+        };
         // The IDE does the scoping: hand the model the selected code + a small window, so it
         // doesn't slurp the whole file (what made a one-line fix slow + context-heavy).
-        let (selection, context) = dc_win::linecomment::scope_context(&cv.lines, start, end);
+        let (selection, context) = dc_win::linecomment::scope_context(lines, start, end);
         let lc = dc_win::linecomment::LineComment {
-            file: cv.rel.clone(),
+            file: rel,
             start,
             end,
             selection,
@@ -925,6 +1112,18 @@ impl App {
         });
         let req = lc.classify_request();
         if self.debug {
+            // Dump exactly what range/text was captured, so a mis-splice is diagnosable.
+            let sel_first = lc.selection.lines().next().unwrap_or("").to_string();
+            self.debug_prompt(
+                "capture",
+                &format!(
+                    "range = lines {}-{}\nselection[0] = {:?}\nselection = {} line(s)",
+                    lc.start,
+                    lc.end,
+                    sel_first,
+                    lc.selection.lines().count()
+                ),
+            );
             let joined = req
                 .messages
                 .iter()
@@ -1035,21 +1234,34 @@ impl App {
         for ev in events {
             match ev {
                 dc_win::chat_session::ChatEvent::Token(delta) => {
-                    if let Some(r) = self.replace.as_mut() {
+                    // Pull the fields we need out of the in-flight replace, ending the mutable
+                    // borrow before we touch `self` again (for workspace_root / self.code).
+                    let preview_bits = self.replace.as_mut().map(|r| {
                         r.streamed.push_str(&delta);
-                        // Live preview: show the growing replacement spliced into the file.
-                        let preview = dc_win::linecomment::extract_replacement(&r.streamed)
-                            .unwrap_or_default();
+                        (
+                            r.comment.file.clone(),
+                            r.comment.start,
+                            r.comment.end,
+                            r.comment.selection.clone(),
+                            dc_win::linecomment::extract_replacement(&r.streamed)
+                                .unwrap_or_default(),
+                        )
+                    });
+                    if let Some((file, hstart, hend, selection, preview)) = preview_bits {
                         if !preview.is_empty() {
-                            let (file, start, end) =
-                                (r.comment.file.clone(), r.comment.start, r.comment.end);
                             let cur = std::fs::read_to_string(self.workspace_root().join(&file))
                                 .unwrap_or_default();
-                            let spliced =
-                                dc_win::linecomment::splice_lines(&cur, start, end, &preview);
-                            self.selected_file = Some(file.clone());
-                            self.follow_agent = false;
-                            self.code = Some(dc_win::codeview::from_text(&file, &spliced));
+                            // Preview at the block's TRUE current location (same re-anchoring the
+                            // real write uses), so the live preview lands where the edit will.
+                            if let Some((start, end)) =
+                                dc_win::linecomment::locate_range(&cur, hstart, hend, &selection)
+                            {
+                                let spliced =
+                                    dc_win::linecomment::splice_lines(&cur, start, end, &preview);
+                                self.selected_file = Some(file.clone());
+                                self.follow_agent = false;
+                                self.code = Some(dc_win::codeview::from_text(&file, &spliced));
+                            }
                         }
                     }
                 }
@@ -1090,6 +1302,19 @@ impl App {
             });
             return;
         };
+        if self.debug {
+            self.debug_prompt(
+                "line-replace reply",
+                &format!(
+                    "hint range = {}-{}\nRAW REPLY:\n{}\n\nEXTRACTED BLOCK ({} lines):\n{}",
+                    c.start,
+                    c.end,
+                    raw.trim(),
+                    new_block.lines().count(),
+                    new_block
+                ),
+            );
+        }
         let Ok(current) = std::fs::read_to_string(&path) else {
             self.chat_turns.push(dc_win::chat::Turn {
                 role: dc_win::chat::Speaker::Agent,
@@ -1097,22 +1322,39 @@ impl App {
             });
             return;
         };
+        // Re-anchor to where the selected block ACTUALLY is on disk right now — guards against the
+        // captured line numbers having drifted (which would splice the fix onto the wrong lines,
+        // duplicating the block instead of replacing it). Abort clearly if we can't locate it.
+        let Some((start, end)) =
+            dc_win::linecomment::locate_range(&current, c.start, c.end, &c.selection)
+        else {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: format!(
+                    "⚠ couldn't safely locate the selected lines in {} (the file changed) — no edit made.",
+                    c.file
+                ),
+            });
+            return;
+        };
         // Capture the exact BEFORE-text of the range (for per-comment Revert), then splice.
         let before: String = current
             .lines()
-            .skip(c.start.saturating_sub(1))
-            .take(c.end.saturating_sub(c.start) + 1)
+            .skip(start.saturating_sub(1))
+            .take(end.saturating_sub(start) + 1)
             .collect::<Vec<_>>()
             .join("\n");
-        let spliced = dc_win::linecomment::splice_lines(&current, c.start, c.end, &new_block);
+        let spliced = dc_win::linecomment::splice_lines(&current, start, end, &new_block);
         if spliced == current {
+            // The model returned the selection unchanged (a local model sometimes echoes the
+            // input on "shorten this"). Be honest about it and leave the comment PENDING so you
+            // can re-run or rephrase, rather than falsely claiming success.
             self.chat_turns.push(dc_win::chat::Turn {
                 role: dc_win::chat::Speaker::Agent,
-                text: "✓ nothing to change — already as requested.".to_string(),
+                text: "⚠ the model returned the same lines unchanged — nothing applied. Try \
+                       rephrasing (e.g. \"make this comment 2 lines\") or run it again."
+                    .to_string(),
             });
-            // Mark resolved anyway (the ask is satisfied).
-            self.comments.resolve_latest_on(&c.file);
-            dc_win::comments::save(&root, &self.comments);
             self.refresh_git_view();
             return;
         }
@@ -1135,6 +1377,13 @@ impl App {
                 stored.resolved = true;
                 stored.before = Some(before);
                 stored.after_len = Some(new_len);
+                // Record where the edit ACTUALLY landed (after re-anchoring) so a later Revert
+                // splices the before-text back over the right lines. The NEW block spans
+                // `start .. start + new_len - 1` — use that as the end, so the resolved comment
+                // anchors to the last NEW line (not the stale old end, which drifts when the fix
+                // added or removed lines).
+                stored.start = start;
+                stored.end = start + new_len - 1;
             }
         }
         dc_win::comments::save(&root, &self.comments);
@@ -1182,20 +1431,51 @@ impl App {
         let restored =
             dc_win::linecomment::splice_lines(&current, c.start, c.start + after_len - 1, &before);
         if std::fs::write(&path, &restored).is_ok() {
-            if let Some(stored) = self.comments.items.get_mut(i) {
-                stored.resolved = false;
-                stored.before = None;
-                stored.after_len = None;
-            }
+            // Reverting the change also removes the comment line entirely (VS-Code-style: undo
+            // the edit → the comment thread goes with it), rather than leaving it pending.
+            self.comments.remove(i);
             dc_win::comments::save(&root, &self.comments);
             self.select_file(c.file.clone());
             self.refresh_git_view();
             self.chat_turns.push(dc_win::chat::Turn {
                 role: dc_win::chat::Speaker::Agent,
-                text: format!(
-                    "↩ Reverted the change on {} (comment is pending again).",
-                    c.file
-                ),
+                text: format!("↩ Reverted the change on {} and removed the comment.", c.file),
+            });
+        }
+    }
+
+    /// Revert ONE diff block (VS-Code-style) back to its HEAD text: replace the block's current
+    /// line range with the committed version. `cur_start` identifies the hunk (its first current
+    /// line). Recomputes the diff from the freshly-loaded file, so it's always ground-truth.
+    fn revert_block(&mut self, cur_start: usize) {
+        let Some(rel) = self.selected_file.clone() else {
+            return;
+        };
+        let root = self.workspace_root();
+        // Find the hunk from the CURRENT on-disk diff (not stale UI state).
+        let diff = dc_win::gitdiff::file_diff(&root, &rel);
+        let Some(hunk) = diff.hunks().into_iter().find(|h| h.cur_start == cur_start) else {
+            return; // the diff moved under us — no-op, the view will refresh
+        };
+        let path = root.join(&rel);
+        let Ok(current) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        // Replace the block's current range with its HEAD text. For a pure addition head_text is
+        // empty (→ the added lines are deleted); for a pure deletion the range is empty (→ the
+        // removed text is inserted back before cur_start).
+        let restored = dc_win::linecomment::splice_lines(
+            &current,
+            hunk.cur_start,
+            hunk.cur_end,
+            &hunk.head_text,
+        );
+        if std::fs::write(&path, &restored).is_ok() {
+            self.select_file(rel.clone());
+            self.refresh_git_view();
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: format!("↩ Reverted a block in {rel} to its committed version."),
             });
         }
     }
@@ -1277,6 +1557,12 @@ impl App {
     /// Select `rel` for the code panel and load its contents from the workspace root.
     fn select_file(&mut self, rel: String) {
         let root = self.workspace_root();
+        // Switching to a different file resets the scrollable to the top; keep our virtualization
+        // offset in sync so the first frame renders the top window, not the old file's slice.
+        if self.selected_file.as_deref() != Some(rel.as_str()) {
+            self.code_scroll_y = 0.0;
+            self.code_viewport = None;
+        }
         self.code = Some(dc_win::codeview::load(&root, &rel));
         self.selected_file = Some(rel);
         self.refresh_changed_lines();
@@ -1292,13 +1578,36 @@ impl App {
         self.refresh_changed_lines();
     }
 
-    /// Recompute which lines of the shown file differ from HEAD (git), for the PR-style
-    /// highlight. Cheap `git diff -U0` on the one file; empty when nothing's selected.
-    fn refresh_changed_lines(&mut self) {
-        self.changed_lines = match &self.selected_file {
-            Some(rel) => dc_win::gitdiff::file_changed_lines(&self.workspace_root(), rel),
-            None => std::collections::BTreeSet::new(),
+    /// Scroll the code view so `line` (1-based) sits in the MIDDLE of the viewport. Each rendered
+    /// line is ~`CODE_LINE_PX` tall; back off by half the visible height so the target lands
+    /// centered (falls back to a small top offset before the first scroll gives us a real
+    /// viewport height). Shared by the minimap jump and the git-tab "open at first change".
+    fn scroll_code_to_line(&self, line: usize) -> Task<Message> {
+        let center = line as f32 * CODE_LINE_PX;
+        // `code_view_h` is 0 until the view's first scroll event; fall back to a typical editor
+        // height so a jump on a freshly-opened file still lands the target near center, not glued
+        // to the very top.
+        let view_h = if self.code_view_h > 1.0 {
+            self.code_view_h
+        } else {
+            400.0
         };
+        let y = (center - view_h / 2.0).max(0.0);
+        iced::widget::operation::scroll_to(
+            code_scroll_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
+        )
+    }
+
+    /// Recompute the shown file's PR-style diff vs HEAD (git): added lines (green) + removed lines
+    /// (red). Cheap `git diff -U0` on the one file (all-added for an untracked file); empty when
+    /// nothing's selected. `changed_lines` is the green set, kept for the minimap + jump-to-change.
+    fn refresh_changed_lines(&mut self) {
+        self.file_diff = match &self.selected_file {
+            Some(rel) => dc_win::gitdiff::file_diff(&self.workspace_root(), rel),
+            None => dc_win::gitdiff::FileDiff::default(),
+        };
+        self.changed_lines = self.file_diff.added.clone();
     }
 
     /// Refresh the PR-view git state: the current branch and per-file M/A/D statuses. Called on
@@ -1306,7 +1615,77 @@ impl App {
     fn refresh_git_view(&mut self) {
         let root = self.workspace_root();
         self.file_status = dc_win::gitdiff::statuses(&root);
+        self.stage_states = dc_win::gitdiff::stage_states(&root);
+        self.unstaged_deltas = dc_win::gitdiff::line_deltas(&root, false);
+        self.staged_deltas = dc_win::gitdiff::line_deltas(&root, true);
+        // Untracked files don't show in `git diff --numstat`; count their lines directly as
+        // all-added so the Changes row still shows a +N.
+        for (path, status) in &self.file_status {
+            if *status == dc_win::gitdiff::FileStatus::Added
+                && !self.unstaged_deltas.contains_key(path)
+            {
+                if let Ok(text) = std::fs::read_to_string(root.join(path)) {
+                    self.unstaged_deltas.insert(
+                        path.clone(),
+                        dc_win::gitdiff::LineDelta {
+                            added: text.lines().count(),
+                            removed: 0,
+                        },
+                    );
+                }
+            }
+        }
         self.branch = dc_win::gitdiff::current_branch(&root);
+        self.upstream = dc_win::gitdiff::upstream_status(&root);
+    }
+
+    /// Run a `git` subcommand in the workspace (e.g. `["add", "--", path]`) and return whether
+    /// it succeeded. Used by the git-tab context-menu actions (stage / unstage / discard).
+    fn run_git(&self, args: &[&str]) -> bool {
+        let root = self.workspace_root();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Run a NETWORK git op (push / pull / fetch), capturing its output and reporting the outcome
+    /// in the chat — these fail more often (auth, conflicts, no remote), so the message matters.
+    /// `label` names the op for the report. Runs synchronously (briefly blocks the UI).
+    fn run_git_net(&mut self, label: &str, args: &[&str]) {
+        let root = self.workspace_root();
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output();
+        let (ok, detail) = match out {
+            Ok(o) => {
+                // git writes progress/results to stderr; prefer it, fall back to stdout.
+                let err = String::from_utf8_lossy(&o.stderr);
+                let msg = if err.trim().is_empty() {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                } else {
+                    err.trim().to_string()
+                };
+                (o.status.success(), msg)
+            }
+            Err(e) => (false, e.to_string()),
+        };
+        // Keep the report short — the last non-empty line usually carries the gist.
+        let gist = detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let text = if ok {
+            format!("✓ git {label} — {}", if gist.is_empty() { "done" } else { gist })
+        } else {
+            format!("⚠ git {label} failed — {gist}")
+        };
+        self.chat_turns.push(dc_win::chat::Turn {
+            role: dc_win::chat::Speaker::Agent,
+            text,
+        });
     }
 
     /// Whether a swarm run is (or was) active — i.e. the topology has nodes to draw.
@@ -1737,6 +2116,25 @@ impl App {
                 self.follow_agent = false;
                 self.select_file(rel);
             }
+            Message::SelectGitFile(rel) => {
+                // Open the file, then jump the code view to its first changed line (git-tab
+                // click → land you on the change, VS-Code-diff style). The scroll is DEFERRED a
+                // beat so it runs against the newly-laid-out content, not the previous file's
+                // tree — a same-frame scroll_to misses on large files (the new lines don't exist
+                // in the layout yet).
+                self.follow_agent = false;
+                self.select_file(rel);
+                if self.changed_lines.iter().next().is_some() {
+                    // Re-emit as a follow-up message: it's processed after this update's view()
+                    // rebuilds with the new file, so scroll_to acts on the correct layout.
+                    return Task::done(Message::JumpToFirstChange);
+                }
+            }
+            Message::JumpToFirstChange => {
+                if let Some(&first) = self.changed_lines.iter().next() {
+                    return self.scroll_code_to_line(first);
+                }
+            }
             Message::ToggleDir(rel) => {
                 if !self.collapsed_dirs.remove(&rel) {
                     self.collapsed_dirs.insert(rel);
@@ -1759,18 +2157,9 @@ impl App {
                 dc_win::comments::save(&self.workspace_root(), &self.comments);
             }
             Message::RevertComment(i) => self.revert_comment(i),
+            Message::RevertBlock(cur_start) => self.revert_block(cur_start),
             Message::MinimapJump(line) => {
-                // Scroll the code view so the clicked line sits in the MIDDLE of the viewport.
-                // Each rendered line is ~17px tall (size-13 monospace); back off by half the
-                // visible height so the target lands centered (falls back to a small top offset
-                // before the first scroll gives us a real viewport height).
-                let center = line as f32 * CODE_LINE_PX;
-                let half = self.code_view_h / 2.0;
-                let y = (center - half).max(0.0);
-                return iced::widget::operation::scroll_to(
-                    code_scroll_id(),
-                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
-                );
+                return self.scroll_code_to_line(line);
             }
             Message::CodeScrolled(vp) => {
                 // Record the visible slice as fractions of the whole content so the minimap can
@@ -1780,6 +2169,8 @@ impl App {
                 let content_h = vp.content_bounds().height.max(1.0);
                 let view_h = vp.bounds().height;
                 self.code_view_h = view_h;
+                self.code_view_w = vp.bounds().width;
+                self.code_scroll_y = vp.absolute_offset().y;
                 let height = (view_h / content_h).clamp(0.0, 1.0);
                 self.code_viewport = Some((top * (1.0 - height), height));
             }
@@ -1793,6 +2184,83 @@ impl App {
                 }
             }
             Message::SelectBottomTab(t) => self.bottom_tab = t,
+            Message::SelectExplorerTab(t) => self.explorer_tab = t,
+            Message::GitCursorMoved(p) => self.cursor_pos = p,
+            Message::GitRowMenu(path, status) => {
+                self.git_menu_at = self.cursor_pos;
+                self.git_menu = Some((path, status));
+            }
+            Message::CloseGitMenu => self.git_menu = None,
+            Message::GitStage(path) => {
+                self.git_menu = None;
+                self.run_git(&["add", "--", &path]);
+                self.refresh_git_view();
+            }
+            Message::GitUnstage(path) => {
+                self.git_menu = None;
+                self.run_git(&["restore", "--staged", "--", &path]);
+                self.refresh_git_view();
+            }
+            Message::GitDiscard(path) => {
+                self.git_menu = None;
+                // For an untracked file `checkout --` is a no-op, so clean it instead; for a
+                // tracked file it restores the committed content (reverting a modify or delete).
+                let is_untracked =
+                    self.file_status.get(&path) == Some(&dc_win::gitdiff::FileStatus::Added);
+                if is_untracked {
+                    self.run_git(&["clean", "-f", "--", &path]);
+                } else {
+                    self.run_git(&["checkout", "--", &path]);
+                }
+                self.refresh_git_view();
+                // If the discarded file is the one on screen, reload it to show reverted content.
+                if self.selected_file.as_deref() == Some(path.as_str()) {
+                    self.reload_selected();
+                }
+            }
+            Message::CommitMsgChanged(s) => self.commit_msg = s,
+            Message::GitStageAll => {
+                self.run_git(&["add", "-A"]);
+                self.refresh_git_view();
+            }
+            Message::GitUnstageAll => {
+                self.run_git(&["reset"]); // unstage everything, keep working-tree changes
+                self.refresh_git_view();
+            }
+            Message::GitCommit => {
+                let msg = self.commit_msg.trim().to_string();
+                // Nothing staged, or an empty message → don't attempt a commit.
+                let has_staged = self.stage_states.values().any(|s| s.staged);
+                if msg.is_empty() || !has_staged {
+                    return Task::none();
+                }
+                if self.run_git(&["commit", "-m", &msg]) {
+                    self.commit_msg.clear();
+                }
+                self.refresh_git_view();
+                self.reload_selected();
+            }
+            Message::GitPush => {
+                // No upstream yet → set it on push so a fresh branch publishes cleanly.
+                if self.upstream.upstream.is_none() {
+                    if let Some(b) = self.branch.clone() {
+                        self.run_git_net("push", &["push", "-u", "origin", &b]);
+                    }
+                } else {
+                    self.run_git_net("push", &["push"]);
+                }
+                self.refresh_git_view();
+                self.reload_selected();
+            }
+            Message::GitPull => {
+                self.run_git_net("pull", &["pull", "--ff-only"]);
+                self.refresh_git_view();
+                self.reload_selected();
+            }
+            Message::GitFetch => {
+                self.run_git_net("fetch", &["fetch"]);
+                self.refresh_git_view();
+            }
             Message::LineDragStart(n) => {
                 // Begin a drag-selection anchored at line n. Clear any open comment box.
                 self.drag = Some((n, n));
@@ -1949,34 +2417,130 @@ impl App {
         if let Some(dd) = self.view_menu_dropdown() {
             layers = layers.push(dd);
         }
+        if let Some(gm) = self.view_git_menu() {
+            layers = layers.push(gm);
+        }
         if self.settings_open {
             layers = layers.push(self.view_settings_modal());
         }
         layers.width(Fill).height(Fill).into()
     }
 
-    /// The left EXPLORER column: the workspace file tree, dirs-first, click a file to
-    /// pin it in the code panel, click a dir to collapse/expand. Empty-state hint before
-    /// a project folder is picked.
+    /// The left EXPLORER column: a tabbed panel — **Files** (the workspace file tree) and
+    /// **Git** (just the changed files, PR-style). A tab bar sits under a branch header that's
+    /// shared across both tabs.
     fn view_explorer(&self) -> Element<'_, Message> {
-        use dc_win::gitdiff::FileStatus;
-        let root = self.workspace_root();
-        let rows = dc_win::filetree::build_rows(&root, &self.collapsed_dirs);
-
-        // GitHub-PR-style header: the current branch and what it's compared against (HEAD/the
-        // working tree). Plus a count of changed files.
+        // GitHub-PR-style header: the current branch, ahead/behind vs upstream, and a count of
+        // changed files. Shared by both tabs.
         let n_changed = self.file_status.len();
+        let up = &self.upstream;
         let branch_line = match &self.branch {
-            Some(b) => format!("⎇ {b}  ·  {n_changed} changed vs HEAD"),
+            Some(b) => {
+                let mut s = format!("⎇ {b}");
+                if up.ahead > 0 {
+                    s.push_str(&format!("  ↑{}", up.ahead));
+                }
+                if up.behind > 0 {
+                    s.push_str(&format!("  ↓{}", up.behind));
+                }
+                s.push_str(&format!("  ·  {n_changed} changed"));
+                s
+            }
             None => "not a git repo".to_string(),
         };
-        let mut col = column![
-            section("EXPLORER"),
+        let git_label = if n_changed > 0 {
+            format!("Git ({n_changed})")
+        } else {
+            "Git".to_string()
+        };
+        let tabs = row![
+            self.explorer_tab_button("Files", ExplorerTab::Files),
+            self.explorer_tab_button(&git_label, ExplorerTab::Git),
+        ]
+        .spacing(4);
+        let mut header = column![
             text(branch_line)
                 .size(11)
                 .color(iced::Color::from_rgb(0.55, 0.58, 0.70)),
         ]
-        .spacing(2);
+        .spacing(6);
+        // Push / Pull / Fetch — only when the repo is on a branch (has a name). Labels show the
+        // ahead/behind counts so you know what each will move.
+        if self.branch.is_some() {
+            header = header.push(self.view_sync_bar());
+        }
+        header = header.push(tabs);
+
+        let content = match self.explorer_tab {
+            ExplorerTab::Files => self.view_files_tab(),
+            ExplorerTab::Git => self.view_git_tab(),
+        };
+
+        container(column![header, content].spacing(6))
+            .width(Length::FillPortion(2))
+            .height(Fill)
+            .padding(10)
+            .style(card_style)
+            .into()
+    }
+
+    /// One explorer-tab button; highlighted when it's the selected tab.
+    fn explorer_tab_button(&self, label: &str, tab: ExplorerTab) -> Element<'_, Message> {
+        let selected = self.explorer_tab == tab;
+        button(
+            text(label.to_string())
+                .size(12)
+                .color(if selected { ACCENT } else { FG_MUTED }),
+        )
+        .on_press(Message::SelectExplorerTab(tab))
+        .padding([3, 10])
+        .style(move |_t, status| menu_title_style(selected, status))
+        .into()
+    }
+
+    /// The push / pull / fetch bar shown under the branch line. Push shows the ahead count, Pull
+    /// the behind count. When the branch has no upstream, Push offers to publish it.
+    fn view_sync_bar(&self) -> Element<'_, Message> {
+        let up = &self.upstream;
+        let push_label = if up.upstream.is_none() {
+            "↑ Publish".to_string()
+        } else if up.ahead > 0 {
+            format!("↑ Push {}", up.ahead)
+        } else {
+            "↑ Push".to_string()
+        };
+        let pull_label = if up.behind > 0 {
+            format!("↓ Pull {}", up.behind)
+        } else {
+            "↓ Pull".to_string()
+        };
+        let btn = |label: String, msg: Message| {
+            button(text(label).size(11).color(FG))
+                .on_press(msg)
+                .padding([1, 8])
+                .style(stage_toggle_button)
+        };
+        row![
+            btn(push_label, Message::GitPush),
+            btn(pull_label, Message::GitPull),
+            button(text("⟳").size(12).color(FG))
+                .on_press(Message::GitFetch)
+                .padding([1, 8])
+                .style(stage_toggle_button),
+        ]
+        .spacing(4)
+        .into()
+    }
+
+    /// The **Files** tab: the workspace file tree, dirs-first, click a file to pin it in the
+    /// code panel, click a dir to collapse/expand. Empty-state hint before a project folder is
+    /// picked.
+    fn view_files_tab(&self) -> Element<'_, Message> {
+        use dc_win::gitdiff::FileStatus;
+        let root = self.workspace_root();
+        let rows = dc_win::filetree::build_rows(&root, &self.collapsed_dirs);
+
+        let mut col = column![].spacing(2);
         if rows.is_empty() {
             col = col.push(
                 text("File ▸ Open folder to work in")
@@ -2041,12 +2605,271 @@ impl App {
             col = col.push(row![Space::new().width(Length::Fixed(indent)), btn]);
         }
 
-        container(scrollable(col).height(Fill))
-            .width(Length::FillPortion(2))
-            .height(Fill)
-            .padding(10)
-            .style(card_style)
+        scrollable(col).height(Fill).into()
+    }
+
+    /// The **Git** tab: a VS-Code-style Source Control panel — a commit-message box + Commit
+    /// button on top, then a **Staged Changes** section and an unstaged **Changes** section
+    /// (grouped Added / Modified / Deleted). Right-click any file for stage / unstage / discard.
+    fn view_git_tab(&self) -> Element<'_, Message> {
+        use dc_win::gitdiff::FileStatus;
+        if self.branch.is_none() {
+            return text("not a git repository")
+                .size(11)
+                .color(FG_MUTED)
+                .into();
+        }
+
+        // The commit box: a message input + a Commit button, enabled only when something is
+        // staged and the message is non-empty (like VS Code's checkmark).
+        let has_staged = self.stage_states.values().any(|s| s.staged);
+        let can_commit = has_staged && !self.commit_msg.trim().is_empty();
+        let input = text_input("Message (commit staged changes)", &self.commit_msg)
+            .on_input(Message::CommitMsgChanged)
+            .on_submit(Message::GitCommit)
+            .padding(6)
+            .size(12)
+            .width(Fill);
+        let mut commit_btn = button(text("✓ Commit").size(12));
+        if can_commit {
+            commit_btn = commit_btn.on_press(Message::GitCommit).style(primary_button);
+        } else {
+            commit_btn = commit_btn.style(menu_item_style);
+        }
+        let commit_box = column![input, commit_btn.padding([4, 12]).width(Fill)].spacing(4);
+
+        // Partition the changed files into staged and unstaged. A file can be in BOTH (staged
+        // plus further working-tree edits) — VS Code shows it in each, and so do we.
+        let staged: Vec<&String> = self
+            .file_status
+            .keys()
+            .filter(|p| self.stage_states.get(*p).map(|s| s.staged).unwrap_or(false))
+            .collect();
+        let unstaged: Vec<(&String, FileStatus)> = self
+            .file_status
+            .iter()
+            .filter(|(p, _)| {
+                // Unstaged, or untracked. If we have no stage info for it, treat it as unstaged.
+                self.stage_states.get(*p).map(|s| s.unstaged).unwrap_or(true)
+            })
+            .map(|(p, s)| (p, *s))
+            .collect();
+
+        let mut col = column![].spacing(2);
+
+        // Staged Changes header — with a "− All" (unstage all) — then rows.
+        if !staged.is_empty() {
+            col = col.push(self.git_section_header(
+                "Staged Changes",
+                staged.len(),
+                Some(("− All", Message::GitUnstageAll)),
+            ));
+            for path in &staged {
+                let status = self.file_status.get(*path).copied().unwrap_or(FileStatus::Modified);
+                col = col.push(self.git_file_row(path, status, true));
+            }
+        }
+
+        // Changes (unstaged) header — with a "＋ All" (stage all) — then rows.
+        if !unstaged.is_empty() {
+            col = col.push(self.git_section_header(
+                "Changes",
+                unstaged.len(),
+                Some(("＋ All", Message::GitStageAll)),
+            ));
+            for (path, status) in &unstaged {
+                col = col.push(self.git_file_row(path, *status, false));
+            }
+        }
+
+        if staged.is_empty() && unstaged.is_empty() {
+            col = col.push(
+                text("working tree clean — no changes vs HEAD")
+                    .size(11)
+                    .color(FG_MUTED),
+            );
+        }
+
+        column![commit_box, scrollable(col).height(Fill)]
+            .spacing(8)
             .into()
+    }
+
+    /// A git-tab section header (e.g. "Staged Changes (3)") with an optional stage/unstage-all
+    /// action button on the right — `action` is `(button_label, message)`, e.g. `("＋ All", …)` on
+    /// the unstaged section or `("− All", …)` on the staged one.
+    fn git_section_header(
+        &self,
+        label: &str,
+        count: usize,
+        action: Option<(&str, Message)>,
+    ) -> Element<'_, Message> {
+        let mut r = row![
+            text(format!("{label} ({count})")).size(11).color(FG_MUTED),
+            Space::new().width(Fill),
+        ]
+        .align_y(iced::Alignment::Center);
+        if let Some((btn_label, msg)) = action {
+            r = r.push(
+                button(text(btn_label.to_string()).size(11).color(FG))
+                    .on_press(msg)
+                    .padding([0, 8])
+                    .style(stage_toggle_button),
+            );
+        }
+        container(r).padding([2, 0]).into()
+    }
+
+    /// One file row in the git tab: a status badge + path, left-click opens it in the code
+    /// panel, right-click pops the stage/unstage/discard menu. `staged` tints staged rows and is
+    /// carried into the menu so it offers the right action. Deleted files aren't click-to-open.
+    fn git_file_row(
+        &self,
+        path: &str,
+        status: dc_win::gitdiff::FileStatus,
+        staged: bool,
+    ) -> Element<'_, Message> {
+        use dc_win::gitdiff::FileStatus;
+        let color = match status {
+            FileStatus::Added => GOOD,
+            FileStatus::Modified => AMBER,
+            FileStatus::Deleted => BAD,
+        };
+        let is_selected = self.selected_file.as_deref() == Some(path);
+        let name_color = if is_selected { ACCENT } else { color };
+        let mut inner = row![
+            text(status.badge().to_string())
+                .size(11)
+                .font(iced::Font::MONOSPACE)
+                .color(color),
+            text(path.to_string()).size(12).color(name_color),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        // Right-aligned +added / −removed line counts for this file (staged rows read the
+        // staged diff, unstaged rows the working-tree diff). Only shown when non-zero.
+        let deltas = if staged {
+            &self.staged_deltas
+        } else {
+            &self.unstaged_deltas
+        };
+        if let Some(d) = deltas.get(path) {
+            if d.added > 0 || d.removed > 0 {
+                inner = inner.push(Space::new().width(Fill));
+                if d.added > 0 {
+                    inner = inner.push(
+                        text(format!("+{}", d.added))
+                            .size(11)
+                            .font(iced::Font::MONOSPACE)
+                            .color(GOOD),
+                    );
+                }
+                if d.removed > 0 {
+                    inner = inner.push(
+                        text(format!("−{}", d.removed))
+                            .size(11)
+                            .font(iced::Font::MONOSPACE)
+                            .color(BAD),
+                    );
+                }
+            }
+        }
+        let row_el: Element<'_, Message> = if status == FileStatus::Deleted {
+            container(inner).padding([1, 4]).width(Fill).into()
+        } else {
+            button(inner)
+                .on_press(Message::SelectGitFile(path.to_string()))
+                .padding([1, 4])
+                .style(tree_button)
+                .width(Fill)
+                .into()
+        };
+        // A quick stage (＋) / unstage (−) button beside the row — staged files get −, unstaged get
+        // ＋. It's a SIBLING of the row button (buttons can't nest), so clicking it stages/unstages
+        // without selecting the file.
+        let (glyph, action) = if staged {
+            ("−", Message::GitUnstage(path.to_string()))
+        } else {
+            ("＋", Message::GitStage(path.to_string()))
+        };
+        let toggle = button(text(glyph).size(13).font(iced::Font::MONOSPACE).color(FG))
+            .on_press(action)
+            .padding([0, 8])
+            .style(stage_toggle_button);
+        let full = row![row_el, toggle]
+            .align_y(iced::Alignment::Center)
+            .spacing(4);
+        // A right-click opens the menu; which Stage/Unstage action it offers is decided from
+        // `stage_states` when the menu opens. Cursor position comes from the window sub.
+        iced::widget::mouse_area(full)
+            .on_right_press(Message::GitRowMenu(path.to_string(), status))
+            .into()
+    }
+
+    /// The git-row context menu overlay: a small floating card of actions (stage / unstage /
+    /// discard) for the right-clicked file, positioned at the cursor. A transparent full-window
+    /// backdrop closes it on any outside click. `None` when no menu is open.
+    fn view_git_menu(&self) -> Option<Element<'_, Message>> {
+        use dc_win::gitdiff::FileStatus;
+        let (path, status) = self.git_menu.clone()?;
+
+        // Show Stage only if the file has unstaged content, Unstage only if it has staged
+        // content — never both when there's nothing to do. Discard's label reflects the status.
+        let stage = self.stage_states.get(&path).copied();
+        let has_unstaged = stage.map(|s| s.unstaged).unwrap_or(true);
+        let has_staged = stage.map(|s| s.staged).unwrap_or(false);
+        let discard_label = match status {
+            FileStatus::Added => "🗑  Delete untracked file",
+            FileStatus::Deleted => "↩  Restore deleted file",
+            FileStatus::Modified => "↩  Discard changes",
+        };
+        let mut items: Vec<(&str, Message)> = Vec::new();
+        if has_unstaged {
+            items.push(("＋  Stage", Message::GitStage(path.clone())));
+        }
+        if has_staged {
+            items.push(("－  Unstage", Message::GitUnstage(path.clone())));
+        }
+        // Discard acts on the working tree — only meaningful when there are unstaged changes.
+        if has_unstaged {
+            items.push((discard_label, Message::GitDiscard(path.clone())));
+        }
+        let mut col = column![
+            text(path.clone())
+                .size(11)
+                .color(FG_MUTED)
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(0);
+        for (label, msg) in items {
+            col = col.push(
+                button(text(label.to_string()).size(13).color(FG))
+                    .on_press(msg)
+                    .padding([6, 14])
+                    .width(Length::Fixed(230.0))
+                    .style(menu_item_style),
+            );
+        }
+        let card = container(col).padding(3).style(dropdown_style);
+
+        // Position the card at the click point; clamp a little off the edges isn't needed for a
+        // narrow panel, but keep it from riding the very top.
+        let x = self.git_menu_at.x.max(0.0);
+        let y = self.git_menu_at.y.max(0.0);
+        let positioned = column![
+            Space::new().height(Length::Fixed(y)),
+            row![Space::new().width(Length::Fixed(x)), card],
+        ];
+        let backdrop = iced::widget::mouse_area(container(Space::new()).width(Fill).height(Fill))
+            .on_press(Message::CloseGitMenu)
+            .on_right_press(Message::CloseGitMenu);
+
+        Some(
+            iced::widget::stack![backdrop, positioned]
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        )
     }
 
     /// The line range currently highlighted in the code view: the active drag (normalized so
@@ -2090,8 +2913,112 @@ impl App {
                     .filter(|(f, _, _)| Some(f.as_str()) == self.selected_file.as_deref())
                     .map(|(_, lo, hi)| (*lo, *hi));
                 let pulse = 0.10 + 0.10 * (0.5 + 0.5 * (self.now() * 3.0).sin());
+
+                // Always window to the visible lines (fast on big files). Inline comments and the
+                // open comment box have variable height, but they only ever appear INSIDE the
+                // rendered window (anchored to a visible line), between the two spacers — so they
+                // never corrupt the spacer counts, which only stand in for plain CODE_LINE_PX
+                // rows above/below. A box below shifts later lines slightly, exactly as before.
+                // When the minimap is floating (file overflows the viewport), inline-comment rows
+                // need right padding so their ✕/revert buttons don't hide behind it. 72px minimap
+                // + a small gap. Computed here since the comment rows are built in the loop below.
+                let minimap_overflows =
+                    self.code_viewport.is_some_and(|(_, height)| height < 0.999);
+                // Width for the comment / revert bars: the VIEWPORT width (not the horizontally-
+                // scrollable content width), minus the minimap gutter when it's floating, so a bar
+                // spans the visible area and ends just before the minimap — with round edges. It
+                // scales with the window and expands when the minimap is hidden. `None` (→ Fill)
+                // before the first scroll gives us a real viewport width.
+                let bar_width: Option<f32> = (self.code_view_w > 1.0).then(|| {
+                    let gutter = if minimap_overflows { 76.0 } else { 8.0 };
+                    (self.code_view_w - gutter).max(120.0)
+                });
+
+                // Diff blocks (VS-Code-style). Two derived maps:
+                //  • `block_bar_after`: last green line of a block → its cur_start (where to render
+                //    the standalone "↩ revert block" bar).
+                //  • `line_to_block`: every green line → its block's cur_start (so a comment ON a
+                //    changed block can offer the same revert inline).
+                let hunks = self.file_diff.hunks();
+                let block_bar_after: std::collections::BTreeMap<usize, usize> = hunks
+                    .iter()
+                    .filter(|h| h.cur_start <= h.cur_end) // has a current (green) line
+                    .map(|h| (h.cur_end, h.cur_start))
+                    .collect();
+                let line_to_block: std::collections::BTreeMap<usize, usize> = hunks
+                    .iter()
+                    .filter(|h| h.cur_start <= h.cur_end)
+                    .flat_map(|h| (h.cur_start..=h.cur_end).map(move |l| (l, h.cur_start)))
+                    .collect();
+                // Blocks that already have a comment on them — those revert from the comment row,
+                // so we skip the standalone bar to avoid a duplicate button.
+                let blocks_with_comment: std::collections::BTreeSet<usize> = self
+                    .selected_file
+                    .as_deref()
+                    .map(|f| {
+                        self.comments
+                            .on_file(f)
+                            .filter_map(|(_, c)| {
+                                (c.start..=c.end).find_map(|l| line_to_block.get(&l).copied())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let total = cv.lines.len();
+                let (first_idx, last_idx) = {
+                    const OVERSCAN: usize = 12;
+                    let per = CODE_LINE_PX.max(1.0);
+                    let view_h = if self.code_view_h > 1.0 {
+                        self.code_view_h
+                    } else {
+                        800.0 // generous first-frame guess before we know the real height
+                    };
+                    let first = ((self.code_scroll_y / per) as usize).saturating_sub(OVERSCAN);
+                    let visible = (view_h / per).ceil() as usize + 2 * OVERSCAN;
+                    (first.min(total), (first + visible).min(total))
+                };
+
                 let mut col = column![].spacing(0);
-                for (n, line) in &cv.lines {
+                // Top spacer standing in for the hidden lines above the window (keeps the
+                // scrollbar geometry, minimap box, and scroll_to offsets pixel-accurate). It must
+                // also cover any RED removed-lines that anchor above the window (they render as
+                // rows, so they add height) — count removals before the first visible line.
+                if first_idx > 0 {
+                    let first_visible_line = first_idx + 1; // 1-based line number of cv.lines[first_idx]
+                    let hidden_removed: usize = self
+                        .file_diff
+                        .removed_before
+                        .range(..first_visible_line)
+                        .map(|(_, v)| v.len())
+                        .sum();
+                    let hidden_rows = first_idx + hidden_removed;
+                    col = col.push(
+                        Space::new().height(Length::Fixed(hidden_rows as f32 * CODE_LINE_PX)),
+                    );
+                }
+                for (n, line) in &cv.lines[first_idx..last_idx] {
+                    // GitHub-PR style: render any lines DELETED just before this one as red rows
+                    // (a `-` gutter, red wash). They exist only in HEAD, so they're not selectable.
+                    if let Some(removed) = self.file_diff.removed_before.get(n) {
+                        for gone in removed {
+                            col = col.push(
+                                container(
+                                    text(format!("-     {gone}"))
+                                        .size(13)
+                                        .line_height(iced::widget::text::LineHeight::Absolute(
+                                            CODE_LINE_PX.into(),
+                                        ))
+                                        .font(iced::Font::MONOSPACE)
+                                        .color(BAD)
+                                        .wrapping(iced::widget::text::Wrapping::None),
+                                )
+                                .height(Length::Fixed(CODE_LINE_PX))
+                                .padding([0, 4])
+                                .style(|_t: &Theme| code_removed_line_container()),
+                            );
+                        }
+                    }
                     let in_sel = sel.is_some_and(|(lo, hi)| *n >= lo && *n <= hi);
                     let working = working_here.is_some_and(|(lo, hi)| *n >= lo && *n <= hi);
                     // A line that differs from HEAD (git) → GitHub-PR-style green highlight
@@ -2111,22 +3038,40 @@ impl App {
                     let line_el = container(
                         text(row_text)
                             .size(13)
+                            // Pin the text's line height so every row is EXACTLY CODE_LINE_PX
+                            // tall — the fixed height the minimap, scroll-jump, and the
+                            // virtualization spacers all assume. Without this, natural line
+                            // height drifts from the estimate and windowed scrolling desyncs.
+                            .line_height(iced::widget::text::LineHeight::Absolute(
+                                CODE_LINE_PX.into(),
+                            ))
                             .font(iced::Font::MONOSPACE)
                             .color(color)
                             .wrapping(iced::widget::text::Wrapping::None),
                     )
+                    .height(Length::Fixed(CODE_LINE_PX))
                     .padding([0, 4])
                     .style(move |_t: &Theme| {
                         code_line_container(in_sel, changed, working.then_some(pulse))
                     });
-                    col = col.push(
-                        iced::widget::mouse_area(line_el)
-                            .on_press(Message::LineDragStart(*n))
-                            .on_enter(Message::LineDragTo(*n))
-                            .on_release(Message::LineDragEnd),
-                    );
+                    let row_ma = iced::widget::mouse_area(line_el)
+                        .on_press(Message::LineDragStart(*n))
+                        .on_enter(Message::LineDragTo(*n))
+                        .on_release(Message::LineDragEnd);
+                    col = col.push(row_ma);
+                    // After the LAST green line of a changed block, render a "↩ revert block" bar —
+                    // its own comment-shaped row (no comment text) carrying only the revert button,
+                    // so the control lives on a dedicated line instead of floating over code. Skip
+                    // it when a comment already sits on this block (it offers revert inline).
+                    if let Some(&cur_start) = block_bar_after.get(n) {
+                        if !blocks_with_comment.contains(&cur_start) {
+                            col = col.push(view_revert_block_bar(cur_start, bar_width));
+                        }
+                    }
                     // Stored inline comments whose range ENDS on this line — render them (PR
-                    // style), struck-through + ✓ once resolved.
+                    // style), struck-through + ✓ once resolved. Only the in-window lines are
+                    // iterated, so a comment scrolled off-screen simply isn't drawn (its state
+                    // persists); the box/comment adds height inside the window, not the spacers.
                     if let Some(file) = self.selected_file.clone() {
                         let here: Vec<(usize, dc_win::comments::Comment)> = self
                             .comments
@@ -2135,12 +3080,54 @@ impl App {
                             .map(|(i, c)| (i, c.clone()))
                             .collect();
                         for (i, c) in here {
-                            col = col.push(view_inline_comment(i, c));
+                            // If the comment sits on a changed block, offer to revert that block
+                            // from the comment row (look up by any line the comment covers).
+                            let block = (c.start..=c.end)
+                                .find_map(|l| line_to_block.get(&l).copied());
+                            col = col.push(view_inline_comment(i, c, bar_width, block));
                         }
                     }
                     // The (new) comment box after the last line of the committed range.
                     if self.comment_range.is_some_and(|(_, hi)| hi == *n) {
                         col = col.push(self.view_comment_box());
+                    }
+                }
+                // Bottom spacer for the hidden lines below the window — plus any removed-lines that
+                // anchor below the last visible line (they'd add height when scrolled into view).
+                if last_idx < total {
+                    let first_hidden_line = last_idx + 1; // 1-based line after the window
+                    let below_removed: usize = self
+                        .file_diff
+                        .removed_before
+                        .range(first_hidden_line..)
+                        .map(|(_, v)| v.len())
+                        .sum();
+                    let hidden_rows = (total - last_idx) + below_removed;
+                    col = col.push(
+                        Space::new().height(Length::Fixed(hidden_rows as f32 * CODE_LINE_PX)),
+                    );
+                } else {
+                    // Window reaches EOF: render removals anchored past the last line (deletions at
+                    // end-of-file) as trailing red rows.
+                    for (anchor, removed) in self.file_diff.removed_before.range(total + 1..) {
+                        let _ = anchor;
+                        for gone in removed {
+                            col = col.push(
+                                container(
+                                    text(format!("-     {gone}"))
+                                        .size(13)
+                                        .line_height(iced::widget::text::LineHeight::Absolute(
+                                            CODE_LINE_PX.into(),
+                                        ))
+                                        .font(iced::Font::MONOSPACE)
+                                        .color(BAD)
+                                        .wrapping(iced::widget::text::Wrapping::None),
+                                )
+                                .height(Length::Fixed(CODE_LINE_PX))
+                                .padding([0, 4])
+                                .style(|_t: &Theme| code_removed_line_container()),
+                            );
+                        }
                     }
                 }
                 if cv.truncated {
@@ -2154,10 +3141,9 @@ impl App {
                     );
                 }
                 // Only show the minimap when the file actually overflows the viewport — if it all
-                // fits on screen there's nothing to navigate, so the map is just noise. `height`
-                // is the visible fraction; < ~1.0 means it scrolls. Before the first scroll
-                // (`None`) we don't know yet, so default to hiding it for short files.
-                let overflows = self.code_viewport.is_some_and(|(_, height)| height < 0.999);
+                // fits on screen there's nothing to navigate, so the map is just noise. Computed
+                // above as `minimap_overflows` (drives both the comment inset and the minimap).
+                let overflows = minimap_overflows;
                 // With the minimap up, its viewport box IS the vertical scrollbar — hide the real
                 // one (width 0) so we don't show both. Keep the horizontal bar for long lines.
                 let vbar = if overflows {

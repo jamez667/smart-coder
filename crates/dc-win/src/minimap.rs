@@ -155,9 +155,13 @@ impl iced_canvas::Program<crate::app::Message> for Minimap {
                 );
                 let n = self.line_lens.len().max(1);
                 let line = ((frac * n as f32) as usize + 1).min(n);
-                return Some(iced_canvas::Action::publish(
-                    crate::app::Message::MinimapJump(line),
-                ));
+                // `.and_capture()` consumes the click so it does NOT fall through to the code's
+                // per-line mouse_area beneath the floating minimap — otherwise a minimap click also
+                // starts a line drag-select on the code underneath.
+                return Some(
+                    iced_canvas::Action::publish(crate::app::Message::MinimapJump(line))
+                        .and_capture(),
+                );
             }
         }
         None

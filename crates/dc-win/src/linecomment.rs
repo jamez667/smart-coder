@@ -130,25 +130,30 @@ impl LineComment {
     }
 
     /// Build a request for a fast LINE-ANCHORED edit: the model returns ONLY the new text for
-    /// the selected lines (inside a plain code fence), and the IDE splices it in by line number.
-    /// No `edit_file`, no whitespace/old_str matching — the thing small models fumble. This is
-    /// the fast path for a localized change on a known range (a reindent, a small tweak).
+    /// the selected lines (inside a ``` fence, which preserves leading indentation verbatim), and
+    /// the IDE splices it in by line number. No `edit_file`, no whitespace/old_str matching — the
+    /// thing small models fumble. Fast path for a localized change on a known range.
     pub fn replace_request(&self) -> GenerateRequest {
-        let sys = "You rewrite a specific block of code to satisfy a review comment. Output ONLY \
-             the new version of THAT block — the same lines, edited — inside a single plain code \
-             fence (```), nothing else. Preserve everything not mentioned by the comment; match \
-             the surrounding indentation. No explanation, no extra lines. /no_think";
-        let ctx = if self.context.trim().is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\n\nSurrounding context (for indentation/reference — do not include it):\n{}",
-                self.context
-            )
-        };
+        let n = self.selection.lines().count().max(1);
+        // The ``` fence is REQUIRED here on purpose: it preserves leading whitespace exactly.
+        // Without it the model (and chat formatting) trims/normalises indentation, and the splice
+        // lands mis-indented code. `extract_replacement` is hardened against broken/bare fences,
+        // so keeping the fence is the robust choice — dropping it corrupted indentation.
+        let sys = "You rewrite ONE specific block of code to satisfy a review comment. Rules:\n\
+             - Output ONLY the new version of the SELECTED block, inside a single ``` code fence, \
+             and NOTHING outside the fence (no explanation, no prose).\n\
+             - Preserve each line's EXACT leading indentation (spaces) inside the fence.\n\
+             - Rewrite ONLY the selected lines. Do NOT add lines from before or after the \
+             selection, and do NOT append neighbouring code, comments, or functions. /no_think";
+        // NOTE: no surrounding context is sent — it made small models copy neighbouring lines
+        // (a comment right after the selection) into the output, GROWING the file instead of
+        // editing the block. The selection alone carries its own indentation.
         let user = format!(
-            "File `{}`. The reviewer selected these lines:\n\n{}\n\nComment: {}\n\n\
-             Return ONLY the rewritten version of those lines in a ``` fence.{ctx}",
+            "File `{}`. Rewrite EXACTLY these {n} selected line(s) — no more, no fewer concepts, \
+             keeping their indentation:\n\n\
+             ```\n{}\n```\n\nComment: {}\n\n\
+             Return ONLY the rewritten selection inside one ``` fence. Do not include any lines \
+             that were not in the selection above.",
             self.anchor(),
             self.selection.trim_end_matches('\n'),
             self.comment.trim(),
@@ -203,29 +208,76 @@ impl LineComment {
 }
 
 /// Extract the replacement block from a [`replace_request`] reply: the body of the first ```
-/// code fence, or — if the model skipped the fence — the whole trimmed reply. Returns `None`
-/// only for an empty reply.
+/// fence (the requested format — it preserves indentation), or the whole trimmed reply if the
+/// model skipped the fence. Hardened against broken fences: an empty / fence-only reply → `None`
+/// (never leak a bare ``` into the file).
 ///
 /// [`replace_request`]: LineComment::replace_request
 pub fn extract_replacement(reply: &str) -> Option<String> {
-    // Strip a leaked <think> block first (reuse chat's stripper via a local minimal version).
     let reply = reply.trim();
+    let has_real = |s: &str| {
+        s.lines().any(|l| {
+            let t = l.trim();
+            !t.is_empty() && t != "```"
+        })
+    };
+    // If the reply has a code fence, the body of the FIRST fence is authoritative — even if it's
+    // empty (we must NOT then fall back to the raw reply, which still contains the fence markers).
     if let Some(open) = reply.find("```") {
         let after = &reply[open + 3..];
-        // Skip the info-string line (```rust\n…).
-        let body_start = after.find('\n').map(|i| i + 1).unwrap_or(0);
-        let body = &after[body_start..];
-        let end = body.find("```").unwrap_or(body.len());
-        let block = body[..end].trim_end_matches('\n');
-        if !block.is_empty() {
-            return Some(block.to_string());
+        // Optional info string (```rust) sits on the same line; the body starts after its newline.
+        let block = match after.find('\n') {
+            Some(nl) => {
+                let body = &after[nl + 1..];
+                let end = body.find("```").unwrap_or(body.len());
+                body[..end].trim_matches('\n').to_string()
+            }
+            None => String::new(), // fence with no newline → no body
+        };
+        return has_real(&block).then_some(block);
+    }
+    // No fence at all: the whole trimmed reply is the block, if it has real content.
+    has_real(reply).then(|| reply.to_string())
+}
+
+/// Find the 1-based inclusive line range in `file_contents` that currently holds `selection`
+/// (the exact block of lines the reviewer selected). Returns the *hinted* range `(start,end)`
+/// when the lines there already match; otherwise searches the whole file for the block and
+/// returns its true location; `None` if the block can't be found (the code changed too much).
+///
+/// This guards the by-line splice against any drift between the captured line numbers and the
+/// file on disk — without it, a stale `start`/`end` silently writes the fix to the WRONG lines.
+pub fn locate_range(
+    file_contents: &str,
+    start: usize,
+    end: usize,
+    selection: &str,
+) -> Option<(usize, usize)> {
+    let file: Vec<&str> = file_contents.lines().collect();
+    let sel: Vec<&str> = selection.lines().collect();
+    if sel.is_empty() {
+        return None;
+    }
+    // Does the block sit exactly where we think it does? (The fast, overwhelmingly common case.)
+    let matches_at = |lo0: usize| -> bool {
+        lo0 + sel.len() <= file.len() && file[lo0..lo0 + sel.len()] == sel[..]
+    };
+    let hint_lo0 = start.saturating_sub(1);
+    if end.saturating_sub(start) + 1 == sel.len() && matches_at(hint_lo0) {
+        return Some((start, end));
+    }
+    // Drifted (or never matched): find the block's true position. Require a UNIQUE match so we
+    // never splice into an identical-looking block elsewhere.
+    let mut found: Option<usize> = None;
+    for lo0 in 0..=file.len().saturating_sub(sel.len()) {
+        if matches_at(lo0) {
+            if found.is_some() {
+                return None; // ambiguous — refuse rather than guess
+            }
+            found = Some(lo0);
         }
     }
-    if reply.is_empty() {
-        None
-    } else {
-        Some(reply.to_string())
-    }
+    found.map(|lo0| (lo0 + 1, lo0 + sel.len()))
 }
 
 /// Splice `replacement` into `file_contents` in place of the 1-based line range `start..=end`
@@ -376,6 +428,15 @@ mod tests {
             Some("let x = 1;")
         );
         assert!(extract_replacement("").is_none());
+        // A reply that is ONLY fence markers must NOT leak a bare ``` into the file.
+        assert!(extract_replacement("```").is_none(), "lone fence → None");
+        assert!(extract_replacement("```rust\n```").is_none(), "empty fenced block → None");
+        assert!(extract_replacement("```\n```").is_none());
+        // Info string on the fence line is dropped; body kept.
+        assert_eq!(
+            extract_replacement("```rust\n/// short\n```").as_deref(),
+            Some("/// short")
+        );
     }
 
     #[test]
@@ -393,6 +454,39 @@ mod tests {
         // A file with no trailing newline stays that way.
         let out3 = splice_lines("a\nb", 1, 1, "X");
         assert_eq!(out3, "X\nb");
+    }
+
+    #[test]
+    fn locate_range_matches_hint_when_correct() {
+        let file = "a\nb\nc\nd\ne\n";
+        // Hint 2-3 = "b\nc" and that's exactly what's there.
+        assert_eq!(locate_range(file, 2, 3, "b\nc"), Some((2, 3)));
+    }
+
+    #[test]
+    fn locate_range_reanchors_when_hint_drifted() {
+        // The selected block "c\nd" is really at lines 3-4, but the hint wrongly says 1-2.
+        let file = "a\nb\nc\nd\ne\n";
+        assert_eq!(
+            locate_range(file, 1, 2, "c\nd"),
+            Some((3, 4)),
+            "re-anchors to the block's true location, not the stale hint"
+        );
+    }
+
+    #[test]
+    fn locate_range_refuses_ambiguous_block() {
+        // "x" appears twice → refuse rather than splice into the wrong one.
+        let file = "x\ny\nx\nz\n";
+        assert_eq!(locate_range(file, 1, 1, "x"), Some((1, 1)), "hint 1 matches exactly");
+        // But if the hint doesn't match at 3 (say hint says 2), the search finds two "x" → None.
+        assert_eq!(locate_range(file, 2, 2, "x"), None, "two matches → ambiguous → None");
+    }
+
+    #[test]
+    fn locate_range_none_when_missing() {
+        let file = "a\nb\nc\n";
+        assert_eq!(locate_range(file, 1, 1, "zzz"), None);
     }
 
     #[test]
