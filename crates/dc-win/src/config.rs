@@ -68,7 +68,9 @@ pub struct UiConfig {
     /// the host — a pinned Python toolkit + known layout, so a build can't depend on or
     /// pollute the host. On by default (the recommended sandbox).
     pub use_docker: bool,
-    /// The Docker image to verify in (built from `docker/pyenv/Dockerfile`).
+    /// The Docker image to verify in — referenced by name; built from the
+    /// `docker/pyenv/` image in the dumb-coder-ops repo (`docker build -t
+    /// dumb-coder-pyenv docker/pyenv`).
     pub docker_image: String,
 }
 
@@ -82,7 +84,7 @@ impl Default for UiConfig {
             // real machine-specific endpoint (which model, which port) is NOT baked into
             // the repo — it lives in %APPDATA%\dumb-coder\config.json (git-ignored) and
             // is layered on by `UiConfig::load()`, or overridden by DC_BASE_URL/DC_MODEL.
-            // See scripts/coder-30b.ps1 for the local 30B launcher this box uses.
+            // The backend launchers live in the dumb-coder-ops repo (scripts/).
             base_url: "http://localhost:8080/v1".to_string(),
             model: "default".to_string(),
             tool_calling: ToolCalling::None,

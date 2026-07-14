@@ -136,6 +136,22 @@ the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 232 tests)
 
 See the [roadmap](docs/specs/07-roadmap.md).
 
+## Running the backends
+
+The rig's model launchers and the verify sandbox image live in a separate
+repo, **[dumb-coder-ops](../dumb-coder-ops)** — they're environment concerns, so
+swapping models doesn't churn this source tree:
+
+- **Backend launchers** (`scripts/`) — llama.cpp servers for the models the agent
+  talks to (the daily-driver 30B split, the 8B swarm pool). Reached over HTTP; the
+  endpoint/model this app uses is set in `%APPDATA%\dumb-coder\config.json` (or
+  `DC_BASE_URL`/`DC_MODEL`), never hard-coded here.
+- **Verify sandbox** (`docker/pyenv/`) — the pinned Python image generated code is
+  tested in, referenced by name (`dumb-coder-pyenv`).
+
+The **MCP server image** stays in this repo at [`docker/mcp/`](docker/mcp/) — it
+compiles this workspace, so it belongs with the code.
+
 ## Key decisions
 
 | Decision | Choice |
