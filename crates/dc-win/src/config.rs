@@ -74,17 +74,17 @@ pub struct UiConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        // The live-test defaults from MEMORY: coder on :11435, advisor on :11434.
+        // Machine-agnostic fallbacks only. The real endpoint/model is layered on by
+        // `UiConfig::load()` from config.json / env — never hard-coded here.
         Self {
             // ONE model does everything now (plan + implement) — no swarm, no advisor.
-            // qwen3-coder-30b-a3b (scripts/coder-30b.ps1): llama.cpp on :11435, alias
-            // `qwen3-coder-30b`, an MoE split across both GPUs (--tensor-split 12,8).
-            // It strictly beats the 8B (clears the whole difficulty ladder) and is
-            // actually faster (~112 tok/s) since only ~3B activates per token. Edit in
-            // settings for a different endpoint/model; scripts/pool-8b.ps1 is the 8B
-            // fallback pool (:11439/:11440) for the parallel MCP swarm.
-            base_url: "http://localhost:11435/v1".to_string(),
-            model: "qwen3-coder-30b".to_string(),
+            // NEUTRAL fallback only: the standard llama.cpp port + a generic tag. The
+            // real machine-specific endpoint (which model, which port) is NOT baked into
+            // the repo — it lives in %APPDATA%\dumb-coder\config.json (git-ignored) and
+            // is layered on by `UiConfig::load()`, or overridden by DC_BASE_URL/DC_MODEL.
+            // See scripts/coder-30b.ps1 for the local 30B launcher this box uses.
+            base_url: "http://localhost:8080/v1".to_string(),
+            model: "default".to_string(),
             tool_calling: ToolCalling::None,
             // No separate advisor/orchestrator: the workflow planner and the implement
             // agent both use the single backend above (orchestrator()/advisor() fall back
@@ -278,7 +278,60 @@ pub fn repo_overview(workspace: &std::path::Path) -> String {
     out
 }
 
+/// The machine-local config file: `%APPDATA%\dumb-coder\config.json` on Windows,
+/// falling back to the system temp dir so we always have *somewhere* to look. This is
+/// the same directory convention as [`crate::persist`]'s state file — deliberately kept
+/// together. It is NOT tracked by git; each box supplies its own endpoint/model here.
+fn config_file() -> std::path::PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("dumb-coder").join("config.json")
+}
+
+/// Pull `{"base_url": "...", "model": "..."}` out of the config JSON. Either key may be
+/// absent; a missing/blank/malformed file yields `(None, None)` and the caller keeps its
+/// default. Dependency-free (serde_json, already in the tree) — mirrors `persist::parse`.
+fn parse_config(text: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (None, None);
+    };
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    (field("base_url"), field("model"))
+}
+
 impl UiConfig {
+    /// The default config, then the machine-local endpoint/model layered on top.
+    ///
+    /// Precedence (highest first): env `DC_BASE_URL`/`DC_MODEL` → `config.json`
+    /// (`%APPDATA%\dumb-coder\config.json`) → the neutral compiled [`Default`]. This is
+    /// the same env-over-file-over-default shape `dc-mcp` uses, so the endpoint the GUI
+    /// talks to is never hard-coded in the repo — swap models by editing the git-ignored
+    /// JSON (or exporting an env var), with zero source churn.
+    pub fn load() -> Self {
+        let mut cfg = Self::default();
+        let (file_url, file_model) =
+            std::fs::read_to_string(config_file()).map_or((None, None), |t| parse_config(&t));
+        // env wins over file wins over default; each layer only overrides when present.
+        if let Some(u) = std::env::var("DC_BASE_URL").ok().or(file_url) {
+            if !u.trim().is_empty() {
+                cfg.base_url = u;
+            }
+        }
+        if let Some(m) = std::env::var("DC_MODEL").ok().or(file_model) {
+            if !m.trim().is_empty() {
+                cfg.model = m;
+            }
+        }
+        cfg
+    }
+
     /// Resolve a fresh per-run workspace: a `run-<stamp>` folder under the base
     /// `workspace`, created on demand. Each prompt gets its own datetime-stamped dir so
     /// outputs never pile up or overwrite. `stamp` is caller-supplied (e.g.
@@ -426,6 +479,47 @@ mod tests {
 
         // Nothing recognizable → the fallback.
         assert_eq!(detect_verify_command(&[], "the-fallback"), "the-fallback");
+    }
+
+    #[test]
+    fn parse_config_reads_both_fields() {
+        let (u, m) =
+            parse_config(r#"{"base_url":"http://localhost:11435/v1","model":"qwen3-coder-30b"}"#);
+        assert_eq!(u.as_deref(), Some("http://localhost:11435/v1"));
+        assert_eq!(m.as_deref(), Some("qwen3-coder-30b"));
+    }
+
+    #[test]
+    fn parse_config_missing_or_blank_fields_are_none() {
+        // Only one key present → the other stays None (caller keeps its default).
+        let (u, m) = parse_config(r#"{"model":"just-the-model"}"#);
+        assert_eq!(u, None);
+        assert_eq!(m.as_deref(), Some("just-the-model"));
+        // Blank / whitespace-only values are treated as absent, not as an empty override.
+        let (u, m) = parse_config(r#"{"base_url":"  ","model":""}"#);
+        assert_eq!(u, None);
+        assert_eq!(m, None);
+    }
+
+    #[test]
+    fn parse_config_malformed_or_wrong_shape_is_none_none() {
+        assert_eq!(parse_config("not json at all"), (None, None));
+        // Right JSON, wrong types → no strings to take.
+        assert_eq!(
+            parse_config(r#"{"base_url":42,"model":true}"#),
+            (None, None)
+        );
+        assert_eq!(parse_config("{}"), (None, None));
+    }
+
+    #[test]
+    fn neutral_default_has_no_machine_specifics() {
+        // The compiled default must be generic — the rig's real endpoint lives in
+        // config.json, never in the repo. Guard against a rig value creeping back in.
+        let d = UiConfig::default();
+        assert_eq!(d.base_url, "http://localhost:8080/v1");
+        assert_eq!(d.model, "default");
+        assert!(!d.base_url.contains("11435") && !d.base_url.contains("11439"));
     }
 
     #[test]

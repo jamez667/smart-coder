@@ -460,10 +460,12 @@ pub(crate) enum Menu {
 
 impl Default for App {
     fn default() -> Self {
-        // Seed the editable input boxes from the config defaults, so the settings
+        // Seed the editable input boxes from the *loaded* config, so the settings
         // panel shows the active values and `start()` never commits a blank input
-        // over a sensible default (URL, /no_think suffix, …).
-        let cfg = UiConfig::default();
+        // over a sensible default (URL, /no_think suffix, …). `load()` layers the
+        // machine-local endpoint/model (config.json / env) over the neutral default,
+        // so the specific backend this box uses never lives in the repo.
+        let cfg = UiConfig::load();
         // Re-open the last project the user worked in (if it still exists on disk), so the
         // app comes back to where they left off instead of the empty scratch base.
         let picked_workspace = dc_win::persist::load().last_project;
