@@ -12,7 +12,7 @@ use dc_model::{GenerateRequest, Message, ModelBackend};
 use dc_proto::Result;
 
 use crate::plan::PlanState;
-use crate::strategy::extract_json_array;
+use crate::text::extract_json_array;
 
 /// Build the planner prompt: the task plus a repo overview, asking for a short
 /// ordered list of concrete steps as a JSON array of strings.

@@ -22,6 +22,7 @@ pub mod planner;
 pub mod recovery;
 pub mod runlog;
 pub mod strategy;
+pub mod text;
 
 pub use advisor::{advice_observation, consult, Predicament};
 pub use agent::{
@@ -38,9 +39,9 @@ pub use planner::{make_plan, parse_plan};
 pub use recovery::{action_hash, Progress, StallDetector, StopReason};
 pub use runlog::{RunLog, RunLogSink};
 pub use strategy::{
-    extract_json_array, extract_json_object, select_strategy, Grammar, NativeTools, ParseRepair,
-    RepairError, ToolCallStrategy,
+    select_strategy, Grammar, NativeTools, ParseRepair, RepairError, ToolCallStrategy,
 };
+pub use text::{extract_json_array, extract_json_object, first_line, mentioned_identifiers};
 
 // Re-export the tool surface so downstream crates (dc-eval) get it via dc-core.
 pub use dc_tools::{
