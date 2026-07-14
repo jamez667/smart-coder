@@ -77,11 +77,14 @@ impl Default for UiConfig {
         // The live-test defaults from MEMORY: coder on :11435, advisor on :11434.
         Self {
             // ONE model does everything now (plan + implement) — no swarm, no advisor.
-            // The Qwen3-8B pool (scripts/pool-8b.ps1): llama.cpp on :11439 (GPU 0), alias
-            // `qwen3-8b`. This is the pool that's actually maintained/started; edit in
-            // settings for a different endpoint/model.
-            base_url: "http://localhost:11439/v1".to_string(),
-            model: "qwen3-8b".to_string(),
+            // qwen3-coder-30b-a3b (scripts/coder-30b.ps1): llama.cpp on :11435, alias
+            // `qwen3-coder-30b`, an MoE split across both GPUs (--tensor-split 12,8).
+            // It strictly beats the 8B (clears the whole difficulty ladder) and is
+            // actually faster (~112 tok/s) since only ~3B activates per token. Edit in
+            // settings for a different endpoint/model; scripts/pool-8b.ps1 is the 8B
+            // fallback pool (:11439/:11440) for the parallel MCP swarm.
+            base_url: "http://localhost:11435/v1".to_string(),
+            model: "qwen3-coder-30b".to_string(),
             tool_calling: ToolCalling::None,
             // No separate advisor/orchestrator: the workflow planner and the implement
             // agent both use the single backend above (orchestrator()/advisor() fall back
