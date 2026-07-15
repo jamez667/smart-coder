@@ -200,7 +200,7 @@ impl ToolCallStrategy for ParseRepair {
 /// embedded `"tool":` marker, meaning an unterminated narrated call absorbed a following real
 /// call into this arg's value. Such a call's content is corrupt and must not be applied.
 fn looks_swallowed(call: &ValidatedCall) -> bool {
-    ["old_str", "new_str", "content", "command"]
+    ["old_str", "new_str", "new_text", "content", "command"]
         .iter()
         .filter_map(|k| call.str(k))
         .any(|v| v.contains("\"tool\":") || v.contains("\"tool\" :"))

@@ -130,6 +130,34 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "edit_lines",
+            description: "Replace lines start..=end (1-based, inclusive) of a file with new_text. \
+                          BEST for a large file: no snippet to copy exactly — just give the line \
+                          numbers shown in the file view. Use start==end+1 form? No: to INSERT \
+                          without deleting, set start = the line to insert BEFORE and end = \
+                          start-1 (an empty range inserts).",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new("start", ParamType::Integer, "first line to replace (1-based)"),
+                ParamSpec::new(
+                    "end",
+                    ParamType::Integer,
+                    "last line to replace (1-based, inclusive); use start-1 to INSERT before start",
+                ),
+                ParamSpec::new(
+                    "new_text",
+                    ParamType::String,
+                    "the replacement text for those lines (may be multiple lines)",
+                ),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "run_command",
             description: "Run a shell command in the workspace; returns exit code + output.",
             params: vec![ParamSpec::new(
@@ -202,6 +230,19 @@ pub fn minimal_worker_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "edit_lines",
+            description: "Replace lines start..=end (1-based) with new_text — address by line \
+                          NUMBER, no snippet to copy. Best for a large file. end=start-1 inserts.",
+            params: vec![
+                ParamSpec::new("path", ParamType::String, "the file to edit"),
+                ParamSpec::new("start", ParamType::Integer, "first line to replace (1-based)"),
+                ParamSpec::new("end", ParamType::Integer, "last line (inclusive); start-1 to insert"),
+                ParamSpec::new("new_text", ParamType::String, "the replacement text"),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "run_verification",
             description: "Run the tests and see which pass or fail.",
             params: vec![],
@@ -257,6 +298,13 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
             arg(call, "path"),
             arg(call, "old_str"),
             arg(call, "new_str"),
+        )),
+        "edit_lines" => ToolOutcome::Observation(edit_lines(
+            workspace,
+            arg(call, "path"),
+            call.int("start"),
+            call.int("end"),
+            arg(call, "new_text"),
         )),
         // run_command / run_verification execute processes and need run config, so
         // the agent loop (dc-core) handles them; they never reach this fs executor.
@@ -506,6 +554,82 @@ fn number_lines(content: &str) -> String {
 
 /// The "exactly once" rule is the small-model safety net (spec 04): an ambiguous
 /// anchor (0 or >1 matches) is rejected with a precise count instead of guessing.
+/// Replace lines `start..=end` (1-based, inclusive) with `new_text`. The line-addressed edit:
+/// no snippet to reproduce, so a model editing a large file it holds imperfectly can't fail on
+/// a hallucinated anchor — it just names the line numbers shown in the file view. An empty range
+/// (`end == start - 1`) inserts before `start`. Line endings are normalized to LF (matches
+/// edit_file). Self-correcting errors on an out-of-range or inverted span.
+fn edit_lines(
+    workspace: &Path,
+    path: &str,
+    start: Option<i64>,
+    end: Option<i64>,
+    new_text: &str,
+) -> String {
+    let p = match safe_join(workspace, path) {
+        Ok(p) => p,
+        Err(e) => return format!("edit_lines {path} rejected: {e}"),
+    };
+    let raw = match std::fs::read_to_string(&p) {
+        Ok(c) => c,
+        Err(e) => return format!("edit_lines {path} error: {e}"),
+    };
+    let (Some(start), Some(end)) = (start, end) else {
+        return format!("edit_lines {path} error: start and end must be integers (1-based lines)");
+    };
+    let content = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
+    let had_trailing_nl = content.ends_with('\n');
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len() as i64;
+
+    // Validate. `end == start - 1` is the INSERT form (empty range). Otherwise 1 <= start <= end
+    // <= total.
+    let insert = end == start - 1;
+    if start < 1 || start > total + 1 {
+        return format!(
+            "edit_lines {path} error: start {start} out of range (file has {total} lines). \
+             Use a start between 1 and {}.",
+            total + 1
+        );
+    }
+    if !insert && (end < start || end > total) {
+        return format!(
+            "edit_lines {path} error: end {end} invalid for start {start} (file has {total} \
+             lines). For a replace, use start <= end <= {total}; to INSERT before line {start}, \
+             pass end = {}.",
+            start - 1
+        );
+    }
+
+    let s = (start - 1) as usize; // 0-based first line to drop
+    let e = if insert { s } else { end as usize }; // 0-based end (exclusive after this)
+    let mut out: Vec<String> = Vec::new();
+    out.extend(lines[..s].iter().map(|l| l.to_string()));
+    if !new_text.is_empty() {
+        out.extend(new_text.split('\n').map(|l| l.to_string()));
+    }
+    out.extend(lines[e..].iter().map(|l| l.to_string()));
+    let mut joined = out.join("\n");
+    if had_trailing_nl {
+        joined.push('\n');
+    }
+    match std::fs::write(&p, &joined) {
+        Ok(()) => {
+            let action = if insert {
+                format!("inserted before line {start}")
+            } else {
+                format!("replaced lines {start}..={end}")
+            };
+            format!(
+                "edit_lines {path} ok ({action}; file now {} lines)",
+                joined.lines().count()
+            )
+        }
+        Err(e) => format!("edit_lines {path} error: {e}"),
+    }
+}
+
 fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> String {
     let p = match safe_join(workspace, path) {
         Ok(p) => p,
@@ -822,6 +946,7 @@ mod tests {
                 "create_file",
                 "append_file",
                 "edit_file",
+                "edit_lines",
                 "run_command",
                 "run_verification",
                 "update_plan",
@@ -957,6 +1082,61 @@ mod tests {
         assert!(o.contains("line 1:") && o.contains("line 2:"), "got: {o}");
         // Untouched — never edits on ambiguity.
         assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "x\nx\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_lines_replaces_a_range_by_number() {
+        // The large-file fix: address lines by NUMBER, no snippet to reproduce.
+        let ws = temp_dir("edit-lines");
+        std::fs::write(ws.join("a.rs"), "one\ntwo\nthree\nfour\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_lines","path":"a.rs","start":2,"end":3,"new_text":"TWO\nTHREE"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok") && o.contains("replaced lines 2..=3"), "got: {o}");
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\nTWO\nTHREE\nfour\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_lines_inserts_with_an_empty_range() {
+        // end == start - 1 inserts BEFORE start without deleting.
+        let ws = temp_dir("edit-lines-ins");
+        std::fs::write(ws.join("a.rs"), "one\ntwo\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_lines","path":"a.rs","start":2,"end":1,"new_text":"INSERTED"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok") && o.contains("inserted before line 2"), "got: {o}");
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\nINSERTED\ntwo\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_lines_appends_at_end_of_file() {
+        let ws = temp_dir("edit-lines-app");
+        std::fs::write(ws.join("a.rs"), "one\ntwo\n").unwrap();
+        // start = total+1, end = total → insert after the last line.
+        let e = call(json!({
+            "tool":"edit_lines","path":"a.rs","start":3,"end":2,"new_text":"three"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok"), "got: {o}");
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\ntwo\nthree\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_lines_rejects_out_of_range_with_a_self_correcting_error() {
+        let ws = temp_dir("edit-lines-oor");
+        std::fs::write(ws.join("a.rs"), "one\ntwo\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_lines","path":"a.rs","start":10,"end":12,"new_text":"x"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("out of range") && o.contains("2 lines"), "got: {o}");
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\ntwo\n", "untouched");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

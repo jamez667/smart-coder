@@ -591,9 +591,10 @@ pub fn run_agent_observed(
                     // a). Redirect it to the shown copy instead of spending a turn on the read.
                     let path = call.str("path").unwrap_or_default().to_string();
                     let obs = format!(
-                        "`{path}` is ALREADY SHOWN IN FULL above (between the file markers) and \
-                         updates after each edit — you do not need to read it. Edit it directly \
-                         (or, if it's read-only context, just use it). Make your next change now."
+                        "`{path}` is ALREADY SHOWN IN FULL above with LINE NUMBERS and updates \
+                         after each edit — you do not need to read it. Edit it directly: prefer \
+                         `edit_lines` (give the line numbers shown, no snippet to copy). Make your \
+                         next change now."
                     );
                     (obs, action, false, tool, arg)
                 } else {
@@ -879,14 +880,14 @@ pub fn run_agent_observed(
                 )
             } else if big_existing {
                 format!(
-                    "Your `edit_file` anchor is NOT in `{arg}` — you are matching against code \
-                     that isn't there (often lines you INTEND TO ADD, written into old_str as if \
-                     already present). `{arg}` is a large file: do NOT try to rewrite it whole. \
-                     Instead: (1) to ADD new code (a struct field, a method, a match arm), copy a \
-                     SHORT exact anchor — one or two REAL lines from the CURRENT file shown in the \
-                     error above — and put ONLY those real lines in old_str, with the addition in \
-                     new_str; or (2) to add a whole new method/function, use `append_file` to put \
-                     it at the end of the file. Never include not-yet-existing lines in old_str."
+                    "Editing `{arg}` by exact snippet is failing — you keep matching code that \
+                     isn't in the file. STOP using edit_file on this large file. Use `edit_lines` \
+                     instead: it addresses lines by NUMBER, so you don't have to reproduce any \
+                     text. The file view shows `N| ` line numbers. To REPLACE lines, call \
+                     edit_lines with start/end = those line numbers and new_text = the replacement \
+                     (do NOT include the `N| ` prefix). To INSERT before line N without deleting, \
+                     pass start=N, end=N-1. To add a whole new method at the end, `append_file` \
+                     also works. Make the change now with edit_lines."
                 )
             } else {
                 format!(

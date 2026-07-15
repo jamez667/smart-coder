@@ -141,20 +141,28 @@ pub(super) fn render_focus_files(workspace: &Path, files: &[String]) -> String {
         return String::new();
     }
     let mut s = String::from(
-        "The file to edit (copy old_str exactly from between the === markers; this \
-         updates after each edit):\n",
+        "The file to edit, with 1-based LINE NUMBERS (updates after each edit). To change a large \
+         file, PREFER `edit_lines` — give the start/end line numbers shown here and the new text; \
+         you do NOT need to copy the old text exactly (which is error-prone on a big file). The \
+         line-number prefix `N| ` is NOT part of the file — never include it in new_text.\n",
     );
     let mut any = false;
     for f in files {
         let p = workspace.join(f);
         if let Ok(content) = std::fs::read_to_string(&p) {
             any = true;
-            // Normalize to LF: on a Windows (CRLF) file, showing the model CRLF makes it copy a
-            // CRLF anchor, which then fails to match edit_file's LF-normalized content — every
-            // edit misses and the model corrupts the file trying to fix it. edit_file works in LF
-            // space, so show LF here too (no line numbers — the model must copy old_str verbatim).
+            // Normalize to LF (a Windows CRLF file would otherwise poison anchor matching), then
+            // prefix each line with its 1-based number so the model can target line RANGES with
+            // edit_lines instead of reproducing an exact snippet — the anchor-hallucination that
+            // traps a mid-size model on a large file.
             let content = content.replace("\r\n", "\n").replace('\r', "\n");
-            s.push_str(&format!("\n=== {f} ===\n{content}\n=== end {f} ===\n"));
+            let numbered = content
+                .lines()
+                .enumerate()
+                .map(|(i, l)| format!("{}| {}", i + 1, l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            s.push_str(&format!("\n=== {f} (line-numbered) ===\n{numbered}\n=== end {f} ===\n"));
         }
     }
     if any {
