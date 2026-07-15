@@ -278,34 +278,49 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
         "read_file" => ToolOutcome::Observation(read_file(workspace, arg(call, "path"))),
         "list_dir" => ToolOutcome::Observation(list_dir(workspace, arg(call, "path"))),
         "search_code" => ToolOutcome::Observation(search_code(workspace, arg(call, "query"))),
-        "write_file" => ToolOutcome::Observation(write_file(
-            workspace,
-            arg(call, "path"),
-            arg(call, "content"),
-        )),
-        "create_file" => ToolOutcome::Observation(create_file(
-            workspace,
-            arg(call, "path"),
-            arg(call, "content"),
-        )),
-        "append_file" => ToolOutcome::Observation(append_file(
-            workspace,
-            arg(call, "path"),
-            arg(call, "content"),
-        )),
-        "edit_file" => ToolOutcome::Observation(edit_file(
-            workspace,
-            arg(call, "path"),
-            arg(call, "old_str"),
-            arg(call, "new_str"),
-        )),
-        "edit_lines" => ToolOutcome::Observation(edit_lines(
-            workspace,
-            arg(call, "path"),
-            call.int("start"),
-            call.int("end"),
-            arg(call, "new_text"),
-        )),
+        "write_file" | "create_file" | "append_file" | "edit_file" | "edit_lines" => {
+            // Guard: the model sometimes nests its NEXT tool call (or a ```json fence wrapping one)
+            // inside the content/new_str field, and we'd write that raw JSON scaffolding into the
+            // source file — corrupting it with `{"tool":"edit_file",...}` text (observed live on
+            // the lakes render stage: mod.rs got a literal nested edit_file object as its body).
+            // Reject it before the write so the model re-sends real file text, not a tool call.
+            let body_key = match call.name.as_str() {
+                "edit_file" => "new_str",
+                "edit_lines" => "new_text",
+                _ => "content",
+            };
+            let body = arg(call, body_key);
+            let path = arg(call, "path");
+            if is_code_path(path) && looks_like_tool_call_json(body) {
+                ToolOutcome::Observation(format!(
+                    "{} {path} rejected: the {body_key} you sent is a tool-call JSON object (or a \
+                     ```json fence), not source code — writing it would corrupt the file. Send the \
+                     RAW file text as {body_key} (no surrounding JSON, no code fences, no nested \
+                     {{\"tool\":...}}). One tool call per reply.",
+                    call.name
+                ))
+            } else {
+                match call.name.as_str() {
+                    "write_file" => ToolOutcome::Observation(write_file(workspace, path, body)),
+                    "create_file" => ToolOutcome::Observation(create_file(workspace, path, body)),
+                    "append_file" => ToolOutcome::Observation(append_file(workspace, path, body)),
+                    "edit_file" => ToolOutcome::Observation(edit_file(
+                        workspace,
+                        path,
+                        arg(call, "old_str"),
+                        body,
+                    )),
+                    "edit_lines" => ToolOutcome::Observation(edit_lines(
+                        workspace,
+                        path,
+                        call.int("start"),
+                        call.int("end"),
+                        body,
+                    )),
+                    _ => unreachable!(),
+                }
+            }
+        }
         // run_command / run_verification execute processes and need run config, so
         // the agent loop (dc-core) handles them; they never reach this fs executor.
         // The registry only dispatches names it knows; an unknown name here means
@@ -559,6 +574,85 @@ fn number_lines(content: &str) -> String {
 /// a hallucinated anchor — it just names the line numbers shown in the file view. An empty range
 /// (`end == start - 1`) inserts before `start`. Line endings are normalized to LF (matches
 /// edit_file). Self-correcting errors on an out-of-range or inverted span.
+/// Does `body` look like the model leaked a tool call (or a ```json fence wrapping one) into a
+/// file-content field, instead of sending raw source? The model does this both at the START of the
+/// content and EMBEDDED mid-file (a real code prefix, then a `{"tool":...}` block), so we scan the
+/// whole body — not just the prefix — for the tell-tale shapes seen corrupting source files.
+fn looks_like_tool_call_json(body: &str) -> bool {
+    // A ```json / ```rs / ```rust fence anywhere — scaffolding the model meant as a code block.
+    if body.contains("```json") || body.contains("```rs") || body.contains("```rust") {
+        return true;
+    }
+    // A JSON object opening with a `"tool"` key, anywhere in the body. Match `{` optionally
+    // followed by whitespace/newlines then a "tool" (or 'tool') key — the nested-call signature.
+    // Cheap scan: find each '{', skip whitespace, check for the tool key.
+    let bytes = body.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if c == b'{' {
+            let rest = body[i + 1..].trim_start();
+            if rest.starts_with("\"tool\"") || rest.starts_with("'tool'") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Does this path look like brace-delimited source we should balance-check? (Rust/JS/TS/etc.)
+/// Python/other whitespace-structured files are skipped — their `{}` are dict/set literals, not
+/// blocks, so a balance count is noise.
+fn is_code_path(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    [".rs", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".c", ".h", ".cpp", ".css"]
+        .iter()
+        .any(|e| p.ends_with(e))
+}
+
+/// Net delimiter balance of a source string: (curly, paren, square). A naive char count that
+/// ignores strings/comments — good enough as a tripwire, since a straddled-brace edit_lines shifts
+/// a count by exactly ±1 and string/comment noise is the SAME in before/after (it's a regression
+/// check, not an absolute correctness check).
+fn delim_balance(s: &str) -> (i64, i64, i64) {
+    let (mut c, mut p, mut b) = (0i64, 0i64, 0i64);
+    for ch in s.chars() {
+        match ch {
+            '{' => c += 1,
+            '}' => c -= 1,
+            '(' => p += 1,
+            ')' => p -= 1,
+            '[' => b += 1,
+            ']' => b -= 1,
+            _ => {}
+        }
+    }
+    (c, p, b)
+}
+
+/// If `before` was delimiter-balanced but `after` is not, return a message naming the delimiter
+/// that went out of balance. `None` when the edit didn't introduce an imbalance (either both
+/// balanced, or `before` was already unbalanced — a partial file mid-build — so we don't blame
+/// this edit for a pre-existing state).
+fn delimiter_regression(before: &str, after: &str) -> Option<String> {
+    let (bc, bp, bb) = delim_balance(before);
+    if bc != 0 || bp != 0 || bb != 0 {
+        return None; // pre-existing imbalance; not this edit's fault
+    }
+    let (ac, ap, ab) = delim_balance(after);
+    let which = |n: i64, open: char, close: char| -> Option<String> {
+        if n > 0 {
+            Some(format!("{n} unclosed '{open}' (missing {n} '{close}')."))
+        } else if n < 0 {
+            Some(format!("{} extra '{close}' (no matching '{open}').", -n))
+        } else {
+            None
+        }
+    };
+    which(ac, '{', '}')
+        .or_else(|| which(ap, '(', ')'))
+        .or_else(|| which(ab, '[', ']'))
+        .map(|d| format!("this edit unbalanced the file's delimiters: {d}"))
+}
+
 fn edit_lines(
     workspace: &Path,
     path: &str,
@@ -613,6 +707,32 @@ fn edit_lines(
     let mut joined = out.join("\n");
     if had_trailing_nl {
         joined.push('\n');
+    }
+    // Brace-balance tripwire. The recurring edit_lines failure is dropping (or duplicating) a
+    // closing `}`/`)`/`]` when the replaced range straddled one — the model edits blind to nesting,
+    // then thrashes for turns un-breaking a delimiter it can't see. If this edit takes a
+    // BALANCED file to an UNBALANCED one, reject it and name the offending delimiter, so the model
+    // fixes its new_text now instead of after a compiler round-trip it keeps guessing wrong on.
+    if is_code_path(path) && !insert {
+        if let Some(msg) = delimiter_regression(&content, &joined) {
+            // Replacing a range that straddles a brace forces the model to reproduce the exact
+            // brace count — which it cannot reliably do (observed: it oscillates 3→2→1 and stalls).
+            // Steer to the INSERT form instead: pick a line boundary that sits BETWEEN two
+            // existing statements (e.g. just before the closing `}` of the match, or right after
+            // an existing arm) and pass `end = start - 1` with new_text = the new, self-contained
+            // balanced block. An insert never removes an existing delimiter, so it can't unbalance
+            // the file — sidestepping the brace-counting problem entirely.
+            let insert_line = start.saturating_sub(1).max(1);
+            return format!(
+                "edit_lines {path} rejected: {msg} Replacing a range that straddles a brace makes \
+                 you reproduce the exact brace count, which keeps going wrong. Instead INSERT the \
+                 new block without deleting anything: pass the SAME balanced new_text but with \
+                 start = the line you want it BEFORE and end = start - 1 (e.g. start = {insert_line}, \
+                 end = {}). Insert a self-contained, brace-balanced block between two existing \
+                 lines — don't replace a range.",
+                insert_line - 1
+            );
+        }
     }
     match std::fs::write(&p, &joined) {
         Ok(()) => {
@@ -1096,6 +1216,85 @@ mod tests {
         let o = obs(execute(&e, &ws));
         assert!(o.contains("ok") && o.contains("replaced lines 2..=3"), "got: {o}");
         assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\nTWO\nTHREE\nfour\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn write_file_rejects_nested_tool_call_json_as_content() {
+        // The lakes-render corruption: the model put its NEXT edit_file call in the content field.
+        // Writing it would fill the .rs file with `{"tool":"edit_file",...}`. Guard rejects it.
+        let ws = temp_dir("write-tooljson");
+        std::fs::write(ws.join("a.rs"), "fn f() {}\n").unwrap();
+        let nested = "{\n  \"tool\": \"edit_file\",\n  \"path\": \"b.rs\",\n  \"old_str\": \"x\"\n}";
+        let e = call(json!({ "tool":"write_file","path":"a.rs","content": nested }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("rejected") && o.contains("tool-call JSON"), "got: {o}");
+        // File untouched — guard fires before the write.
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "fn f() {}\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_rejects_embedded_tool_call_json() {
+        // The stronger case: a real code prefix, THEN a nested tool-call object mid-content (the
+        // shape that slipped past the prefix-only guard and corrupted mod.rs at line 49).
+        let ws = temp_dir("edit-embed-json");
+        std::fs::write(ws.join("a.rs"), "fn f() {\n    old();\n}\n").unwrap();
+        let embedded = "fn f() {\n    new();\n}\n{\n  \"tool\": \"edit_file\",\n  \"path\": \"b.rs\"\n}";
+        let e = call(json!({
+            "tool":"edit_file","path":"a.rs","old_str":"fn f() {\n    old();\n}","new_str": embedded
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("rejected") && o.contains("tool-call JSON"), "got: {o}");
+        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "fn f() {\n    old();\n}\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn write_file_allows_real_code_that_mentions_tool() {
+        // False-positive check: real source that happens to contain the word "tool" still writes.
+        let ws = temp_dir("write-realcode");
+        let e = call(json!({
+            "tool":"write_file","path":"a.rs","content":"// pick a tool\nfn tool() {}\n"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok") || o.contains("wrote"), "got: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_lines_rejects_a_brace_dropping_edit() {
+        // The recurring render-stage failure: a range replacement that drops a closing brace.
+        // The balance tripwire must reject it (file was balanced, edit unbalances it) instead of
+        // writing broken code the model then thrashes on.
+        let ws = temp_dir("edit-lines-brace");
+        std::fs::write(ws.join("a.rs"), "fn f() {\n    if x {\n        g();\n    }\n}\n").unwrap();
+        // Replace the inner block but "forget" the closing `}` of the if — net one unclosed `{`.
+        let e = call(json!({
+            "tool":"edit_lines","path":"a.rs","start":2,"end":4,"new_text":"    if x {\n        g();"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("rejected") && o.contains("unclosed '{'"), "got: {o}");
+        // Steers to the INSERT form (the reliable fix for a brace-straddling replace).
+        assert!(o.contains("INSERT"), "got: {o}");
+        // File is untouched — the balance guard fires BEFORE the write.
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "fn f() {\n    if x {\n        g();\n    }\n}\n"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_lines_allows_a_balanced_edit() {
+        // A range replacement that keeps delimiters balanced must go through (no false positive).
+        let ws = temp_dir("edit-lines-ok");
+        std::fs::write(ws.join("a.rs"), "fn f() {\n    old();\n}\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_lines","path":"a.rs","start":2,"end":2,"new_text":"    new(); more();"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok"), "got: {o}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

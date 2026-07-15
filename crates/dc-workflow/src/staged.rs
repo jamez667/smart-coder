@@ -177,6 +177,11 @@ pub fn staged_build(
     let strategy = select_strategy(&backend.capabilities());
     let mut results: Vec<StageResult> = Vec::new();
     let mut last_verified = false;
+    // If the oracle passes partway through the stage list, the feature already WORKS — the
+    // remaining stages can only churn already-correct code (observed live: stage 1 landed the
+    // whole render change to satisfy the compiler, then stage 2 re-edited the same match and
+    // broke a brace, burning its budget un-breaking its own damage). Short-circuit once green.
+    let mut oracle_short_circuited = false;
 
     // The union of every file the feature touches across all stages — pinned in full each stage
     // so an INTEGRATION stage (edit terrain.rs to wire in the new lake.rs) can SEE the new
@@ -250,6 +255,19 @@ pub fn staged_build(
             steps,
             changed,
         });
+
+        // After a stage that compiled, check the behavioral oracle. If it already passes, the
+        // feature works — stop before later stages can churn (and break) the code that just
+        // satisfied it. The final convergence loop below is then a no-op confirm.
+        if last_verified && i + 1 < stages.len() {
+            if let Some(oracle) = oracle_command {
+                let rep = dc_verify::run_verification_in(&base_cfg.sandbox, workspace, oracle);
+                if rep.command_ok {
+                    oracle_short_circuited = true;
+                    break;
+                }
+            }
+        }
     }
 
     // FINAL BEHAVIORAL ORACLE. The per-stage `cargo check` gate only proves the code compiles —
@@ -258,7 +276,12 @@ pub fn staged_build(
     // convergence loop gated on it: the model sees the whole project and the oracle's failure
     // message, and must make the feature actually WORK, not just compile.
     let mut oracle_ok = None;
-    if let Some(oracle) = oracle_command {
+    if oracle_short_circuited {
+        // A mid-list stage already turned the oracle green; the remaining stages were skipped.
+        // No convergence loop needed — the feature works. Record the pass directly.
+        oracle_ok = Some(true);
+        last_verified = true;
+    } else if let Some(oracle) = oracle_command {
         let mut cfg = base_cfg.clone();
         cfg.plan_first = false;
         cfg.focus_files = Vec::new(); // whole-project: the oracle may span several files
