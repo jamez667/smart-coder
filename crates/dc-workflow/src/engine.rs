@@ -190,9 +190,18 @@ fn phase_instruction(phase: Phase, stack: ProjectStack) -> String {
                      concrete build sequence for this change. For each stage give: a short title, \
                      the file(s) it touches (from the layout), and one or two sentences on what to \
                      build there. Order stages so each builds on the last (foundations first, then \
-                     what depends on them). This is a DESIGN breakdown to review, NOT tests and NOT \
-                     code — do not write test files or source code. Output a short Markdown \
-                     document with a numbered list of stages."
+                     what depends on them).\n\n\
+                     CRITICAL — KEEP EDITS TO LARGE EXISTING FILES TINY. Put the feature's CORE \
+                     LOGIC in a NEW, small module file (e.g. a new `<feature>.rs`), which the first \
+                     stage CREATES whole. The existing large files should get only MINIMAL edits: \
+                     one stage adds the module declaration (`mod <feature>;`) and a field, and one \
+                     or two stages add a few lines to wire it in (a call, a match arm). Do NOT plan \
+                     a stage that adds a large block of logic INTO an existing 500+ line file — that \
+                     logic belongs in the new module; the existing file only gets the small hook. \
+                     This keeps every edit to a big file down to a handful of lines.\n\n\
+                     This is a DESIGN breakdown to review, NOT tests and NOT code — do not write \
+                     test files or source code. Output a short Markdown document with a numbered \
+                     list of stages."
                     .to_string();
             }
             // ONE test file per SOURCE file in the layout. This 1:1 alignment is what

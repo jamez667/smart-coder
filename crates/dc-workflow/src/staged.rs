@@ -178,9 +178,25 @@ pub fn staged_build(
     let mut results: Vec<StageResult> = Vec::new();
     let mut last_verified = false;
 
+    // The union of every file the feature touches across all stages — pinned in full each stage
+    // so an INTEGRATION stage (edit terrain.rs to wire in the new lake.rs) can SEE the new
+    // module's real API without burning its budget re-reading it (observed live: stage 2 spent
+    // its whole budget re-reading lake.rs turn after turn because only terrain.rs was pinned).
+    let feature_files: Vec<String> = {
+        let mut v: Vec<String> = Vec::new();
+        for s in stages {
+            for f in &s.files {
+                if !v.contains(f) {
+                    v.push(f.clone());
+                }
+            }
+        }
+        v
+    };
+
     for (i, stage) in stages.iter().enumerate() {
         on_stage(i, stage);
-        let cfg = stage_cfg(base_cfg, verify_command, stage);
+        let cfg = stage_cfg(base_cfg, verify_command, stage, &feature_files);
 
         // Snapshot the stage's target files up front. This is BOTH the no-op check (did the
         // stage change anything?) AND the edit-safety anchor: the pre-stage files compile (the
@@ -193,8 +209,14 @@ pub fn staged_build(
         let mut changed = false;
         // Up to 3 attempts: retry on a no-op (nudge) OR on a build-breaking result (restore the
         // clean snapshot first so the retry starts from compiling code, not the mess).
+        // Is this stage's target a LARGE existing file (edit surgically) vs. a new/small file
+        // (create it whole)? Drives the instruction so the model doesn't try to add a big block
+        // of logic into a 500+ line file — that's the coherence wall; new logic goes in a new file.
+        let big_edit = stage.files.iter().any(|f| is_large_existing(workspace, f));
+        let new_or_small = stage.files.iter().any(|f| !is_large_existing(workspace, f));
         for attempt in 0..3 {
-            let instruction = stage_instruction(stage, i, stages.len(), attempt > 0);
+            let instruction =
+                stage_instruction(stage, i, stages.len(), attempt > 0, big_edit, new_or_small);
             let report = run_agent_observed(
                 backend,
                 None,
@@ -280,12 +302,26 @@ fn oracle_instruction() -> String {
         .to_string()
 }
 
-/// The per-stage agent config: scoped to this stage's file(s), gated on the project build,
-/// tight step budget. Inherits permissions/sandbox/suffix from the base.
-fn stage_cfg(base: &AgentConfig, verify_command: &str, stage: &Stage) -> AgentConfig {
+/// The per-stage agent config: pins the whole feature's file set (so an integration stage sees
+/// the new module it wires in without re-reading it), gated on the project build, tight budget.
+/// The stage's own file is what it edits; the rest are read-only context. Order the stage's own
+/// files first so they're the primary anchor.
+fn stage_cfg(
+    base: &AgentConfig,
+    verify_command: &str,
+    stage: &Stage,
+    feature_files: &[String],
+) -> AgentConfig {
     let mut cfg = base.clone();
     cfg.plan_first = false;
-    cfg.focus_files = stage.files.clone();
+    // Stage's own files first, then the rest of the feature's files as context.
+    let mut focus = stage.files.clone();
+    for f in feature_files {
+        if !focus.contains(f) {
+            focus.push(f.clone());
+        }
+    }
+    cfg.focus_files = focus;
     cfg.verify_command = Some(verify_command.to_string());
     cfg.max_steps = STAGE_MAX_STEPS;
     cfg
@@ -294,7 +330,14 @@ fn stage_cfg(base: &AgentConfig, verify_command: &str, stage: &Stage) -> AgentCo
 /// The per-stage instruction: do ONLY this stage, surgically, keep the project compiling.
 /// The focused file(s) are already pinned in full by the agent loop (focus_files), so this
 /// tells the model to edit them in place — never rewrite them wholesale.
-fn stage_instruction(stage: &Stage, idx: usize, total: usize, firmer: bool) -> String {
+fn stage_instruction(
+    stage: &Stage,
+    idx: usize,
+    total: usize,
+    firmer: bool,
+    big_edit: bool,
+    new_or_small: bool,
+) -> String {
     let files = if stage.files.is_empty() {
         "the relevant existing file(s)".to_string()
     } else {
@@ -307,21 +350,38 @@ fn stage_instruction(stage: &Stage, idx: usize, total: usize, firmer: bool) -> S
     } else {
         ""
     };
+    // Size-aware guidance: a NEW/small file is written WHOLE (the model can hold ~100 lines); a
+    // LARGE existing file gets only a tiny surgical edit (a big block would exceed the model's
+    // structural coherence and break the file). This is file-level decomposition — new logic
+    // lives in a new module, the big file only gets the hook.
+    let size_note = if big_edit && !new_or_small {
+        "This stage's file is a LARGE existing file. Make ONLY A SMALL, surgical change — add a \
+         module declaration, a struct field, a single method CALL, or a match arm (a handful of \
+         lines). Do NOT add a large block of logic here; that logic belongs in the feature's own \
+         new module. Use `edit_lines` (address by the line numbers shown) for the edit.\n\n"
+    } else if new_or_small {
+        "This stage's file is NEW or small. WRITE IT WHOLE in one shot with `write_file` (for a \
+         new file) or a few `append_file`/`edit_lines` calls — put the feature's real logic here \
+         so the large existing files only need tiny hooks.\n\n"
+    } else {
+        ""
+    };
     format!(
-        "{retry_note}You are editing an EXISTING project in place. This is stage {} of {} of a larger \
+        "{retry_note}{size_note}You are editing an EXISTING project in place. This is stage {} of {} of a larger \
          feature; do ONLY this stage, nothing more:\n\n\
          STAGE: {}\n{}\n\n\
-         Edit {} with SURGICAL edit_file changes — add the methods/types/arms this stage needs \
-         and wire them in. Do NOT rewrite whole files (you will drop existing code and break the \
-         build), and do NOT start other stages.\n\n\
-         CRITICAL — ADAPT TO THE REAL CODE: the stage description above came from an up-front \
-         design and may name types, enums, modules, or functions that DO NOT EXIST in this \
-         codebase (e.g. an `Elevation` enum or a `lake_generator` module that was imagined). \
-         The actual file(s) are shown IN FULL above — that is the source of truth. Use the types \
-         and functions that actually exist there; do NOT `use` or reference a symbol that isn't \
-         in the code, and do NOT invent one. If the design's naming doesn't fit, implement the \
-         same INTENT with the real API. A `use` of a non-existent path will fail to compile and \
-         you will get stuck — read the file, use what's really there.\n\n\
+         Edit {} with SURGICAL edit_file/edit_lines changes — add the methods/types/arms this \
+         stage needs and wire them in. Do NOT rewrite whole large files (you will drop existing \
+         code and break the build), and do NOT start other stages.\n\n\
+         CRITICAL — USE WHAT THE EARLIER STAGES ACTUALLY BUILT. The stage description came from \
+         an up-front design and may name a type/function that doesn't match what was really \
+         created (e.g. it says integrate a `LakeGenerator` type, but an earlier stage's new \
+         module actually exposes a `generate_lakes()` function and a `Lake` struct). ALL the \
+         feature's files — including the new module an earlier stage created — are shown IN FULL \
+         above; that is the source of truth. Call the functions / use the types that ACTUALLY \
+         exist in those pinned files. Do NOT invent a `LakeGenerator` (or any symbol) just \
+         because the design named it — implement the same INTENT with the real API that's there. \
+         A `use` or reference to a non-existent symbol fails to compile and you will get stuck.\n\n\
          This stage must make a REAL change to {} — do not finish having changed nothing. When \
          your change is in and the project still compiles, run_verification; keep editing until \
          it is green, then finish. If verification shows compiler errors, read them and fix \
@@ -333,6 +393,17 @@ fn stage_instruction(stage: &Stage, idx: usize, total: usize, firmer: bool) -> S
         files,
         files,
     )
+}
+
+/// Whether `rel` is a LARGE existing file — one a mid-size model can't reliably add a big block
+/// of logic to (it loses track of the structure). Above this, a stage must make only a tiny hook
+/// edit; the real logic goes in a new module. New/missing files are not "large" (created whole).
+const LARGE_FILE_LINES: usize = 200;
+
+fn is_large_existing(workspace: &Path, rel: &str) -> bool {
+    std::fs::read_to_string(workspace.join(rel))
+        .map(|s| s.lines().count() > LARGE_FILE_LINES)
+        .unwrap_or(false)
 }
 
 /// A cheap content snapshot of `files` (workspace-relative), for detecting whether a stage
@@ -414,14 +485,14 @@ mod tests {
             files: vec!["terrain.rs".to_string()],
             instruction: "Introduce a Lake struct.".to_string(),
         };
-        let i = stage_instruction(&s, 0, 3, false);
+        let i = stage_instruction(&s, 0, 3, false, false, false);
         assert!(i.contains("stage 1 of 3"));
         assert!(i.contains("Add Lake struct"));
         assert!(i.contains("terrain.rs"));
-        assert!(i.to_lowercase().contains("do not rewrite whole files"));
+        assert!(i.to_lowercase().contains("do not rewrite whole large files"));
         assert!(i.to_lowercase().contains("only this stage"));
-        // The adapt-to-real-code guard (against the invented-symbol stall).
-        assert!(i.contains("DO NOT EXIST"), "warns the design may name non-existent symbols");
+        // The adapt-to-real-code guard (use what earlier stages actually built).
+        assert!(i.contains("EARLIER STAGES ACTUALLY BUILT"), "steers to the real API: {i}");
     }
 
     #[test]
@@ -431,10 +502,22 @@ mod tests {
             files: vec!["a.rs".into()],
             instruction: "do it".into(),
         };
-        let normal = stage_instruction(&s, 0, 1, false);
-        let firmer = stage_instruction(&s, 0, 1, true);
+        let normal = stage_instruction(&s, 0, 1, false, false, false);
+        let firmer = stage_instruction(&s, 0, 1, true, false, false);
         assert!(!normal.contains("CHANGED NOTHING"));
         assert!(firmer.starts_with("YOUR PREVIOUS ATTEMPT CHANGED NOTHING"));
+    }
+
+    #[test]
+    fn stage_instruction_is_size_aware() {
+        let s = Stage { title: "t".into(), files: vec!["big.rs".into()], instruction: "x".into() };
+        // Large existing file → tiny-hook guidance.
+        let big = stage_instruction(&s, 0, 1, false, true, false);
+        assert!(big.contains("LARGE existing file"), "steers to a small hook: {big}");
+        assert!(big.to_lowercase().contains("small, surgical change"));
+        // New/small file → write-it-whole guidance.
+        let small = stage_instruction(&s, 0, 1, false, false, true);
+        assert!(small.contains("NEW or small"), "steers to write-whole: {small}");
     }
 
     #[test]
