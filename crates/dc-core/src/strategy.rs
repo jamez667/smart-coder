@@ -125,6 +125,15 @@ impl ToolCallStrategy for ParseRepair {
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError> {
         let (valid, last_err) = validated_calls(raw, registry);
         if valid.is_empty() {
+            // Swallowed-call recovery FIRST: the coder model narrated an illustration whose
+            // unterminated string absorbed the real call, so the only balanced object is corrupt
+            // and none validated. Dig the real, complete `{"tool":…}` out of the swallowed body
+            // before the key-aware repairs below (which would grab the swallowed old_str).
+            if let Some(value) = recover_swallowed_call(raw) {
+                if let Ok(call) = registry.validate(&value) {
+                    return Ok(call);
+                }
+            }
             // Last resort: key-aware recovery for a write_file/create_file whose content broke
             // strict parsing (a literal Python `"""docstring"""` — the inner `"` closes the
             // JSON string early). Only fires on the already-failing branch.
@@ -154,15 +163,79 @@ impl ToolCallStrategy for ParseRepair {
             }
             return Err(last_err.unwrap_or(RepairError::NoJson));
         }
-        // One action per turn (preserves observe→react). When the model batched calls,
-        // run the FIRST one that makes progress (edit/create/run/finish) — the leading
-        // reads are it re-confirming context it already has. Else take the first valid.
-        let chosen = valid
+        // A call is SWALLOWED when one of its string args contains an embedded `"tool":` — the
+        // coder model narrates a call in prose (an illustration), its string never closes, and
+        // the balanced-brace scan absorbs the REAL call that follows into that arg's value
+        // (observed live 2026-07-15: an edit_file whose old_str was `pub struct Terrain{…{"tool":
+        // "edit_file",…}`, corrupting the file). Prefer a clean call; if the ONLY calls are
+        // swallowed, recover the real call from inside the swallowed string.
+        let clean: Vec<&ValidatedCall> = valid.iter().filter(|c| !looks_swallowed(c)).collect();
+        if clean.is_empty() {
+            // Every parsed call is swallowed — dig the real call out of the last one's body.
+            if let Some(value) = recover_swallowed_call(raw) {
+                if let Ok(call) = registry.validate(&value) {
+                    return Ok(call);
+                }
+            }
+        }
+        let pool: Vec<&ValidatedCall> = if clean.is_empty() {
+            valid.iter().collect()
+        } else {
+            clean
+        };
+        // One action per turn (preserves observe→react). Among the clean calls, run the FIRST
+        // that makes progress (edit/create/run/finish) — leading reads are re-confirmations —
+        // else the first clean call.
+        let chosen = pool
             .iter()
-            .position(|c| is_progress_tool(&c.name))
-            .unwrap_or(0);
-        Ok(valid.into_iter().nth(chosen).unwrap())
+            .find(|c| is_progress_tool(&c.name))
+            .or_else(|| pool.first())
+            .copied()
+            .expect("pool is non-empty (valid was non-empty)");
+        Ok(chosen.clone())
     }
+}
+
+/// Whether a validated call has been SWALLOWED: one of its string arguments contains an
+/// embedded `"tool":` marker, meaning an unterminated narrated call absorbed a following real
+/// call into this arg's value. Such a call's content is corrupt and must not be applied.
+fn looks_swallowed(call: &ValidatedCall) -> bool {
+    ["old_str", "new_str", "content", "command"]
+        .iter()
+        .filter_map(|k| call.str(k))
+        .any(|v| v.contains("\"tool\":") || v.contains("\"tool\" :"))
+}
+
+/// Recover the REAL tool call from a swallowed reply: the model narrated an illustration whose
+/// unterminated string absorbed the real call, so the real, complete `{"tool":…}` sits LATER in
+/// the raw text. Take the LAST balanced `{"tool":…}` object and parse it — that's the one the
+/// model actually finished writing. Returns the parsed JSON value, or `None` if none parses.
+fn recover_swallowed_call(raw: &str) -> Option<serde_json::Value> {
+    // Find every `{"tool"` start and try the balanced object from each; keep the LAST that
+    // parses AND is not itself swallowed (its string args carry no embedded `"tool":`).
+    let mut best: Option<serde_json::Value> = None;
+    let mut search_from = 0;
+    while let Some(rel) = raw[search_from..].find("{\"tool\"") {
+        let start = search_from + rel;
+        if let Some(obj) = extract_all_json_objects(&raw[start..]).into_iter().next() {
+            let parsed = serde_json::from_str::<serde_json::Value>(obj)
+                .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(obj)))
+                .ok();
+            if let Some(v) = parsed {
+                // Skip a candidate that is itself swallowed (its own args embed another "tool":).
+                let self_swallowed = ["old_str", "new_str", "content", "command"].iter().any(|k| {
+                    v.get(k)
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|s| s.contains("\"tool\":"))
+                });
+                if !self_swallowed {
+                    best = Some(v);
+                }
+            }
+        }
+        search_from = start + "{\"tool\"".len();
+    }
+    best
 }
 
 /// Parse + validate every JSON object in a model turn (tolerating raw control chars). Shared
@@ -544,6 +617,35 @@ mod tests {
             .unwrap();
         assert_eq!(call.name, "read_file");
         assert_eq!(call.str("path"), Some("a.txt"));
+    }
+
+    #[test]
+    fn prefers_the_real_call_over_a_narrated_illustration() {
+        // Observed live (2026-07-15): the coder model NARRATES a tool call in prose as an
+        // illustration ("Let me edit: {"tool":"edit_file",...truncated...}") and THEN emits the
+        // real complete call. The narrated copy is often incomplete/mangled; picking it applies
+        // garbage. The complete, well-formed call must win.
+        let reg = default_registry();
+        let raw = "Let me make the edit: {\"tool\":\"edit_file\",\"path\":\"terrain.rs\",\
+                   \"old_str\":\"pub struct Terrain { seed\
+                   \n\nActually, here is the real edit:\n\
+                   {\"tool\":\"edit_file\",\"path\":\"terrain.rs\",\"old_str\":\"let x = 1;\",\
+                   \"new_str\":\"let x = 2;\"}";
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.name, "edit_file");
+        assert_eq!(call.str("old_str"), Some("let x = 1;"), "picked the complete call");
+        assert_eq!(call.str("new_str"), Some("let x = 2;"));
+    }
+
+    #[test]
+    fn skips_a_swallowed_call_when_a_clean_one_also_parsed() {
+        // Both a swallowed call (its old_str embeds another "tool":) and a clean read parsed.
+        // The clean one must win, not the corrupt swallowed edit.
+        let reg = default_registry();
+        let raw = "{\"tool\":\"edit_file\",\"path\":\"a.rs\",\"old_str\":\"x {\\\"tool\\\":\\\"y\\\"}\",\"new_str\":\"z\"}\
+                   <tool_call|>{\"tool\":\"read_file\",\"path\":\"a.rs\"}";
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.name, "read_file", "skipped the swallowed edit for the clean read");
     }
 
     #[test]

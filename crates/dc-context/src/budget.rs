@@ -103,6 +103,51 @@ pub struct BuiltContext {
     pub dropped: Vec<Zone>,
 }
 
+/// Truncate `text` to roughly `target_tokens`, keeping its HEAD and TAIL with a marked cut in
+/// the middle (a source file's imports/types sit up top; the region being edited is often near
+/// the end where new code lands). Line-granular so anchors stay copyable. If `text` already
+/// fits, it's returned unchanged.
+fn truncate_middle(text: &str, target_tokens: usize, counter: &TokenCounter) -> String {
+    if counter.count(text) <= target_tokens || target_tokens == 0 {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 8 {
+        return text.to_string(); // too small to usefully middle-truncate
+    }
+    let marker = "\n… (file truncated in the middle to fit the context window) …\n";
+    // Grow head and tail line counts until we'd exceed the budget, then step back one.
+    let mut head = 0usize;
+    let mut tail = 0usize;
+    loop {
+        // Alternate growing head and tail for a balanced keep.
+        let grow_head = head <= tail;
+        let (nh, nt) = if grow_head { (head + 1, tail) } else { (head, tail + 1) };
+        if nh + nt >= lines.len() {
+            break;
+        }
+        let candidate = format!(
+            "{}{marker}{}",
+            lines[..nh].join("\n"),
+            lines[lines.len() - nt..].join("\n")
+        );
+        if counter.count(&candidate) > target_tokens {
+            break;
+        }
+        head = nh;
+        tail = nt;
+    }
+    if head == 0 && tail == 0 {
+        // Even the marker + a line each is over budget — keep just the head that fits.
+        return lines[..lines.len().min(1)].join("\n");
+    }
+    format!(
+        "{}{marker}{}",
+        lines[..head].join("\n"),
+        lines[lines.len() - tail..].join("\n")
+    )
+}
+
 /// Compute the hard prompt budget from the backend's advertised window.
 ///
 /// We budget against an **effective** fraction of the nominal window (small
@@ -174,6 +219,36 @@ impl<'a> ContextBuilder<'a> {
                 }
             }
             segments = kept;
+        }
+
+        // Last resort: even after evicting every non-sacred zone, the sacred content can exceed
+        // the window — a large FocusFile (the file being edited) plus a full recent window. A
+        // sacred zone is never dropped, but an over-budget one must be TRUNCATED, or the request
+        // overflows the model's context and the backend rejects it outright (observed live:
+        // 34445 tokens vs a 24576 window → HTTP 400). Shrink the biggest FocusFile segment to
+        // fit, keeping its head and tail (imports/types up top, the code being edited often near
+        // where the model is working) with a marked cut.
+        let mut running: usize = segments.iter().map(cost).sum();
+        while running > self.budget {
+            // The largest FocusFile segment is the one to shrink.
+            let Some(idx) = segments
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.zone == Zone::FocusFile)
+                .max_by_key(|(_, s)| cost(s))
+                .map(|(i, _)| i)
+            else {
+                break; // nothing left we're willing to truncate; send it and let the backend cope
+            };
+            let over = running - self.budget;
+            let seg = &mut segments[idx];
+            let before = cost(seg);
+            seg.text = truncate_middle(&seg.text, before.saturating_sub(over + 64), &self.counter);
+            let after = cost(seg);
+            if after >= before {
+                break; // couldn't shrink further — avoid an infinite loop
+            }
+            running = running - before + after;
         }
 
         let tokens_used = segments.iter().map(cost).sum();
@@ -285,6 +360,32 @@ mod tests {
         // History dropped; the three sacred remain even though we're over budget.
         assert_eq!(built.messages.len(), 3);
         assert!(built.dropped.contains(&Zone::HistorySummary));
+    }
+
+    #[test]
+    fn a_huge_focus_file_is_truncated_to_fit_rather_than_overflowing() {
+        // The live crash: a large (sacred) FocusFile pushed the prompt past the window and the
+        // backend rejected the whole request (HTTP 400). Now the focus file is truncated to fit,
+        // keeping head + tail, so the request always fits — sacred means "kept, possibly clipped,"
+        // never "overflow the window."
+        let c = counter();
+        let budget = 200;
+        let b = ContextBuilder::new(&c, budget);
+        let huge: String = (0..500).map(|i| format!("line number {i} of the focus file\n")).collect();
+        let built = b.build(vec![
+            Segment::system(Zone::System, "sys"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::FocusFile, huge),
+            Segment::user(Zone::RecentObservation, "obs"),
+        ]);
+        assert!(built.tokens_used <= budget, "prompt fits the window: {} <= {budget}", built.tokens_used);
+        // All four zones are still present (nothing dropped), the focus file just got clipped.
+        assert_eq!(built.messages.len(), 4);
+        let focus = &built.messages[2].content;
+        assert!(focus.contains("truncated in the middle"), "focus file clipped: {focus}");
+        // Head and tail are both preserved.
+        assert!(focus.contains("line number 0 "), "head kept");
+        assert!(focus.contains("line number 499"), "tail kept");
     }
 
     #[test]

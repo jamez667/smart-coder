@@ -842,7 +842,14 @@ pub fn run_agent_observed(
             && (obs.contains("0 matches") || obs.contains("not found"))
             && !changed;
         let create_clash = tool == "create_file" && obs.contains("already exists") && !changed;
-        let write_loop = edit_missed || create_clash;
+        // write_file REJECTED because the target is too large to safely overwrite — the model
+        // fixates on write_file and re-submits it every turn, ignoring the "use edit_file/
+        // append_file" steer in the rejection (observed live 2026-07-15: ~10 write_file
+        // rejections in a row on a stage). Track it like an edit-miss so the breaker fires a
+        // firm directive and resets, instead of the stall detector slowly killing the stage.
+        let write_blocked =
+            tool == "write_file" && obs.contains("too large to safely overwrite") && !changed;
+        let write_loop = edit_missed || create_clash || write_blocked;
         if write_loop && failed_edit_path.as_deref() == Some(arg.as_str()) {
             failed_edit_streak += 1;
         } else if write_loop {
