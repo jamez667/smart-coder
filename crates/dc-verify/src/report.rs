@@ -25,15 +25,37 @@ pub struct TestReport {
     /// True when no per-test breakdown could be parsed and we fell back to the
     /// raw exit code (the generic path).
     pub generic: bool,
+    /// The command's combined stdout/stderr, kept for the generic path so a
+    /// failing non-test command (e.g. `cargo check`) can show the model its
+    /// actual errors instead of a bare "exited non-zero". `None` for parsed
+    /// per-test reports (their detail lives on the cases).
+    pub raw: Option<String>,
 }
 
+/// Max chars of raw generic output to surface in an observation — enough for a
+/// compiler-error block, bounded so a 5k-line log can't blow the window. The TAIL
+/// is kept (cargo prints the error summary last).
+const RAW_TAIL_CHARS: usize = 2000;
+
 impl TestReport {
-    /// A generic pass/fail with no per-test detail (exit-code fallback).
+    /// A generic pass/fail with no per-test detail (exit-code fallback), carrying
+    /// the raw command output so a failing command can still show what broke.
     pub fn generic(command_ok: bool) -> Self {
         Self {
             cases: Vec::new(),
             command_ok,
             generic: true,
+            raw: None,
+        }
+    }
+
+    /// A generic report that carries the command's raw output (surfaced on failure).
+    pub fn generic_with_output(command_ok: bool, output: &str) -> Self {
+        Self {
+            cases: Vec::new(),
+            command_ok,
+            generic: true,
+            raw: Some(output.to_string()),
         }
     }
 
@@ -56,12 +78,31 @@ impl TestReport {
     /// them (spec 05 — spend the window on what's broken).
     pub fn observation(&self) -> String {
         if self.generic {
-            return if self.command_ok {
-                "run_verification: command exited 0 (passed); no per-test detail available".into()
-            } else {
-                "run_verification: command exited non-zero (failed); no per-test detail available"
-                    .into()
-            };
+            if self.command_ok {
+                return "run_verification: command exited 0 (passed)".into();
+            }
+            // Failed: show the tail of the real output (compiler errors, etc.) so the model can
+            // actually fix it, rather than a bare "exited non-zero" it can only guess at.
+            let mut out =
+                String::from("run_verification: command exited non-zero (failed).");
+            if let Some(raw) = &self.raw {
+                let raw = raw.trim();
+                if !raw.is_empty() {
+                    let tail = if raw.len() > RAW_TAIL_CHARS {
+                        let start = raw.len() - RAW_TAIL_CHARS;
+                        // Start on a char boundary.
+                        let start = (start..raw.len())
+                            .find(|i| raw.is_char_boundary(*i))
+                            .unwrap_or(raw.len());
+                        format!("…\n{}", &raw[start..])
+                    } else {
+                        raw.to_string()
+                    };
+                    out.push_str("\nOutput:\n");
+                    out.push_str(&tail);
+                }
+            }
+            return out;
         }
         let failed = self.failed();
         let passed = self.passed_count();
@@ -105,6 +146,7 @@ mod tests {
             cases: vec![case("a", true), case("b", true)],
             command_ok: true,
             generic: false,
+            raw: None,
         };
         assert!(green.all_green());
 
@@ -112,6 +154,7 @@ mod tests {
             cases: vec![case("a", true), case("b", false)],
             command_ok: false,
             generic: false,
+            raw: None,
         };
         assert!(!red.all_green());
         assert_eq!(red.failed().len(), 1);
@@ -123,6 +166,7 @@ mod tests {
             cases: vec![case("keep", true), case("broken", false)],
             command_ok: false,
             generic: false,
+            raw: None,
         };
         let o = red.observation();
         assert!(o.contains("✗ broken"), "{o}");
@@ -136,5 +180,27 @@ mod tests {
         assert!(TestReport::generic(true).all_green());
         assert!(!TestReport::generic(false).all_green());
         assert!(TestReport::generic(true).observation().contains("exited 0"));
+    }
+
+    #[test]
+    fn generic_failure_surfaces_the_raw_output_so_the_model_can_fix_it() {
+        // The blind-flying bug: a failing `cargo check` used to say only "exited non-zero".
+        // Now the observation carries the real compiler errors.
+        let errs = "error[E0433]: cannot find value `lakes` in this scope\n  --> src/gen/terrain.rs:42";
+        let r = TestReport::generic_with_output(false, errs);
+        let o = r.observation();
+        assert!(o.contains("E0433"), "compiler error surfaced: {o}");
+        assert!(o.contains("terrain.rs:42"), "location surfaced: {o}");
+        assert!(!r.all_green());
+    }
+
+    #[test]
+    fn generic_failure_tail_is_bounded() {
+        // A 5k-line log must not blow the window — only the TAIL (where cargo's error
+        // summary sits) is kept.
+        let big = "x\n".repeat(5000) + "error: the real problem is here";
+        let o = TestReport::generic_with_output(false, &big).observation();
+        assert!(o.len() < 2400, "observation bounded, got {}", o.len());
+        assert!(o.contains("the real problem is here"), "tail kept: {o}");
     }
 }

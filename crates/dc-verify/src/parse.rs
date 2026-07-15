@@ -40,7 +40,7 @@ pub fn parse(command: &str, output: &str, command_ok: bool) -> TestReport {
     match detect(command, output) {
         Framework::Cargo => parse_cargo(output, command_ok),
         Framework::Pytest => parse_pytest(output, command_ok),
-        Framework::Generic => TestReport::generic(command_ok),
+        Framework::Generic => TestReport::generic_with_output(command_ok, output),
     }
 }
 
@@ -73,12 +73,15 @@ fn parse_cargo(output: &str, command_ok: bool) -> TestReport {
     }
     attach_cargo_failure_messages(output, &mut cases);
     if cases.is_empty() {
-        return TestReport::generic(command_ok);
+        // No `test ...` lines — e.g. `cargo check`/`cargo build`. Keep the raw output so a
+        // failing compile surfaces its errors to the model (was dropped → it edited blind).
+        return TestReport::generic_with_output(command_ok, output);
     }
     TestReport {
         cases,
         command_ok,
         generic: false,
+        raw: None,
     }
 }
 
@@ -197,12 +200,13 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
     }
 
     if cases.is_empty() {
-        return TestReport::generic(command_ok);
+        return TestReport::generic_with_output(command_ok, output);
     }
     TestReport {
         cases,
         command_ok,
         generic: false,
+        raw: None,
     }
 }
 
