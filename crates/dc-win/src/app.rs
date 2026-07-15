@@ -688,6 +688,12 @@ pub(crate) enum Message {
     ChatSend,
     /// Apply the Nth proposed plan-file to disk (writes README.md / TODO.md).
     ApplyFile(usize),
+    /// Apply the Nth proposed plan-file, then kick off an iterate build to implement it —
+    /// the one-click bridge from a `PLAN-<slug>.md` design doc to a real build run.
+    ExecutePlan(usize),
+    /// Kick off an iterate build to implement the PLAN-*.md currently open in the code view
+    /// (already on disk — no apply needed). The button lives on the code-view header.
+    ExecuteOpenPlan,
     /// Toggle "think" mode for the next chat turn (reason vs. answer directly).
     ToggleThink(bool),
     /// Toggle debug mode: echo every prompt sent to the model into the chat.
@@ -1015,9 +1021,20 @@ impl App {
         self.cfg.base_url = self.url_input.clone();
         let think = self.think;
 
+        // Snapshot the file open in the code view so the model answers against what the user is
+        // looking at ("what does this do?", "add handling here"). Read from disk (not the capped
+        // CodeView render) so the chat sees the real file; chat.rs head-clips it for the window.
+        let open_file = self.selected_file.as_ref().and_then(|rel| {
+            let path = self.workspace_root().join(rel);
+            std::fs::read_to_string(&path)
+                .ok()
+                .map(|body| (rel.clone(), body))
+        });
+
         // Update the conversation + build the request in one scoped mutable borrow.
         let req = {
             let convo = self.conversation.as_mut().expect("checked above");
+            convo.set_open_file(open_file);
             convo.user_turn(&text);
             convo.request(think)
         };
@@ -1509,6 +1526,70 @@ impl App {
         // Mark this run so its outcome is reported back into the chat (set AFTER start(),
         // which clears run state).
         self.iterate_from_comment = true;
+    }
+
+    /// Start a PLAN-ONLY workflow run from a ready-made task (the Execute-plan flow): run the
+    /// staged workflow through the stage breakdown and stop for review. The phases stream to
+    /// the plan panel. Mirrors `start_iterate_with` but with `RunKind::Plan`.
+    fn start_plan_with(&mut self, task: String) {
+        if self.session.is_some() {
+            return;
+        }
+        self.debug_prompt("execute plan", &task);
+        self.intent = task;
+        self.start(RunKind::Plan);
+        self.intent.clear();
+        // Report the plan's outcome back into the chat thread, like an iterate-from-comment run.
+        self.iterate_from_comment = true;
+    }
+
+    /// Apply the Nth proposed plan-file, then kick off an iterate build to implement it.
+    /// The one-click bridge from a `PLAN-<slug>.md` design doc to a real build run: the plan
+    /// is written to disk (so the agent can read it), then an iterate run is started with an
+    /// instruction pointing at that file. Iterate needs a real project on disk, so this is a
+    /// no-op (with a chat note) when no project folder is open or a run is already in flight.
+    fn execute_plan(&mut self, i: usize) {
+        let Some(pf) = self.proposed_files.get(i).cloned() else {
+            return;
+        };
+        if self.session.is_some() {
+            return; // A run is already in flight — don't stack another.
+        }
+        if self.picked_workspace.is_none() {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: "⚠ Open a project folder first — executing a plan builds into it."
+                    .to_string(),
+            });
+            return;
+        }
+        // Land the plan on disk (and refresh the conversation snapshot) first, so the workflow
+        // can read the plan it's told to design against. This also clears it from the pending
+        // proposals, so `i` is consumed exactly like a plain Apply.
+        self.apply_proposed_file(i);
+        self.start_plan_with(plan_task(&pf.name));
+    }
+
+    /// Kick off an iterate build to implement the `PLAN-*.md` open in the code view. Unlike
+    /// [`Self::execute_plan`], the file is already on disk (opened from the tree), so there's
+    /// nothing to apply — just point an iterate run at it. Same guards: needs an open project
+    /// and no run in flight.
+    fn execute_open_plan(&mut self) {
+        let Some(rel) = self.selected_file.clone() else {
+            return;
+        };
+        if !is_feature_plan(&rel) || self.session.is_some() {
+            return;
+        }
+        if self.picked_workspace.is_none() {
+            self.chat_turns.push(dc_win::chat::Turn {
+                role: dc_win::chat::Speaker::Agent,
+                text: "⚠ Open a project folder first — executing a plan builds into it."
+                    .to_string(),
+            });
+            return;
+        }
+        self.start_plan_with(plan_task(&rel));
     }
 
     /// Write the Nth proposed plan-file to disk (README.md / TODO.md), then refresh the
@@ -2149,6 +2230,8 @@ impl App {
             }
             Message::ChatSend => self.send_chat(),
             Message::ApplyFile(i) => self.apply_proposed_file(i),
+            Message::ExecutePlan(i) => self.execute_plan(i),
+            Message::ExecuteOpenPlan => self.execute_open_plan(),
             Message::ToggleThink(v) => self.think = v,
             Message::ToggleDebug(v) => self.debug = v,
             Message::UndoLastChange => self.undo_last_change(),
@@ -3201,8 +3284,28 @@ impl App {
         };
 
         // Header stays fixed; the code area is the single scrollable (no outer scroll wrap,
-        // which is what previously collapsed the inner one).
-        let body = column![text(header).size(12).color(FG_MUTED), inner].spacing(6);
+        // which is what previously collapsed the inner one). When the open file is a feature
+        // plan (PLAN-<slug>.md), the header carries an "⚒ Execute plan" button — the same
+        // one-click build the proposal card offers, but for a plan opened from the tree.
+        let is_open_plan = self
+            .selected_file
+            .as_deref()
+            .is_some_and(is_feature_plan);
+        let header_bar: Element<'_, Message> = if is_open_plan && self.session.is_none() {
+            row![
+                text(header).size(12).color(FG_MUTED),
+                Space::new().width(Fill),
+                button(text("⚒ Execute plan").size(12))
+                    .on_press(Message::ExecuteOpenPlan)
+                    .padding([3, 10])
+                    .style(primary_button),
+            ]
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            text(header).size(12).color(FG_MUTED).into()
+        };
+        let body = column![header_bar, inner].spacing(6);
         container(body)
             .width(Length::FillPortion(4))
             .height(Fill)
@@ -3702,7 +3805,18 @@ impl App {
             .on_press(Message::ApplyFile(i))
             .padding([5, 12])
             .style(primary_button);
-        container(column![head, apply].spacing(6))
+        // A feature plan (PLAN-<slug>.md) gets a one-click build: apply it, then iterate the
+        // project to implement it. README/TODO edits aren't buildable, so they show Apply only.
+        let actions: Element<'_, Message> = if is_feature_plan(&pf.name) {
+            let execute = button(text("⚒ Execute plan").size(13))
+                .on_press(Message::ExecutePlan(i))
+                .padding([5, 12])
+                .style(primary_button);
+            row![apply, execute].spacing(8).into()
+        } else {
+            apply.into()
+        };
+        container(column![head, actions].spacing(6))
             .width(Fill)
             .padding(10)
             .style(dropdown_style)
@@ -4024,6 +4138,9 @@ impl App {
 fn fix_feed_line(e: &dc_core::AgentEvent) -> Option<String> {
     use dc_core::AgentEvent::*;
     match e {
+        // The model's own account of what it's seeing / about to do — so the execute feed
+        // reads as a running narration, not just a list of file touches.
+        ModelTurn { raw, .. } => dc_win::view::narration(raw).map(|n| format!("💭 {n}")),
         ToolCall { tool, arg } => match tool.as_str() {
             "edit_file" | "write_file" | "append_file" | "create_file" => {
                 Some(format!("✎ editing {}", arg.trim()))
@@ -4092,6 +4209,26 @@ fn non_empty(s: &str) -> Option<String> {
     }
 }
 
+/// The workflow task for executing a feature plan. Names the plan file so the workflow pins
+/// its contents every phase (via `referenced_plan`) and grounds the design on it — and frames
+/// the run as designing (not implementing), since plan-only stops at the breakdown for review.
+fn plan_task(plan_name: &str) -> String {
+    format!(
+        "Design how to implement the feature plan in {plan_name}. Read the plan, look at the \
+         relevant existing files, and produce a spec, an architecture, a file layout, and an \
+         ordered implementation breakdown that follows the plan's Approach and Files-to-touch. \
+         This is a DESIGN pass — do not write source code yet."
+    )
+}
+
+/// Whether a proposed file is a *feature plan* (a `PLAN-<slug>.md`), as opposed to a
+/// README/TODO plan-file edit. Only feature plans get the "Execute plan" build button —
+/// README/TODO aren't things you "build".
+fn is_feature_plan(name: &str) -> bool {
+    let n = name.trim();
+    n.to_ascii_uppercase().starts_with("PLAN-") && n.to_ascii_lowercase().ends_with(".md")
+}
+
 /// The prefix to remember when a user clicks "Allow & remember": the command up to
 /// and including the first space (so `git push` remembers `git `), or the whole
 /// command if it has no space.
@@ -4106,3 +4243,43 @@ fn remember_prefix(command: &str) -> String {
 // unused-import churn; the v0 settings panel exposes the common knobs first.
 #[allow(dead_code)]
 const _: Option<ToolCalling> = None;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feature_plans_are_buildable_but_readme_and_todo_are_not() {
+        // The Execute-plan button gates on this: only a PLAN-<slug>.md is buildable.
+        assert!(is_feature_plan("PLAN-lakes.md"));
+        assert!(is_feature_plan("plan-auth-flow.md")); // case-insensitive
+        assert!(!is_feature_plan("README.md"));
+        assert!(!is_feature_plan("TODO.md"));
+        assert!(!is_feature_plan("PLAN-lakes.txt")); // must be markdown
+        assert!(!is_feature_plan("MYPLAN-x.md")); // must start with the PLAN- prefix
+    }
+
+    #[test]
+    fn plan_task_names_the_plan_and_frames_a_design_pass() {
+        // The workflow pins the plan via its filename, so the task must name it; and plan-only
+        // stops at the breakdown, so it must frame a design pass (not "write the code").
+        let t = plan_task("PLAN-lakes.md");
+        assert!(t.contains("PLAN-lakes.md"), "names the plan so referenced_plan pins it");
+        assert!(t.to_lowercase().contains("design"));
+        assert!(t.contains("do not write source code yet"));
+    }
+
+    #[test]
+    fn fix_feed_line_surfaces_model_narration() {
+        // The execute/iterate feed shows the model's thinking, not just file touches.
+        let line = fix_feed_line(&dc_core::AgentEvent::ModelTurn {
+            step: 1,
+            prompt_tokens: 10,
+            raw: "I'll add the water module and wire it in.\n{\"tool\":\"write_file\",\"path\":\"w.rs\"}"
+                .to_string(),
+        });
+        let line = line.expect("narration surfaced");
+        assert!(line.starts_with("💭"));
+        assert!(line.contains("water module"));
+    }
+}

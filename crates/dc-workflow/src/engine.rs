@@ -10,13 +10,19 @@ use dc_model::{GenerateRequest, Message, ModelBackend};
 
 use crate::phase::Phase;
 use crate::policy::ThinkPolicy;
+use crate::stack::ProjectStack;
 use crate::state::{Artifact, WorkflowState};
 
 /// Build the messages for producing `phase`: a phase-specific system prompt, the
 /// original task, and every approved upstream artifact as grounding context. When
 /// `think` suppresses this phase, a `/no_think` suffix is appended to the system
 /// prompt (a thinking model then skips its chain-of-thought).
-pub fn phase_messages(phase: Phase, state: &WorkflowState, think: ThinkPolicy) -> Vec<Message> {
+pub fn phase_messages(
+    phase: Phase,
+    state: &WorkflowState,
+    think: ThinkPolicy,
+    stack: ProjectStack,
+) -> Vec<Message> {
     let mut user = format!("Task: {}\n", state.task);
     // Ground only on the upstream artifacts this phase actually needs — not the whole
     // chain. Stuffing every approved artifact into every phase overflows a small model
@@ -40,9 +46,9 @@ pub fn phase_messages(phase: Phase, state: &WorkflowState, think: ThinkPolicy) -
             "\n=== Reviewer feedback (address this) ===\n{notes}\n"
         ));
     }
-    user.push_str(&format!("\n{}", phase_instruction(phase)));
+    user.push_str(&format!("\n{}", phase_instruction(phase, stack)));
 
-    let mut system = system_for(phase);
+    let mut system = system_for(phase, stack);
     if think.suppress(phase) {
         system.push_str(" /no_think");
     }
@@ -64,6 +70,7 @@ pub fn generate_phase(
     phase: Phase,
     state: &WorkflowState,
     think: ThinkPolicy,
+    stack: ProjectStack,
 ) -> Artifact {
     // A transient backend error (a 503 "Loading model" while a Docker container
     // reloads, or a network blip) needs the retries to span a few SECONDS — three
@@ -81,7 +88,7 @@ pub fn generate_phase(
         } else {
             think.with(phase, true)
         };
-        let mut req = GenerateRequest::new(phase_messages(phase, state, effective));
+        let mut req = GenerateRequest::new(phase_messages(phase, state, effective, stack));
         // A complex task's decomposition / coverage plan is long structured JSON; the
         // old 1536 cap truncated it mid-array (observed live 2026-06-14: a restaurant
         // site decomposition ran out of budget while still reasoning → no JSON → empty
@@ -93,8 +100,11 @@ pub fn generate_phase(
                 // A JSON phase that came back as prose-only (no parseable array) is a
                 // FAILED attempt, not a usable artifact — retry with thinking suppressed
                 // rather than chaining an empty board downstream and building nothing.
-                let usable = !content.is_empty()
-                    && (!phase.produces_json() || contains_json_array(&content));
+                // The non-Python stage breakdown intentionally emits a Markdown design doc, not
+                // a JSON coverage array, so the JSON gate must not apply to it.
+                let wants_json = phase.produces_json()
+                    && !(phase == Phase::StageBreakdown && !matches!(stack, ProjectStack::Python));
+                let usable = !content.is_empty() && (!wants_json || contains_json_array(&content));
                 if usable {
                     return Artifact::draft(phase, content);
                 }
@@ -128,7 +138,7 @@ fn contains_json_array(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn system_for(phase: Phase) -> String {
+fn system_for(phase: Phase, stack: ProjectStack) -> String {
     let role = match phase {
         Phase::Specs => "You write a crisp spec: goals, non-goals, and constraints.",
         Phase::Architecture => {
@@ -137,10 +147,14 @@ fn system_for(phase: Phase) -> String {
         Phase::Layout => {
             "You define the concrete project layout: directories, modules/files, and each one's responsibility."
         }
-        Phase::StageBreakdown => {
+        Phase::StageBreakdown if matches!(stack, ProjectStack::Python) => {
             "You plan the TESTS first (TDD). You don't write test code yourself — you list the \
              coverage each test file must hit; small worker models will write the actual tests \
              from your coverage list. The stages are 'make these tests pass'."
+        }
+        Phase::StageBreakdown => {
+            "You break the work into an ordered set of small implementation stages — the concrete \
+             build sequence, foundations first. A design breakdown to review, not tests or code."
         }
         Phase::ImplementationPlan => {
             "For each stage, you write the concrete, ordered plan to make its tests pass (red → green)."
@@ -153,29 +167,34 @@ fn system_for(phase: Phase) -> String {
     format!(
         "You are the orchestrator (architect) in a staged coding workflow. {role} \
         Ground everything in the approved artifacts you are given. Be concise and concrete. \
-        {STACK_CONSTRAINT}"
+        {}",
+        stack.constraint()
     )
 }
 
-/// The locked technology stack, woven into every phase prompt. The small models are
-/// most reliable on Python + plain web, and a fixed stack lets the harness match the
-/// verify command (pytest / vitest) and reject off-stack files. No TypeScript, no React
-/// build tooling, no other backend languages.
-const STACK_CONSTRAINT: &str = "STACK: backend in Python with Flask; a frontend, ONLY IF the \
-    task needs a user interface, in plain JavaScript, HTML, and CSS. Build ONLY what the task \
-    asks for — if it is a backend/JSON API with no UI, create NO frontend files (no index.html, \
-    script.js, or styles.css) and write NO frontend tests; app.py alone is the whole project. \
-    Do NOT use TypeScript, React, Vue, a build step, or any other backend language (no \
-    Node.js/Express, no Java, no Go). Every source file must be a .py, .js, .html, or .css file. \
-    LIBRARIES: the installed Python packages you may import are flask, flask_sqlalchemy, \
-    flask_restful, flask_cors, marshmallow, requests, pytest, and the standard library. \
-    Do NOT use any package outside that list (no FastAPI, no Django) — it is not installed \
-    and the tests will fail to import. Frontend uses only the browser's built-in fetch and \
-    DOM APIs (no npm packages). Write Flask route handlers as plain `def`, never `async def`.";
-
-fn phase_instruction(phase: Phase) -> String {
+fn phase_instruction(phase: Phase, stack: ProjectStack) -> String {
+    // The stage-breakdown / work-decomposition instructions below are written for the Python
+    // eval ladder (test_app.py, pytest/vitest, Flask routes). They only apply to the Python
+    // stack; for a real Rust/JS project the caller uses the skip-tests / plan-only path (2nd
+    // pass), which supplies its own non-TDD wording. Guard the TDD-specific text on the stack
+    // so a Rust run never gets told to write `test_app.py`.
+    let _ = stack;
     match phase {
         Phase::StageBreakdown => {
+            // Non-Python stacks (the plan-only Execute flow on a real Rust/JS project) don't do
+            // the frozen-test TDD dance — they want a readable, ordered implementation breakdown
+            // to review, not a pytest coverage array. Only the Python eval ladder gets the
+            // test-first JSON below (kept byte-identical so the ladder is unaffected).
+            if !matches!(stack, ProjectStack::Python) {
+                return "Break the work into an ORDERED set of small implementation stages — the \
+                     concrete build sequence for this change. For each stage give: a short title, \
+                     the file(s) it touches (from the layout), and one or two sentences on what to \
+                     build there. Order stages so each builds on the last (foundations first, then \
+                     what depends on them). This is a DESIGN breakdown to review, NOT tests and NOT \
+                     code — do not write test files or source code. Output a short Markdown \
+                     document with a numbered list of stages."
+                    .to_string();
+            }
             // ONE test file per SOURCE file in the layout. This 1:1 alignment is what
             // makes the swarm work: each source file gets its own test, so each becomes a
             // single-file subtask judged by a single test the worker can actually satisfy.
@@ -226,15 +245,72 @@ fn phase_instruction(phase: Phase) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stack::ProjectStack;
     use crate::state::Artifact;
     use dc_model::MockBackend;
+
+    #[test]
+    fn rust_stack_prompt_names_cargo_not_flask() {
+        // The language-aware fix: a Rust project's phase prompts must speak Rust/cargo, never
+        // the Python/Flask default — else the orchestrator designs a Flask app.py for a Rust repo.
+        let s = WorkflowState::new("add lakes to the terrain");
+        let sys = phase_messages(Phase::Architecture, &s, ThinkPolicy::default(), ProjectStack::Rust)
+            [0]
+        .content
+        .clone();
+        assert!(sys.contains("cargo"), "Rust prompt names cargo: {sys}");
+        assert!(sys.to_lowercase().contains("rust"));
+        assert!(!sys.to_lowercase().contains("flask"), "no Flask in a Rust prompt: {sys}");
+        assert!(!sys.contains("app.py"), "no app.py in a Rust prompt");
+    }
+
+    #[test]
+    fn non_python_stage_breakdown_asks_for_an_ordered_design_not_tests() {
+        // The plan-only Execute flow: on a Rust project the stage breakdown must produce a
+        // readable ordered breakdown, not a pytest coverage JSON array.
+        let s = WorkflowState::new("add lakes");
+        let msgs = phase_messages(
+            Phase::StageBreakdown,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Rust,
+        );
+        let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
+        assert!(joined.to_lowercase().contains("ordered"), "ordered stages: {joined}");
+        assert!(!joined.contains("test_app.py"), "no pytest file for a Rust breakdown");
+        assert!(!joined.contains("JSON array"), "not the coverage JSON: {joined}");
+    }
+
+    #[test]
+    fn python_stage_breakdown_still_asks_for_the_coverage_json() {
+        let s = WorkflowState::new("build an API");
+        let msgs = phase_messages(
+            Phase::StageBreakdown,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        );
+        let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
+        assert!(joined.contains("JSON array"), "Python ladder keeps coverage JSON");
+        assert!(joined.contains("test_app.py"));
+    }
+
+    #[test]
+    fn python_stack_keeps_the_original_flask_constraint() {
+        let s = WorkflowState::new("build an API");
+        let sys =
+            phase_messages(Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python)[0]
+                .content
+                .clone();
+        assert!(sys.contains("Flask"), "Python default preserved");
+    }
 
     #[test]
     fn messages_include_task_and_approved_upstream() {
         let mut s = WorkflowState::new("build a CLI");
         s.set(Artifact::draft(Phase::Specs, "the spec text"));
         s.approve(Phase::Specs);
-        let msgs = phase_messages(Phase::Architecture, &s, ThinkPolicy::default());
+        let msgs = phase_messages(Phase::Architecture, &s, ThinkPolicy::default(), ProjectStack::Python);
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("build a CLI"));
         assert!(joined.contains("the spec text"));
@@ -247,7 +323,7 @@ mod tests {
         // A later-phase artifact and an unapproved one must not leak into an
         // earlier phase's context.
         s.set(Artifact::draft(Phase::Architecture, "ARCH_DRAFT")); // unapproved
-        let msgs = phase_messages(Phase::Specs, &s, ThinkPolicy::default());
+        let msgs = phase_messages(Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(!joined.contains("ARCH_DRAFT"));
     }
@@ -268,7 +344,7 @@ mod tests {
             s.set(Artifact::draft(p, body));
             s.approve(p);
         }
-        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default());
+        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default(), ProjectStack::Python);
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("LAYOUT_FILES"), "needs the layout");
         assert!(joined.contains("STAGE_TESTS"), "needs the stage breakdown");
@@ -286,7 +362,7 @@ mod tests {
     #[test]
     fn decomposition_phase_asks_for_json() {
         let s = WorkflowState::new("t");
-        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default());
+        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default(), ProjectStack::Python);
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("JSON array"));
         assert!(joined.contains("\"files\""));
@@ -296,17 +372,19 @@ mod tests {
     fn think_policy_appends_no_think_per_phase() {
         let s = WorkflowState::new("t");
         // Default: a doc phase gets /no_think; a JSON reasoning phase doesn't.
-        let spec_sys = phase_messages(Phase::Specs, &s, ThinkPolicy::default())[0]
+        let spec_sys = phase_messages(Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python)[0]
             .content
             .clone();
         assert!(spec_sys.contains("/no_think"), "{spec_sys}");
-        let cov_sys = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default())[0]
+        let cov_sys = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default(), ProjectStack::Python)[0]
             .content
             .clone();
         assert!(!cov_sys.contains("/no_think"), "{cov_sys}");
         // A per-step override flips just that phase.
         let forced = ThinkPolicy::always_think().with(Phase::Specs, true);
-        let spec2 = phase_messages(Phase::Specs, &s, forced)[0].content.clone();
+        let spec2 = phase_messages(Phase::Specs, &s, forced, ProjectStack::Python)[0]
+            .content
+            .clone();
         assert!(spec2.contains("/no_think"));
     }
 
@@ -314,7 +392,7 @@ mod tests {
     fn generate_phase_returns_a_draft() {
         let backend = MockBackend::new(["# Specs\nGoals: ship it"]);
         let s = WorkflowState::new("ship it");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
         assert_eq!(a.phase, Phase::Specs);
         assert!(a.content.contains("Goals"));
         assert!(!a.is_approved());
@@ -326,7 +404,7 @@ mod tests {
         // reasoning); the engine retries and recovers.
         let backend = MockBackend::new(["", "  ", "# Specs\nrecovered"]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
         assert!(a.content.contains("recovered"), "got: {:?}", a.content);
     }
 
@@ -336,7 +414,7 @@ mod tests {
         // that into a loud error.
         let backend = MockBackend::new(["", "", "", ""]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
         assert!(a.content.is_empty());
     }
 
@@ -380,7 +458,7 @@ mod tests {
             calls: Cell::new(0),
         };
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
         assert!(
             a.content.contains("recovered after the blip"),
             "must recover from a transient error, got: {:?}",
@@ -404,6 +482,7 @@ mod tests {
             Phase::WorkDecomposition,
             &s,
             ThinkPolicy::default(),
+            ProjectStack::Python,
         );
         assert!(
             a.content.contains("\"id\""),
@@ -417,7 +496,7 @@ mod tests {
         // A non-JSON phase (specs) is happy with prose — the JSON gate must not apply.
         let backend = MockBackend::new(["## Goals\nship a great thing"]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default());
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
         assert!(a.content.contains("Goals"));
     }
 

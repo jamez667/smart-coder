@@ -64,7 +64,17 @@ pub struct Conversation {
     readme: String,
     /// Current TODO.md contents (empty if none), injected into the system prompt.
     todo: String,
+    /// The file open in the code view — `(name, contents)` — so a question like "what does
+    /// this do?" is answered against what the user is actually looking at. `None` when no
+    /// file is open. Injected (head-clipped) into the system prompt.
+    open_file: Option<(String, String)>,
 }
+
+/// How much of an open file to inject into the system prompt. A small model's window is
+/// tight ([`crate::chat`] keeps the plan on disk for the same reason), so a long file is
+/// head-clipped: the top of a source file (imports, types, signatures) is what a question
+/// usually needs, and the note tells the model the rest was cut.
+const OPEN_FILE_MAX_LINES: usize = 200;
 
 impl Conversation {
     /// Open a conversation. `readme`/`todo` are the current on-disk contents (empty = absent);
@@ -80,6 +90,7 @@ impl Conversation {
             turns: Vec::new(),
             readme: readme.to_string(),
             todo: todo.to_string(),
+            open_file: None,
         }
     }
 
@@ -130,6 +141,13 @@ impl Conversation {
         self.todo = todo.to_string();
     }
 
+    /// Set (or clear) the file open in the code view, so the next request can answer a
+    /// question against what the user is looking at. Pass `None` when no file is open, or a
+    /// `(name, contents)` pair for the current file. Contents are head-clipped at inject time.
+    pub fn set_open_file(&mut self, file: Option<(String, String)>) {
+        self.open_file = file;
+    }
+
     /// Build the request for the next model call: the mode-shaped system prompt (with the
     /// current plan files) plus the last [`KEEP_TURNS`] transcript turns.
     ///
@@ -149,8 +167,11 @@ impl Conversation {
         messages.extend(self.turns[start..].iter().cloned());
         let mut req = GenerateRequest::new(messages);
         req.temperature = 0.4;
-        // Thinking needs room to reach a conclusion; fast mode stays tight.
-        req.max_tokens = if think { 2400 } else { 700 };
+        // Thinking needs room to reach a conclusion; fast mode stays tight but must still fit a
+        // multi-section feature plan (the plan-a-feature case) without truncating mid-block. The
+        // model stops early on short answers, so the larger ceiling only costs tokens when it
+        // genuinely writes a plan.
+        req.max_tokens = if think { 2400 } else { 1200 };
         req
     }
 
@@ -179,7 +200,7 @@ impl Conversation {
             ),
         }
         s.push_str(
-            "CRITICAL — three cases:\n\
+            "CRITICAL — four cases:\n\
              • A CODE-CHANGE request (\"shorten this comment\", \"rename X\", \"fix this \
              function\", \"change the code to…\") → you CANNOT edit source code from this chat; \
              it only edits the plan (README/TODO). Reply in prose telling the user: to change \
@@ -191,9 +212,18 @@ impl Conversation {
              to…\", \"reprioritize\") → output the FULL new contents of the affected plan file \
              in a fenced block whose info string is `file:<name>`, e.g.\n\
              ```file:TODO.md\n- [ ] first task\n- [ ] second task\n```\n\
-             Default to PROSE. Only produce a file block for a clear PLAN-file change (README/\
-             TODO). When unsure, answer in prose and ask. Never reply with a file block and no \
-             prose.\n\n",
+             • A PLAN-A-FEATURE request (\"plan out adding lakes to the terrain\", \"design the \
+             auth flow\", \"how would we add X\") → write a structured FEATURE PLAN as a file \
+             block named `file:PLAN-<slug>.md` (slug = the feature, kebab-case, e.g. \
+             `PLAN-lakes.md`). Use these sections: `## Plan: <feature>`, then **Approach** (2–3 \
+             sentences on the design), **Files to touch** (a bullet per file with what changes; \
+             mark new files `(new)`), **Steps** (a numbered build order), and **Risks** (edge \
+             cases / unknowns). Keep each section tight. Add a one-line prose lead-in before the \
+             block, e.g. \"Here's a plan for lakes:\". This is a DESIGN doc, not source code — \
+             describe the changes, don't write the implementation.\n\
+             Default to PROSE. Produce a file block only for a clear PLAN-file change (a TODO/\
+             README edit or a feature plan). When unsure, answer in prose and ask. Never reply \
+             with a file block and no prose.\n\n",
         );
         // Channel any reasoning into <think> tags so the user sees only the conclusion —
         // thinking is welcome (it makes the plan better), but it must not be the visible
@@ -212,8 +242,40 @@ impl Conversation {
             s.push_str(self.todo.trim());
             s.push_str("\n\n");
         }
+        // The file the user is currently looking at, head-clipped. A question like "what does
+        // this do?" or "add error handling here" refers to THIS file — inject it so the model
+        // answers against what's on screen rather than guessing.
+        if let Some((name, body)) = &self.open_file {
+            if !body.trim().is_empty() {
+                let (clipped, cut) = clip_lines(body, OPEN_FILE_MAX_LINES);
+                s.push_str(&format!(
+                    "=== file open in the code view: {name} ===\n\
+                     (This is what the user is looking at. Questions like \"what does this do?\" \
+                     or \"how would I change this?\" refer to this file.)\n",
+                ));
+                s.push_str(clipped.trim_end());
+                if cut {
+                    s.push_str("\n… (file truncated — only the first portion is shown)");
+                }
+                s.push_str("\n\n");
+            }
+        }
         s
     }
+}
+
+/// Head-clip `body` to at most `max_lines` lines. Returns the clipped text and whether any
+/// lines were dropped, so the caller can add a truncation note.
+fn clip_lines(body: &str, max_lines: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut n = 0;
+    for line in body.lines().take(max_lines) {
+        out.push_str(line);
+        out.push('\n');
+        n += 1;
+    }
+    let cut = body.lines().nth(n).is_some();
+    (out, cut)
 }
 
 /// Split a raw assistant reply into (prose, proposed-files). The prose is everything outside
@@ -348,6 +410,63 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.role == dc_model::Role::User && m.content.contains("what's left")));
+    }
+
+    #[test]
+    fn system_prompt_teaches_the_plan_a_feature_case() {
+        // "Plan out adding lakes" must have a home: the prompt names the feature-plan case and
+        // the PLAN-<slug>.md file convention, so the model designs instead of just answering.
+        let sys = Conversation::open("", "").request(false).messages[0]
+            .content
+            .to_lowercase();
+        assert!(sys.contains("plan-a-feature"), "feature-plan case named: {sys}");
+        assert!(sys.contains("plan-<slug>.md"), "plan file convention given: {sys}");
+    }
+
+    #[test]
+    fn fast_mode_budget_fits_a_feature_plan() {
+        // A multi-section feature plan can't land in the old 700-token fast budget.
+        assert!(Conversation::open("", "").request(false).max_tokens >= 1200);
+    }
+
+    #[test]
+    fn open_file_is_injected_into_the_prompt_and_head_clipped() {
+        let mut c = Conversation::open("# App", "- [ ] x");
+        let body: String = (1..=500).map(|n| format!("line {n}\n")).collect();
+        c.set_open_file(Some(("src/water.rs".to_string(), body)));
+        let sys = c.request(false).messages[0].content.clone();
+        assert!(sys.contains("file open in the code view: src/water.rs"), "name shown");
+        assert!(sys.contains("line 1\n"), "head of file present");
+        assert!(!sys.contains("line 500"), "tail clipped past the cap");
+        assert!(sys.contains("truncated"), "truncation noted");
+    }
+
+    #[test]
+    fn open_file_none_injects_nothing() {
+        let mut c = Conversation::open("", "");
+        c.set_open_file(None);
+        assert!(!c.request(false).messages[0]
+            .content
+            .contains("file open in the code view"));
+        // An empty/whitespace file is treated as nothing too.
+        c.set_open_file(Some(("empty.rs".to_string(), "   \n".to_string())));
+        assert!(!c.request(false).messages[0]
+            .content
+            .contains("file open in the code view"));
+    }
+
+    #[test]
+    fn parse_reply_carries_a_feature_plan_file_block() {
+        // The generic file:<name> plumbing already routes a PLAN-*.md doc through — no app change.
+        let reply = "Here's a plan for lakes:\n\
+             ```file:PLAN-lakes.md\n## Plan: lakes\n**Approach:** flood-fill basins.\n```\n\
+             Want me to break this into TODO items?";
+        let (prose, files) = parse_reply(reply);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "PLAN-lakes.md");
+        assert!(files[0].content.contains("## Plan: lakes"));
+        assert!(prose.contains("plan for lakes"));
+        assert!(!prose.contains("flood-fill"), "plan body not left in prose");
     }
 
     #[test]

@@ -53,8 +53,18 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
         ModelTurn {
             step,
             prompt_tokens,
-            ..
-        } => vec![Row::ok("·", format!("turn {step}   ({prompt_tokens} tok)"))],
+            raw,
+        } => {
+            // The turn header — always shown.
+            let mut rows = vec![Row::ok("·", format!("turn {step}   ({prompt_tokens} tok)"))];
+            // The model's own narration — what it says it's seeing / planning to do, BEFORE the
+            // tool-call JSON. Surfacing it turns the stream from a bare list of tool calls into a
+            // running account of the agent's thinking (the raw carries it; it was being dropped).
+            if let Some(note) = narration(raw) {
+                rows.push(Row::ok("💭", note));
+            }
+            rows
+        }
         ToolCall { tool, arg } => vec![Row::ok("▸", format!("{tool}  {arg}"))],
         ToolResult {
             summary, is_error, ..
@@ -82,6 +92,56 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
         }
         Stopped { reason } => vec![stop_row(reason)],
     }
+}
+
+/// The model's own narration for a turn: the prose it wrote BEFORE its tool-call JSON, with
+/// any `<think>…</think>` reasoning block removed and collapsed to a single tidy line. This is
+/// the "what it's seeing / about to do" account that makes the stream readable. Returns `None`
+/// when the turn is pure tool call with nothing to say (common), so no empty row is emitted.
+///
+/// Public so the chat/execute feed (`app::fix_feed_line`) can surface the same narration during
+/// an iterate/execute run, not just the activity stream.
+pub fn narration(raw: &str) -> Option<String> {
+    // Drop a leading/embedded <think> block (Qwen3 et al.) — internal reasoning, not narration.
+    let mut s = raw;
+    let lower = s.to_ascii_lowercase();
+    if let (Some(o), Some(c)) = (lower.find("<think>"), lower.find("</think>")) {
+        if c > o {
+            // Keep whatever prose came after the closed think block.
+            s = &raw[c + "</think>".len()..];
+        }
+    }
+    // Cut at the first tool-call JSON object — everything before it is the narration.
+    let prose = match dc_core::text::extract_json_object(s) {
+        Some(json) => {
+            let cut = json.as_ptr() as usize - s.as_ptr() as usize;
+            &s[..cut]
+        }
+        None => s, // No tool call this turn (e.g. a finish with a message) — it's all prose.
+    };
+    // Collapse whitespace/newlines to one line and trim leading list/fence noise.
+    let one_line = prose
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c: char| c == '`' || c == '#' || c == '-' || c.is_whitespace())
+        .to_string();
+    if one_line.is_empty() {
+        None
+    } else {
+        // Keep the stream tidy — a long paragraph gets clipped with an ellipsis.
+        Some(clip(&one_line, 240))
+    }
+}
+
+/// Clip `s` to at most `max` chars on a char boundary, appending `…` if it was cut.
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 /// Map one [`SwarmEvent`] to activity rows — the orchestrator/task-board vocabulary.
@@ -210,6 +270,47 @@ mod tests {
         assert_eq!(rows.len(), 3, "header + 2 steps");
         assert!(rows[1].text.starts_with("1. "));
         assert!(rows[2].text.starts_with("2. "));
+    }
+
+    #[test]
+    fn model_turn_surfaces_the_narration_before_the_tool_call() {
+        let raw = "I'll add the water module and wire it into the terrain builder.\n\
+                   {\"tool\":\"write_file\",\"path\":\"water.rs\",\"content\":\"x\"}";
+        let rows = agent_rows(&AgentEvent::ModelTurn {
+            step: 2,
+            prompt_tokens: 100,
+            raw: raw.to_string(),
+        });
+        assert_eq!(rows.len(), 2, "turn header + narration");
+        assert_eq!(rows[1].icon, "💭");
+        assert!(rows[1].text.contains("add the water module"));
+        assert!(!rows[1].text.contains("write_file"), "tool JSON not in narration");
+    }
+
+    #[test]
+    fn model_turn_narration_strips_a_think_block() {
+        let raw = "<think>which file first?</think>Creating the water surface renderer.\n\
+                   {\"tool\":\"create_file\",\"path\":\"water.rs\"}";
+        let rows = agent_rows(&AgentEvent::ModelTurn {
+            step: 1,
+            prompt_tokens: 50,
+            raw: raw.to_string(),
+        });
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].text.contains("water surface renderer"));
+        assert!(!rows[1].text.contains("which file first"), "reasoning hidden");
+    }
+
+    #[test]
+    fn model_turn_with_no_narration_yields_only_the_header() {
+        // Pure tool call, no prose → just the turn row, no empty 💭 line.
+        let rows = agent_rows(&AgentEvent::ModelTurn {
+            step: 3,
+            prompt_tokens: 20,
+            raw: "{\"tool\":\"read_file\",\"path\":\"a.rs\"}".to_string(),
+        });
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].icon, "·");
     }
 
     #[test]

@@ -63,6 +63,10 @@ pub enum RunKind {
     /// verify command (e.g. `cargo check`) until it's green, then finishes. This is the mode
     /// the GUI uses when you've picked a project folder to work in.
     Iterate,
+    /// Plan-only: run the staged workflow through the stage breakdown (language-aware, no
+    /// frozen tests) and STOP for review — the "Execute plan" flow. Produces specs →
+    /// architecture → layout → breakdown as reviewable artifacts; does not build.
+    Plan,
 }
 
 /// A live run. Holds the receiving ends the UI drains; the worker thread owns the
@@ -95,6 +99,7 @@ impl Session {
                 run_sequential_build(cfg, task, workspace, ev_tx, pending_tx)
             }
             RunKind::Iterate => run_iterate(cfg, task, workspace, ev_tx, pending_tx, cancel_worker),
+            RunKind::Plan => run_plan(cfg, task, workspace, ev_tx),
         });
 
         Self {
@@ -478,6 +483,51 @@ fn run_swarm(
 /// mirror of `dc-cli::plan_task`. The phases stream to the UI as [`UiEvent::Phase`]
 /// (the plan panel); after the test-writing phase the swarm implements against the
 /// frozen tests until the verify command goes green.
+/// The "Execute plan" flow: run the staged workflow language-aware and TDD-free through the
+/// stage breakdown, streaming each phase to the plan panel, then STOP for review. No frozen
+/// tests, no decomposition, no build — the user reads specs → architecture → layout →
+/// breakdown and kicks off the build separately. The plan doc the user is executing rides in
+/// as the task, so every phase grounds on it.
+fn run_plan(cfg: UiConfig, task: String, workspace: PathBuf, ev_tx: Sender<UiEvent>) {
+    let orchestrator = cfg.orchestrator();
+    let worker = cfg.backend();
+
+    let phase_tx = ev_tx.clone();
+    let on_phase = move |phase: dc_workflow::Phase, content: &str| {
+        let _ = phase_tx.send(UiEvent::Phase {
+            phase,
+            content: content.to_string(),
+            tests_written: Vec::new(),
+        });
+    };
+
+    let outcome = match dc_workflow::run_workflow_moded(
+        &orchestrator,
+        &worker,
+        &task,
+        &workspace,
+        dc_workflow::ThinkPolicy::default(),
+        dc_workflow::WorkflowMode::plan_only(),
+        &on_phase,
+        &dc_workflow::AutoApprove,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = ev_tx.send(UiEvent::Failed(format!("planning failed: {e}")));
+            return;
+        }
+    };
+
+    let phases = outcome.state.approved().len();
+    let _ = ev_tx.send(UiEvent::Done {
+        ok: true,
+        summary: format!(
+            "plan ready — {phases} design phase(s) written to .dumb-coder/plan/. \
+             Review the breakdown, then build."
+        ),
+    });
+}
+
 fn run_tdd(
     cfg: UiConfig,
     task: String,

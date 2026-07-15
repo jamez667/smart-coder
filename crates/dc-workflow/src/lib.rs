@@ -18,6 +18,7 @@ mod phase;
 mod policy;
 mod runner;
 mod sequential;
+mod stack;
 mod state;
 mod testwriter;
 
@@ -26,7 +27,10 @@ pub use engine::{generate_phase, phase_messages};
 pub use gate::{AutoApprove, CeremonyGate, Decision, Gate};
 pub use phase::{Ceremony, Phase, PhaseSet};
 pub use policy::ThinkPolicy;
-pub use runner::{run_workflow, run_workflow_gated, WorkflowOutcome};
+pub use runner::{
+    run_workflow, run_workflow_gated, run_workflow_moded, WorkflowMode, WorkflowOutcome,
+};
+pub use stack::ProjectStack;
 pub use sequential::{build_sequential, build_sequential_with_board, SequentialReport};
 pub use state::{load, plan_dir, save, Artifact, Status, WorkflowState};
 pub use testwriter::{persist_tests, write_tests, WrittenTest};

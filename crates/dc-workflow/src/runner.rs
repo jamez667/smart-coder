@@ -17,7 +17,48 @@ use crate::engine::generate_phase;
 use crate::gate::{AutoApprove, Decision, Gate};
 use crate::phase::Phase;
 use crate::policy::ThinkPolicy;
+use crate::stack::ProjectStack;
 use crate::state::{plan_dir, save, WorkflowState};
+
+/// How much of the pipeline to run, and whether to write frozen tests.
+///
+/// The default ([`WorkflowMode::full_tdd`]) is the original behavior: all six phases, and the
+/// approved stage-breakdown drives worker-written frozen tests. [`WorkflowMode::plan_only`] is
+/// the "structured design, no TDD" mode the desktop app's Execute uses: run the design phases
+/// through the stage breakdown, then STOP — no test writing, no decomposition, no build — so
+/// the user reviews specs → architecture → layout → breakdown before anything is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowMode {
+    /// Skip writing frozen tests after the stage-breakdown phase.
+    pub skip_tests: bool,
+    /// Stop the pipeline after this phase is approved (inclusive). `None` runs to the end.
+    pub stop_after: Option<Phase>,
+}
+
+impl WorkflowMode {
+    /// The full six-phase TDD pipeline: writes frozen tests, runs to work-decomposition.
+    pub fn full_tdd() -> Self {
+        Self {
+            skip_tests: false,
+            stop_after: None,
+        }
+    }
+
+    /// Structured design only: run through the stage breakdown, write no tests, stop before
+    /// decomposition/build. The Execute-plan flow — produce a reviewable plan, don't build yet.
+    pub fn plan_only() -> Self {
+        Self {
+            skip_tests: true,
+            stop_after: Some(Phase::StageBreakdown),
+        }
+    }
+}
+
+impl Default for WorkflowMode {
+    fn default() -> Self {
+        Self::full_tdd()
+    }
+}
 
 /// What a completed workflow yields.
 #[derive(Debug)]
@@ -86,12 +127,43 @@ pub fn run_workflow_gated(
     on_phase: &dyn Fn(Phase, &str),
     gate: &dyn Gate,
 ) -> Result<WorkflowOutcome> {
+    run_workflow_moded(
+        orchestrator,
+        worker,
+        task,
+        workspace,
+        think,
+        WorkflowMode::full_tdd(),
+        on_phase,
+        gate,
+    )
+}
+
+/// The core pipeline driver, parameterized by [`WorkflowMode`] — the full-TDD default and the
+/// plan-only Execute flow share this one loop. `mode.stop_after` ends the run once that phase
+/// is approved (plan-only stops at the stage breakdown); `mode.skip_tests` suppresses the
+/// worker test-writing (plan-only produces a design, not a frozen contract).
+#[allow(clippy::too_many_arguments)]
+pub fn run_workflow_moded(
+    orchestrator: &dyn ModelBackend,
+    worker: &dyn ModelBackend,
+    task: &str,
+    workspace: &Path,
+    think: ThinkPolicy,
+    mode: WorkflowMode,
+    on_phase: &dyn Fn(Phase, &str),
+    gate: &dyn Gate,
+) -> Result<WorkflowOutcome> {
     let mut state = WorkflowState::new(task);
     let mut test_files = Vec::new();
     let mut aborted = false;
+    // Detect the project's language once, so every phase prompt speaks it (a Rust cargo repo
+    // gets Rust rules, not the Python/Flask default). Derived from the workspace, not stored in
+    // the serializable state.
+    let stack = ProjectStack::detect(workspace);
 
     while let Some(phase) = state.next_phase() {
-        let artifact = generate_phase(orchestrator, phase, &state, think);
+        let artifact = generate_phase(orchestrator, phase, &state, think, stack);
         // Fail loudly on an empty artifact (after the engine's retries) rather than
         // chaining a broken plan downstream — the usual cause is a dead/unreachable
         // orchestrator backend (spec 00 — fail clearly, don't corrupt silently).
@@ -142,11 +214,19 @@ pub fn run_workflow_gated(
         save(workspace, &state)?;
 
         // After the coverage plan is approved, have workers write the tests so
-        // they exist on disk for the implementation phases to target.
-        if phase == Phase::StageBreakdown {
+        // they exist on disk for the implementation phases to target. Skipped in the
+        // plan-only mode (Execute produces a design, not a frozen test contract).
+        if phase == Phase::StageBreakdown && !mode.skip_tests {
             let coverage = crate::coverage::parse_coverage(&artifact_content(&state, phase));
             let written = crate::testwriter::write_tests(worker, &coverage);
             test_files = crate::testwriter::persist_tests(workspace, &written)?;
+        }
+
+        // Stop-at-phase (plan-only stops once the stage breakdown is approved): the design is
+        // done and the user reviews before anything is built. Downstream phases are simply not
+        // generated — the state holds the approved-so-far chain.
+        if mode.stop_after == Some(phase) {
+            break;
         }
     }
 
@@ -286,6 +366,61 @@ mod tests {
         let arch = std::fs::read_to_string(crate::state::plan_dir(&ws).join("02-architecture.md"))
             .unwrap();
         assert!(arch.contains("shape"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn plan_only_stops_at_the_stage_breakdown_and_writes_no_tests() {
+        // The Execute-plan flow on a Rust project: run specs → architecture → layout → stage
+        // breakdown (as an ordered design, not tests), then STOP. No test files, no
+        // decomposition, no board — the user reviews before anything is built.
+        let backend = PhaseScripted {
+            replies: Mutex::new(vec![
+                ("crisp spec", "# Specs\ngoals"),
+                ("high-level architecture", "# Architecture\nshape"),
+                ("concrete project layout", "# Layout\nfiles"),
+                // Rust stack → the stage-breakdown system prompt says "ordered set of small
+                // implementation stages", so key off that instead of "plan the TESTS".
+                ("ordered set of small implementation stages", "# Breakdown\n1. detect basins"),
+            ]),
+        };
+        let ws = temp("plan-only");
+        // Make it a Rust project so ProjectStack::detect → Rust (non-TDD breakdown path).
+        std::fs::write(ws.join("Cargo.toml"), "[package]\nname=\"city\"").unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let outcome = run_workflow_moded(
+            &backend,
+            &backend,
+            "add lakes to the terrain",
+            &ws,
+            ThinkPolicy::default(),
+            WorkflowMode::plan_only(),
+            &|p, _| seen.borrow_mut().push(p),
+            &AutoApprove,
+        )
+        .unwrap();
+
+        // Ran exactly the four design phases, stopping at the stage breakdown.
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                Phase::Specs,
+                Phase::Architecture,
+                Phase::Layout,
+                Phase::StageBreakdown
+            ]
+        );
+        // No tests written, no decomposition board.
+        assert!(outcome.test_files.is_empty(), "plan-only writes no frozen tests");
+        assert_eq!(outcome.board.len(), 0, "no decomposition/build in plan-only");
+        assert!(!outcome.aborted);
+        // The design artifacts are on disk for review.
+        let breakdown =
+            std::fs::read_to_string(crate::state::plan_dir(&ws).join("04-stage-breakdown.md"))
+                .unwrap();
+        assert!(breakdown.contains("detect basins"));
+        // The later phases were never generated.
+        assert!(outcome.state.artifact(Phase::WorkDecomposition).is_none());
         let _ = std::fs::remove_dir_all(&ws);
     }
 

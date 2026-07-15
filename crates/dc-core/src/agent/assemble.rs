@@ -55,6 +55,23 @@ pub(super) fn assemble_segments(
     // Files whose full current contents are pinned in this turn's prompt (set in the
     // focused branch). A `read_file` of one is redundant and gets short-circuited.
     let mut pinned_full_files: Vec<String> = Vec::new();
+    // A feature-plan doc (PLAN-<slug>.md) named in the instruction is the SPEC for this run,
+    // but it's neither a focus file nor a Python import, so nothing else pins it. Left
+    // unpinned, the model reads it every few turns to remember what it's building, then
+    // re-reads it once the read scrolls out of the window — the "re-reading the plan over and
+    // over" stall. Pin its full body in the retrieved zone and short-circuit the redundant
+    // read, exactly as we do for imported files.
+    if let Some((name, body)) = referenced_plan(workspace, instruction) {
+        segments.push(Segment::user(
+            Zone::Retrieved,
+            format!(
+                "The feature plan you are implementing (do NOT re-read this — its full contents \
+                 are here; follow its Approach, Files to touch, and Steps):\n\n=== {name} ===\n\
+                 {body}\n=== end {name} ===",
+            ),
+        ));
+        pinned_full_files.push(name);
+    }
     if cfg.focus_files.is_empty() {
         // WHOLE-TASK path: the repo map helps navigation; the progress ledger lists the
         // files that exist (so it doesn't re-create/forget them).
@@ -117,4 +134,74 @@ pub(super) fn assemble_segments(
     }
 
     (segments, pinned_full_files)
+}
+
+/// If `instruction` names a feature-plan file (`PLAN-<slug>.md`) that exists in `workspace`,
+/// return its `(name, contents)` so the caller can pin it. Case-insensitive on the token;
+/// returns the on-disk filename. `None` if no plan is referenced or the file is missing/empty.
+fn referenced_plan(workspace: &Path, instruction: &str) -> Option<(String, String)> {
+    // Scan whitespace/punctuation-delimited tokens for one shaped like PLAN-<...>.md.
+    let token = instruction
+        .split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ','))
+        .map(|t| t.trim_end_matches('.')) // a trailing sentence period
+        .find(|t| {
+            let up = t.to_ascii_uppercase();
+            up.starts_with("PLAN-") && up.ends_with(".MD")
+        })?;
+    let body = std::fs::read_to_string(workspace.join(token)).ok()?;
+    if body.trim().is_empty() {
+        return None;
+    }
+    Some((token.to_string(), body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::test_util::temp_dir;
+
+    #[test]
+    fn referenced_plan_pins_a_named_plan_that_exists() {
+        let ws = temp_dir("refplan");
+        std::fs::write(ws.join("PLAN-lakes.md"), "## Plan: lakes\nflood-fill basins").unwrap();
+        // Referenced with a trailing period, as the iterate instruction phrases it.
+        let got = referenced_plan(&ws, "Implement the feature plan in PLAN-lakes.md. Follow it.");
+        let (name, body) = got.expect("plan found");
+        assert_eq!(name, "PLAN-lakes.md");
+        assert!(body.contains("flood-fill"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn referenced_plan_is_none_when_absent_or_unmentioned() {
+        let ws = temp_dir("refplan-none");
+        std::fs::write(ws.join("PLAN-lakes.md"), "x").unwrap();
+        // No plan token in the instruction.
+        assert!(referenced_plan(&ws, "add error handling to the parser").is_none());
+        // Token present but the file doesn't exist.
+        assert!(referenced_plan(&ws, "implement PLAN-rivers.md").is_none());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn plan_is_pinned_into_the_retrieved_zone_and_short_circuits_reads() {
+        let ws = temp_dir("refplan-assemble");
+        std::fs::write(ws.join("PLAN-lakes.md"), "## Plan: lakes\nstep one").unwrap();
+        let cfg = AgentConfig::default();
+        let (segments, pinned) = assemble_segments(
+            &cfg,
+            &ws,
+            "Implement the feature plan in PLAN-lakes.md.",
+            "system",
+            "",
+            String::new(),
+            &[],
+            &[],
+        );
+        assert!(pinned.contains(&"PLAN-lakes.md".to_string()), "plan is pinned so re-reads short-circuit");
+        let joined: String = segments.iter().map(|s| s.text.clone()).collect();
+        assert!(joined.contains("## Plan: lakes"), "plan body is in the prompt");
+        assert!(joined.contains("do NOT re-read this"), "steered away from re-reading");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }

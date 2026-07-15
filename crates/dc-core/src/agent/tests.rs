@@ -117,6 +117,103 @@ fn diagnosis_fires_on_a_test_stall_then_is_bounded() {
 }
 
 #[test]
+fn a_referenced_plan_is_pinned_so_the_model_never_re_reads_it() {
+    // Reproduces the live bug: an iterate run told to "implement PLAN-lakes.md" saw the model
+    // read the plan over and over (the plan wasn't pinned, so each read scrolled out of the
+    // window and it fetched it again). The fix pins the plan's contents every turn and
+    // short-circuits a redundant read. This test drives a model that ALWAYS tries to read the
+    // plan first, and asserts the harness (a) shows the plan body in the prompt and (b) answers
+    // the read with "ALREADY SHOWN" instead of the file — so the loop can't spin on it.
+    use crate::event::AgentEvent;
+    use std::sync::Mutex;
+
+    let ws = temp_dir("plan-pin");
+    std::fs::write(
+        ws.join("PLAN-lakes.md"),
+        "## Plan: lakes\n**Approach:** flood-fill basins below water level.\n\
+         **Files to touch:**\n- water.rs (new)\n**Steps:**\n1. detect basins\n2. emit quads",
+    )
+    .unwrap();
+
+    // The model's script: turn 1 tries to read the plan (the reflex that used to loop); once it
+    // has been told the plan is already shown, it writes the file and finishes. It keys off the
+    // observation it got back, which rides in the recent window of the next prompt.
+    let caps = dc_model::Capabilities {
+        max_context_tokens: 8192,
+        tool_calling: dc_model::ToolCalling::None,
+        on_device: false,
+    };
+    let backend = CallbackBackend::new("plan-reader", caps, |req: &GenerateRequest| {
+        // The model reflexively reads the plan until the harness tells it the plan is shown;
+        // then it writes the planned file, and once the write's success observation comes back
+        // it finishes. Keying off the observations (not raw history) avoids finishing before
+        // the write actually lands.
+        let prompt: String = req.messages.iter().map(|m| m.content.clone()).collect();
+        let told_shown = prompt.contains("ALREADY SHOWN");
+        let write_confirmed = prompt.contains("write_file water.rs ok");
+        let content = if !told_shown {
+            r#"{"tool":"read_file","path":"PLAN-lakes.md"}"#.to_string()
+        } else if !write_confirmed {
+            r#"{"tool":"write_file","path":"water.rs","content":"// lakes"}"#.to_string()
+        } else {
+            r#"{"tool":"finish"}"#.to_string()
+        };
+        Ok(GenerateResponse { content })
+    });
+
+    let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+    let sink = crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+    let registry = dc_tools::default_registry();
+    let strategy = crate::strategy::select_strategy(&backend.capabilities());
+    let cfg = AgentConfig {
+        max_steps: 12,
+        repeat_limit: 3,
+        no_progress_limit: 3,
+        ..AgentConfig::default()
+    };
+    // Verbose so PromptAssembled carries the full prompt — lets us assert the plan body is pinned.
+    let cfg = AgentConfig {
+        verbose: true,
+        ..cfg
+    };
+    let report = run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        "Implement the feature plan in PLAN-lakes.md. Follow its Steps.",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let evs = events.lock().unwrap();
+
+    // (a) The plan BODY is pinned into the assembled prompt — not just its filename.
+    let plan_pinned = evs.iter().any(|e| {
+        matches!(e, AgentEvent::PromptAssembled { messages, .. }
+            if messages.iter().any(|m| m.content.contains("flood-fill basins")))
+    });
+    assert!(plan_pinned, "the plan body must be pinned into the prompt every turn");
+
+    // (b) A read of the pinned plan is short-circuited to the ALREADY-SHOWN note, so the model
+    //     can't spin on it — the observation the harness fed back says so.
+    let short_circuited = evs.iter().any(|e| {
+        matches!(e, AgentEvent::ToolResult { full, .. } if full.contains("ALREADY SHOWN")
+            && full.contains("PLAN-lakes.md"))
+    });
+    assert!(short_circuited, "a read of the pinned plan must be short-circuited, not re-run");
+
+    // (c) The run made real progress and finished (it wrote the file once unblocked), rather
+    //     than looping on the plan read until the step budget ran out.
+    assert!(report.finished, "the run should finish once the plan-read loop is broken");
+    assert!(ws.join("water.rs").is_file(), "the model wrote the planned file");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn no_diagnosis_when_the_flag_is_off_or_no_verify_command() {
     use crate::event::AgentEvent;
     use std::sync::Mutex;
