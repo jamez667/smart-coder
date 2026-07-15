@@ -365,9 +365,30 @@ fn search_code(workspace: &Path, query: &str) -> String {
     }
 }
 
+/// A file with more than this many lines is too large to safely OVERWRITE with `write_file`:
+/// a small/mid model can't faithfully reproduce that much code and drops functions or leaves an
+/// unterminated string, breaking the build (observed live: the 30B looping write_file on a
+/// 790-line terrain.rs, each rewrite introducing a fresh syntax error). Such a file must be
+/// changed with surgical `edit_file` / `append_file` instead.
+const WRITE_FILE_OVERWRITE_MAX_LINES: usize = 150;
+
 fn write_file(workspace: &Path, path: &str, content: &str) -> String {
     match safe_join(workspace, path) {
         Ok(p) => {
+            // Guard: refuse to OVERWRITE a large existing file — steer to surgical edits. New
+            // files and small files are fine; this only blocks the destructive rewrite of a big
+            // one, which is where the model corrupts the codebase.
+            if let Ok(existing) = std::fs::read_to_string(&p) {
+                let existing_lines = existing.lines().count();
+                if existing_lines > WRITE_FILE_OVERWRITE_MAX_LINES {
+                    return format!(
+                        "write_file {path} rejected: {path} already exists and is {existing_lines} \
+                         lines — too large to safely overwrite (a full rewrite drops code and \
+                         breaks the build). Use edit_file to change a specific snippet, or \
+                         append_file to add new code at the end. Make a small, surgical change."
+                    );
+                }
+            }
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -497,22 +518,27 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
     if old_str.is_empty() {
         return format!("edit_file {path} error: old_str must not be empty");
     }
-    // Normalize line endings to LF for matching/editing. A small model's anchor is
-    // LF-only, but a file checked out on Windows is CRLF — without this the anchor
-    // never matches (the \r breaks it). We edit in LF space and write LF; that's
-    // correct for source files and what the model expects.
-    let content = raw.replace("\r\n", "\n");
+    // Normalize line endings to LF for matching/editing, on BOTH sides. A file checked out on
+    // Windows is CRLF; the model, shown that file verbatim, faithfully copies CRLF into old_str
+    // — but if we normalize only the file and not old_str, the `\r` in the anchor breaks the
+    // match and EVERY edit fails (observed live 2026-07-15: the 30B's first, correct anchor on a
+    // CRLF terrain.rs missed, and it spiralled into corrupting the file trying to "fix" it). Strip
+    // `\r` from the file AND from old_str/new_str so a CRLF-copied anchor matches. We edit in LF
+    // space and write LF — correct for source files.
+    let content = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let old_str = old_str.replace("\r\n", "\n").replace('\r', "\n");
+    let new_str = new_str.replace("\r\n", "\n").replace('\r', "\n");
     // Small models also emit a literal backslash-n (`\\n`) instead of a real
     // newline inside a multi-line old_str. Resolve the anchor to whichever form the
     // (normalized) file actually contains, un-escaping new_str to match.
-    let (old_owned, new_owned) = if content.contains(old_str) {
-        (old_str.to_string(), new_str.to_string())
+    let (old_owned, new_owned) = if content.contains(&old_str) {
+        (old_str.clone(), new_str.clone())
     } else {
-        let unescaped = unescape_literal(old_str);
+        let unescaped = unescape_literal(&old_str);
         if unescaped != old_str && content.contains(&unescaped) {
-            (unescaped, unescape_literal(new_str))
+            (unescaped, unescape_literal(&new_str))
         } else {
-            (old_str.to_string(), new_str.to_string())
+            (old_str.clone(), new_str.clone())
         }
     };
     edit_file_with(&p, path, &content, &old_owned, &new_owned)
@@ -524,6 +550,19 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
 fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &str) -> String {
     let count = content.matches(old_str).count();
     if count == 0 {
+        // Exact match failed. Before giving up, try a WHITESPACE-TOLERANT multi-line match: a
+        // model editing a large file often reproduces the block's TEXT correctly but gets the
+        // indentation or inner spacing slightly wrong, so a byte-exact `old_str` never matches
+        // and it thrashes (observed live: the 30B looping read→edit→write_file on terrain.rs).
+        // If the anchor's non-blank lines match a unique run of the file's lines (comparing each
+        // line's whitespace-collapsed text), replace that real run — the edit lands despite the
+        // spacing drift.
+        if let Some(fuzzed) = fuzzy_line_block_replace(content, old_str, new_str) {
+            return match std::fs::write(p, &fuzzed) {
+                Ok(()) => format!("edit_file {path} ok (1 replacement, whitespace-tolerant match)"),
+                Err(e) => format!("edit_file {path} error: {e}"),
+            };
+        }
         // The anchor isn't in the file. The usual cause for a small model is that
         // the edit already landed (or it's working from a stale view), so it keeps
         // re-proposing a change that's no longer applicable. Show the CURRENT file
@@ -588,6 +627,92 @@ fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &
         Ok(()) => format!("edit_file {path} ok (1 replacement)"),
         Err(e) => format!("edit_file {path} error: {e}"),
     }
+}
+
+/// Collapse a line to its whitespace-insensitive signature: trimmed, with internal runs of
+/// whitespace squeezed to one space. Two lines that differ only in indentation/spacing share a
+/// signature. Empty after trimming → `None` (blank lines are ignored when aligning a block).
+fn line_sig(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Whitespace-tolerant multi-line replace: when `old_str` doesn't match byte-exactly, try to
+/// find a UNIQUE run of file lines whose signatures equal the anchor's non-blank line
+/// signatures, and replace that real run with `new_str`. Returns the whole new file content, or
+/// `None` if there's no unique multi-line match (so the caller falls back to the error path).
+///
+/// Only fires for a genuine multi-line anchor (≥2 non-blank lines) — a single-line fuzzy match
+/// would be too eager and the exact/whole-line paths already handle single lines. `new_str` is
+/// re-indented to the matched block's leading whitespace so the replacement sits correctly.
+fn fuzzy_line_block_replace(content: &str, old_str: &str, new_str: &str) -> Option<String> {
+    let anchor_sigs: Vec<String> = old_str.lines().filter_map(line_sig).collect();
+    if anchor_sigs.len() < 2 {
+        return None; // single-line anchors handled elsewhere; don't fuzzy-match those
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    // File-line signatures, keeping the original index (skip blank lines when aligning).
+    let sig_idx: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| line_sig(l).map(|s| (i, s)))
+        .collect();
+
+    // Find windows of `sig_idx` whose signatures match `anchor_sigs` in order.
+    let mut matches: Vec<(usize, usize)> = Vec::new(); // (first line idx, last line idx) in `lines`
+    if sig_idx.len() >= anchor_sigs.len() {
+        for w in 0..=sig_idx.len() - anchor_sigs.len() {
+            if (0..anchor_sigs.len()).all(|k| sig_idx[w + k].1 == anchor_sigs[k]) {
+                let first = sig_idx[w].0;
+                let last = sig_idx[w + anchor_sigs.len() - 1].0;
+                matches.push((first, last));
+            }
+        }
+    }
+    if matches.len() != 1 {
+        return None; // must be unambiguous
+    }
+    let (first, last) = matches[0];
+
+    // Re-indent `new_str` by the SAME leading-whitespace prefix the matched block's first line
+    // carries, preserving each new line's OWN relative indentation. The model's old_str/new_str
+    // are usually written with a flat or shallow indent; prefixing the block's real indent slots
+    // them in correctly while keeping any nested structure the model intended.
+    let block_indent: String = lines[first]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    // The anchor's own first-line indent — subtract it so we don't double-count.
+    let anchor_indent: usize = old_str
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+        .unwrap_or(0);
+    let new_block: Vec<String> = new_str
+        .lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                return String::new();
+            }
+            let own = l.chars().take_while(|c| c.is_whitespace()).count();
+            // Relative indent past the anchor's baseline (never negative).
+            let rel = own.saturating_sub(anchor_indent);
+            format!("{block_indent}{}{}", " ".repeat(rel), l.trim_start())
+        })
+        .collect();
+
+    let mut out: Vec<String> = Vec::new();
+    out.extend(lines[..first].iter().map(|s| s.to_string()));
+    out.extend(new_block);
+    out.extend(lines[last + 1..].iter().map(|s| s.to_string()));
+    let mut joined = out.join("\n");
+    if content.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
 }
 
 /// List the **source** files actually on disk under `workspace` (workspace-relative,
@@ -740,6 +865,34 @@ mod tests {
     }
 
     #[test]
+    fn write_file_refuses_to_overwrite_a_large_existing_file() {
+        // The corruption guard: a model can't faithfully rewrite a big file, so overwriting one
+        // with write_file is blocked and steered to surgical edits.
+        let ws = temp_dir("write-big");
+        let big: String = (0..200).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(ws.join("big.rs"), &big).unwrap();
+        let w = call(json!({"tool":"write_file","path":"big.rs","content":"fn only() {}"}));
+        let o = obs(execute(&w, &ws));
+        assert!(o.contains("rejected") && o.contains("too large"), "got: {o}");
+        // Untouched — the big file is preserved.
+        assert_eq!(std::fs::read_to_string(ws.join("big.rs")).unwrap(), big);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn write_file_allows_new_and_small_files() {
+        let ws = temp_dir("write-ok");
+        // New file: fine.
+        let n = call(json!({"tool":"write_file","path":"new.rs","content":"fn a() {}"}));
+        assert!(obs(execute(&n, &ws)).contains("ok"));
+        // Overwriting a SMALL existing file (≤150 lines): fine.
+        let s = call(json!({"tool":"write_file","path":"new.rs","content":"fn b() {}"}));
+        assert!(obs(execute(&s, &ws)).contains("ok"));
+        assert_eq!(std::fs::read_to_string(ws.join("new.rs")).unwrap(), "fn b() {}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn append_file_creates_then_appends() {
         let ws = temp_dir("append");
         // First append creates the file.
@@ -804,6 +957,68 @@ mod tests {
         assert!(o.contains("line 1:") && o.contains("line 2:"), "got: {o}");
         // Untouched — never edits on ambiguity.
         assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "x\nx\n");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_matches_a_crlf_anchor_against_a_crlf_file() {
+        // THE Windows bug: the file is CRLF, the model copies a CRLF anchor from the shown file,
+        // but edit_file used to normalize only the file → the `\r` in old_str broke the match and
+        // every edit failed. Now both sides are normalized, so a CRLF anchor lands.
+        let ws = temp_dir("edit-crlf");
+        std::fs::write(ws.join("a.rs"), "fn f() {\r\n    let x = 1;\r\n}\r\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_file","path":"a.rs",
+            "old_str":"    let x = 1;\r\n","new_str":"    let x = 2;\n"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok") || o.contains("replacement"), "CRLF anchor landed: {o}");
+        assert!(std::fs::read_to_string(ws.join("a.rs")).unwrap().contains("let x = 2;"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_whitespace_tolerant_multiline_match_lands() {
+        // The large-file anchor-precision fix: the model reproduces a multi-line block's TEXT
+        // but with different indentation/spacing, so byte-exact match fails. The fuzzy fallback
+        // finds the real block and replaces it — the edit lands instead of the model thrashing.
+        let ws = temp_dir("edit-fuzzy");
+        std::fs::write(
+            ws.join("a.rs"),
+            "impl T {\n    pub fn generate(&self) -> u32 {\n        let x = 1;\n        x\n    }\n}\n",
+        )
+        .unwrap();
+        // old_str has WRONG indentation (4 spaces flattened) but the right lines.
+        let e = call(json!({
+            "tool":"edit_file","path":"a.rs",
+            "old_str":"pub fn generate(&self) -> u32 {\nlet x = 1;\nx\n}",
+            "new_str":"pub fn generate(&self) -> u32 {\nself.build_lakes();\nlet x = 1;\nx\n}"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("whitespace-tolerant match"), "got: {o}");
+        let got = std::fs::read_to_string(ws.join("a.rs")).unwrap();
+        assert!(got.contains("self.build_lakes();"), "edit landed: {got}");
+        // The new statement is indented to at least the matched block's level (4 spaces), not
+        // left at column 0 (the model's flat new_str gets the block indent prefixed).
+        assert!(got.contains("    self.build_lakes();"), "re-indented to block: {got}");
+        // The surrounding real lines are preserved.
+        assert!(got.contains("let x = 1;") && got.contains("impl T {"), "kept context: {got}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_file_fuzzy_needs_a_unique_block() {
+        // Two identical blocks → the fuzzy match is ambiguous → it does NOT fire (falls to the
+        // error path), so we never edit the wrong one.
+        let ws = temp_dir("edit-fuzzy-amb");
+        std::fs::write(ws.join("a.rs"), "fn a() {\n  x;\n  y;\n}\nfn b() {\n  x;\n  y;\n}\n").unwrap();
+        let e = call(json!({
+            "tool":"edit_file","path":"a.rs","old_str":"x;\ny;","new_str":"z;\ny;"
+        }));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("not found") || o.contains("ambiguous"), "must not silently pick one: {o}");
+        // Untouched.
+        assert!(std::fs::read_to_string(ws.join("a.rs")).unwrap().contains("  x;\n  y;\n}\nfn b"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 

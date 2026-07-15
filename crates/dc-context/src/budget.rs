@@ -19,6 +19,11 @@ pub enum Zone {
     System,
     /// The user's original request, verbatim. Sacred — prevents goal drift.
     TaskAnchor,
+    /// The FULL current contents of the file(s) being edited (the focus files). Sacred: on an
+    /// edit task this is the single most essential context — if it's clipped the model edits a
+    /// truncated view, can't anchor `old_str`, and thrashes (observed live: the 30B looped
+    /// read→edit→write_file on a 790-line terrain.rs whose focus pin kept getting evicted).
+    FocusFile,
     /// The most recent tool result the model must react to. Sacred.
     RecentObservation,
     /// Retrieved snippets relevant to the current step. Budgeted, evictable.
@@ -32,7 +37,7 @@ impl Zone {
     pub fn is_sacred(self) -> bool {
         matches!(
             self,
-            Zone::System | Zone::TaskAnchor | Zone::RecentObservation
+            Zone::System | Zone::TaskAnchor | Zone::FocusFile | Zone::RecentObservation
         )
     }
 }
@@ -239,6 +244,31 @@ mod tests {
         assert!(kept.contains(&"you are an agent"));
         assert!(kept.contains(&"fix the bug"));
         assert!(kept.contains(&"last tool output"));
+    }
+
+    #[test]
+    fn focus_file_is_sacred_and_survives_eviction() {
+        // The edit-task fix: the file being edited (Zone::FocusFile) must never be evicted, even
+        // when Retrieved/History are dropped for budget. Otherwise the model edits a truncated
+        // view and can't anchor old_str.
+        let c = counter();
+        let sacred = crate::tokens::estimate_tokens("sys")
+            + crate::tokens::estimate_tokens("task")
+            + crate::tokens::estimate_tokens("obs")
+            + crate::tokens::estimate_tokens(&"the whole file ".repeat(30));
+        let b = ContextBuilder::new(&c, sacred + 1);
+        let built = b.build(vec![
+            Segment::system(Zone::System, "sys"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::FocusFile, "the whole file ".repeat(30)),
+            Segment::user(Zone::RecentObservation, "obs"),
+            Segment::user(Zone::Retrieved, "evictable retrieved ".repeat(30)),
+            Segment::user(Zone::HistorySummary, "evictable history ".repeat(30)),
+        ]);
+        assert!(Zone::FocusFile.is_sacred());
+        let kept: String = built.messages.iter().map(|m| m.content.clone()).collect();
+        assert!(kept.contains("the whole file"), "focus file survived");
+        assert!(built.dropped.contains(&Zone::Retrieved) || built.dropped.contains(&Zone::HistorySummary));
     }
 
     #[test]

@@ -81,25 +81,19 @@ impl TestReport {
             if self.command_ok {
                 return "run_verification: command exited 0 (passed)".into();
             }
-            // Failed: show the tail of the real output (compiler errors, etc.) so the model can
-            // actually fix it, rather than a bare "exited non-zero" it can only guess at.
+            // Failed: show the real output so the model can fix it. Lead with the actual ERROR
+            // blocks (a build's warnings and its final "could not compile" summary would
+            // otherwise dominate the tail, so the model fixes the wrong thing — observed live: it
+            // chased a dead-code warning while the real "unexpected closing brace" error scrolled
+            // past). Fall back to the tail when no error lines are recognized.
             let mut out =
                 String::from("run_verification: command exited non-zero (failed).");
             if let Some(raw) = &self.raw {
                 let raw = raw.trim();
                 if !raw.is_empty() {
-                    let tail = if raw.len() > RAW_TAIL_CHARS {
-                        let start = raw.len() - RAW_TAIL_CHARS;
-                        // Start on a char boundary.
-                        let start = (start..raw.len())
-                            .find(|i| raw.is_char_boundary(*i))
-                            .unwrap_or(raw.len());
-                        format!("…\n{}", &raw[start..])
-                    } else {
-                        raw.to_string()
-                    };
+                    let body = error_first(raw);
                     out.push_str("\nOutput:\n");
-                    out.push_str(&tail);
+                    out.push_str(&body);
                 }
             }
             return out;
@@ -121,6 +115,71 @@ impl TestReport {
             out.push('\n');
         }
         out.trim_end().to_string()
+    }
+}
+
+/// From raw build/command output, produce a bounded, ERROR-FIRST slice for the model: the
+/// `error[...]`/`error:` lines and the context that follows each (the `-->` location, the code
+/// frame) — the stuff needed to fix the failure — with warnings dropped. If no error lines are
+/// found (a runtime failure with no compiler errors), fall back to the tail of the output.
+fn error_first(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        let is_error = t.starts_with("error[") || t.starts_with("error:");
+        if is_error {
+            // Take this error line plus its following context: indented/`-->`/frame lines, up to
+            // a blank line or the next top-level diagnostic (error/warning/note at column 0).
+            let mut block = vec![lines[i]];
+            let mut j = i + 1;
+            while j < lines.len() {
+                let l = lines[j];
+                let lt = l.trim_start();
+                if l.trim().is_empty()
+                    || lt.starts_with("error")
+                    || lt.starts_with("warning")
+                    || (lt.starts_with("note:") && block.len() > 1)
+                {
+                    break;
+                }
+                block.push(l);
+                j += 1;
+            }
+            blocks.push(block.join("\n"));
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    if blocks.is_empty() {
+        // No compiler-error lines — fall back to the TAIL (a runtime failure/panic prints its
+        // message last). Already bounded to RAW_TAIL_CHARS; keep the tail, don't re-clip the head.
+        let start = raw.len().saturating_sub(RAW_TAIL_CHARS);
+        let start = (start..raw.len())
+            .find(|k| raw.is_char_boundary(*k))
+            .unwrap_or(raw.len());
+        return if start > 0 {
+            format!("…\n{}", &raw[start..])
+        } else {
+            raw.to_string()
+        };
+    }
+
+    // Lead with the error blocks (first errors = the ones to fix; later ones are often cascades),
+    // bounded by keeping the HEAD.
+    let joined = blocks.join("\n\n");
+    if joined.chars().count() > RAW_TAIL_CHARS {
+        let end = joined
+            .char_indices()
+            .nth(RAW_TAIL_CHARS)
+            .map(|(k, _)| k)
+            .unwrap_or(joined.len());
+        format!("{}\n… (more errors omitted)", &joined[..end])
+    } else {
+        joined
     }
 }
 
@@ -196,11 +255,28 @@ mod tests {
 
     #[test]
     fn generic_failure_tail_is_bounded() {
-        // A 5k-line log must not blow the window — only the TAIL (where cargo's error
-        // summary sits) is kept.
-        let big = "x\n".repeat(5000) + "error: the real problem is here";
+        // A 5k-line log with NO compiler errors falls back to the tail, bounded.
+        let big = "x\n".repeat(5000) + "panic: the real problem is here";
         let o = TestReport::generic_with_output(false, &big).observation();
         assert!(o.len() < 2400, "observation bounded, got {}", o.len());
         assert!(o.contains("the real problem is here"), "tail kept: {o}");
+    }
+
+    #[test]
+    fn generic_failure_leads_with_the_error_not_warnings() {
+        // The live bug: the model chased a dead-code WARNING while the real error scrolled past.
+        // The observation must surface the error[...] block, not the warnings or the summary.
+        let cargo = "\
+warning: unused variable: `x`\n  --> src/a.rs:1\n\n\
+error[E0765]: unterminated double quote string\n  --> src/gen/terrain.rs:265:9\n   |\n\
+265 |         let c = \"oops;\n   |                 ^^^^^^^\n\n\
+warning: fields `width` and `height` are never read\n  --> src/b.rs:2\n\n\
+error: could not compile `city` (bin \"city\") due to 1 previous error\n";
+        let o = TestReport::generic_with_output(false, cargo).observation();
+        assert!(o.contains("E0765"), "the real error is surfaced: {o}");
+        assert!(o.contains("unterminated double quote"), "{o}");
+        assert!(o.contains("terrain.rs:265"), "with its location: {o}");
+        // The dead-code warning is dropped (not what the model should fix).
+        assert!(!o.contains("never read"), "warnings dropped: {o}");
     }
 }

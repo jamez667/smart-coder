@@ -391,7 +391,10 @@ impl UiConfig {
             .orchestrator_model
             .clone()
             .unwrap_or_else(|| self.model.clone());
-        OpenAiBackend::new(url, model)
+        // Detect the server's real context window (like `backend()` does) — the workflow phases
+        // ground on real file CONTENTS, which need the full window; at the hardcoded 8192 a
+        // large source file is clipped and the design hallucinates around the missing code.
+        OpenAiBackend::new(url, model).with_detected_context()
     }
 
     /// The swarm's advisor: an explicit advisor if set, else the orchestrator

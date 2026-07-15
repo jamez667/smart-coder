@@ -260,6 +260,23 @@ fn ground_task(task: &str, workspace: &Path) -> String {
              Design for exactly this plan: its Approach, its Files-to-touch, and its Steps. Do \
              NOT invent a different structure or ignore the files it names."
         ));
+
+        // Inject the FULL CONTENTS of the existing files the plan says it will touch. Without
+        // this the design phases saw only filenames and invented an architecture that doesn't
+        // exist — an `ElevationField` struct, a `lake_generator` module, an `Elevation` enum —
+        // so every downstream build stage stalled hunting fictional symbols. Showing the real
+        // code makes the architecture/layout/breakdown reference types that actually exist.
+        let touched = plan_touched_files(&body, workspace);
+        for f in touched.iter().take(6) {
+            if let Ok(src) = std::fs::read_to_string(workspace.join(f)) {
+                let clipped = clip_chars(&src, 12_000);
+                out.push_str(&format!(
+                    "\n\n=== EXISTING contents of {f} (design against the REAL types/functions \
+                     here; the plan may name things that do not exist — use what is actually in \
+                     this code) ===\n{clipped}\n=== end {f} ==="
+                ));
+            }
+        }
     }
 
     let files = dc_core::source_files(workspace);
@@ -297,6 +314,61 @@ fn referenced_plan(task: &str, workspace: &Path) -> Option<(String, String)> {
         return None;
     }
     Some((token.to_string(), body))
+}
+
+/// Extract the existing source files a plan says it will touch, so their real contents can
+/// ground the design. Scans the plan body for path-shaped tokens (ending in a code extension)
+/// and resolves each to a REAL file in the project — matching by path suffix, because a plan
+/// often names a crate-relative path (`gen/terrain.rs`) while the file lives deeper
+/// (`crates/city/src/gen/terrain.rs`). Returns workspace-relative paths, deduped, order-preserving.
+fn plan_touched_files(plan_body: &str, workspace: &Path) -> Vec<String> {
+    const EXTS: [&str; 8] = [".rs", ".py", ".js", ".ts", ".go", ".java", ".css", ".html"];
+    let all = dc_core::source_files(workspace); // real files, workspace-relative
+    let mut out: Vec<String> = Vec::new();
+    for tok in plan_body.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | ':')) {
+        let t = tok.trim().trim_end_matches(&['.', ';'][..]);
+        if t.is_empty() {
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        if !EXTS.iter().any(|e| lower.ends_with(e)) {
+            continue;
+        }
+        // Resolve: exact match, else a real file whose path ends with this token (with a '/'
+        // boundary so "terrain.rs" doesn't match "myterrain.rs").
+        let norm = t.replace('\\', "/");
+        let resolved = if workspace.join(&norm).is_file() {
+            Some(norm.clone())
+        } else {
+            all.iter()
+                .find(|f| {
+                    let fp = f.replace('\\', "/");
+                    fp == norm || fp.ends_with(&format!("/{norm}"))
+                })
+                .cloned()
+        };
+        if let Some(r) = resolved {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// Clip `s` to at most `max` chars on a char boundary, noting the truncation. Keeps the HEAD
+/// (imports, type/struct decls, signatures — what a design needs), which is what sits at the
+/// top of a source file.
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let end = s
+        .char_indices()
+        .nth(max)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    format!("{}\n… (file truncated — first {max} chars shown)", &s[..end])
 }
 
 fn artifact_content(state: &WorkflowState, phase: Phase) -> String {
@@ -357,6 +429,54 @@ mod tests {
         assert!(grounded.contains("gen/terrain.rs"), "real file surveyed");
         assert!(grounded.contains("render.rs"), "real file surveyed");
         assert!(grounded.contains("ALREADY EXIST"), "survey framing present");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ground_task_injects_the_real_contents_of_the_plans_touched_files() {
+        // The invented-architecture bug: with only a file LIST, the design phases hallucinated
+        // an `ElevationField` struct that doesn't exist. Grounding must inject the real file
+        // CONTENTS so the design references types that are actually there.
+        let ws = temp("ground-contents");
+        std::fs::write(ws.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir_all(ws.join("gen")).unwrap();
+        std::fs::write(
+            ws.join("gen/terrain.rs"),
+            "pub struct Terrain { seed: u64 }\nimpl Terrain { pub fn elevation(&self) -> f32 { 0.0 } }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("PLAN-lakes.md"),
+            "## Plan\n**Files to touch:**\n- `gen/terrain.rs` (update: add lakes)",
+        )
+        .unwrap();
+
+        let g = ground_task("Design PLAN-lakes.md.", &ws);
+        assert!(g.contains("EXISTING contents of gen/terrain.rs"), "real file injected");
+        assert!(g.contains("pub struct Terrain"), "real type shown so the design uses it");
+        assert!(g.contains("fn elevation"), "real method shown");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn plan_touched_files_resolves_crate_relative_paths_by_suffix() {
+        // The real bug: the plan names `gen/terrain.rs` but the file lives at
+        // crates/city/src/gen/terrain.rs — so exact join fails and grounding never fires.
+        // Suffix resolution finds the real file.
+        let ws = temp("touched");
+        std::fs::create_dir_all(ws.join("crates/city/src/gen")).unwrap();
+        std::fs::write(ws.join("crates/city/src/gen/terrain.rs"), "x").unwrap();
+        std::fs::write(ws.join("crates/city/src/render.rs"), "x").unwrap();
+        let body = "- `gen/terrain.rs` (update)\n- render.rs (logic)\n- gen/missing.rs (nope)";
+        let mut got = plan_touched_files(body, &ws);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "crates/city/src/gen/terrain.rs".to_string(),
+                "crates/city/src/render.rs".to_string(),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

@@ -856,12 +856,30 @@ pub fn run_agent_observed(
             failed_edit_path = None;
             failed_edit_streak = 0;
             interv.count += 1;
-            let directive = if create_clash {
+            // Is the target a LARGE existing file? A wholesale `write_file` of such a file
+            // corrupts it (the model can't reproduce hundreds of lines faithfully — unterminated
+            // strings, dropped fns) AND is refused by the write_file guard, so steering to it
+            // would deadlock. For a big file, steer to SURGICAL edits instead.
+            let big_existing = std::fs::read_to_string(workspace.join(&arg))
+                .map(|s| s.lines().count() > 150)
+                .unwrap_or(false);
+            let directive = if create_clash && !big_existing {
                 format!(
                     "`{arg}` already exists — `create_file` will NOT overwrite it, so \
                      repeating it does nothing. To change it, call `write_file` with `path` \
                      `{arg}` and the ENTIRE new file contents in one shot (write_file \
                      overwrites). Make the fix the failing test needs."
+                )
+            } else if big_existing {
+                format!(
+                    "Your `edit_file` anchor is NOT in `{arg}` — you are matching against code \
+                     that isn't there (often lines you INTEND TO ADD, written into old_str as if \
+                     already present). `{arg}` is a large file: do NOT try to rewrite it whole. \
+                     Instead: (1) to ADD new code (a struct field, a method, a match arm), copy a \
+                     SHORT exact anchor — one or two REAL lines from the CURRENT file shown in the \
+                     error above — and put ONLY those real lines in old_str, with the addition in \
+                     new_str; or (2) to add a whole new method/function, use `append_file` to put \
+                     it at the end of the file. Never include not-yet-existing lines in old_str."
                 )
             } else {
                 format!(

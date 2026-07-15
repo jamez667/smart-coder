@@ -19,6 +19,7 @@ mod policy;
 mod runner;
 mod sequential;
 mod stack;
+mod staged;
 mod state;
 mod testwriter;
 
@@ -31,6 +32,7 @@ pub use runner::{
     run_workflow, run_workflow_gated, run_workflow_moded, WorkflowMode, WorkflowOutcome,
 };
 pub use stack::ProjectStack;
+pub use staged::{parse_stages, staged_build, Stage, StageResult, StagedReport};
 pub use sequential::{build_sequential, build_sequential_with_board, SequentialReport};
 pub use state::{load, plan_dir, save, Artifact, Status, WorkflowState};
 pub use testwriter::{persist_tests, write_tests, WrittenTest};

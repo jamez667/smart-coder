@@ -116,7 +116,10 @@ pub(super) fn assemble_segments(
     // the model copies `old_str` from.
     let focus = render_focus_files(workspace, &cfg.focus_files);
     if !focus.is_empty() {
-        segments.push(Segment::user(Zone::Retrieved, focus));
+        // SACRED (Zone::FocusFile): the file being edited must never be evicted/clipped, or the
+        // model edits a truncated view and can't anchor its `old_str`. This is the anchor the
+        // model copies `old_str` from — it is the whole point of a focused edit turn.
+        segments.push(Segment::user(Zone::FocusFile, focus));
     }
     if !summary.is_empty() {
         segments.push(Segment::user(Zone::HistorySummary, summary));

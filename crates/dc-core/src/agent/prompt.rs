@@ -149,8 +149,11 @@ pub(super) fn render_focus_files(workspace: &Path, files: &[String]) -> String {
         let p = workspace.join(f);
         if let Ok(content) = std::fs::read_to_string(&p) {
             any = true;
-            // Verbatim, with no line numbers — whatever the model copies as old_str
-            // must match the file byte-for-byte, so any prefix we add would poison it.
+            // Normalize to LF: on a Windows (CRLF) file, showing the model CRLF makes it copy a
+            // CRLF anchor, which then fails to match edit_file's LF-normalized content — every
+            // edit misses and the model corrupts the file trying to fix it. edit_file works in LF
+            // space, so show LF here too (no line numbers — the model must copy old_str verbatim).
+            let content = content.replace("\r\n", "\n").replace('\r', "\n");
             s.push_str(&format!("\n=== {f} ===\n{content}\n=== end {f} ===\n"));
         }
     }
