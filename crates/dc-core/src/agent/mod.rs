@@ -400,6 +400,12 @@ pub fn run_agent_observed(
     // anchor. Observed live 2026-06-15 (the A/B `/sum` 500→400 fix it couldn't apply).
     let mut failed_edit_path: Option<String> = None;
     let mut failed_edit_streak = 0usize;
+    // Consecutive turns whose reply didn't parse into a tool call at all (malformed JSON). A
+    // coder model encoding a long multi-line `edit_file` `old_str` often produces JSON the
+    // parser can't extract, and re-tries the SAME malformed call — the anchor-miss breaker never
+    // fires (the call never parsed). After a couple, steer it to `edit_lines`, which takes line
+    // NUMBERS and no big `old_str`, sidestepping the encoding problem (observed live 2026-07-15).
+    let mut malformed_streak = 0usize;
     // The same verification failure, seen N times in a row. A model stuck on a hard bug
     // edits ineffectively (each edit resets the stall, so the stall detector never trips)
     // or spams run_verification — burning the whole budget while the SAME tests keep
@@ -526,6 +532,7 @@ pub fn run_agent_observed(
         let (obs, action, changed, tool, arg) = match extracted {
             Ok(call) => {
                 metrics.record_valid();
+                malformed_streak = 0; // a parseable call broke the malformed-reply streak
                 let arg = key_arg(&call);
                 let action = action_hash(&call.name, &arg);
                 let tool = call.name.clone();
@@ -747,7 +754,23 @@ pub fn run_agent_observed(
             // Repair loop (spec 03): feed back the exact error; never execute.
             Err(e) => {
                 metrics.record_invalid();
-                let detail = e.repair_prompt();
+                malformed_streak += 1;
+                let mut detail = e.repair_prompt();
+                // Repeated malformed replies usually mean the model is trying to encode a long
+                // multi-line `edit_file` `old_str` as JSON and mangling it. Steer to `edit_lines`
+                // (line numbers, no old_str) so the encoding problem disappears.
+                if malformed_streak >= 2 {
+                    detail.push_str(
+                        "\n\nYou have produced an unparseable reply more than once — this usually \
+                         happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
+                         hard to encode as JSON. STOP using edit_file for this. Use `edit_lines` \
+                         instead: {\"tool\":\"edit_lines\",\"path\":\"<file>\",\"start\":<n>,\
+                         \"end\":<m>,\"new_text\":\"<the replacement>\"}. It takes the LINE NUMBERS \
+                         shown in the file view (no snippet to copy), so the reply stays short and \
+                         valid.",
+                    );
+                    interv.count += 1;
+                }
                 sink.record(&AgentEvent::RepairTriggered {
                     detail: first_line(&detail),
                 });
