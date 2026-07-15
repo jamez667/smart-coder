@@ -154,7 +154,14 @@ pub fn run_workflow_moded(
     on_phase: &dyn Fn(Phase, &str),
     gate: &dyn Gate,
 ) -> Result<WorkflowOutcome> {
-    let mut state = WorkflowState::new(task);
+    // Ground the task in reality BEFORE the first phase: a workflow phase is a direct model call
+    // that otherwise sees only the task string — so with just "implement PLAN-lakes.md" the
+    // orchestrator designed a generic module tree that ignored the plan AND the real files
+    // (observed live 2026-07-14: it invented src/lakes/*.rs, never touching the plan's
+    // gen/terrain.rs / render.rs). Inject the plan's full body and a survey of the files that
+    // actually exist, so every phase designs against THIS plan and THIS codebase.
+    let grounded = ground_task(task, workspace);
+    let mut state = WorkflowState::new(grounded);
     let mut test_files = Vec::new();
     let mut aborted = false;
     // Detect the project's language once, so every phase prompt speaks it (a Rust cargo repo
@@ -239,6 +246,59 @@ pub fn run_workflow_moded(
     })
 }
 
+/// Augment the task with the grounding every phase needs: the full body of a `PLAN-*.md` the
+/// task references (so the design follows the actual plan, not a guess from its filename), and
+/// a survey of the source files that already exist (so it edits real files like `gen/terrain.rs`
+/// instead of inventing a fresh module tree). Both are read from `workspace`; if there's no plan
+/// reference or no files, that section is simply omitted.
+fn ground_task(task: &str, workspace: &Path) -> String {
+    let mut out = String::from(task);
+
+    if let Some((name, body)) = referenced_plan(task, workspace) {
+        out.push_str(&format!(
+            "\n\n=== The feature plan you are designing for ({name}) — follow it ===\n{body}\n\
+             Design for exactly this plan: its Approach, its Files-to-touch, and its Steps. Do \
+             NOT invent a different structure or ignore the files it names."
+        ));
+    }
+
+    let files = dc_core::source_files(workspace);
+    if !files.is_empty() {
+        out.push_str(
+            "\n\n=== Source files that ALREADY EXIST in this project (edit these; do not \
+             reinvent the layout) ===\n",
+        );
+        for f in files.iter().take(200) {
+            out.push_str("  ");
+            out.push_str(f);
+            out.push('\n');
+        }
+        out.push_str(
+            "Ground the architecture and layout in these real files and the plan's \
+             Files-to-touch — new files only where the plan calls for them.",
+        );
+    }
+
+    out
+}
+
+/// If `task` names a `PLAN-<slug>.md` that exists in `workspace`, return `(name, contents)`.
+/// Mirrors the agent loop's `referenced_plan` (dc-core) so the workflow pins the same plan.
+fn referenced_plan(task: &str, workspace: &Path) -> Option<(String, String)> {
+    let token = task
+        .split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ','))
+        .map(|t| t.trim_end_matches('.'))
+        .find(|t| {
+            let up = t.to_ascii_uppercase();
+            up.starts_with("PLAN-") && up.ends_with(".MD")
+        })?;
+    let body = std::fs::read_to_string(workspace.join(token)).ok()?;
+    if body.trim().is_empty() {
+        return None;
+    }
+    Some((token.to_string(), body))
+}
+
 fn artifact_content(state: &WorkflowState, phase: Phase) -> String {
     state
         .artifact(phase)
@@ -272,6 +332,43 @@ mod tests {
     use crate::state::Artifact;
     use dc_model::{Capabilities, GenerateRequest, GenerateResponse, ToolCalling};
     use std::sync::Mutex;
+
+    #[test]
+    fn ground_task_injects_the_plan_body_and_the_real_file_survey() {
+        // The live regression: without grounding, a phase saw only "implement PLAN-lakes.md"
+        // and designed a generic module tree that ignored the plan and the real files. Grounding
+        // must put the plan's BODY and the existing source files into the task.
+        let ws = temp("ground");
+        std::fs::write(ws.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir_all(ws.join("gen")).unwrap();
+        std::fs::write(ws.join("gen/terrain.rs"), "pub fn gen() {}").unwrap();
+        std::fs::write(ws.join("render.rs"), "pub fn draw() {}").unwrap();
+        std::fs::write(
+            ws.join("PLAN-lakes.md"),
+            "## Plan: lakes\n**Approach:** flood-fill basins\n**Files to touch:**\n- gen/terrain.rs",
+        )
+        .unwrap();
+
+        let grounded = ground_task("Design how to implement PLAN-lakes.md.", &ws);
+        // The plan body is present (not just its name).
+        assert!(grounded.contains("flood-fill basins"), "plan body injected: {grounded}");
+        assert!(grounded.contains("follow it"), "framed to follow the plan");
+        // The real files are surveyed, so the model edits them instead of inventing a layout.
+        assert!(grounded.contains("gen/terrain.rs"), "real file surveyed");
+        assert!(grounded.contains("render.rs"), "real file surveyed");
+        assert!(grounded.contains("ALREADY EXIST"), "survey framing present");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ground_task_is_a_noop_without_a_plan_or_files() {
+        // The Python eval ladder builds from an empty dir with no PLAN reference — grounding
+        // must leave that task untouched so the ladder is unaffected.
+        let ws = temp("ground-empty");
+        let task = "build a counter API";
+        assert_eq!(ground_task(task, &ws), task);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 
     /// A backend that answers each phase by matching its system prompt, and emits a
     /// valid subtask array for the decomposition phase.
