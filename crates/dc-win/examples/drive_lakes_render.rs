@@ -47,7 +47,12 @@ fn main() {
             `RenderTile::Lake(depth)` that colors the tile with \
             `palette::water_depth_color(crate::gen::terrain::WaterKind::Lake, depth)`, like the \
             Ocean arm but with WaterKind::Lake. All three must be present for lakes to draw. Do NOT \
-            edit the oracle files or main.rs."
+            edit the oracle files or main.rs.\n\n\
+            CRITICAL: make these edits ONE AT A TIME. Each reply must be exactly ONE JSON tool call \
+            and nothing else — no prose, no plan, no ```json fence, no multiple edits batched. Do \
+            edit (1) FIRST: reply with a single edit_file/edit_lines call that adds the enum \
+            variant, and STOP. Wait for the result, then do (2), then (3). Do not describe what you \
+            will do — just emit the one tool call."
             .into(),
     }];
 

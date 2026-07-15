@@ -284,7 +284,12 @@ pub fn staged_build(
     } else if let Some(oracle) = oracle_command {
         let mut cfg = base_cfg.clone();
         cfg.plan_first = false;
-        cfg.focus_files = Vec::new(); // whole-project: the oracle may span several files
+        // Pin the feature's files so the convergence loop edits them directly instead of wandering
+        // the tree. Observed live: with focus cleared (whole-project), the model spent its whole
+        // oracle budget on list_dir/read_file trying to REDISCOVER where render_sample lives —
+        // reading water.rs/mod.rs/rivers.rs over and over, never editing — and stalled. The feature
+        // files ARE where the fix goes; pinning them keeps them in the window so the model acts.
+        cfg.focus_files = feature_files.clone();
         cfg.verify_command = Some(oracle.to_string());
         cfg.max_steps = ORACLE_MAX_STEPS;
         let report = run_agent_observed(
@@ -317,11 +322,13 @@ fn oracle_instruction() -> String {
     "The feature's code has been added across the project and it compiles, but a BEHAVIORAL test \
      (run_verification) is FAILING — which means the feature does not actually work yet (e.g. a \
      function was stubbed out, or the pieces aren't wired together so nothing actually runs). \
-     Read the failing test's message, then make the feature genuinely work: implement any stubbed \
-     logic, wire generation/rendering together, and route data through the real code paths the \
-     test checks. Edit the existing files surgically (edit_file / append_file — do not rewrite a \
-     large file whole). You may NOT edit the test/oracle file itself. Run run_verification and \
-     keep going until it PASSES, then finish."
+     Read the failing test's message CAREFULLY: it names the exact function whose output is wrong \
+     (e.g. \"render_sample() does not know about them\"). That named function is what you must \
+     edit — it is in the files already pinned in your context, so DO NOT go hunting through the \
+     tree with list_dir; open the pinned file, find that function, and add the missing logic so it \
+     returns/routes the value the test expects. Edit surgically (edit_file / edit_lines — do not \
+     rewrite a large file whole). You may NOT edit the test/oracle file itself. Run \
+     run_verification and keep going until it PASSES, then finish."
         .to_string()
 }
 
