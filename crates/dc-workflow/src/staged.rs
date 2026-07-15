@@ -45,8 +45,11 @@ pub struct StageResult {
 #[derive(Debug, Clone)]
 pub struct StagedReport {
     pub stages: Vec<StageResult>,
-    /// Whether the final verify (after the last stage) was green.
+    /// Whether the final verify (after the last stage / oracle) was green.
     pub verified: bool,
+    /// Whether the final BEHAVIORAL oracle passed (`None` if no oracle was configured). This is
+    /// the real "does the feature work?" signal — distinct from the per-stage compile gate.
+    pub oracle_passed: Option<bool>,
 }
 
 /// Max turns for one stage's scoped edit. A stage is small — add a method, a struct, a match
@@ -165,6 +168,7 @@ pub fn staged_build(
     stages: &[Stage],
     workspace: &Path,
     verify_command: &str,
+    oracle_command: Option<&str>,
     base_cfg: &AgentConfig,
     on_stage: &dyn Fn(usize, &Stage),
     sink: &dyn EventSink,
@@ -226,10 +230,54 @@ pub fn staged_build(
         });
     }
 
+    // FINAL BEHAVIORAL ORACLE. The per-stage `cargo check` gate only proves the code compiles —
+    // a model can (and did) satisfy it with stubs that generate/render nothing. If an oracle is
+    // configured (a frozen behavioral test that a stub CANNOT pass), run a final, unfocused
+    // convergence loop gated on it: the model sees the whole project and the oracle's failure
+    // message, and must make the feature actually WORK, not just compile.
+    let mut oracle_ok = None;
+    if let Some(oracle) = oracle_command {
+        let mut cfg = base_cfg.clone();
+        cfg.plan_first = false;
+        cfg.focus_files = Vec::new(); // whole-project: the oracle may span several files
+        cfg.verify_command = Some(oracle.to_string());
+        cfg.max_steps = ORACLE_MAX_STEPS;
+        let report = run_agent_observed(
+            backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            &oracle_instruction(),
+            workspace,
+            &cfg,
+            sink,
+        )?;
+        oracle_ok = Some(report.verified == Some(true));
+        last_verified = report.verified == Some(true);
+    }
+
     Ok(StagedReport {
         stages: results,
         verified: last_verified,
+        oracle_passed: oracle_ok,
     })
+}
+
+/// Budget for the final oracle-convergence loop — larger than a stage, since making a feature
+/// truly behave (across the files a stub left empty) is the real work.
+const ORACLE_MAX_STEPS: usize = 40;
+
+/// The instruction for the final oracle pass: the feature must actually WORK, not just compile.
+fn oracle_instruction() -> String {
+    "The feature's code has been added across the project and it compiles, but a BEHAVIORAL test \
+     (run_verification) is FAILING — which means the feature does not actually work yet (e.g. a \
+     function was stubbed out, or the pieces aren't wired together so nothing actually runs). \
+     Read the failing test's message, then make the feature genuinely work: implement any stubbed \
+     logic, wire generation/rendering together, and route data through the real code paths the \
+     test checks. Edit the existing files surgically (edit_file / append_file — do not rewrite a \
+     large file whole). You may NOT edit the test/oracle file itself. Run run_verification and \
+     keep going until it PASSES, then finish."
+        .to_string()
 }
 
 /// The per-stage agent config: scoped to this stage's file(s), gated on the project build,

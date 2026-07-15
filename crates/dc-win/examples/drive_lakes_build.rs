@@ -39,6 +39,12 @@ fn main() {
     cfg.plan_first = false;
     cfg.sandbox = dc_verify::Sandbox::Host;
     cfg.permission.allow_shell = true;
+    // FREEZE the behavioral oracle + main.rs so the model can't game the gate by editing/deleting
+    // the test or unregistering the module.
+    cfg.permission.frozen_paths = vec![
+        "crates/city/src/lakes_oracle.rs".to_string(),
+        "crates/city/src/main.rs".to_string(),
+    ];
 
     let sink = dc_core::FnSink(|e: &AgentEvent| match e {
         AgentEvent::ModelTurn { raw, step, .. } => {
@@ -70,11 +76,14 @@ fn main() {
         println!("\n========== STAGE {} : {} ==========", i + 1, s.title);
     };
 
+    // Each stage gates on cargo check (must compile); the FINAL behavioral oracle
+    // (a frozen test a stub can't pass) gates whether the feature actually WORKS.
     let report = staged_build(
         &backend,
         &stages,
         &ws,
         "cargo check --workspace",
+        Some("cargo test -p city lakes_oracle"),
         &cfg,
         &on_stage,
         &sink,
@@ -91,6 +100,11 @@ fn main() {
                     st.title,
                     st.steps
                 );
+            }
+            match r.oracle_passed {
+                Some(true) => println!("\n🌊 ORACLE PASSED — lakes actually work (behavioral test green)."),
+                Some(false) => println!("\n❌ ORACLE FAILED — code compiles but lakes don't behave (stub)."),
+                None => println!("\n(no behavioral oracle configured)"),
             }
             println!("final verified: {}", r.verified);
         }

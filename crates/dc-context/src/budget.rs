@@ -112,10 +112,21 @@ fn truncate_middle(text: &str, target_tokens: usize, counter: &TokenCounter) -> 
         return text.to_string();
     }
     let lines: Vec<&str> = text.lines().collect();
-    if lines.len() < 8 {
-        return text.to_string(); // too small to usefully middle-truncate
-    }
     let marker = "\n… (file truncated in the middle to fit the context window) …\n";
+    if lines.len() < 8 {
+        // Too few lines to middle-truncate by line — fall back to a char-level head+tail cut so a
+        // large single-block observation still shrinks (else the prompt can't be made to fit).
+        let chars: Vec<char> = text.chars().collect();
+        // ~4 chars/token; keep half the budget as head, half as tail.
+        let keep = (target_tokens.saturating_mul(4)).min(chars.len());
+        if keep + marker.len() >= chars.len() {
+            return text.to_string();
+        }
+        let half = keep / 2;
+        let head: String = chars[..half].iter().collect();
+        let tail: String = chars[chars.len() - (keep - half)..].iter().collect();
+        return format!("{head}{marker}{tail}");
+    }
     // Grow head and tail line counts until we'd exceed the budget, then step back one.
     let mut head = 0usize;
     let mut tail = 0usize;
@@ -230,21 +241,35 @@ impl<'a> ContextBuilder<'a> {
         // where the model is working) with a marked cut.
         let mut running: usize = segments.iter().map(cost).sum();
         while running > self.budget {
-            // The largest FocusFile segment is the one to shrink.
-            let Some(idx) = segments
+            // Shrink the LARGEST truncatable sacred segment. Prefer the focus file / observations
+            // (bulky, safe to middle-clip); the System and TaskAnchor zones are the true minimum
+            // and only clipped if nothing else is left. A single large read observation or a huge
+            // grounded task instruction can each blow the window, so we can't restrict this to the
+            // FocusFile zone alone (observed live: multiple full-file reads in the recent window →
+            // 35k tokens vs a 24576 window → HTTP 400).
+            let truncatable = |z: Zone| matches!(z, Zone::FocusFile | Zone::RecentObservation);
+            let pick = segments
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.zone == Zone::FocusFile)
+                .filter(|(_, s)| truncatable(s.zone) && cost(s) > 32)
                 .max_by_key(|(_, s)| cost(s))
-                .map(|(i, _)| i)
-            else {
-                break; // nothing left we're willing to truncate; send it and let the backend cope
+                .or_else(|| {
+                    // Last resort: the biggest sacred segment of any zone (System/TaskAnchor too).
+                    segments
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.zone.is_sacred() && cost(s) > 32)
+                        .max_by_key(|(_, s)| cost(s))
+                })
+                .map(|(i, _)| i);
+            let Some(idx) = pick else {
+                break; // nothing left big enough to shrink; send it and let the backend cope
             };
             let over = running - self.budget;
-            let seg = &mut segments[idx];
-            let before = cost(seg);
-            seg.text = truncate_middle(&seg.text, before.saturating_sub(over + 64), &self.counter);
-            let after = cost(seg);
+            let before = cost(&segments[idx]);
+            let target = before.saturating_sub(over + 64);
+            segments[idx].text = truncate_middle(&segments[idx].text, target, &self.counter);
+            let after = cost(&segments[idx]);
             if after >= before {
                 break; // couldn't shrink further — avoid an infinite loop
             }
@@ -386,6 +411,25 @@ mod tests {
         // Head and tail are both preserved.
         assert!(focus.contains("line number 0 "), "head kept");
         assert!(focus.contains("line number 499"), "tail kept");
+    }
+
+    #[test]
+    fn a_huge_recent_observation_is_also_truncated_to_fit() {
+        // The 2nd overflow bug: several full-file reads pile into the sacred recent window and
+        // exceed the window even after the focus file is clipped. Any large sacred segment
+        // (not just FocusFile) must shrink so the prompt fits.
+        let c = counter();
+        let budget = 200;
+        let b = ContextBuilder::new(&c, budget);
+        let huge_read: String = (0..500).map(|i| format!("read line {i}\n")).collect();
+        let built = b.build(vec![
+            Segment::system(Zone::System, "sys"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::RecentObservation, huge_read),
+        ]);
+        assert!(built.tokens_used <= budget, "fits: {} <= {budget}", built.tokens_used);
+        assert_eq!(built.messages.len(), 3, "nothing dropped, just clipped");
+        assert!(built.messages[2].content.contains("truncated"), "recent obs clipped");
     }
 
     #[test]
