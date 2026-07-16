@@ -403,6 +403,12 @@ fn iterate_verify_command(configured: &Option<String>, workspace: &Path) -> Opti
         }
     }
     // No meaningful explicit command → detect the language from the workspace.
+    // Unity first (its signature can coexist with stray manifests), mirroring stack detection.
+    if workspace.join("Assets").is_dir() && workspace.join("ProjectSettings").is_dir() {
+        let cmd = unity_verify_command(workspace);
+        // An empty command means no Editor and no solution — keep whatever was configured.
+        return if cmd.is_empty() { configured.clone() } else { Some(cmd) };
+    }
     if workspace.join("Cargo.toml").is_file() {
         return Some("cargo check".to_string());
     }
@@ -411,6 +417,85 @@ fn iterate_verify_command(configured: &Option<String>, workspace: &Path) -> Opti
     }
     // Fall back to the configured value (or None) — e.g. a Python project keeps pytest.
     configured.clone()
+}
+
+/// Build the verify gate for a Unity project: the Editor batchmode CLI running EditMode tests.
+/// If no Unity Editor can be found, degrade gracefully — `dotnet build` when a solution/project
+/// file exists, else nothing (the caller keeps the configured command). This keeps a machine
+/// without Unity installed from hard-failing every run.
+fn unity_verify_command(workspace: &Path) -> String {
+    match find_unity_editor() {
+        Some(editor) => {
+            let ws = workspace.display();
+            let results = workspace.join("Temp").join("dc-tests.xml");
+            format!(
+                "\"{}\" -batchmode -quit -projectPath \"{ws}\" -runTests -testPlatform EditMode \
+                 -testResults \"{}\" -logFile -",
+                editor.display(),
+                results.display(),
+            )
+        }
+        None => {
+            if has_dotnet_project(workspace) {
+                "dotnet build".to_string()
+            } else {
+                // No Editor and no solution — a bare `dotnet build` would fail; let the caller
+                // keep whatever was configured (Generic exit-code gate at worst).
+                String::new()
+            }
+        }
+    }
+}
+
+/// Resolve a Unity Editor executable: `DC_UNITY_EDITOR` env override, then common Hub install
+/// locations, then `Unity`/`unity` on `PATH`. Returns the first that exists.
+fn find_unity_editor() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("DC_UNITY_EDITOR") {
+        let path = std::path::PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    // Unity Hub installs editors under a versioned dir; scan the standard roots for any editor.
+    #[cfg(target_os = "windows")]
+    let hub_roots = [
+        std::path::PathBuf::from(r"C:\Program Files\Unity\Hub\Editor"),
+        std::path::PathBuf::from(r"C:\Program Files\Unity\Editor"),
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let hub_roots = [
+        std::path::PathBuf::from("/Applications/Unity/Hub/Editor"),
+        std::path::PathBuf::from("/opt/unity/editors"),
+    ];
+    for root in hub_roots {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                #[cfg(target_os = "windows")]
+                let exe = entry.path().join("Editor").join("Unity.exe");
+                #[cfg(target_os = "macos")]
+                let exe = entry.path().join("Unity.app/Contents/MacOS/Unity");
+                #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+                let exe = entry.path().join("Editor").join("Unity");
+                if exe.is_file() {
+                    return Some(exe);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether the workspace has a `.sln` or `.csproj` at its root (so `dotnet build` can run).
+fn has_dotnet_project(workspace: &Path) -> bool {
+    std::fs::read_dir(workspace)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            name.ends_with(".sln") || name.ends_with(".csproj")
+        })
 }
 
 /// The instruction for an iterate run: the user's change, framed as an in-place edit of an

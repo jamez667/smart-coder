@@ -189,6 +189,7 @@ pub fn detect_verify_command(test_files: &[String], fallback: &str) -> String {
     let mut js = 0usize;
     let mut rs = 0usize;
     let mut go = 0usize;
+    let mut cs = 0usize;
     for f in test_files {
         let lower = f.to_ascii_lowercase();
         if lower.ends_with(".py") {
@@ -201,12 +202,14 @@ pub fn detect_verify_command(test_files: &[String], fallback: &str) -> String {
             js += 1;
         } else if lower.ends_with(".rs") {
             rs += 1;
+        } else if lower.ends_with(".cs") {
+            cs += 1;
         } else if lower.ends_with("_test.go") || lower.ends_with(".go") {
             go += 1;
         }
     }
     // Pick the language with the most test files; ties favour the fallback's spirit.
-    let max = py.max(js).max(rs).max(go);
+    let max = py.max(js).max(rs).max(go).max(cs);
     if max == 0 {
         return fallback.to_string();
     }
@@ -217,6 +220,10 @@ pub fn detect_verify_command(test_files: &[String], fallback: &str) -> String {
         "python -m pytest -q".to_string()
     } else if rs == max {
         "cargo test".to_string()
+    } else if cs == max {
+        // A standalone C# test project; a real Unity project resolves the Editor batchmode
+        // gate in `iterate_verify_command` (which has the workspace path).
+        "dotnet test".to_string()
     } else {
         "go test ./...".to_string()
     }
