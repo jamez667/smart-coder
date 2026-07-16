@@ -24,12 +24,26 @@ pub fn default_registry() -> ToolRegistry {
     ToolRegistry::new(vec![
         ToolSpec {
             name: "read_file",
-            description: "Read a UTF-8 text file's contents.",
-            params: vec![ParamSpec::new(
-                "path",
-                ParamType::String,
-                "file path relative to the project root",
-            )],
+            description: "Read a UTF-8 text file. Optionally pass `start` (1-based line) and \
+                          `limit` (line count) to read just a window — after `search_code` gives \
+                          you a line number, read a chunk around it instead of the whole file.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new(
+                    "start",
+                    ParamType::OptionalInteger,
+                    "1-based line to start reading from (omit to read from the top)",
+                ),
+                ParamSpec::new(
+                    "limit",
+                    ParamType::OptionalInteger,
+                    "how many lines to read from `start` (omit for a capped default)",
+                ),
+            ],
             side_effect: SideEffect::ReadOnly,
             permission: Permission::Auto,
         },
@@ -275,7 +289,12 @@ pub enum ToolOutcome {
 pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
     match call.name.as_str() {
         "finish" => ToolOutcome::Finished,
-        "read_file" => ToolOutcome::Observation(read_file(workspace, arg(call, "path"))),
+        "read_file" => ToolOutcome::Observation(read_file(
+            workspace,
+            arg(call, "path"),
+            call.int("start"),
+            call.int("limit"),
+        )),
         "list_dir" => ToolOutcome::Observation(list_dir(workspace, arg(call, "path"))),
         "search_code" => ToolOutcome::Observation(search_code(workspace, arg(call, "query"))),
         "write_file" | "create_file" | "append_file" | "edit_file" | "edit_lines" => {
@@ -335,13 +354,50 @@ fn arg<'a>(call: &'a ValidatedCall, name: &str) -> &'a str {
     call.str(name).unwrap_or_default()
 }
 
-fn read_file(workspace: &Path, path: &str) -> String {
-    match safe_join(workspace, path) {
-        Ok(p) => match std::fs::read_to_string(&p) {
-            Ok(c) => format!("read_file {path}:\n{c}"),
-            Err(e) => format!("read_file {path} error: {e}"),
-        },
-        Err(e) => format!("read_file {path} rejected: {e}"),
+/// Default line cap when no explicit `limit` is given, so reading a large file can't flood the
+/// context window (or the MCP status tail). A model that needs more asks for a specific window.
+const READ_FILE_DEFAULT_LINES: usize = 400;
+
+/// Read a file, optionally windowed to `[start, start+limit)` (1-based lines) — the
+/// grep-then-read-a-chunk pattern. With no window it reads from the top, capped at
+/// [`READ_FILE_DEFAULT_LINES`]; a truncation note tells the model how to see more.
+fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option<i64>) -> String {
+    let p = match safe_join(workspace, path) {
+        Ok(p) => p,
+        Err(e) => return format!("read_file {path} rejected: {e}"),
+    };
+    let content = match std::fs::read_to_string(&p) {
+        Ok(c) => c,
+        Err(e) => return format!("read_file {path} error: {e}"),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    // 1-based start; clamp to the file. `start=0`/absent → 1.
+    let start_1 = start.filter(|&s| s > 0).map(|s| s as usize).unwrap_or(1);
+    if start_1 > total {
+        return format!("read_file {path}: start line {start_1} is past end of file ({total} lines)");
+    }
+    let count = limit
+        .filter(|&l| l > 0)
+        .map(|l| l as usize)
+        .unwrap_or(READ_FILE_DEFAULT_LINES);
+    let end = (start_1 - 1 + count).min(total); // exclusive, 0-based
+    let body = lines[start_1 - 1..end].join("\n");
+    // Label the window and, when it doesn't reach the end, tell the model exactly how to continue.
+    if start_1 == 1 && end == total {
+        format!("read_file {path} ({total} lines):\n{body}")
+    } else {
+        let more = if end < total {
+            format!(
+                "\n… {} more line(s). Read the next chunk with \
+                 {{\"tool\":\"read_file\",\"path\":\"{path}\",\"start\":{},\"limit\":{count}}}.",
+                total - end,
+                end + 1,
+            )
+        } else {
+            String::new()
+        };
+        format!("read_file {path} (lines {start_1}-{end} of {total}):\n{body}{more}")
     }
 }
 
@@ -391,7 +447,14 @@ fn search_code(workspace: &Path, query: &str) -> String {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if path.is_dir() {
-                if matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                // Skip VCS/build noise AND the agent's own run logs — `.dumb-coder/sessions/*`
+                // echoes every prior tool result, so searching it makes the agent match its own
+                // transcript (observed live: a search for a function name hit the session log
+                // instead of the source, wasting turns).
+                if matches!(
+                    name.as_str(),
+                    ".git" | "target" | "node_modules" | ".dumb-coder" | "__pycache__"
+                ) {
                     continue;
                 }
                 walk.push(path);
@@ -1095,6 +1158,50 @@ mod tests {
             ToolOutcome::Observation(o) => o,
             _ => panic!("expected observation"),
         }
+    }
+
+    #[test]
+    fn read_file_windows_to_a_line_range() {
+        let ws = temp_dir("rwin");
+        let body: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(ws.join("big.txt"), body).unwrap();
+        // start=10, limit=3 → lines 10,11,12 only.
+        let r = call(json!({"tool":"read_file","path":"big.txt","start":10,"limit":3}));
+        let o = obs(execute(&r, &ws));
+        assert!(o.contains("lines 10-12 of 50"), "labels the window: {o}");
+        assert!(o.contains("line 10") && o.contains("line 12"), "window content: {o}");
+        assert!(!o.contains("line 9\n") && !o.contains("line 13"), "outside window excluded: {o}");
+        // The continuation hint tells the model how to read the next chunk.
+        assert!(o.contains("\"start\":13"), "next-chunk hint: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn read_file_caps_a_large_file_by_default() {
+        let ws = temp_dir("rcap");
+        let body: String = (1..=1000).map(|n| format!("L{n}\n")).collect();
+        std::fs::write(ws.join("huge.txt"), body).unwrap();
+        let r = call(json!({"tool":"read_file","path":"huge.txt"}));
+        let o = obs(execute(&r, &ws));
+        // Only the first READ_FILE_DEFAULT_LINES are returned, with a continuation hint.
+        assert!(o.contains(&format!("lines 1-{READ_FILE_DEFAULT_LINES} of 1000")), "capped: {o}");
+        assert!(o.contains("more line(s)"), "truncation noted: {o}");
+        assert!(!o.contains("L1000"), "tail not included: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn search_code_skips_the_agents_own_session_logs() {
+        let ws = temp_dir("rsearch");
+        std::fs::create_dir_all(ws.join(".dumb-coder/sessions")).unwrap();
+        // The needle appears in BOTH a session log and a real source file.
+        std::fs::write(ws.join(".dumb-coder/sessions/x.jsonl"), "stringify_reason in a log").unwrap();
+        std::fs::write(ws.join("real.rs"), "fn stringify_reason() {}").unwrap();
+        let s = call(json!({"tool":"search_code","query":"stringify_reason"}));
+        let o = obs(execute(&s, &ws));
+        assert!(o.contains("real.rs"), "finds the source: {o}");
+        assert!(!o.contains(".dumb-coder"), "does not match its own log: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

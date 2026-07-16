@@ -251,7 +251,10 @@ fn read_events(mut child: Child, stdout: std::process::ChildStdout, job: Arc<Mut
         }
         let mut j = job.lock().expect("job lock");
         ingest_event(&line, &mut j);
-        j.recent.push(line);
+        // Cap each stored line: a single event (e.g. a read_file result echoing a whole source
+        // file) can be tens of KB, and 12 of those blow the status tool's token budget. Structured
+        // parsing already happened in ingest_event; the tail is just for a human glance.
+        j.recent.push(truncate_event(&line));
         let overflow = j.recent.len().saturating_sub(MAX_RECENT);
         if overflow > 0 {
             j.recent.drain(0..overflow);
@@ -311,6 +314,24 @@ fn ingest_event(line: &str, job: &mut Job) {
     }
 }
 
+/// Max characters kept per stored event line in the status tail. A `read_file` result can echo a
+/// whole source file (tens of KB); keeping the head is enough for a human glance, and the
+/// structured signals (`edited`, `verified_green`, `stop_reason`) are already extracted.
+const MAX_EVENT_CHARS: usize = 2000;
+
+/// Truncate one raw event line to [`MAX_EVENT_CHARS`], appending a marker so the reader knows it
+/// was clipped. Splits on a char boundary so we never cut inside a UTF-8 sequence.
+fn truncate_event(line: &str) -> String {
+    if line.len() <= MAX_EVENT_CHARS {
+        return line.to_string();
+    }
+    let mut end = MAX_EVENT_CHARS;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [+{} chars truncated]", &line[..end], line.len() - end)
+}
+
 /// Render a `StopReason` JSON value as a short human string. The enum is either a
 /// bare string (`"Finished"`) or a single-key object (`{"Stalled": "…"}`).
 fn stringify_reason(reason: &serde_json::Value) -> String {
@@ -321,7 +342,16 @@ fn stringify_reason(reason: &serde_json::Value) -> String {
         if let Some((k, v)) = obj.iter().next() {
             return match v.as_str() {
                 Some(detail) => format!("{k}: {detail}"),
-                None => k.clone(),
+                None => {
+                    // Handle numeric values by converting them to string
+                    if let Some(num) = v.as_i64() {
+                        format!("{k}: {num}")
+                    } else if let Some(num) = v.as_u64() {
+                        format!("{k}: {num}")
+                    } else {
+                        k.clone()
+                    }
+                }
             };
         }
     }
@@ -410,5 +440,21 @@ mod tests {
     fn mode_maps_to_subcommand() {
         assert_eq!(Mode::Run.subcommand(), "run");
         assert_eq!(Mode::Swarm.subcommand(), "swarm");
+    }
+
+    #[test]
+    fn truncate_event_caps_huge_lines_but_leaves_small_ones() {
+        let small = r#"{"type":"ToolCall","tool":"read_file"}"#;
+        assert_eq!(truncate_event(small), small, "small lines pass through");
+        let big = "x".repeat(MAX_EVENT_CHARS * 3);
+        let out = truncate_event(&big);
+        assert!(out.len() < big.len(), "clipped");
+        assert!(out.contains("chars truncated"), "marks the clip: {}", &out[out.len() - 30..]);
+    }
+
+    #[test]
+    fn stringifies_a_numeric_reason_detail() {
+        let reason = serde_json::json!({"BudgetExhausted": 25});
+        assert_eq!(stringify_reason(&reason), "BudgetExhausted: 25");
     }
 }
