@@ -420,6 +420,16 @@ struct App {
     /// Collapsed directories in the explorer (workspace-relative paths). Everything
     /// expanded by default; clicking a dir toggles it here.
     collapsed_dirs: std::collections::HashSet<String>,
+    /// The explorer's quick-filter query. When non-empty the file tree is narrowed to matching
+    /// files/folders (searching the whole tree, ignoring collapse). Empty = normal tree.
+    file_filter: String,
+    /// The fully-walked file tree, cached so `view()` derives the collapsed/filtered display in
+    /// memory instead of re-walking the filesystem every frame (which made filtering laggy).
+    /// Refreshed by the snapshot path on workspace change and after edits/git actions.
+    tree_cache: Vec<dc_win::filetree::TreeRow>,
+    /// True while a background `compute_snapshot` is in flight, so the heartbeat doesn't stack up
+    /// overlapping walks if one runs long.
+    sync_pending: bool,
     /// The file shown in the code panel (workspace-relative). `None` before any file
     /// is chosen / touched.
     selected_file: Option<String>,
@@ -512,8 +522,6 @@ struct App {
     /// Ahead/behind vs the upstream tracking branch (for the ↑↓ header + push/pull buttons).
     /// Refreshed alongside the branch; `behind` reflects the last fetch (Pull/Fetch updates it).
     upstream: dc_win::gitdiff::UpstreamStatus,
-    /// Which explorer tab is selected (Files tree / Git changes). Defaults to Files.
-    explorer_tab: ExplorerTab,
     /// Last cursor position seen over the git list, so a right-click can pop the context menu
     /// at the cursor. Updated on mouse-move within the git rows.
     cursor_pos: iced::Point,
@@ -559,15 +567,6 @@ pub(crate) enum BottomTab {
     Build,
 }
 
-/// The left explorer column's tabs — the workspace file tree (Files) vs. a PR-style list of
-/// just the changed files grouped by status (Git). Tabbed so the git view isn't buried inside
-/// the full tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExplorerTab {
-    Files,
-    Git,
-}
-
 /// The top menu-bar dropdowns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Menu {
@@ -586,6 +585,17 @@ impl Default for App {
         // Re-open the last project the user worked in (if it still exists on disk), so the
         // app comes back to where they left off instead of the empty scratch base.
         let picked_workspace = dc_win::persist::load().last_project;
+        // Re-opening a remembered project → open its tree compacted (top-level folders collapsed),
+        // matching the fresh-pick behavior.
+        let collapsed_dirs = picked_workspace
+            .as_deref()
+            .map(dc_win::filetree::top_level_dirs)
+            .unwrap_or_default();
+        // Walk the remembered project's tree once up front; the view derives from this cache.
+        let tree_cache = picked_workspace
+            .as_deref()
+            .map(dc_win::filetree::full_rows)
+            .unwrap_or_default();
         Self {
             url_input: cfg.base_url.clone(),
             model_input: cfg.model.clone(),
@@ -615,7 +625,10 @@ impl Default for App {
             picked_workspace,
             iterating: false,
             edited_files: Vec::new(),
-            collapsed_dirs: std::collections::HashSet::new(),
+            collapsed_dirs,
+            file_filter: String::new(),
+            tree_cache,
+            sync_pending: false,
             selected_file: None,
             follow_agent: true,
             code: None,
@@ -645,7 +658,6 @@ impl Default for App {
             file_status: std::collections::BTreeMap::new(),
             branch: None,
             upstream: dc_win::gitdiff::UpstreamStatus::default(),
-            explorer_tab: ExplorerTab::Files,
             cursor_pos: iced::Point::ORIGIN,
             git_menu: None,
             git_menu_at: iced::Point::ORIGIN,
@@ -675,11 +687,18 @@ pub(crate) enum Message {
     /// Run the in-place iterate loop (the default when a project folder is picked).
     RunIterate,
     Tick,
+    /// Heartbeat while a project is open: kick off an OFF-THREAD re-walk of the tree + git state
+    /// so externally-created/removed files appear without a manual refresh.
+    SyncWorkspace,
+    /// The background workspace snapshot finished — apply it (or drop it if the compute failed).
+    WorkspaceSynced(Option<WorkspaceSnapshot>),
     // Explorer / code-viewer interaction.
     /// Select a file in the tree → show it in the code panel (and pin, stop following).
     SelectFile(String),
     /// Toggle a directory's collapsed state in the explorer.
     ToggleDir(String),
+    /// The explorer's quick-filter text changed → narrow the tree to matching files/folders.
+    FileFilterChanged(String),
     // Top menu bar.
     /// Open (or toggle) a top-bar dropdown menu.
     ToggleMenu(Menu),
@@ -716,8 +735,6 @@ pub(crate) enum Message {
     CancelRun,
     /// Select a bottom-panel tab (Activity / Verification / Build).
     SelectBottomTab(BottomTab),
-    /// Select a left-explorer tab (Files tree / Git changes).
-    SelectExplorerTab(ExplorerTab),
     /// Cursor moved over the git list — track it so a right-click can place the context menu.
     GitCursorMoved(iced::Point),
     /// Right-clicked a git-tab row: open its context menu (stage / unstage / discard …).
@@ -810,6 +827,15 @@ impl App {
         } else {
             Subscription::none()
         };
+        // A heartbeat that re-walks the tree + git state while a project is open, so files
+        // created/removed OUTSIDE the app (or by a running agent) show up without a manual
+        // refresh. The walk is cheap and off the render path, so 500ms feels live without cost.
+        // Off when no project is open.
+        let sync = if self.picked_workspace.is_some() {
+            iced::time::every(Duration::from_millis(500)).map(|_| Message::SyncWorkspace)
+        } else {
+            Subscription::none()
+        };
         // Track the window-absolute cursor position so a right-click in the git tab can pop its
         // context menu exactly at the pointer. `mouse_area::on_move` reports widget-relative
         // coordinates (useless for placing a window overlay); this window event is absolute.
@@ -819,7 +845,7 @@ impl App {
             }
             _ => None,
         });
-        Subscription::batch([tick, cursor])
+        Subscription::batch([tick, sync, cursor])
     }
 
     /// The run action for the primary button / intent submit, chosen by context: a
@@ -1031,12 +1057,13 @@ impl App {
                 .map(|body| (rel.clone(), body))
         });
 
-        // Update the conversation + build the request in one scoped mutable borrow.
-        let req = {
+        // Update the conversation, then spawn a planning turn (classify intent → generate). The
+        // classification decides how the reply is shaped; the app no longer sniffs the text.
+        let convo = {
             let convo = self.conversation.as_mut().expect("checked above");
             convo.set_open_file(open_file);
             convo.user_turn(&text);
-            convo.request(think)
+            convo.clone()
         };
         self.chat_turns.push(dc_win::chat::Turn {
             role: dc_win::chat::Speaker::You,
@@ -1044,7 +1071,23 @@ impl App {
         });
         self.proposed_files.clear();
         self.intent.clear();
-        self.spawn_chat("chat", req);
+        if self.debug {
+            // Show the generate prompt for the most likely intent path (feature plan is the one
+            // that was misbehaving); the real intent is classified on the worker.
+            let req = convo.request(think, dc_win::chat::ChatIntent::Question);
+            let joined = req
+                .messages
+                .iter()
+                .map(|m| format!("[{:?}]\n{}", m.role, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            self.debug_prompt("chat", &joined);
+        }
+        self.chat_session = Some(dc_win::chat_session::ChatSession::spawn_planning(
+            self.cfg.clone(),
+            convo,
+            think,
+        ));
     }
 
     /// Spawn a chat/generate call, first echoing its prompt into the chat when debug mode is
@@ -1691,33 +1734,25 @@ impl App {
         self.changed_lines = self.file_diff.added.clone();
     }
 
-    /// Refresh the PR-view git state: the current branch and per-file M/A/D statuses. Called on
-    /// project open and after a fix lands, so the file tree tracks working-tree changes.
+    /// Refresh the PR-view git state synchronously: the tree cache, per-file M/A/D statuses,
+    /// branch, upstream. Used at the points where we want the state up-to-date *before* the next
+    /// line runs (project open, right after a stage/discard). The periodic heartbeat instead uses
+    /// the async path (`SyncWorkspace` → `compute_snapshot` off-thread → `WorkspaceSynced`).
     fn refresh_git_view(&mut self) {
-        let root = self.workspace_root();
-        self.file_status = dc_win::gitdiff::statuses(&root);
-        self.stage_states = dc_win::gitdiff::stage_states(&root);
-        self.unstaged_deltas = dc_win::gitdiff::line_deltas(&root, false);
-        self.staged_deltas = dc_win::gitdiff::line_deltas(&root, true);
-        // Untracked files don't show in `git diff --numstat`; count their lines directly as
-        // all-added so the Changes row still shows a +N.
-        for (path, status) in &self.file_status {
-            if *status == dc_win::gitdiff::FileStatus::Added
-                && !self.unstaged_deltas.contains_key(path)
-            {
-                if let Ok(text) = std::fs::read_to_string(root.join(path)) {
-                    self.unstaged_deltas.insert(
-                        path.clone(),
-                        dc_win::gitdiff::LineDelta {
-                            added: text.lines().count(),
-                            removed: 0,
-                        },
-                    );
-                }
-            }
-        }
-        self.branch = dc_win::gitdiff::current_branch(&root);
-        self.upstream = dc_win::gitdiff::upstream_status(&root);
+        let snap = compute_snapshot(self.workspace_root());
+        self.apply_snapshot(snap);
+    }
+
+    /// Apply a computed [`WorkspaceSnapshot`] to the live state. Pure assignment — the expensive
+    /// walk/git work already happened in [`compute_snapshot`] (possibly on a background thread).
+    fn apply_snapshot(&mut self, snap: WorkspaceSnapshot) {
+        self.tree_cache = snap.tree;
+        self.file_status = snap.file_status;
+        self.stage_states = snap.stage_states;
+        self.unstaged_deltas = snap.unstaged_deltas;
+        self.staged_deltas = snap.staged_deltas;
+        self.branch = snap.branch;
+        self.upstream = snap.upstream;
     }
 
     /// Run a `git` subcommand in the workspace (e.g. `["add", "--", path]`) and return whether
@@ -2191,6 +2226,29 @@ impl App {
             Message::RunTdd => self.start(RunKind::Tdd),
             Message::RunIterate => self.start(RunKind::Iterate),
             Message::Tick => self.pump(),
+            Message::SyncWorkspace => {
+                // Re-walk the tree + git state OFF the UI thread — the walk and the git
+                // subprocesses are the slow part, so compute a snapshot on a background thread and
+                // apply it when it's ready (`WorkspaceSynced`). Skip if a sync is already pending.
+                if self.picked_workspace.is_some() && !self.sync_pending {
+                    self.sync_pending = true;
+                    let root = self.workspace_root();
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || compute_snapshot(root))
+                                .await
+                                .ok()
+                        },
+                        Message::WorkspaceSynced,
+                    );
+                }
+            }
+            Message::WorkspaceSynced(snap) => {
+                self.sync_pending = false;
+                if let Some(snap) = snap {
+                    self.apply_snapshot(snap);
+                }
+            }
             Message::SelectFile(rel) => {
                 // Click-to-pin: show this file and stop auto-following the agent until
                 // the next run re-arms follow.
@@ -2220,6 +2278,9 @@ impl App {
                 if !self.collapsed_dirs.remove(&rel) {
                     self.collapsed_dirs.insert(rel);
                 }
+            }
+            Message::FileFilterChanged(q) => {
+                self.file_filter = q;
             }
             Message::ToggleMenu(m) => {
                 self.open_menu = if self.open_menu == Some(m) {
@@ -2267,7 +2328,6 @@ impl App {
                 }
             }
             Message::SelectBottomTab(t) => self.bottom_tab = t,
-            Message::SelectExplorerTab(t) => self.explorer_tab = t,
             Message::GitCursorMoved(p) => self.cursor_pos = p,
             Message::GitRowMenu(path, status) => {
                 self.git_menu_at = self.cursor_pos;
@@ -2405,10 +2465,13 @@ impl App {
                     .pick_folder()
                 {
                     self.picked_workspace = Some(dir.clone());
-                    // A fresh project → drop any stale selection/collapse from the last one.
+                    // A fresh project → drop any stale selection from the last one, and open the
+                    // tree compacted: every top-level folder starts collapsed.
                     self.selected_file = None;
                     self.code = None;
-                    self.collapsed_dirs.clear();
+                    self.collapsed_dirs = dc_win::filetree::top_level_dirs(&dir);
+                    self.file_filter.clear();
+                    self.tree_cache = dc_win::filetree::full_rows(&dir);
                     // Remember it for next launch.
                     dc_win::persist::save(&dc_win::persist::UiState {
                         last_project: Some(dir),
@@ -2531,17 +2594,10 @@ impl App {
             }
             None => "not a git repo".to_string(),
         };
-        let git_label = if n_changed > 0 {
-            format!("Git ({n_changed})")
-        } else {
-            "Git".to_string()
-        };
-        let tabs = row![
-            self.explorer_tab_button("Files", ExplorerTab::Files),
-            self.explorer_tab_button(&git_label, ExplorerTab::Git),
-        ]
-        .spacing(4);
-        let mut header = column![
+        // Top section (25%): everything git — the branch line, push/pull/fetch, and the changed
+        // files. Bottom section (75%): the Files tree with its quick filter. Stacked rather than
+        // tabbed so both are visible at once.
+        let mut git_col = column![
             text(branch_line)
                 .size(11)
                 .color(iced::Color::from_rgb(0.55, 0.58, 0.70)),
@@ -2550,35 +2606,26 @@ impl App {
         // Push / Pull / Fetch — only when the repo is on a branch (has a name). Labels show the
         // ahead/behind counts so you know what each will move.
         if self.branch.is_some() {
-            header = header.push(self.view_sync_bar());
+            git_col = git_col.push(self.view_sync_bar());
         }
-        header = header.push(tabs);
+        git_col = git_col.push(self.view_git_tab());
 
-        let content = match self.explorer_tab {
-            ExplorerTab::Files => self.view_files_tab(),
-            ExplorerTab::Git => self.view_git_tab(),
-        };
+        // Each section is its own rounded card, stacked with a gap between them.
+        let git_section = container(git_col.spacing(6))
+            .height(Length::FillPortion(1))
+            .width(Fill)
+            .padding(10)
+            .style(card_style);
+        let files_section = container(self.view_files_tab())
+            .height(Length::FillPortion(3))
+            .width(Fill)
+            .padding(10)
+            .style(card_style);
 
-        container(column![header, content].spacing(6))
+        container(column![git_section, files_section].spacing(10))
             .width(Length::FillPortion(2))
             .height(Fill)
-            .padding(10)
-            .style(card_style)
             .into()
-    }
-
-    /// One explorer-tab button; highlighted when it's the selected tab.
-    fn explorer_tab_button(&self, label: &str, tab: ExplorerTab) -> Element<'_, Message> {
-        let selected = self.explorer_tab == tab;
-        button(
-            text(label.to_string())
-                .size(12)
-                .color(if selected { ACCENT } else { FG_MUTED }),
-        )
-        .on_press(Message::SelectExplorerTab(tab))
-        .padding([3, 10])
-        .style(move |_t, status| menu_title_style(selected, status))
-        .into()
     }
 
     /// The push / pull / fetch bar shown under the branch line. Push shows the ahead count, Pull
@@ -2620,22 +2667,36 @@ impl App {
     /// picked.
     fn view_files_tab(&self) -> Element<'_, Message> {
         use dc_win::gitdiff::FileStatus;
-        let root = self.workspace_root();
-        let rows = dc_win::filetree::build_rows(&root, &self.collapsed_dirs);
+        let filtering = !self.file_filter.trim().is_empty();
+        // Derive the display from the cached full tree in memory — no filesystem walk per frame.
+        let rows = if filtering {
+            dc_win::filetree::filter_view(&self.tree_cache, &self.file_filter)
+        } else {
+            dc_win::filetree::collapse_view(&self.tree_cache, &self.collapsed_dirs)
+        };
+
+        // A quick-filter box at the top of the tree — type to narrow to matching files/folders.
+        let filter_box = text_input("Filter files…", &self.file_filter)
+            .on_input(Message::FileFilterChanged)
+            .padding(4)
+            .size(12)
+            .width(Fill);
 
         let mut col = column![].spacing(2);
         if rows.is_empty() {
-            col = col.push(
-                text("File ▸ Open folder to work in")
-                    .size(11)
-                    .color(FG_MUTED),
-            );
+            let hint = if filtering {
+                "no files match"
+            } else {
+                "File ▸ Open folder to work in"
+            };
+            col = col.push(text(hint).size(11).color(FG_MUTED));
         }
         for r in rows.iter().take(600) {
             let indent = 8.0 + (r.depth as f32) * 12.0;
             let is_selected = !r.is_dir && self.selected_file.as_deref() == Some(r.rel.as_str());
             let glyph = if r.is_dir {
-                if self.collapsed_dirs.contains(&r.rel) {
+                // While filtering the tree is force-expanded, so every shown dir reads as open.
+                if !filtering && self.collapsed_dirs.contains(&r.rel) {
                     "▸"
                 } else {
                     "▾"
@@ -2688,7 +2749,9 @@ impl App {
             col = col.push(row![Space::new().width(Length::Fixed(indent)), btn]);
         }
 
-        scrollable(col).height(Fill).into()
+        column![filter_box, scrollable(col).height(Fill)]
+            .spacing(6)
+            .into()
     }
 
     /// The **Git** tab: a VS-Code-style Source Control panel — a commit-message box + Commit
@@ -3558,7 +3621,10 @@ impl App {
     /// working and in which mode.
     fn workspace_status(&self) -> String {
         match (&self.picked_workspace, &self.run_dir) {
-            (Some(dir), _) => format!("iterating in  {}", dir.display()),
+            (Some(dir), _) => {
+                let stack = dc_workflow::ProjectStack::detect(dir).label();
+                format!("iterating in  {}  ·  {stack}", dir.display())
+            }
             (None, Some(d)) => format!("output  {}", d.display()),
             (None, None) => "no project — File ▸ Open folder".to_string(),
         }
@@ -4196,6 +4262,58 @@ fn plural(n: usize) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+/// A computed snapshot of the workspace's tree + git state. Produced by [`compute_snapshot`]
+/// (the expensive filesystem walk + git subprocess calls) so that work can run OFF the UI thread;
+/// [`App::apply_snapshot`] then applies it with cheap assignments.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceSnapshot {
+    tree: Vec<dc_win::filetree::TreeRow>,
+    file_status: std::collections::BTreeMap<String, dc_win::gitdiff::FileStatus>,
+    stage_states: std::collections::BTreeMap<String, dc_win::gitdiff::StageState>,
+    unstaged_deltas: std::collections::BTreeMap<String, dc_win::gitdiff::LineDelta>,
+    staged_deltas: std::collections::BTreeMap<String, dc_win::gitdiff::LineDelta>,
+    branch: Option<String>,
+    upstream: dc_win::gitdiff::UpstreamStatus,
+}
+
+/// Compute the full workspace snapshot: walk the tree and run the git status/diff/branch queries.
+/// This is the BLOCKING work (filesystem + `git` subprocesses); it takes no `&self` so it can run
+/// on a background thread (see `Message::SyncWorkspace`). Pure — reads the workspace, mutates
+/// nothing.
+fn compute_snapshot(root: std::path::PathBuf) -> WorkspaceSnapshot {
+    let tree = dc_win::filetree::full_rows(&root);
+    let file_status = dc_win::gitdiff::statuses(&root);
+    let stage_states = dc_win::gitdiff::stage_states(&root);
+    let mut unstaged_deltas = dc_win::gitdiff::line_deltas(&root, false);
+    let staged_deltas = dc_win::gitdiff::line_deltas(&root, true);
+    // Untracked files don't show in `git diff --numstat`; count their lines directly as all-added
+    // so the Changes row still shows a +N.
+    for (path, status) in &file_status {
+        if *status == dc_win::gitdiff::FileStatus::Added && !unstaged_deltas.contains_key(path) {
+            if let Ok(text) = std::fs::read_to_string(root.join(path)) {
+                unstaged_deltas.insert(
+                    path.clone(),
+                    dc_win::gitdiff::LineDelta {
+                        added: text.lines().count(),
+                        removed: 0,
+                    },
+                );
+            }
+        }
+    }
+    let branch = dc_win::gitdiff::current_branch(&root);
+    let upstream = dc_win::gitdiff::upstream_status(&root);
+    WorkspaceSnapshot {
+        tree,
+        file_status,
+        stage_states,
+        unstaged_deltas,
+        staged_deltas,
+        branch,
+        upstream,
     }
 }
 

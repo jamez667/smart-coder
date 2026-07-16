@@ -39,6 +39,13 @@ pub fn is_noise_dir(name: &str) -> bool {
             | "screenshots"
             | "dist"
             | "build"
+            // Unity-generated / non-source trees.
+            | "Library"
+            | "Temp"
+            | "obj"
+            | "Logs"
+            | "UserSettings"
+            | "Builds"
     ) || name.starts_with('.') && name != "."
 }
 
@@ -52,6 +59,92 @@ pub fn build_rows(root: &Path, collapsed: &HashSet<String>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     walk(root, root, 0, collapsed, &mut rows);
     rows
+}
+
+/// The workspace-relative names of the top-level (non-noise) directories under `root`. Seeding
+/// these into the explorer's `collapsed` set makes the tree open *compacted* — root files and
+/// folder headers show, but every folder starts closed (the user expands what they need).
+pub fn top_level_dirs(root: &Path) -> HashSet<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return HashSet::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() && !is_noise_dir(&name) => Some(name),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Filter the tree to rows matching `query` (case-insensitive substring on the leaf name or the
+/// full relative path). Collapse state is ignored — a filter searches the WHOLE tree — so every
+/// match shows regardless of which folders are closed. Matching files keep their ancestor
+/// directories (so the path context is visible); a directory whose own name matches is kept too.
+/// An empty/whitespace query returns the normal collapsed view via [`build_rows`].
+pub fn filter_rows(root: &Path, collapsed: &HashSet<String>, query: &str) -> Vec<TreeRow> {
+    let q = query.trim();
+    if q.is_empty() {
+        return build_rows(root, collapsed);
+    }
+    filter_view(&full_rows(root), q)
+}
+
+/// The FULLY-expanded tree (every non-noise dir walked), for caching. Walking the filesystem is
+/// the expensive part; do it once and derive the collapsed/filtered views in memory with
+/// [`collapse_view`] / [`filter_view`] rather than re-walking on every frame.
+pub fn full_rows(root: &Path) -> Vec<TreeRow> {
+    build_rows(root, &HashSet::new())
+}
+
+/// Derive the collapsed display view from an already-walked full tree: drop any row whose parent
+/// directory (or any ancestor) is in `collapsed`. Pure in-memory — no filesystem access.
+pub fn collapse_view(full: &[TreeRow], collapsed: &HashSet<String>) -> Vec<TreeRow> {
+    if collapsed.is_empty() {
+        return full.to_vec();
+    }
+    full.iter()
+        .filter(|r| {
+            // Keep a row unless one of its ancestor dirs is collapsed. (A collapsed dir keeps its
+            // own row but hides its descendants.)
+            let mut cur = r.rel.as_str();
+            while let Some(slash) = cur.rfind('/') {
+                cur = &cur[..slash];
+                if collapsed.contains(cur) {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+/// Derive the filtered display view from an already-walked full tree: keep rows matching `query`
+/// (case-insensitive substring on the leaf name or full path) plus the ancestor dirs leading to
+/// each match (for context). Pure in-memory — no filesystem access.
+pub fn filter_view(full: &[TreeRow], query: &str) -> Vec<TreeRow> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return full.to_vec();
+    }
+    let mut keep: HashSet<&str> = HashSet::new();
+    for r in full {
+        let hit = r.name.to_ascii_lowercase().contains(&q)
+            || r.rel.to_ascii_lowercase().contains(&q);
+        if hit {
+            keep.insert(r.rel.as_str());
+            let mut cur = r.rel.as_str();
+            while let Some(slash) = cur.rfind('/') {
+                cur = &cur[..slash];
+                keep.insert(cur);
+            }
+        }
+    }
+    full.iter().filter(|r| keep.contains(r.rel.as_str())).cloned().collect()
 }
 
 fn walk(
@@ -147,6 +240,65 @@ mod tests {
         assert!(
             !rels.iter().any(|r| r.starts_with(".git")),
             ".git must be skipped: {rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_memory_views_match_disk_walk() {
+        // The cached full tree derives the same collapsed/filtered views in memory that a fresh
+        // disk walk produces — this is the perf path the explorer actually renders from.
+        let dir = scratch("cache");
+        let full = full_rows(&dir);
+        let collapsed = top_level_dirs(&dir);
+        assert_eq!(
+            collapse_view(&full, &collapsed),
+            build_rows(&dir, &collapsed),
+            "in-memory collapse == disk walk"
+        );
+        assert_eq!(
+            filter_view(&full, "sim"),
+            filter_rows(&dir, &collapsed, "sim"),
+            "in-memory filter == disk filter"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filter_finds_matches_across_collapsed_folders_with_ancestors() {
+        let dir = scratch("filter");
+        // Everything collapsed — the filter must still search the whole tree.
+        let collapsed = top_level_dirs(&dir);
+        let rows = filter_rows(&dir, &collapsed, "sim");
+        let rels: Vec<&str> = rows.iter().map(|r| r.rel.as_str()).collect();
+        // The match plus its ancestor dirs are kept; unrelated files are dropped.
+        assert!(rels.contains(&"crates/city/src/sim.rs"), "match kept: {rels:?}");
+        assert!(rels.contains(&"crates"), "ancestor kept: {rels:?}");
+        assert!(rels.contains(&"crates/city/src"), "ancestor kept: {rels:?}");
+        assert!(!rels.contains(&"crates/city/src/main.rs"), "non-match dropped: {rels:?}");
+        assert!(!rels.contains(&"Cargo.toml"), "non-match dropped: {rels:?}");
+        // An empty query falls back to the normal collapsed view.
+        let normal = filter_rows(&dir, &collapsed, "  ");
+        assert_eq!(normal, build_rows(&dir, &collapsed), "blank query = normal tree");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn top_level_dirs_are_the_non_noise_folders_and_compact_the_tree() {
+        let dir = scratch("compact");
+        let top = top_level_dirs(&dir);
+        // Only the real top-level folder; noise (target/.git) and files excluded.
+        assert!(top.contains("crates"), "{top:?}");
+        assert!(!top.contains("target"), "noise excluded: {top:?}");
+        assert!(!top.contains(".git"), "noise excluded: {top:?}");
+        assert!(!top.contains("Cargo.toml"), "files excluded: {top:?}");
+        // Seeding it collapses the tree: `crates` shows but its children don't.
+        let rows = build_rows(&dir, &top);
+        let rels: Vec<&str> = rows.iter().map(|r| r.rel.as_str()).collect();
+        assert!(rels.contains(&"crates"), "folder header shows: {rels:?}");
+        assert!(
+            !rels.iter().any(|r| r.starts_with("crates/")),
+            "collapsed folder hides children: {rels:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -26,3 +26,4 @@ iced = { version = "0.14", features = ["tokio", "canvas", "advanced"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde_json = { workspace = true }
+tokio = { version = "1.52.4", features = ["rt"] }

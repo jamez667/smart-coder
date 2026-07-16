@@ -10,8 +10,9 @@
 use std::sync::mpsc::Receiver;
 use std::thread;
 
-use dc_model::GenerateRequest;
+use dc_model::{GenerateRequest, ModelBackend};
 
+use crate::chat::{ChatIntent, Conversation};
 use crate::config::UiConfig;
 
 /// The result of one chat turn streamed back to the UI.
@@ -50,6 +51,42 @@ impl ChatSession {
             };
             let result = backend.generate_streaming(&req, &mut on_token);
             match result {
+                Ok(resp) => {
+                    let _ = tx.send(ChatEvent::Reply(resp.content));
+                }
+                Err(e) => {
+                    let _ = tx.send(ChatEvent::Failed(format!("chat failed: {e}")));
+                }
+            }
+        });
+        Self {
+            events: rx,
+            _handle: handle,
+        }
+    }
+
+    /// Spawn a full planning turn: first CLASSIFY the user's intent (a fast, grammar-constrained
+    /// call whose reply is one intent token), then GENERATE with an instruction tailored to that
+    /// intent (and, for file-producing intents, a grammar that forces the right `file:` block).
+    /// Both calls run on the worker thread; only the generate call streams tokens to the UI. This
+    /// replaces string-sniffing the reply for intent — the model classifies, the app doesn't
+    /// guess. `think` controls the generate reasoning budget.
+    pub fn spawn_planning(cfg: UiConfig, convo: Conversation, think: bool) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            let backend = cfg.backend();
+            // 1) Classify. On any failure, fall back to Question (prose-only — the safe default).
+            let intent = match backend.generate(&convo.classify_request()) {
+                Ok(resp) => ChatIntent::parse(&resp.content),
+                Err(_) => ChatIntent::Question,
+            };
+            // 2) Generate the actual reply, tailored to the classified intent, streamed live.
+            let req = convo.request(think, intent);
+            let tok_tx = tx.clone();
+            let mut on_token = |delta: &str| {
+                let _ = tok_tx.send(ChatEvent::Token(delta.to_string()));
+            };
+            match backend.generate_streaming(&req, &mut on_token) {
                 Ok(resp) => {
                     let _ = tx.send(ChatEvent::Reply(resp.content));
                 }
