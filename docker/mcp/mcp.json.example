@@ -4,10 +4,10 @@
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-v", "${workspaceFolder}:/workspace",
+        "-v", "${PWD}:/workspace",
         "--add-host", "host.docker.internal:host-gateway",
-        "-e", "DC_BASE_URLS=http://host.docker.internal:11439/v1,http://host.docker.internal:11440/v1",
-        "-e", "DC_MODEL=qwen3-8b",
+        "-e", "DC_BASE_URL=http://host.docker.internal:11435/v1",
+        "-e", "DC_MODEL=qwen3-coder-30b",
         "dumb-coder-mcp"
       ]
     }

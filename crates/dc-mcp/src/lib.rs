@@ -18,7 +18,8 @@ use jobs::{JobConfig, JobStore};
 use tools::StoreTools;
 
 /// Environment-driven configuration for the server. Defaults target the project's
-/// current live-test rig (Docker llama.cpp pool on :11439), overridable per deployment.
+/// current live-test rig (Docker llama.cpp serving the 30B on :11435), overridable
+/// per deployment.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub binary: String,
@@ -39,7 +40,7 @@ impl Config {
     ///   them (e.g. one pool per GPU: `…:11439/v1,…:11440/v1`). Falls back to the
     ///   single `DC_BASE_URL`, then to the default rig.
     /// * `DC_BASE_URL`    — a single backend URL (used when `DC_BASE_URLS` is unset).
-    /// * `DC_MODEL`       — model tag (default: `qwen3-8b`).
+    /// * `DC_MODEL`       — model tag (default: `qwen3-coder-30b`).
     /// * `DC_MCP_YOLO`    — `0`/`false` to *disable* shell auto-approval (default on:
     ///   a headless run can't prompt, so shell must be pre-approved or it stalls).
     /// * `DC_MCP_WORKSPACE` — default workspace when a `code` call omits one
@@ -53,7 +54,7 @@ impl Config {
         Config {
             binary: env_or("DC_MCP_BINARY", "dumb-coder"),
             base_urls: base_urls_from_env(),
-            model: env_or("DC_MODEL", "qwen3-8b"),
+            model: env_or("DC_MODEL", "qwen3-coder-30b"),
             yolo: !matches!(
                 std::env::var("DC_MCP_YOLO").as_deref(),
                 Ok("0") | Ok("false") | Ok("no")
@@ -79,7 +80,7 @@ fn base_urls_from_env() -> Vec<String> {
             return urls;
         }
     }
-    vec![env_or("DC_BASE_URL", "http://localhost:11439/v1")]
+    vec![env_or("DC_BASE_URL", "http://localhost:11435/v1")]
 }
 
 /// Split a comma-separated URL list, trimming whitespace and dropping empties.

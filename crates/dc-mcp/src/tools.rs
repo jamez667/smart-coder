@@ -151,6 +151,7 @@ impl StoreTools {
             "stop_reason": st.stop_reason,
             "finished_ok": st.state == State::Done
                 && st.stop_reason.as_deref() == Some("Finished"),
+            "outcome": st.outcome,
             "exit_code": st.exit_code,
             "error": st.error,
             "recent_events": st.recent_events,

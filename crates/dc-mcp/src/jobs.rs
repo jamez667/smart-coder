@@ -80,6 +80,13 @@ struct Job {
     exit_code: Option<i32>,
     /// Anything the launch/read path went wrong with.
     error: Option<String>,
+    /// Whether the agent successfully edited the workspace at least once (a successful
+    /// `edit_file`/`write_file`). Used to tell "made changes but couldn't verify" apart from
+    /// "did nothing".
+    edited: bool,
+    /// Whether a verification run ever went green. When false but `edited` is true, the changes
+    /// are unverified (the caller should check the diff), not necessarily wrong.
+    verified_green: bool,
 }
 
 impl Job {
@@ -91,7 +98,33 @@ impl Job {
             stop_reason: None,
             exit_code: None,
             error: None,
+            edited: false,
+            verified_green: false,
         }
+    }
+
+    /// A plain-language outcome once the job has finished (`None` while running). Turns the
+    /// (state, edited, verified) triple into something a caller can trust rather than guessing
+    /// from a bare exit code — the whole point is that correct-but-unverified work reads as
+    /// "check the diff", not "failed".
+    fn outcome(&self) -> Option<String> {
+        if self.state == State::Running {
+            return None;
+        }
+        if self.error.is_some() {
+            return Some("failed to launch".to_string());
+        }
+        Some(
+            match (self.edited, self.verified_green) {
+                // Verification runs on the HOST (the caller), not in the container, so the normal
+                // success case is "edited" — the caller then runs cargo/pytest/the Unity Editor.
+                (true, true) => "verified — edits made and in-container verification passed",
+                (true, false) => "edited — changes were made; verify on the host (cargo / pytest \
+                     / Unity Editor) and re-delegate with the failure if it's wrong",
+                (false, _) => "no changes made",
+            }
+            .to_string(),
+        )
     }
 }
 
@@ -104,6 +137,11 @@ pub struct JobStatus {
     pub recent_events: Vec<String>,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
+    /// A plain-language outcome for the caller, so correct-but-unverified work isn't read as
+    /// failure. `None` while still running; once finished, one of: "verified" (edits + a green
+    /// verify), "edited, unverified" (edits made but verification never went green — check the
+    /// diff), "no changes made", or "failed to launch".
+    pub outcome: Option<String>,
 }
 
 /// Keep the status tail bounded so polling never floods Claude's context.
@@ -147,6 +185,12 @@ impl JobStore {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // NB: no `--verify` is passed. Verification of a delegated task happens on the HOST (the
+        // caller runs cargo/pytest/the Unity Editor and re-delegates on failure), not in this
+        // slim container — see the Dockerfile. With no verify command the agent's finish gate
+        // allows a clean stop after editing (dc_core::gate_finish → Allow), so it edits and
+        // finishes instead of looping against a toolchain it doesn't have. The `outcome` field
+        // then reports "edited, unverified — review the diff" for the caller to verify.
         // `swarm --json` needs the terminal path; `run --json` is already headless.
         if self.cfg.yolo {
             cmd.arg("--yolo");
@@ -184,6 +228,7 @@ impl JobStore {
             recent_events: j.recent.clone(),
             exit_code: j.exit_code,
             error: j.error.clone(),
+            outcome: j.outcome(),
         })
     }
 }
@@ -246,8 +291,23 @@ fn ingest_event(line: &str, job: &mut Job) {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
         return;
     };
-    if val.get("type").and_then(|t| t.as_str()) == Some("Stopped") {
-        job.stop_reason = Some(stringify_reason(&val["reason"]));
+    match val.get("type").and_then(|t| t.as_str()) {
+        Some("Stopped") => job.stop_reason = Some(stringify_reason(&val["reason"])),
+        // A successful edit/write tool result means the workspace changed at least once.
+        Some("ToolResult") => {
+            let ok = val.get("is_error").and_then(|e| e.as_bool()) != Some(true);
+            let summary = val.get("summary").and_then(|s| s.as_str()).unwrap_or("");
+            if ok && (summary.starts_with("edit_file") || summary.starts_with("write_file")) {
+                job.edited = true;
+            }
+        }
+        // A green verification is the real success signal.
+        Some("Verification") => {
+            if val.get("green").and_then(|g| g.as_bool()) == Some(true) {
+                job.verified_green = true;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -295,6 +355,35 @@ mod tests {
         ingest_event(r#"{"type":"Stopped","reason":"Finished"}"#, &mut j);
         assert_eq!(j.stop_reason.as_deref(), Some("Finished"));
     }
+
+    #[test]
+    fn tracks_edits_and_green_verification_for_the_outcome() {
+        let mut j = blank();
+        assert_eq!(j.outcome(), None, "no outcome while running");
+        // A successful edit flips `edited`; a failed one does not.
+        ingest_event(
+            r#"{"type":"ToolResult","summary":"edit_file math_utils.py ok","is_error":false}"#,
+            &mut j,
+        );
+        assert!(j.edited);
+        // Edited but not verified in-container → "edited" (host verifies), NOT a failure.
+        ingest_event(r#"{"type":"Stopped","reason":"Finished"}"#, &mut j);
+        j.state = State::Done;
+        let o = j.outcome().unwrap();
+        assert!(o.starts_with("edited") && o.contains("host"), "got: {o}");
+        // A green verification upgrades it to "verified".
+        ingest_event(r#"{"type":"Verification","green":true}"#, &mut j);
+        assert!(j.verified_green);
+        assert!(j.outcome().unwrap().starts_with("verified"));
+    }
+
+    #[test]
+    fn outcome_reports_no_changes_when_nothing_edited() {
+        let mut j = blank();
+        j.state = State::Done;
+        assert_eq!(j.outcome().as_deref(), Some("no changes made"));
+    }
+
 
     #[test]
     fn ingests_detailed_stop_reason() {
