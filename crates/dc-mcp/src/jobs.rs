@@ -116,11 +116,12 @@ impl Job {
         }
         Some(
             match (self.edited, self.verified_green) {
-                // Verification runs on the HOST (the caller), not in the container, so the normal
-                // success case is "edited" — the caller then runs cargo/pytest/the Unity Editor.
+                // Rust/Python verify in-container (cargo/pytest), so a green run is real success.
                 (true, true) => "verified — edits made and in-container verification passed",
-                (true, false) => "edited — changes were made; verify on the host (cargo / pytest \
-                     / Unity Editor) and re-delegate with the failure if it's wrong",
+                // No in-container verify: either a C#/Unity task (host-only by design — run the
+                // Unity Editor) or a project with no detected test command. Review the diff.
+                (true, false) => "edited — changes made but not verified in-container (e.g. a \
+                     Unity/C# task); verify on the host and re-delegate with the failure if wrong",
                 (false, _) => "no changes made",
             }
             .to_string(),
@@ -185,12 +186,14 @@ impl JobStore {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        // NB: no `--verify` is passed. Verification of a delegated task happens on the HOST (the
-        // caller runs cargo/pytest/the Unity Editor and re-delegates on failure), not in this
-        // slim container — see the Dockerfile. With no verify command the agent's finish gate
-        // allows a clean stop after editing (dc_core::gate_finish → Allow), so it edits and
-        // finishes instead of looping against a toolchain it doesn't have. The `outcome` field
-        // then reports "edited, unverified — review the diff" for the caller to verify.
+        // Pass a verify command for languages that run headless in this container (Rust/Python),
+        // so the agent self-verifies and fixes its own compile/test breaks before finishing.
+        // A C# (Unity) project returns None here: Unity needs the licensed Editor, which can't run
+        // in the container — so it's verified on the HOST and the agent finishes on "edited"
+        // (dc_core::gate_finish with no command → Allow).
+        if let Some(verify) = detect_verify_command(workspace) {
+            cmd.arg("--verify").arg(verify);
+        }
         // `swarm --json` needs the terminal path; `run --json` is already headless.
         if self.cfg.yolo {
             cmd.arg("--yolo");
@@ -312,6 +315,64 @@ fn ingest_event(line: &str, job: &mut Job) {
         }
         _ => {}
     }
+}
+
+/// Detect a verify command for `workspace`, for the languages that can compile/test INSIDE the
+/// MCP container (matched by their manifest at the workspace root). Returns `None` for anything
+/// unrecognized AND — deliberately — for a Unity/C# project: Unity needs the licensed Editor,
+/// which can't run headless here, so C# is verified on the HOST and the agent finishes on
+/// "edited". Order matters: C# is checked first so its manifests never fall through to another
+/// command. A shallow read of the workspace root.
+fn detect_verify_command(workspace: &str) -> Option<String> {
+    let root = std::path::Path::new(workspace);
+    let has_file = |name: &str| root.join(name).is_file();
+    // Any root file whose name matches `pred` (case-insensitive) — for extension/suffix checks.
+    let any_file = |pred: &dyn Fn(&str) -> bool| -> bool {
+        std::fs::read_dir(root).ok().is_some_and(|entries| {
+            entries.flatten().any(|e| {
+                let n = e.file_name();
+                pred(&n.to_string_lossy().to_ascii_lowercase())
+            })
+        })
+    };
+
+    // Unity/C# FIRST → host-only. Recognize it so we never hand back a bogus in-container command.
+    let is_unity = root.join("Assets").is_dir() && root.join("ProjectSettings").is_dir();
+    if is_unity || any_file(&|n| n.ends_with(".csproj") || n.ends_with(".sln")) {
+        return None;
+    }
+
+    // Rust.
+    if has_file("Cargo.toml") {
+        return Some("cargo test".to_string());
+    }
+    // Go.
+    if has_file("go.mod") {
+        return Some("go test ./...".to_string());
+    }
+    // Node / TypeScript — the project's own test script (works for vitest/jest/etc.).
+    if has_file("package.json") {
+        return Some("npm test".to_string());
+    }
+    // Java/Kotlin — Maven then Gradle.
+    if has_file("pom.xml") {
+        return Some("mvn -q test".to_string());
+    }
+    if has_file("build.gradle") || has_file("build.gradle.kts") {
+        return Some("gradle test".to_string());
+    }
+    // C/C++ — CMake (ctest) preferred over a bare Makefile's `test` target.
+    if has_file("CMakeLists.txt") {
+        return Some("cmake -B build && cmake --build build && ctest --test-dir build".to_string());
+    }
+    if has_file("Makefile") || has_file("makefile") {
+        return Some("make test".to_string());
+    }
+    // Python — a pytest-style test file at the root (no single manifest is required).
+    if any_file(&|n| n.ends_with(".py") && (n.starts_with("test_") || n.ends_with("_test.py"))) {
+        return Some("python -m pytest -q".to_string());
+    }
+    None
 }
 
 /// Max characters kept per stored event line in the status tail. A `read_file` result can echo a
@@ -440,6 +501,49 @@ mod tests {
     fn mode_maps_to_subcommand() {
         assert_eq!(Mode::Run.subcommand(), "run");
         assert_eq!(Mode::Swarm.subcommand(), "swarm");
+    }
+
+    #[test]
+    fn detect_verify_command_maps_each_manifest_and_keeps_csharp_host_only() {
+        let base = std::env::temp_dir().join(format!("dc-mcp-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // (subdir, manifest file, expected command substring)
+        let cases: &[(&str, &str, &str)] = &[
+            ("rust", "Cargo.toml", "cargo test"),
+            ("go", "go.mod", "go test"),
+            ("node", "package.json", "npm test"),
+            ("maven", "pom.xml", "mvn"),
+            ("gradle", "build.gradle", "gradle test"),
+            ("cmake", "CMakeLists.txt", "ctest"),
+            ("make", "Makefile", "make test"),
+        ];
+        for (dir, manifest, expect) in cases {
+            let p = base.join(dir);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join(manifest), "x").unwrap();
+            let got = detect_verify_command(p.to_str().unwrap()).unwrap_or_default();
+            assert!(got.contains(expect), "{manifest} → {got:?}, expected to contain {expect:?}");
+        }
+        // Python by test-file convention (no manifest).
+        let py = base.join("py");
+        std::fs::create_dir_all(&py).unwrap();
+        std::fs::write(py.join("test_app.py"), "def test_x(): pass").unwrap();
+        assert_eq!(
+            detect_verify_command(py.to_str().unwrap()).as_deref(),
+            Some("python -m pytest -q")
+        );
+        // Unity → None even with a stray Cargo.toml (C# checked first, host-only).
+        let unity = base.join("unity");
+        std::fs::create_dir_all(unity.join("Assets")).unwrap();
+        std::fs::create_dir_all(unity.join("ProjectSettings")).unwrap();
+        std::fs::write(unity.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(detect_verify_command(unity.to_str().unwrap()), None, "Unity stays host-only");
+        // A bare .csproj → None too.
+        let cs = base.join("cs");
+        std::fs::create_dir_all(&cs).unwrap();
+        std::fs::write(cs.join("App.csproj"), "<Project/>").unwrap();
+        assert_eq!(detect_verify_command(cs.to_str().unwrap()), None, "C# stays host-only");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

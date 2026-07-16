@@ -36,11 +36,44 @@ Docker. To instead share a docker network, put everything on it and use the cont
 names in the URL. `DC_BASE_URLS` (comma-separated) still works if you run several
 backends and want jobs round-robined across them — see the note below.
 
+## Verification: in-container vs. on the host
+
+The agent **verifies its own edits by running the project's tests inside this
+container**, so it catches its own compile/test breaks and fixes them before
+finishing — a green run reports `outcome: "verified"`. The image ships a toolchain
+per language; the MCP detects the project from its manifest at the workspace root and
+passes the matching command to `run_verification`:
+
+| Language | Detected by | Verify command |
+| --- | --- | --- |
+| Rust | `Cargo.toml` | `cargo test` |
+| Go | `go.mod` | `go test ./...` |
+| Node / TypeScript | `package.json` | `npm test` |
+| Java | `pom.xml` | `mvn -q test` |
+| Java / Kotlin | `build.gradle[.kts]` | `gradle test` |
+| C / C++ | `CMakeLists.txt` | `cmake -B build && cmake --build build && ctest` |
+| C / C++ | `Makefile` | `make test` |
+| Python | a `test_*.py` / `*_test.py` file | `python -m pytest -q` |
+
+**Unity / C# is the exception — it is verified on the HOST, not in the container.**
+Unity compiles via the licensed Unity Editor, which can't run headless in Docker, so
+a project with `Assets/` + `ProjectSettings/` (or a `.csproj`/`.sln`) gets no
+in-container verify: the agent edits and finishes with `outcome: "edited …"`, and the
+caller runs the Unity Editor on the host and re-delegates with the failure if wrong.
+Any language with no recognized manifest is treated the same way (edit-only).
+
 ## Build
 
 ```
 docker build -f docker/mcp/Dockerfile -t dumb-coder-mcp .
 ```
+
+The image bundles the `dumb-coder` agent plus a verify toolchain for every supported
+language (Rust, Go, Node, a JDK + Maven/Gradle, make/cmake, Python) — so it is large
+(~2 GB) and the first build is slow. **Rebuild it and reconnect the MCP whenever you
+change the harness** (`/mcp reconnect dumb-coder` in Claude Code): a `docker run --rm`
+container is pinned to the image it launched with, so a running server keeps using the
+old build until you reconnect.
 
 ## Register with Claude Code
 
@@ -67,14 +100,29 @@ which `backend` a job landed on. It's either/or with the single 30B for VRAM.
 | Tool | Purpose |
 | --- | --- |
 | `dumb_coder_code` | Start a coding job. Args: `task` (required), `workspace` (default `/workspace`), `decompose` (bool — `true` fans the task out across dumb-coder's own parallel workers for larger tasks). Returns a `job_id` immediately. |
-| `dumb_coder_status` | Poll a `job_id`. Returns `state` (running/done/failed), `stop_reason`, `finished_ok`, `exit_code`, and the tail of the event stream. |
+| `dumb_coder_status` | Poll a `job_id`. Returns `state` (running/done/failed), `stop_reason`, `finished_ok`, `exit_code`, `outcome`, and the tail of the event stream. |
 | `dumb_coder_health` | Check the model backend is reachable (`dumb-coder doctor`). |
 
-The agent **writes no tests and self-decides when done** (`stop_reason: Finished`).
-Verify the diff yourself after a job completes — e.g. `git diff` + your own tests.
-Shell commands the agent needs are auto-approved (`DC_MCP_YOLO=1`); set
+`outcome` is the field to trust — it says what actually happened, so correct work is
+never read as a failure:
+
+* **`verified`** — edits made and the in-container test run passed. Good to accept
+  (still glance at the diff).
+* **`edited …`** — edits made but not verified in-container (a Unity/C# task, or no
+  recognized manifest). **Verify on the host** (`cargo test` / `pytest` / the Unity
+  Editor) and re-delegate with the failure if it's wrong.
+* **`no changes made`** / **`failed to launch`** — nothing happened; check the task
+  and the backend.
+
+The agent writes no tests of its own and self-decides when done (`stop_reason:
+Finished`). Shell commands it needs are auto-approved (`DC_MCP_YOLO=1`); set
 `DC_MCP_YOLO=0` to deny shell (edits-only, safer, but a run needing a command will
 stall).
+
+**Delegation gotcha:** the `workspace` must be a path the *container* can see — pass
+`/workspace/...` (under the bind-mount), never a host path like `C:\...`. A host path
+fails to spawn (`No such file or directory`). Put scratch files under the repo so they
+map in.
 
 ## Configuration (env)
 

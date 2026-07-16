@@ -24,18 +24,32 @@ RUN cargo build --release -p dc-cli -p dc-mcp
 # Must match the builder's Debian release so glibc matches (rust:1-slim is
 # trixie-based; a bookworm runtime is glibc-too-old and the binary won't load).
 FROM debian:trixie-slim
-# ca-certificates: HTTPS for the ureq backend when the model URL is remote.
-#
-# NO language toolchains are installed here on purpose. Verification of a delegated
-# task happens on the HOST (by the caller — Claude Code), not in this container:
-#   • the host already has cargo / python / node and the LICENSED Unity Editor;
-#   • Unity C# can only be compiled by that Editor, which can't run headless here;
-#   • keeping the image slim avoids a per-language, drift-prone duplicate of the
-#     host toolchain.
-# The delegated agent's job is to EDIT; the caller runs the real verify afterwards
-# and re-delegates with the failure if needed. See DC_MCP_NO_VERIFY below.
+# The agent VERIFIES a delegated task by running the project's tests INSIDE this
+# container, so it catches its own compile/test breaks and fixes them before finishing
+# (without a toolchain it edits blind and every error falls to the caller). Toolchains
+# for the languages that CAN run headless here (see detect_verify_command for the
+# manifest→command mapping):
+#   • ca-certificates      — HTTPS for the ureq backend / package fetches.
+#   • rustc + cargo (+ gcc) — Rust      (Cargo.toml → cargo test)
+#   • python3 + pytest      — Python    (test_*.py → python -m pytest)
+#   • golang                — Go        (go.mod → go test ./...)
+#   • nodejs + npm          — Node/TS   (package.json → npm test)
+#   • default-jdk + maven + gradle — Java/Kotlin (pom.xml → mvn test, build.gradle → gradle test)
+#   • make + cmake (gcc/g++) — C/C++    (Makefile → make test, CMakeLists.txt → ctest)
+# NOT installed: a .NET SDK. Unity C# compiles via the LICENSED Unity Editor, which
+# can't run headless in a container — a delegated C# task is verified on the HOST and
+# reported "edited" (detect_verify_command returns None for it). The MODEL runs in its
+# own container reached over the network; this image only runs the target's tests.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gcc g++ make cmake \
+        rustc cargo \
+        python3 python3-pip python3-pytest \
+        golang \
+        nodejs npm \
+        default-jdk maven gradle \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/dumb-coder /usr/local/bin/dumb-coder
