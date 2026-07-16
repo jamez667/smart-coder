@@ -75,6 +75,12 @@ change the harness** (`/mcp reconnect dumb-coder` in Claude Code): a `docker run
 container is pinned to the image it launched with, so a running server keeps using the
 old build until you reconnect.
 
+> **TODO / future:** investigate separating the languages so you can pull only what you
+> need instead of the full ~2 GB polyglot image — e.g. per-language build args/tags
+> (`--build-arg LANGS=rust,python`), a slim base image + per-language overlay images, or
+> a multi-stage split. The verify toolchains are the bulk of the size (the JDK, Go, and
+> Node dominate); the agent binary itself is tiny.
+
 ## Register with Claude Code
 
 Copy `mcp.json.example` to your project's `.mcp.json` (use an absolute path or
