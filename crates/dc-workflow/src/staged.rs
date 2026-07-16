@@ -149,7 +149,7 @@ fn looks_like_file(bullet: &str) -> Option<String> {
     if t.is_empty() || t.contains(char::is_whitespace) {
         return None;
     }
-    const EXTS: [&str; 8] = [".rs", ".py", ".js", ".ts", ".go", ".java", ".css", ".html"];
+    const EXTS: [&str; 9] = [".rs", ".py", ".js", ".ts", ".go", ".java", ".css", ".html", ".cs"];
     if EXTS.iter().any(|e| t.to_ascii_lowercase().ends_with(e)) {
         Some(t.to_string())
     } else {

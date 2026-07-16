@@ -19,6 +19,7 @@ use tree_sitter::{Parser, Query, QueryCursor};
 pub enum Language {
     Rust,
     Python,
+    CSharp,
 }
 
 impl Language {
@@ -28,6 +29,7 @@ impl Language {
         match ext {
             "rs" => Some(Language::Rust),
             "py" => Some(Language::Python),
+            "cs" => Some(Language::CSharp),
             _ => None,
         }
     }
@@ -36,6 +38,7 @@ impl Language {
         match self {
             Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),
+            Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         }
     }
 
@@ -56,6 +59,15 @@ impl Language {
                 "(function_definition name: (identifier) @def.name)
                  (class_definition name: (identifier) @def.name)
                  (call function: (identifier) @ref)"
+            }
+            Language::CSharp => {
+                "(class_declaration name: (identifier) @def.name)
+                 (struct_declaration name: (identifier) @def.name)
+                 (interface_declaration name: (identifier) @def.name)
+                 (enum_declaration name: (identifier) @def.name)
+                 (method_declaration name: (identifier) @def.name)
+                 (invocation_expression function: (identifier) @ref)
+                 (identifier) @ref"
             }
         }
     }
@@ -184,6 +196,25 @@ class Widget:
         assert!(names.contains(&"Widget"), "{names:?}");
         assert!(names.contains(&"method"), "{names:?}");
         assert!(syms.refs.contains(&"helper".to_string()), "{:?}", syms.refs);
+    }
+
+    #[test]
+    fn extracts_csharp_defs() {
+        let src = "\
+using UnityEngine;
+
+public class Player : MonoBehaviour {
+    void Start() {
+        Move();
+    }
+    void Move() {}
+}
+";
+        let syms = extract_symbols(Language::CSharp, src);
+        let names: Vec<&str> = syms.defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"Player"), "{names:?}");
+        assert!(names.contains(&"Start"), "{names:?}");
+        assert!(names.contains(&"Move"), "{names:?}");
     }
 
     #[test]
