@@ -52,6 +52,29 @@ const BUILD_STEPS: usize = 80;
 const EXTEND_STEPS: usize = 50;
 
 fn rungs() -> Vec<Rung> {
+    let all = all_rungs();
+    // DC_RUNGS=S3 (or "S2,S3") runs only the named rungs — for focusing a live run on one
+    // rung (e.g. the S3 EXTEND ceiling probe) without a code edit. Matched case-insensitively
+    // against the rung name prefix. Unset → all rungs.
+    match std::env::var("DC_RUNGS") {
+        Ok(sel) if !sel.trim().is_empty() => {
+            let want: Vec<String> = sel
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            all.into_iter()
+                .filter(|r| {
+                    let n = r.name.to_ascii_lowercase();
+                    want.iter().any(|w| n.starts_with(w))
+                })
+                .collect()
+        }
+        _ => all,
+    }
+}
+
+fn all_rungs() -> Vec<Rung> {
     vec![
         // ===== S1: URL shortener (~4 files) =====
         Rung {
@@ -649,7 +672,9 @@ fn ab_scale_ladder() {
         );
     }
     eprintln!("=============================================================\n");
-    assert_eq!(rows.len(), 3);
+    // Filtered runs (DC_RUNGS) select a subset; unfiltered runs all three.
+    assert_eq!(rows.len(), rungs().len());
+    assert!(!rows.is_empty());
 }
 
 /// Run one rung: PASS 1 builds greenfield vs oracle_v1, PASS 2 extends the SAME workspace
