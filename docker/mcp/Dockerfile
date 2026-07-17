@@ -20,36 +20,24 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release -p dc-cli -p dc-mcp
 
-# ---- runtime stage: a slim image with the two binaries + a verify toolchain ----
+# ---- runtime stage: a slim image with just the two binaries ----
 # Must match the builder's Debian release so glibc matches (rust:1-slim is
 # trixie-based; a bookworm runtime is glibc-too-old and the binary won't load).
 FROM debian:trixie-slim
-# The agent VERIFIES a delegated task by running the project's tests INSIDE this
-# container, so it catches its own compile/test breaks and fixes them before finishing
-# (without a toolchain it edits blind and every error falls to the caller). Toolchains
-# for the languages that CAN run headless here (see detect_verify_command for the
-# manifest→command mapping):
-#   • ca-certificates      — HTTPS for the ureq backend / package fetches.
-#   • rustc + cargo (+ gcc) — Rust      (Cargo.toml → cargo test)
-#   • python3 + pytest      — Python    (test_*.py → python -m pytest)
-#   • golang                — Go        (go.mod → go test ./...)
-#   • nodejs + npm          — Node/TS   (package.json → npm test)
-#   • default-jdk + maven + gradle — Java/Kotlin (pom.xml → mvn test, build.gradle → gradle test)
-#   • make + cmake (gcc/g++) — C/C++    (Makefile → make test, CMakeLists.txt → ctest)
-# NOT installed: a .NET SDK. Unity C# compiles via the LICENSED Unity Editor, which
-# can't run headless in a container — a delegated C# task is verified on the HOST and
-# reported "edited" (detect_verify_command returns None for it). The MODEL runs in its
-# own container reached over the network; this image only runs the target's tests.
+# NO language toolchains. The container is an EDIT-ONLY surface: the delegated agent
+# reads and edits the workspace, then finishes on "edited"; the CALLER (host / planning
+# agent) verifies against its own correct, warm toolchain. We deliberately do NOT ship
+# rustc/cargo/go/jdk/etc. here because:
+#   • The distro toolchain lags the host's — a modern Rust workspace needs a rustc newer
+#     than Debian ships, so an in-container `cargo test` fails on the TOOLCHAIN VERSION,
+#     not the edit: a false red the caller then has to untangle.
+#   • Cold in-container builds re-download + recompile the whole dep tree every run
+#     (minutes on a big workspace), for a result the host would produce warm anyway.
+#   • With no cargo present the model can't shell out to a build even under --yolo, so it
+#     stops burning turns fighting a toolchain that will never match the host.
+# Only ca-certificates remains — HTTPS for the ureq backend that reaches the model.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        gcc g++ make cmake \
-        rustc cargo \
-        python3 python3-pip python3-pytest \
-        golang \
-        nodejs npm \
-        default-jdk maven gradle \
-    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/dumb-coder /usr/local/bin/dumb-coder

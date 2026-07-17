@@ -186,14 +186,11 @@ impl JobStore {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        // Pass a verify command for languages that run headless in this container (Rust/Python),
-        // so the agent self-verifies and fixes its own compile/test breaks before finishing.
-        // A C# (Unity) project returns None here: Unity needs the licensed Editor, which can't run
-        // in the container — so it's verified on the HOST and the agent finishes on "edited"
-        // (dc_core::gate_finish with no command → Allow).
-        if let Some(verify) = detect_verify_command(workspace) {
-            cmd.arg("--verify").arg(verify);
-        }
+        // No in-container verify: this image ships no language toolchains (see docker/mcp/
+        // Dockerfile). The agent edits the workspace and finishes on "edited"; the CALLER
+        // (host / planning agent) verifies against its own correct, warm toolchain. An
+        // in-container verify would fail on toolchain VERSION drift (the distro rustc/etc.
+        // lags the host) and cold-rebuild the world every run, so it's deliberately host-side.
         // `swarm --json` needs the terminal path; `run --json` is already headless.
         if self.cfg.yolo {
             cmd.arg("--yolo");
@@ -317,12 +314,13 @@ fn ingest_event(line: &str, job: &mut Job) {
     }
 }
 
-/// Detect a verify command for `workspace`, for the languages that can compile/test INSIDE the
-/// MCP container (matched by their manifest at the workspace root). Returns `None` for anything
-/// unrecognized AND — deliberately — for a Unity/C# project: Unity needs the licensed Editor,
-/// which can't run headless here, so C# is verified on the HOST and the agent finishes on
-/// "edited". Order matters: C# is checked first so its manifests never fall through to another
-/// command. A shallow read of the workspace root.
+/// Map a workspace's root manifest to the command that would test it. No longer called on the
+/// hot path — the MCP container ships no toolchains and verify is host-side (see the spawn site)
+/// — but retained (test-only) as the canonical manifest→command mapping for if a host-side
+/// verify hint is ever wired back in. Returns `None` for anything unrecognized and for Unity/C#
+/// (needs the licensed Editor; host-verified). Order matters: C# is checked first so its
+/// manifests never fall through to another command. A shallow read of the workspace root.
+#[cfg(test)]
 fn detect_verify_command(workspace: &str) -> Option<String> {
     let root = std::path::Path::new(workspace);
     let has_file = |name: &str| root.join(name).is_file();
