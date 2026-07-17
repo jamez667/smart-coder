@@ -4121,10 +4121,13 @@ impl App {
                 .style(primary_button)
         };
         // Send button is full composer height, sitting flush against the input.
-        let mut bar = row![input, btn].spacing(8);
+        let mut bar = row![input, btn].spacing(0);
         // The think/debug toggles stack vertically to the right of the send button. They're kept
         // small (14px box, 11px label, tight gap) so both fit within the one-input-tall composer.
-        let mut toggles = column![].spacing(2).align_x(iced::Alignment::Start);
+        let mut toggles = column![]
+            .spacing(2)
+            .padding([0, 8])
+            .align_x(iced::Alignment::Start);
         // The Think toggle (chat mode only): fast conclusions by default, deeper reasoning
         // when you flip it on for a hard planning question.
         if has_convo {
