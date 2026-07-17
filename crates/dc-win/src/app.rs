@@ -4109,7 +4109,7 @@ impl App {
                     }
                 })
         } else if sending {
-            button(text("…").width(Fill).height(Fill).center())
+            button(text("Thinking").size(15).width(Fill).height(Fill).center())
                 .width(Length::Fixed(90.0))
                 .height(Fill)
                 .padding(0)
