@@ -265,11 +265,27 @@ pub(super) fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
     }
 }
 
-/// The key argument of a call, for the history record (path or query/name).
+/// The key argument of a call, for the repeat-dedup history record (path or
+/// query/name). For a windowed `read_file` the window (`start`/`limit`) is folded
+/// into the key so paging THROUGH a file — `read_file(a.rs, start=1)` then
+/// `read_file(a.rs, start=51)` — reads as two DISTINCT actions, not a refused
+/// "duplicate". Without this, any file past the first window is unreachable: the
+/// second page hashes identical to the first and gets nudged away, so the model
+/// can never see lines 51+ of a file it must edit. A bare re-read (same path, no
+/// window, or the identical window) still dedups, which is the case we want to nudge.
 pub(super) fn key_arg(call: &dc_tools::ValidatedCall) -> String {
     for k in ["path", "query", "name"] {
         if let Some(v) = call.str(k) {
-            return v.to_string();
+            let start = call.int("start");
+            let limit = call.int("limit");
+            return match (start, limit) {
+                (None, None) => v.to_string(),
+                _ => format!(
+                    "{v}@{}:{}",
+                    start.map(|n| n.to_string()).unwrap_or_default(),
+                    limit.map(|n| n.to_string()).unwrap_or_default()
+                ),
+            };
         }
     }
     String::new()
@@ -415,6 +431,49 @@ mod tests {
             ToolOutcome::Observation(s) => s,
             _ => panic!("expected an Observation from run_command dispatch"),
         }
+    }
+
+    fn read_call(path: &str, start: Option<i64>, limit: Option<i64>) -> dc_tools::ValidatedCall {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), json!(path));
+        if let Some(s) = start {
+            args.insert("start".to_string(), json!(s));
+        }
+        if let Some(l) = limit {
+            args.insert("limit".to_string(), json!(l));
+        }
+        dc_tools::ValidatedCall {
+            name: "read_file".to_string(),
+            args,
+        }
+    }
+
+    #[test]
+    fn key_arg_distinguishes_read_windows() {
+        use crate::recovery::action_hash;
+        // The bug: paging through a file was refused as a duplicate because the key
+        // ignored start/limit, so any file past the first window was unreachable.
+        let page1 = read_call("db.rs", Some(1), Some(50));
+        let page2 = read_call("db.rs", Some(51), Some(50));
+        assert_ne!(
+            key_arg(&page1),
+            key_arg(&page2),
+            "different windows of the same file must be distinct actions"
+        );
+        assert_ne!(
+            action_hash("read_file", &key_arg(&page1)),
+            action_hash("read_file", &key_arg(&page2)),
+            "paging forward must not hash as a repeat"
+        );
+
+        // A bare re-read (no window) is still a duplicate — the case we DO want to nudge.
+        let bare_a = read_call("db.rs", None, None);
+        let bare_b = read_call("db.rs", None, None);
+        assert_eq!(key_arg(&bare_a), key_arg(&bare_b));
+        assert_eq!(key_arg(&bare_a), "db.rs", "unwindowed read keeps the plain path key");
+
+        // The identical window twice still dedups (genuine re-read of the same page).
+        assert_eq!(key_arg(&page1), key_arg(&read_call("db.rs", Some(1), Some(50))));
     }
 
     #[test]
