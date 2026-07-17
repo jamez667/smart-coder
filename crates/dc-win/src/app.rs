@@ -38,6 +38,20 @@ const BAD: Color = Color::from_rgb(0.93, 0.45, 0.50);
 /// Amber — the "agent is working on these lines" highlight (pulses while a fix is in flight).
 const AMBER: Color = Color::from_rgb(0.95, 0.72, 0.35);
 
+// --- Spacing / shape tokens (the modern flat look) --------------------------------
+// One radius and one panel padding, so the whole UI reads as a single system and the
+// look is dialed from here — not scattered magic numbers. Panels butt together with a
+// hairline gutter instead of floating as rounded cards on a wide gap.
+
+/// The single corner radius for every widget — fully square for a flat, modern look.
+const RADIUS: f32 = 0.0;
+/// The gutter between panels: none — panels butt seamlessly against each other. The
+/// card border alone divides them.
+const GAP: f32 = 0.0;
+/// Shared inner padding for the main panels — tighter than the old 10/12 so the cramped
+/// left tree reclaims width.
+const PAD: u16 = 8;
+
 /// A stable id for the code-view scrollable, so the minimap can scroll it to a clicked line
 /// via `iced::widget::operation::scroll_to`.
 fn code_scroll_id() -> iced::advanced::widget::Id {
@@ -55,7 +69,7 @@ fn card_style(_t: &Theme) -> container::Style {
         border: Border {
             color: CARD_BORDER,
             width: 1.0,
-            radius: 8.0.into(),
+            radius: RADIUS.into(),
         },
         text_color: Some(FG),
         ..container::Style::default()
@@ -72,7 +86,7 @@ fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
         background: Some(Background::Color(bg)),
         text_color: Color::from_rgb(0.06, 0.07, 0.11),
         border: Border {
-            radius: 6.0.into(),
+            radius: RADIUS.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -90,7 +104,7 @@ fn tree_button(_t: &Theme, status: button::Status) -> button::Style {
         background: bg,
         text_color: FG,
         border: Border {
-            radius: 4.0.into(),
+            radius: RADIUS.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -118,7 +132,7 @@ fn menu_title_style(open: bool, status: button::Status) -> button::Style {
         background: bg,
         text_color: FG,
         border: Border {
-            radius: 4.0.into(),
+            radius: RADIUS.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -142,7 +156,7 @@ fn stage_toggle_button(_t: &Theme, status: button::Status) -> button::Style {
         border: Border {
             color: Color { a: 0.35, ..CARD_BORDER },
             width: 1.0,
-            radius: 4.0.into(),
+            radius: RADIUS.into(),
         },
         ..Default::default()
     }
@@ -158,7 +172,7 @@ fn menu_item_style(_t: &Theme, status: button::Status) -> button::Style {
             FG
         },
         border: Border {
-            radius: 3.0.into(),
+            radius: RADIUS.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -201,11 +215,26 @@ fn dropdown_style(_t: &Theme) -> container::Style {
         border: Border {
             color: CARD_BORDER,
             width: 1.0,
-            radius: 6.0.into(),
+            radius: RADIUS.into(),
         },
         text_color: Some(FG),
         ..container::Style::default()
     }
+}
+
+/// Text-input style: the theme default, but with our single [`RADIUS`] so the boxes
+/// match the flat panels instead of iced's rounder default corners.
+fn input_style(t: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut s = text_input::default(t, status);
+    s.border.radius = RADIUS.into();
+    s
+}
+
+/// Checkbox style: the theme default squared to our [`RADIUS`].
+fn checkbox_style(t: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let mut s = checkbox::primary(t, status);
+    s.border.radius = RADIUS.into();
+    s
 }
 
 /// A section header label (muted, uppercase-ish small caps feel via size).
@@ -241,7 +270,7 @@ fn bar_container<'a>(
             border: Border {
                 color: CARD_BORDER,
                 width: 1.0,
-                radius: 4.0.into(),
+                radius: RADIUS.into(),
             },
             ..container::Style::default()
         })
@@ -2511,12 +2540,12 @@ impl App {
         let center: Element<'_, Message> = if self.plan.started() && self.is_swarm() {
             // A swarm build in flight: the plan panel + live topology are the story.
             row![self.view_plan(), self.view_topology()]
-                .spacing(12)
+                .spacing(GAP)
                 .into()
         } else if self.plan.started() {
             // A staged build (single agent): plan panel beside the activity stream.
             row![self.view_plan(), self.view_center()]
-                .spacing(12)
+                .spacing(GAP)
                 .into()
         } else {
             // Iterate / idle: the activity stream + composer is the center column.
@@ -2528,7 +2557,7 @@ impl App {
             container(center).width(Length::FillPortion(4)).height(Fill),
             self.view_code(),
         ]
-        .spacing(12)
+        .spacing(GAP)
         .height(Fill);
 
         let gate = self.view_gatebar();
@@ -2536,7 +2565,7 @@ impl App {
         // The body content below the (flush, full-width) menu bar — this part is padded.
         // The run outcome now lives in the BUILD panel of the bottom strip (not a top
         // banner), so it no longer shoves the three columns down.
-        let mut body_col = column![].spacing(10);
+        let mut body_col = column![].spacing(GAP);
         if self.plan.started() {
             body_col = body_col.push(self.view_step_flow());
         }
@@ -2552,7 +2581,7 @@ impl App {
         // then the padded body beneath it.
         let base = column![
             self.view_menu_bar(),
-            container(body_col).width(Fill).height(Fill).padding(10),
+            container(body_col).width(Fill).height(Fill),
         ]
         .width(Fill)
         .height(Fill);
@@ -2614,15 +2643,15 @@ impl App {
         let git_section = container(git_col.spacing(6))
             .height(Length::FillPortion(1))
             .width(Fill)
-            .padding(10)
+            .padding(PAD)
             .style(card_style);
         let files_section = container(self.view_files_tab())
             .height(Length::FillPortion(3))
             .width(Fill)
-            .padding(10)
+            .padding(PAD)
             .style(card_style);
 
-        container(column![git_section, files_section].spacing(10))
+        container(column![git_section, files_section].spacing(GAP))
             .width(Length::FillPortion(2))
             .height(Fill)
             .into()
@@ -2680,6 +2709,7 @@ impl App {
             .on_input(Message::FileFilterChanged)
             .padding(4)
             .size(12)
+            .style(input_style)
             .width(Fill);
 
         let mut col = column![].spacing(2);
@@ -2775,6 +2805,7 @@ impl App {
             .on_submit(Message::GitCommit)
             .padding(6)
             .size(12)
+            .style(input_style)
             .width(Fill);
         let mut commit_btn = button(text("✓ Commit").size(12));
         if can_commit {
@@ -3372,7 +3403,7 @@ impl App {
         container(body)
             .width(Length::FillPortion(4))
             .height(Fill)
-            .padding(10)
+            .padding(PAD)
             .style(card_style)
             .into()
     }
@@ -3388,6 +3419,7 @@ impl App {
             .on_input(Message::CommentDraftChanged)
             .on_submit(Message::CommentSubmit)
             .padding(8)
+            .style(input_style)
             .width(Fill);
         let submit = button(text("Comment").size(13))
             .on_press(Message::CommentSubmit)
@@ -3522,7 +3554,7 @@ impl App {
                             })),
                             text_color: FG,
                             border: Border {
-                                radius: 5.0.into(),
+                                radius: RADIUS.into(),
                                 ..Default::default()
                             },
                             ..Default::default()
@@ -3796,7 +3828,7 @@ impl App {
         container(column![thread, composer].spacing(8))
             .width(Length::FillPortion(2))
             .height(Fill)
-            .padding(12)
+            .padding(PAD)
             .style(card_style)
             .into()
     }
@@ -3822,7 +3854,7 @@ impl App {
                 border: Border {
                     color: CARD_BORDER,
                     width: 1.0,
-                    radius: 4.0.into(),
+                    radius: RADIUS.into(),
                 },
                 ..container::Style::default()
             })
@@ -3914,6 +3946,7 @@ impl App {
             .on_input(Message::IntentChanged)
             .on_submit(send_msg.clone())
             .padding(10)
+            .style(input_style)
             .width(Fill);
         let btn = if run_active {
             button(text("⏹ cancel").size(15))
@@ -3930,7 +3963,7 @@ impl App {
                         })),
                         text_color: Color::from_rgb(0.06, 0.07, 0.11),
                         border: Border {
-                            radius: 6.0.into(),
+                            radius: RADIUS.into(),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -3954,14 +3987,16 @@ impl App {
             bar = bar.push(
                 checkbox(self.think)
                     .label("think")
-                    .on_toggle(Message::ToggleThink),
+                    .on_toggle(Message::ToggleThink)
+                    .style(checkbox_style),
             );
         }
         // Debug: echo every prompt sent to the model into the chat (always available).
         bar = bar.push(
             checkbox(self.debug)
                 .label("debug")
-                .on_toggle(Message::ToggleDebug),
+                .on_toggle(Message::ToggleDebug)
+                .style(checkbox_style),
         );
         bar.into()
     }
@@ -3976,7 +4011,7 @@ impl App {
         container(column![section("SWARM TOPOLOGY"), canvas].spacing(6))
             .width(Length::FillPortion(2))
             .height(Fill)
-            .padding(12)
+            .padding(PAD)
             .style(card_style)
             .into()
     }
@@ -4028,7 +4063,7 @@ impl App {
 
         container(scrollable(col).height(Fill))
             .width(Length::FillPortion(2))
-            .padding(12)
+            .padding(PAD)
             .style(card_style)
             .into()
     }
@@ -4084,7 +4119,7 @@ impl App {
         container(scrollable(inner).height(Fill))
             .width(Fill)
             .height(Length::FillPortion(1))
-            .padding(12)
+            .padding(PAD)
             .style(card_style)
             .into()
     }
@@ -4117,7 +4152,8 @@ impl App {
                     .height(Length::Fixed(160.0));
                 let notes = text_input("send-back notes (optional)…", &self.sendback_notes)
                     .on_input(Message::NotesChanged)
-                    .padding(6);
+                    .padding(6)
+                    .style(input_style);
                 let buttons = row![
                     button(text("Approve")).on_press(Message::GateApprove),
                     button(text("Revise")).on_press(Message::GateRevise),
@@ -4141,34 +4177,44 @@ impl App {
     fn view_settings_body(&self) -> Element<'_, Message> {
         let model = text_input("model", &self.model_input)
             .on_input(Message::ModelChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let url = text_input("backend url", &self.url_input)
             .on_input(Message::UrlChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let orch_model = text_input("orchestrator model (decomposer)", &self.orch_model_input)
             .on_input(Message::OrchModelChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let orch_url = text_input("orchestrator url", &self.orch_url_input)
             .on_input(Message::OrchUrlChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let advisor = text_input("advisor model (senior)", &self.advisor_input)
             .on_input(Message::AdvisorChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let advisor_url = text_input("advisor url", &self.advisor_url_input)
             .on_input(Message::AdvisorUrlChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let verify = text_input("verify command (optional)", &self.verify_input)
             .on_input(Message::VerifyChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let suffix = text_input("system suffix (e.g. /no_think)", &self.suffix_input)
             .on_input(Message::SuffixChanged)
-            .padding(6);
+            .padding(6)
+            .style(input_style);
         let yolo = checkbox(self.cfg.yolo)
             .label("yolo (allow shell without asking)")
-            .on_toggle(Message::ToggleYolo);
+            .on_toggle(Message::ToggleYolo)
+            .style(checkbox_style);
         let dry = checkbox(self.cfg.dry_run)
             .label("dry-run (no writes)")
-            .on_toggle(Message::ToggleDryRun);
+            .on_toggle(Message::ToggleDryRun)
+            .style(checkbox_style);
 
         let form = column![
             text("CODER  (does the file writing)")
