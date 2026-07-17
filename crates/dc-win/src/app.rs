@@ -4112,6 +4112,16 @@ impl App {
             button(text("…").width(Fill).height(Fill).center())
                 .width(Length::Fixed(90.0))
                 .height(Fill)
+                .padding(0)
+                .style(|_t: &Theme, _status| button::Style {
+                    background: Some(Background::Color(Color::from_rgb(0.72, 0.40, 0.16))),
+                    text_color: Color::from_rgb(0.12, 0.06, 0.02),
+                    border: Border {
+                        radius: RADIUS.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
         } else {
             button(text(label).size(15).width(Fill).height(Fill).center())
                 .on_press(send_msg)
