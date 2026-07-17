@@ -89,6 +89,22 @@ fn v_divider<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// A draggable version of [`v_divider`]: the same 1px hairline, but wrapped in a wider
+/// invisible grab strip that shows the horizontal-resize cursor and starts a divider drag
+/// on mouse-down. Used only between the chat and code panels.
+fn v_divider_draggable<'a>() -> Element<'a, Message> {
+    // A 1px visible line centered in a 7px hit strip, so the handle is easy to grab without
+    // widening the seam the user sees.
+    let handle = container(v_divider())
+        .width(Length::Fixed(7.0))
+        .height(Fill)
+        .align_x(iced::alignment::Horizontal::Center);
+    iced::widget::mouse_area(handle)
+        .on_press(Message::SplitDragStart)
+        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+        .into()
+}
+
 /// A 1px horizontal hairline between stacked panels, in the card-border tone.
 fn h_divider<'a>() -> Element<'a, Message> {
     container(Space::new())
@@ -594,6 +610,16 @@ struct App {
     staged_deltas: std::collections::BTreeMap<String, dc_win::gitdiff::LineDelta>,
     /// The commit-message draft typed in the git tab's VS-Code-style commit box.
     commit_msg: String,
+
+    // --- Resizable chat|code divider --------------------------------------------
+    /// Chat's share of the combined chat+code region (0.15..0.85). 0.5 = the old even
+    /// split; dragging the divider between the chat and code panels moves this.
+    chat_frac: f32,
+    /// Last-seen window width (px), from resize events — needed to turn an absolute
+    /// cursor X into a split fraction while dragging the chat|code divider.
+    window_w: f32,
+    /// True while the chat|code divider is being dragged (mouse down on the handle).
+    dragging_split: bool,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -719,6 +745,9 @@ impl Default for App {
             unstaged_deltas: std::collections::BTreeMap::new(),
             staged_deltas: std::collections::BTreeMap::new(),
             commit_msg: String::new(),
+            chat_frac: 0.5,
+            window_w: 1040.0,
+            dragging_split: false,
         }
     }
 }
@@ -852,6 +881,13 @@ pub(crate) enum Message {
     ClearWorkspace,
     /// Open the output folder of the last run in the system file manager.
     OpenOutputFolder,
+    // Resizable chat|code divider.
+    /// Mouse pressed on the chat|code divider → begin dragging it.
+    SplitDragStart,
+    /// Mouse released anywhere → stop dragging the divider.
+    SplitDragEnd,
+    /// The window was resized — remember its width so the drag can map cursor X to a fraction.
+    WindowResized(f32),
 }
 
 impl App {
@@ -896,6 +932,18 @@ impl App {
         let cursor = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                 Some(Message::GitCursorMoved(position))
+            }
+            // A button-release anywhere ends a divider drag (even if the cursor left the handle).
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )) => Some(Message::SplitDragEnd),
+            // Track the window width so a divider drag can map cursor X to a split fraction.
+            // `Opened` seeds it at startup; `Resized` keeps it current.
+            iced::Event::Window(iced::window::Event::Resized(size)) => {
+                Some(Message::WindowResized(size.width))
+            }
+            iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
+                Some(Message::WindowResized(size.width))
             }
             _ => None,
         });
@@ -2382,7 +2430,23 @@ impl App {
                 }
             }
             Message::SelectBottomTab(t) => self.bottom_tab = t,
-            Message::GitCursorMoved(p) => self.cursor_pos = p,
+            Message::GitCursorMoved(p) => {
+                self.cursor_pos = p;
+                // While the chat|code divider is held, map the absolute cursor X to chat's share
+                // of the chat+code region. The explorer occupies a fixed 20% on the left, so that
+                // region runs from 0.20·W to W.
+                if self.dragging_split && self.window_w > 0.0 {
+                    let region_left = 0.20 * self.window_w;
+                    let region_w = self.window_w - region_left;
+                    if region_w > 1.0 {
+                        let frac = (p.x - region_left) / region_w;
+                        self.chat_frac = frac.clamp(0.15, 0.85);
+                    }
+                }
+            }
+            Message::SplitDragStart => self.dragging_split = true,
+            Message::SplitDragEnd => self.dragging_split = false,
+            Message::WindowResized(w) => self.window_w = w,
             Message::GitRowMenu(path, status) => {
                 self.git_menu_at = self.cursor_pos;
                 self.git_menu = Some((path, status));
@@ -2577,12 +2641,19 @@ impl App {
             self.view_center()
         };
 
+        // The chat and code panels share the region right of the explorer; `chat_frac` splits
+        // it, driven by dragging the divider between them. Explorer stays a fixed ~20% (200 of
+        // the 1000 total portions), so chat+code get 800 to divide.
+        let chat_portion = (self.chat_frac * 800.0).round() as u16;
+        let code_portion = 800u16.saturating_sub(chat_portion);
         let body = row![
             self.view_explorer(),
             v_divider(),
-            container(center).width(Length::FillPortion(4)).height(Fill),
-            v_divider(),
-            self.view_code(),
+            container(center)
+                .width(Length::FillPortion(chat_portion))
+                .height(Fill),
+            v_divider_draggable(),
+            self.view_code(code_portion),
         ]
         .spacing(GAP)
         .height(Fill);
@@ -2679,8 +2750,10 @@ impl App {
             .padding(PAD)
             .style(card_style);
 
+        // 200 of the 1000-portion total (chat+code share the other 800) → a fixed ~20% width,
+        // so dragging the chat|code divider never moves the explorer.
         container(column![git_section, h_divider(), files_section])
-            .width(Length::FillPortion(2))
+            .width(Length::FillPortion(200))
             .height(Fill)
             .into()
     }
@@ -3092,7 +3165,7 @@ impl App {
     /// side-by-side columns; wrapping is disabled so a long line scrolls horizontally
     /// instead of wrapping into — and interrupting — the number gutter. One vertical
     /// scroll (whole editor) + one horizontal scroll (the code column) is what you get.
-    fn view_code(&self) -> Element<'_, Message> {
+    fn view_code(&self, portion: u16) -> Element<'_, Message> {
         let header = match (&self.selected_file, self.follow_agent) {
             (Some(rel), true) => format!("CODE  ·  {rel}  ·  following"),
             (Some(rel), false) => format!("CODE  ·  {rel}  ·  pinned"),
@@ -3429,7 +3502,7 @@ impl App {
         };
         let body = column![header_bar, inner].spacing(6);
         container(body)
-            .width(Length::FillPortion(4))
+            .width(Length::FillPortion(portion))
             .height(Fill)
             .padding(PAD)
             .style(card_style)
