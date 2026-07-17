@@ -3926,7 +3926,8 @@ impl App {
         let thread = scrollable(thread).height(Fill);
 
         let composer = self.view_composer();
-        container(column![thread, composer].spacing(8))
+        // A single-pixel divider separates the scrolling thread from the composer below it.
+        container(column![thread, h_divider(), composer].spacing(8))
             .width(Length::FillPortion(2))
             .height(Fill)
             .padding(PAD)
@@ -4053,7 +4054,7 @@ impl App {
             button(text("⏹ cancel").size(15))
                 .on_press(Message::CancelRun)
                 .width(Length::Fixed(110.0))
-                .padding([8, 12])
+                .height(Fill)
                 .style(|_t: &Theme, status| {
                     let hov = matches!(status, button::Status::Hovered);
                     button::Style {
@@ -4073,19 +4074,23 @@ impl App {
         } else if sending {
             button(text("…"))
                 .width(Length::Fixed(90.0))
-                .padding([8, 12])
+                .height(Fill)
         } else {
             button(text(label).size(15))
                 .on_press(send_msg)
                 .width(Length::Fixed(90.0))
-                .padding([8, 12])
+                .height(Fill)
                 .style(primary_button)
         };
-        let mut bar = row![input, btn].spacing(8).align_y(iced::Alignment::Center);
+        // Send button is full composer height, sitting flush against the input.
+        let mut bar = row![input, btn].spacing(8);
+        // The think/debug toggles stack vertically to the right of the send button, so the
+        // composer stays one tidy row tall instead of spreading its controls across the width.
+        let mut toggles = column![].spacing(4).align_x(iced::Alignment::Start);
         // The Think toggle (chat mode only): fast conclusions by default, deeper reasoning
         // when you flip it on for a hard planning question.
         if has_convo {
-            bar = bar.push(
+            toggles = toggles.push(
                 checkbox(self.think)
                     .label("think")
                     .on_toggle(Message::ToggleThink)
@@ -4093,13 +4098,16 @@ impl App {
             );
         }
         // Debug: echo every prompt sent to the model into the chat (always available).
-        bar = bar.push(
+        toggles = toggles.push(
             checkbox(self.debug)
                 .label("debug")
                 .on_toggle(Message::ToggleDebug)
                 .style(checkbox_style),
         );
-        bar.into()
+        bar = bar.push(toggles);
+        // The row's height comes from the (single-line) input; the send button's `height(Fill)`
+        // then matches it exactly, sitting flush. Toggles are centered against that height.
+        bar.align_y(iced::Alignment::Center).height(Length::Shrink).into()
     }
 
     fn view_topology(&self) -> Element<'_, Message> {
