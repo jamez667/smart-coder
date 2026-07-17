@@ -2,9 +2,9 @@
 **/*.rs.bk
 Cargo.lock
 
-# Workflow plan artifacts written by `dumb-coder plan` (spec 09) — run output,
+# Workflow plan artifacts written by `smart-coder plan` (spec 09) — run output,
 # not source.
-.dumb-coder/
+.smart-coder/
 
 # Stray stdout/stderr redirect logs from launching the GUI during dev.
-dc-win-launch-*.log
+sc-win-launch-*.log

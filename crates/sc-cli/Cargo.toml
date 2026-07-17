@@ -1,0 +1,22 @@
+[package]
+name = "sc-cli"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "smart-coder CLI: doctor + chat against a real small-model backend (M0)."
+
+[[bin]]
+name = "smart-coder"
+path = "src/main.rs"
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-model = { path = "../sc-model" }
+sc-core = { path = "../sc-core" }
+sc-tools = { path = "../sc-tools" }
+sc-swarm = { path = "../sc-swarm" }
+sc-workflow = { path = "../sc-workflow" }
+sc-tui = { path = "../sc-tui" }
+sc-web = { path = "../sc-web" }
+serde_json = { workspace = true }

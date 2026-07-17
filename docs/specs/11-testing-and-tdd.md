@@ -2,7 +2,7 @@
 
 ## Principle
 
-Testing is not a phase in `dumb-coder` — it is the **control system** for the
+Testing is not a phase in `smart-coder` — it is the **control system** for the
 whole agent. A small model cannot be trusted to judge whether its own code is
 correct; a **test can**. So every unit of work is defined by a test *before* it
 is implemented, and "done" means "the test goes green (and nothing else went
@@ -130,7 +130,7 @@ on a wall of green.
 
 ## We dogfood this
 
-`dumb-coder` itself is built test-first at the unit level. Each roadmap milestone
+`smart-coder` itself is built test-first at the unit level. Each roadmap milestone
 ([07](07-roadmap.md)) lands with unit tests for its components (the model gateway,
 tool schemas/validation, context budgeter, planner, integration logic). The
 agent's own test suite is part of every milestone's definition of done — if we

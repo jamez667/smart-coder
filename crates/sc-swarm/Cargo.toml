@@ -1,0 +1,16 @@
+[package]
+name = "sc-swarm"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The worker swarm: an orchestrator over many agent-loop workers (spec 08)."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-model = { path = "../sc-model" }
+sc-core = { path = "../sc-core" }
+sc-tools = { path = "../sc-tools" }
+sc-verify = { path = "../sc-verify" }
+serde = { workspace = true }
+serde_json = { workspace = true }

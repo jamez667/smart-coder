@@ -1,7 +1,7 @@
 # Where the time goes — speed report
 
 Measured against the live qwen3-coder-30b backend (:11435, dual-GPU) + Docker pytest
-sandbox, on a full `ab_scale` ladder run (3 rungs × 2 arms, with `DC_DIAGNOSE=1`):
+sandbox, on a full `ab_scale` ladder run (3 rungs × 2 arms, with `SC_DIAGNOSE=1`):
 **770s wall-clock, 477 model turns, 57 verifications, 11 diagnoses.**
 
 Method: wrapped the backend to time every in-loop `generate()` call, and timed Docker verify

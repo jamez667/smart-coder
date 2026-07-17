@@ -9,7 +9,7 @@ under control. Everything else builds on a working, reliable single-step loop.
 - Cargo workspace + crate boundaries ([01](01-architecture.md)).
 - `ModelBackend` trait + **OpenAI-compatible adapter** and **Ollama adapter**
   ([02](02-model-backends.md)).
-- `dumb-coder doctor`: backend reachable, model present, context budget printed.
+- `smart-coder doctor`: backend reachable, model present, context budget printed.
 - Trivial loop: prompt → model text → print. No tools yet.
 - **Exit criteria:** can chat with Gemma 4 E4B via both backends from the CLI.
 
@@ -26,9 +26,9 @@ under control. Everything else builds on a working, reliable single-step loop.
 
 ## M2 — Context discipline ✅
 **Goal:** keep a tiny window useful across many turns.
-- ✅ Context Manager (`dc-context`) with hard budget + prioritized zones, eviction
+- ✅ Context Manager (`sc-context`) with hard budget + prioritized zones, eviction
   lowest-first, sacred zones never dropped ([05](05-context-management.md)).
-- ✅ Retrieval index (`dc-index`): tree-sitter (Rust + Python) symbol graph +
+- ✅ Retrieval index (`sc-index`): tree-sitter (Rust + Python) symbol graph +
   **PageRank repo map** with task/in-play boosts; `find_symbol` tool.
 - ✅ Observation truncation (head+tail, error-prioritized, flagged) + rolling
   extractive history summary.
@@ -36,7 +36,7 @@ under control. Everything else builds on a working, reliable single-step loop.
   estimator fallback.
 - ✅ Wired into the agent loop, replacing the clone-everything prompt.
 - **Exit criteria:** ✅ a multi-turn run with whole-file observations every turn
-  provably stays under an 8k budget (`dc-core` integration test); the assembled
+  provably stays under an 8k budget (`sc-core` integration test); the assembled
   prompt is inspectable via `BuiltContext`.
 - *Deferred to a follow-up:* per-step (vs. per-run) repo-map refresh; embedding
   retrieval; lexical chunk search beyond `search_code`; more tree-sitter
@@ -48,7 +48,7 @@ under control. Everything else builds on a working, reliable single-step loop.
   0/>1 matches), `create_file`; an edit journal records before/after for diff +
   rollback (the single apply-and-record path).
 - ✅ `run_command` + `run_verification` with **structured per-test results**
-  (`dc-verify`: cargo + pytest parsers, generic exit-code fallback), behind the
+  (`sc-verify`: cargo + pytest parsers, generic exit-code fallback), behind the
   permission layer ([04](04-tools.md)).
 - ✅ **TDD loop:** the whole-suite gate refuses `finish` while the suite is red,
   feeding the failing cases back ([11](11-testing-and-tdd.md), [03](03-agent-loop.md)).
@@ -57,7 +57,7 @@ under control. Everything else builds on a working, reliable single-step loop.
   ([04](04-tools.md)).
 - **Exit criteria:** ✅ a scripted run drives a failing `sh` test red→green on a
   sample repo without breaking the suite or weakening the frozen test
-  (`dc-core` `tdd_loop` integration test); cheat-edits and red-suite finishes are
+  (`sc-core` `tdd_loop` integration test); cheat-edits and red-suite finishes are
   both rejected.
 - *Deferred:* interactive `[y/n]` confirmation prompt for `Confirm`-gated calls
   (CLI/M5); verify-red-*first* as an explicit harness-run pre-check (the loop lets
@@ -75,7 +75,7 @@ under control. Everything else builds on a working, reliable single-step loop.
   the junior keeps doing the work. No advisor → clean `Escalated`/`Stalled` stop.
 - **Exit criteria:** ✅ recovers from induced failures (bad edit, repeated action)
   without human rescue, breaks loops via an advisor nudge, and escalates cleanly
-  with no advisor (`dc-core` `recovery_loop` integration test).
+  with no advisor (`sc-core` `recovery_loop` integration test).
 - *Deferred:* automatic step-completion detection (the harness renders the plan
   and runs the retry budget, but advances steps only via the model's
   `update_plan` / on retry-exhaustion, not by inferring which call satisfied a
@@ -86,16 +86,16 @@ under control. Everything else builds on a working, reliable single-step loop.
 - ✅ **Event-stream architecture** ([01](01-architecture.md)): typed `AgentEvent`s
   emitted through an `EventSink` at every phase — the hub all observers consume.
 - ✅ Live event rendering + plan panel + honest stop lines — delivered as **two**
-  renderers over the one stream: a **full-screen TUI** (`dc-tui`, ratatui,
-  `dumb-coder run`) and a **local web dashboard** (`dc-web`, `tiny_http` + browser,
-  `dumb-coder serve`). Both are ahead of the spec's line-oriented plan / the
+  renderers over the one stream: a **full-screen TUI** (`sc-tui`, ratatui,
+  `smart-coder run`) and a **local web dashboard** (`sc-web`, `tiny_http` + browser,
+  `smart-coder serve`). Both are ahead of the spec's line-oriented plan / the
   daemon-mode-out-of-scope note ([06](06-cli-ux.md)) — pragmatic given the event
   stream made a second renderer cheap. Both verified driving real Gemma 4 E4B.
 - ✅ One-shot `run` mode (`run <task> [--verify CMD] [--plan]`).
 - ✅ **`--json` line output** — a `JsonLinesSink` over the event stream; headless
   `run --json` emits NDJSON on stdout (human notes to stderr), scriptable.
 - ✅ **Session logging + `replay`** — every `run` tees its event stream to
-  `.dumb-coder/sessions/<id>.jsonl` (override with `--log`); `replay <id>`
+  `.smart-coder/sessions/<id>.jsonl` (override with `--log`); `replay <id>`
   re-renders a past run from the log (`AgentEvent` round-trips Serialize↔Deserialize).
 - ✅ **`--dry-run`** — preview only: read-only tools run for real, every
   side-effecting tool (edit/create/run_command/run_verification) is short-circuited
@@ -146,9 +146,9 @@ agent loop, unchanged; the swarm is a coordinator above it.
   `SwarmDone`) for inspection + a future multi-worker dashboard.
 - **Exit criteria:** ✅ a task decomposing into multiple subtasks (incl. a
   dependency) is completed by parallel workers and integrated green; a
-  suite-breaking proposal is reverted (`dc-swarm` `swarm_run` + orchestrator tests).
+  suite-breaking proposal is reverted (`sc-swarm` `swarm_run` + orchestrator tests).
 - ✅ **CLI/dashboard surfacing of swarm state** — the `SwarmEvent` stream renders
-  two ways over one source: the `dc-web` swarm dashboard *and* a line-oriented CLI
+  two ways over one source: the `sc-web` swarm dashboard *and* a line-oriented CLI
   view (`swarm --cli`: task board · which worker on which subtask · integration
   accept/reject), plus `swarm --json` NDJSON parity (`SwarmEvent` round-trips
   Serialize↔Deserialize) — mirroring M5's `print_event` ([06](06-cli-ux.md)).
@@ -180,7 +180,7 @@ agent loop, unchanged; the swarm is a coordinator above it.
   test-editing subtasks.
 - ✅ **Advisor escalation before the final retry** (spec 08 / spec 02 "junior asks
   senior") — when a subtask's last retry is about to run, the orchestrator consults
-  the configured advisor via `dc_core::consult` for a one-line nudge (advice, not the
+  the configured advisor via `sc_core::consult` for a one-line nudge (advice, not the
   fix) and folds it into that attempt's worker prompt. Once per subtask, only on the
   final attempt (a subtask that recovers earlier never pays the senior call), and
   strictly optional (no advisor → clean no-op, the retry still runs). Visible as
@@ -189,33 +189,18 @@ agent loop, unchanged; the swarm is a coordinator above it.
   diffs instead); conflict *arbitration* by the orchestrator (we reject+reassign);
   the serialized shared-workspace lease fallback; specialized worker roles.
 
-## M8 — Android app + AICore (first platform client)
-**Goal:** the showcase of the "small model" thesis — fully on-device on a phone,
-as a **native Android app** using **AICore** (Gemma 4 / Gemini Nano 4) via ML Kit
-GenAI ([12](12-platform-clients.md), [10](10-prior-art.md)).
-- `dc-android` cdylib (Rust core via cargo-ndk) + Kotlin app shell.
-- AICore inference wired through `dc_model::CallbackBackend` over the JNI bridge
-  ([02](02-model-backends.md)).
-- Android effects/tools: app-scoped working directory (no arbitrary shell);
-  platform abstraction for filesystem ([04](04-tools.md)).
-- Tighter default budgets/timeouts for mobile.
-- **Exit criteria:** a scoped task runs fully offline on a device via AICore.
-- *(Stretch: self-hosted LiteRT-LM fallback for non-AICore devices.)*
-
-## M9 — Windows client (flexible)
+## M8 — Windows client (flexible)
 **Goal:** the capable desktop client — same Rust core, full tools, flexible
 backends ([12](12-platform-clients.md)).
-- Desktop shell (CLI per [06](06-cli-ux.md); GUI optional) for `x86_64-pc-windows-msvc`.
+- Desktop shell (CLI per [06](06-cli-ux.md); `sc-win` GUI) for `x86_64-pc-windows-msvc`.
 - Flexible backends (Ollama / llama.cpp / OpenAI-compat) incl. up to the 12B
   ceiling, so this client can act as the **T1 orchestrator** ([02](02-model-backends.md)).
 - Full filesystem + shell with the permission layer ([04](04-tools.md)).
-- **Exit criteria:** completes a real multi-file TDD task on Windows; optionally
-  orchestrates an Android device as an on-device worker ([08](08-orchestration-and-swarm.md)).
+- **Exit criteria:** completes a real multi-file TDD task on Windows.
 
 ---
 
 ## Post-v1 / future ideas
-- **MCP client** — consume external Model Context Protocol tool servers.
 - **User-defined tools** via config.
 - **Heterogeneous swarms** — specialized worker roles (searcher/editor/tester/
   integrator) mapped to different small models, beyond the M7 baseline
@@ -234,13 +219,13 @@ backends ([12](12-platform-clients.md)).
   benchmark; tracked from M1 so harness changes are measured against real
   small-model behavior.
   - **SWE-bench is the post-M3 feasibility check, not a current target.** Our
-    `dc-eval` red→green machinery already mirrors SWE-bench's
+    `sc-eval` red→green machinery already mirrors SWE-bench's
     `FAIL_TO_PASS`/`PASS_TO_PASS` split, but three preconditions must land first
     or a run measures missing infrastructure, not the model: **(1)** per-task
     environment isolation (Docker images with pinned deps); **(2)** the retrieval
-    index + context budgeter (M2 / `dc-index`) so a 4B model can navigate a large
+    index + context budgeter (M2 / `sc-index`) so a 4B model can navigate a large
     unfamiliar repo; **(3)** structured `run_verification` with pytest parsing
-    (M3, [04](04-tools.md)). Sequence: a `dc-eval` SWE-bench *adapter* + a tiny
+    (M3, [04](04-tools.md)). Sequence: a `sc-eval` SWE-bench *adapter* + a tiny
     pure-Python Docker subset once M2/M3 are in, then **SWE-bench Lite/Verified**
     as the real benchmark. Expect low absolute scores — purpose-built 7B coders
     sit ~18–23% ([10](10-prior-art.md)); the value is the *relative* signal across

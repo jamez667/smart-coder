@@ -9,16 +9,16 @@ that's pleasant interactively and scriptable in one-shot mode.
 
 ```bash
 # Interactive session (REPL) in the current repo
-dumb-coder
+smart-coder
 
 # One-shot task, non-interactive (good for scripts / CI experiments)
-dumb-coder run "add input validation to parse_config and a test for it"
+smart-coder run "add input validation to parse_config and a test for it"
 
 # Pick a backend/model ad hoc
-dumb-coder --backend ollama --model gemma4:e4b
+smart-coder --backend ollama --model gemma4:e4b
 
 # Replay / inspect a previous session log
-dumb-coder replay <session-id>
+smart-coder replay <session-id>
 ```
 
 ### Interactive REPL
@@ -107,17 +107,17 @@ agent presents the phase artifact and waits for a decision:
   *actually saw*, [05](05-context-management.md)).
 - `--log <path>` — write the structured session log; default to a per-session
   file under the config dir.
-- `dumb-coder replay <id>` — step through a recorded session
+- `smart-coder replay <id>` — step through a recorded session
   ([03](03-agent-loop.md)) to understand a past run.
 - `--dry-run` — plan and show intended actions without mutating anything.
 
 ## Configuration & discovery
 
-- Config precedence: **CLI flags > env vars > project `.dumb-coder.toml` > user
+- Config precedence: **CLI flags > env vars > project `.smart-coder.toml` > user
   config > defaults.** ([02](02-model-backends.md) shows the model section.)
-- A **project file** (`.dumb-coder.toml`) can pin the verification command,
+- A **project file** (`.smart-coder.toml`) can pin the verification command,
   ignore globs for indexing, and permission policy for that repo.
-- `dumb-coder doctor` — check that the configured backend is reachable, the
+- `smart-coder doctor` — check that the configured backend is reachable, the
   model is pulled, and the tokenizer is available; print effective context
   budget. (First thing to run when setup is off.)
 
@@ -125,7 +125,7 @@ agent presents the phase artifact and waits for a decision:
 
 - Default: rich human output as above.
 - `--json` (or in `run` mode): emit the event stream as JSON lines, so
-  `dumb-coder` can be driven by scripts or other tools.
+  `smart-coder` can be driven by scripts or other tools.
 
 ## Explicitly out of scope for v1
 

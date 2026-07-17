@@ -7,8 +7,8 @@ actually advertises a **128K window** ([10](10-prior-art.md)) — but the
 **effective** usable context of a small model is reliably *less* than advertised,
 and quality degrades as the window fills (a small model gets *confused* by
 irrelevant context long before it runs out of tokens). So the discipline holds:
-for `dumb-coder`, deciding *what goes into each prompt* is the difference between
-a working agent and a confused one. The Context Manager (`dc-context`) treats the
+for `smart-coder`, deciding *what goes into each prompt* is the difference between
+a working agent and a confused one. The Context Manager (`sc-context`) treats the
 window as a scarce, hard-budgeted resource — budgeting against an **effective**
 limit (a configurable fraction of the advertised window), not the nominal max.
 
@@ -39,7 +39,7 @@ current step.
 ## Strategies
 
 ### 1. Retrieval over inclusion
-Never dump whole files "just in case." The retrieval index (`dc-index`) over the
+Never dump whole files "just in case." The retrieval index (`sc-index`) over the
 repo lets the manager pull **only the relevant chunks**:
 
 - Index files into chunks (function/section granularity where the language
@@ -51,7 +51,7 @@ repo lets the manager pull **only the relevant chunks**:
   `path:line` so the model can ask to read more precisely.
 
 **Borrowed algorithm — the PageRank repo map (aider).** Rather than ad-hoc
-ranking, `dc-index` builds a **tree-sitter symbol-definition/-reference graph**
+ranking, `sc-index` builds a **tree-sitter symbol-definition/-reference graph**
 over the repo and runs **PageRank** to score how central each symbol is, with
 boosts for identifiers mentioned in the current task/conversation (~10×) and for
 files already in play (~50×). The output is a compact, token-budgeted "map" of

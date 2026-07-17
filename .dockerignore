@@ -2,6 +2,6 @@
 # so the host's build artifacts and VCS metadata must not be shipped in.
 target/
 .git/
-.dumb-coder/
+.smart-coder/
 **/*.log
 grouped-query-attention.md

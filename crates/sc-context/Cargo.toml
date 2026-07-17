@@ -1,0 +1,11 @@
+[package]
+name = "sc-context"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Context Manager: hard token budget, prioritized zones, truncation, compaction (spec 05)."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-model = { path = "../sc-model" }

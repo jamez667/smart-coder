@@ -1,0 +1,13 @@
+[package]
+name = "sc-model"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model Gateway: the pluggable ModelBackend trait and adapters."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { version = "3", features = ["json"] }

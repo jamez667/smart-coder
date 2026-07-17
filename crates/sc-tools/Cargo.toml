@@ -1,0 +1,12 @@
+[package]
+name = "sc-tools"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool Registry: strict tool schemas, validation, and built-in tools (spec 04)."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }

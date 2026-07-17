@@ -9,7 +9,7 @@ Make the tests pass **without editing test_calc.py**.
 
 ```powershell
 cd examples\demo-py
-dumb-coder run "Fix is_even in calc.py so even numbers return True" --verify "python -m pytest -q"
+smart-coder run "Fix is_even in calc.py so even numbers return True" --verify "python -m pytest -q"
 ```
 
 Reset after a run: `git checkout examples/demo-py/calc.py`

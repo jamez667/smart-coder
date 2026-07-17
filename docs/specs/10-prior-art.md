@@ -1,6 +1,6 @@
 # 10 — Prior art & references
 
-`dumb-coder` is not inventing the agentic-coding wheel. This doc records the
+`smart-coder` is not inventing the agentic-coding wheel. This doc records the
 systems and techniques we deliberately borrow from, what we take from each, and
 the open debates we're walking into. It exists so design choices in the other
 specs can point at evidence rather than assertion.
@@ -27,36 +27,11 @@ Sources: [Ollama `gemma4:e4b`](https://ollama.com/library/gemma4:e4b),
 [Google AI — Gemma 4 overview](https://ai.google.dev/gemma/docs/core),
 [InfoWorld](https://www.infoworld.com/article/4156597/googles-gemma-4-shines-on-local-systems-both-big-and-small.html).
 
-## On-device Android: AICore vs LiteRT-LM
-
-Two ways to run Gemma 4 locally on Android, both feeding the on-device adapter
-([02](02-model-backends.md), M8 in [07](07-roadmap.md)):
-
-- **AICore (OS-managed).** Android's **AICore** system service ships and manages
-  the model on the device's behalf; on supported devices **Gemma 4 runs as
-  Gemini Nano 4** — so AICore *is* a Gemma 4 path, not a departure from it. No
-  weights to bundle, hardware-accelerated, ~4× faster / ~60% less battery than
-  the prior gen. **Catch:** flagship-only (~12GB RAM, supported SoC, Gemini Nano
-  v3+ on board). The recommended *production* path where the hardware exists.
-- **LiteRT-LM (self-hosted).** Ship and run **Gemma 4 E4B/E2B** ourselves via
-  **LiteRT-LM** (the recommended successor to the now-maintenance-mode MediaPipe
-  LLM Inference API). Models are published ready-to-run
-  (`litert-community/gemma-4-E4B-it-litert-lm`). Broader device reach and full
-  control; cost is bundling weights.
-
-**Our posture:** prefer AICore when present, fall back to self-hosted LiteRT-LM —
-"runs broadly on modest hardware" beats "fastest on flagships only."
-
-Sources: [Announcing Gemma 4 in the AICore Developer Preview](https://android-developers.googleblog.com/2026/04/AI-Core-Developer-Preview.html),
-[Gemma 4 = engine behind Gemini Nano on Android](https://gadgetbond.com/google-gemma-4-android-local-agentic-ai-intelligence/),
-[LLM Inference guide for Android (Google AI Edge)](https://ai.google.dev/edge/mediapipe/solutions/genai/llm_inference/android),
-[gemma-4-E4B-it-litert-lm](https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm).
-
 ## Feasibility evidence
 
 - **Harness >> raw model.** Surveys are blunt: "every model performs
   significantly better inside a structured agent harness than in raw chat mode —
-  that investment isn't optional." This is the core `dumb-coder` thesis, and it's
+  that investment isn't optional." This is the core `smart-coder` thesis, and it's
   the consensus. ([MindStudio](https://www.mindstudio.ai/blog/best-open-source-llms-agentic-coding-2026))
 - **The small-model gap is real.** Purpose-built 7B coding models score ~18–23%
   on SWE-bench Verified (SWE-Dev-7B: 23.4%); the field recommends 27B+ for
@@ -75,7 +50,7 @@ Sources: [Announcing Gemma 4 in the AICore Developer Preview](https://android-de
   chat files ~50×; output is token-budgeted. Beats naive file inclusion on edit
   accuracy by precomputing relevance from the code's actual structure instead of
   asking the model to navigate. → adopt in [05](05-context-management.md) /
-  `dc-index`.
+  `sc-index`.
 - **Auto test/lint-repair loop** and **precise edit formats** → [03](03-agent-loop.md)
   (verify) and [04](04-tools.md) (`edit_file`).
 - Refs: [Building a better repository map with tree-sitter](https://aider.chat/2023/10/22/repomap.html),
@@ -131,7 +106,7 @@ softened, but to a *specific* pattern we should adopt: **"writes stay
 single-threaded; multiple agents contribute intelligence"** (e.g. parallel
 coding + review loops, not parallel writers).
 
-**What this means for `dumb-coder`:** our worktree-per-worker model is the
+**What this means for `smart-coder`:** our worktree-per-worker model is the
 *optimistic* form of multi-agent. We therefore default to the conservative
 posture in [08](08-orchestration-and-swarm.md) — **parallelize exploration and
 proposals, serialize integration/writes through the orchestrator** — with full
@@ -145,7 +120,7 @@ mandatory integration-verification gate is the backstop, not the only defense.
 
 | Borrowed idea | Lands in |
 | --- | --- |
-| PageRank tree-sitter repo map | [05](05-context-management.md), `dc-index` |
+| PageRank tree-sitter repo map | [05](05-context-management.md), `sc-index` |
 | Event-stream architecture | [01](01-architecture.md) |
 | Agent-Computer Interface (tools for the model) | [04](04-tools.md) |
 | Grammar-constrained tool calls (+ envelope-only caveat) | [02](02-model-backends.md) |

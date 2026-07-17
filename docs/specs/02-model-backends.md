@@ -2,16 +2,16 @@
 
 ## Goal
 
-One agent, many runtimes. The same `dumb-coder` session must run against
-**Ollama, llama.cpp's server, vLLM, an on-device Android runtime, or any
-OpenAI-compatible endpoint** with nothing but a config change. The harness is
+One agent, many runtimes. The same `smart-coder` session must run against
+**Ollama, llama.cpp's server, vLLM, or any OpenAI-compatible endpoint** with
+nothing but a config change. The harness is
 tuned for small models (≤ 12B, ideally Gemma 4 E4B), but it must not be
 coupled to *how* those models are served.
 
 ## The `ModelBackend` trait
 
-All inference goes through one trait in `dc-model`. Concrete adapters implement
-it; `dc-core` only ever sees the trait.
+All inference goes through one trait in `sc-model`. Concrete adapters implement
+it; `sc-core` only ever sees the trait.
 
 ```rust
 // Illustrative — not final signatures.
@@ -85,28 +85,8 @@ schema paths matter most for models that lack it.
    Ollama-specific options. First-class because it's the easiest local setup.
 3. **llama.cpp (direct/server)** — to expose **GBNF grammar** constrained
    decoding, which gives the most reliable tool calls on tiny models.
-4. **On-device / Android** — run the model fully offline on a phone, the
-   showcase of the small-model thesis. Two flavors behind one adapter
-   ([10](10-prior-art.md)):
-   - **AICore (OS-managed)** — call Android's **AICore** system service, which
-     runs **Gemma 4 as Gemini Nano 4** on-device: most efficient (no weights to
-     ship, hardware-accelerated, big battery wins), but **flagship-only**
-     (~12GB RAM + supported SoC). Preferred where available.
-   - **LiteRT-LM (self-hosted)** — ship and run **Gemma 4 E4B/E2B** ourselves via
-     the **LiteRT-LM** runtime (the recommended successor to MediaPipe LLM
-     Inference). Broader device support and full control, at the cost of bundling
-     weights.
-   The adapter **prefers AICore when present and falls back to self-hosted
-   LiteRT-LM** — consistent with "runs broadly on modest hardware." Behind a
-   feature flag; thinnest viable adapter first. (A desktop/CPU `llama.cpp` or
-   `MLC` build covers the same "in-process, offline" need off-phone.)
 
-   On Android, AICore is reachable only from a native app via ML Kit GenAI, so the
-   adapter is realised as a **callback backend** (`CallbackBackend`) whose closure
-   crosses a JNI bridge into the Kotlin AICore wrapper — keeping the Rust core
-   platform-agnostic. See [12 — Platform clients](12-platform-clients.md).
-
-> A backend can technically point at a large model, but `dumb-coder` is
+> A backend can technically point at a large model, but `smart-coder` is
 > developed and benchmarked against small ones — that's the whole premise.
 
 ## Model configuration
@@ -114,9 +94,9 @@ schema paths matter most for models that lack it.
 Backends and models are selected by config (file + CLI flags + env), not code.
 
 ```toml
-# ~/.config/dumb-coder/config.toml  (illustrative)
+# ~/.config/smart-coder/config.toml  (illustrative)
 [model]
-backend = "ollama"            # ollama | openai | llamacpp | android
+backend = "ollama"            # ollama | openai | llamacpp
 model   = "gemma4:e4b"
 context_tokens = 8192         # override / cap the window we actually use
 temperature = 0.2
@@ -124,7 +104,7 @@ seed = 42
 
 [model.openai]               # used when backend = "openai"
 base_url = "http://localhost:8000/v1"
-api_key_env = "DC_API_KEY"   # optional, for remote OpenAI-compat servers
+api_key_env = "SC_API_KEY"   # optional, for remote OpenAI-compat servers
 ```
 
 Multiple named profiles are allowed (e.g. a fast `planner` model and a separate
@@ -135,7 +115,7 @@ ceiling) and workers are tiny profiles ([08](08-orchestration-and-swarm.md)).
 
 ## Tiered model assignment
 
-Named profiles enable the most important routing decision in `dumb-coder`:
+Named profiles enable the most important routing decision in `smart-coder`:
 **match model capability to the cognitive difficulty of the work.** The hard,
 judgment-heavy work goes to the biggest model we allow; the narrow, verifiable
 work goes to the smallest, fastest ones. Crucially, **writing a good test or

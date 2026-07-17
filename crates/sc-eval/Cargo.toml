@@ -1,0 +1,25 @@
+[package]
+name = "sc-eval"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The smart-coder eval harness: score a solver on red->green tasks."
+
+[lib]
+name = "sc_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sc-eval"
+path = "src/main.rs"
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-model = { path = "../sc-model" }
+sc-core = { path = "../sc-core" }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

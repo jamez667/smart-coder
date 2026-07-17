@@ -1,0 +1,15 @@
+[package]
+name = "sc-tui"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Full-screen TUI that visualizes a live agent run from the event stream (spec 01/06)."
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-model = { path = "../sc-model" }
+sc-tools = { path = "../sc-tools" }
+sc-proto = { path = "../sc-proto" }
+ratatui = "0.30"
+crossterm = "0.29"

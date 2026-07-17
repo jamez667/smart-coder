@@ -1,4 +1,4 @@
-# dumb-coder eval suite (M1). Each task is a red->green coding problem.
+# smart-coder eval suite (M1). Each task is a red->green coding problem.
 # Paths are resolved relative to this file. See docs/specs/11-testing-and-tdd.md.
 
 [[tasks]]

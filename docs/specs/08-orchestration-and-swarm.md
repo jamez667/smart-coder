@@ -5,7 +5,7 @@
 A single tiny model is a weak agent. But **many tiny models, each given a
 narrow, well-scoped subtask, coordinated by one larger model**, can cover a lot
 of ground — cheaply and in parallel. This is the second core bet of
-`dumb-coder` (the first being "the harness is smart, the model is dumb",
+`smart-coder` (the first being "the harness is smart, the model is dumb",
 [00](00-overview.md)):
 
 > One **orchestrator** model (the biggest we allow — up to the 12B ceiling)
@@ -64,7 +64,7 @@ combinatorial chaos of peer-to-peer small-model chatter.
 - **Hub-and-spoke = all coordination flows through the orchestrator.** No worker
   ever depends on another worker's running state.
 
-## Each worker IS a `dumb-coder` agent loop
+## Each worker IS a `smart-coder` agent loop
 
 A worker is not a new concept — it's the single-agent loop from
 [03](03-agent-loop.md), scoped to one subtask, with one tiny model, its own
@@ -81,7 +81,7 @@ correct diffs can still break in combination (semantic conflicts). Cognition's
 distilled rule is **"writes stay single-threaded; multiple agents contribute
 intelligence."**
 
-So `dumb-coder` defaults to the **conservative** posture and treats aggressive
+So `smart-coder` defaults to the **conservative** posture and treats aggressive
 parallel-write as an opt-in we validate empirically against the eval suite
 ([07](07-roadmap.md)):
 
@@ -213,7 +213,7 @@ Per subtask, after integration:
    below `max_subtask_retries` (default **2**; `0` restores today's
    no-retry behaviour). Re-dispatch the *same* subtask to a worker with a
    **feedback-augmented prompt**: the still-failing test names and their assertion
-   messages (`dc_verify::TestReport::failed()` already carries `name` +
+   messages (`sc_verify::TestReport::failed()` already carries `name` +
    `message`), plus the current (already-merged) file contents. This is the
    swarm-level analogue of the agent loop feeding a failing case back to the model
    ([11](11-testing-and-tdd.md)) — "here's what's still wrong, try again", not a

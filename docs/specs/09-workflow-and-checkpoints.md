@@ -2,7 +2,7 @@
 
 ## Principle
 
-`dumb-coder` does not jump from a one-line request straight to editing code. For
+`smart-coder` does not jump from a one-line request straight to editing code. For
 any non-trivial task it runs a **staged pipeline**, and between every stage it
 **stops at a human checkpoint** for review and sign-off before continuing.
 
@@ -115,7 +115,7 @@ Rules:
 ## Artifacts are durable, versioned, and inspectable
 
 - Every phase artifact is written to disk (e.g. under `docs/` and/or a
-  `.dumb-coder/plan/` directory) and committed, so the plan is **reviewable as a
+  `.smart-coder/plan/` directory) and committed, so the plan is **reviewable as a
   diff** and survives across sessions (important in ephemeral environments).
 - Because artifacts persist, the workflow is **resumable**: stop after the
   architecture gate today, resume at layout tomorrow — the approved artifacts are

@@ -1,8 +1,8 @@
-# Plan — the plan-first conversational IDE (dc-win pivot)
+# Plan — the plan-first conversational IDE (sc-win pivot)
 
 ## The shift
 
-`dc-win` today is a **task-runner GUI**: type intent → `⚒ iterate` → the agent works
+`sc-win` today is a **task-runner GUI**: type intent → `⚒ iterate` → the agent works
 autonomously → stops. That's a CLI/batch model wearing a window.
 
 The new model is a **plan-first conversational IDE**: you and the agent *talk*, fast and
@@ -25,7 +25,7 @@ Detection is a cheap filesystem check on open (reuse `find_readme` / `find_todo_
 
 ## The conversation engine (the real new primitive)
 
-`dc-core`'s agent loop is one-shot; it is NOT a chat session. But `dc-model` already has
+`sc-core`'s agent loop is one-shot; it is NOT a chat session. But `sc-model` already has
 the primitive we need:
 
 ```
@@ -34,10 +34,10 @@ GenerateRequest::new(vec![Message::system(..), Message::user(..), Message::assis
 ```
 
 So a **multi-turn chat is just a growing `Vec<Message>`**. New host-testable type in
-`dc-win`:
+`sc-win`:
 
-- `crates/dc-win/src/chat.rs` — `Conversation`:
-  - holds `Vec<dc_model::Message>` (system + running user/assistant turns),
+- `crates/sc-win/src/chat.rs` — `Conversation`:
+  - holds `Vec<sc_model::Message>` (system + running user/assistant turns),
   - a **mode-shaped system prompt** (scratch vs existing; injects the current README/TODO
     contents so the model always plans against the real files),
   - `fn user_turn(&mut self, text: &str)` appends a user message,

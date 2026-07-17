@@ -1,28 +1,26 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/dc-proto",
-    "crates/dc-model",
-    "crates/dc-tools",
-    "crates/dc-context",
-    "crates/dc-index",
-    "crates/dc-verify",
-    "crates/dc-core",
-    "crates/dc-swarm",
-    "crates/dc-workflow",
-    "crates/dc-tui",
-    "crates/dc-win",
-    "crates/dc-web",
-    "crates/dc-mcp",
-    "crates/dc-cli",
-    "crates/dc-eval",
-    "crates/dc-android",
+    "crates/sc-proto",
+    "crates/sc-model",
+    "crates/sc-tools",
+    "crates/sc-context",
+    "crates/sc-index",
+    "crates/sc-verify",
+    "crates/sc-core",
+    "crates/sc-swarm",
+    "crates/sc-workflow",
+    "crates/sc-tui",
+    "crates/sc-win",
+    "crates/sc-web",
+    "crates/sc-cli",
+    "crates/sc-eval",
 ]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/jamez667/dumb-coder"
+repository = "https://github.com/jamez667/smart-coder"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

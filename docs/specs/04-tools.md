@@ -109,6 +109,5 @@ execution:
 ## Extensibility (post-v1)
 
 The registry is designed so tools can be added without touching the loop. Future
-directions ([07](07-roadmap.md)): user-defined tools via config, and an **MCP
-client** so `dumb-coder` can consume external Model Context Protocol servers.
-Out of scope for v1.
+directions ([07](07-roadmap.md)): user-defined tools via config. Out of scope for
+v1.

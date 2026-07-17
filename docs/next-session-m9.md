@@ -6,8 +6,8 @@ the next session re-derives facts rather than trusting this summary.
 
 ---
 
-Context: dumb-coder (Rust agentic coding tool for small models), at
-`c:\Users\mail\working\Personal\dumb-coder`, on branch `main` (the repo's default;
+Context: smart-coder (Rust agentic coding tool for small models), at
+`c:\Users\mail\working\Personal\smart-coder`, on branch `main` (the repo's default;
 the old `claude/agentic-coding-tool-specs-fp1oid` branch is kept and points at the
 same commit). M0–M8 core is done; the swarm (M7) is complete including the
 subtask-retry loop and advisor-escalation-before-final-retry. Everything is pushed.
@@ -24,9 +24,9 @@ web dashboard and NOT a web-view wrapper.** It is a **vibe-coding** app:
 > should be genuinely modern — this is a showcase of the "small model" thesis, so
 > the app should feel polished, not a debug panel.
 
-The Rust core, the `dc-cli` shell, flexible backends
-(`dc_model::OpenAiBackend` for Ollama/llama.cpp/OpenAI-compat), Windows shell
-selection (`cmd /C` in `crates/dc-verify/src/run.rs`), and the permission layer
+The Rust core, the `sc-cli` shell, flexible backends
+(`sc_model::OpenAiBackend` for Ollama/llama.cpp/OpenAI-compat), Windows shell
+selection (`cmd /C` in `crates/sc-verify/src/run.rs`), and the permission layer
 already exist and have been built and live-tested on this Windows box throughout —
 so M9 is **almost entirely new GUI work over a proven core**, not core work.
 
@@ -43,19 +43,19 @@ Read first (authoritative — follow them, don't trust this file where they diff
 - `docs/specs/07-roadmap.md` M9 bullet.
 
 Study these to bind the UI to existing data, NOT to copy the web UI's looks:
-- `crates/dc-core` events — `AgentEvent` is the live data model (it's
-  `Serialize`/`Deserialize`); `dc_swarm::SwarmEvent` is the swarm's. The app renders
-  these. See how `dc-cli`'s `print_event` / `dc-swarm`'s `print_swarm_event`
+- `crates/sc-core` events — `AgentEvent` is the live data model (it's
+  `Serialize`/`Deserialize`); `sc_swarm::SwarmEvent` is the swarm's. The app renders
+  these. See how `sc-cli`'s `print_event` / `sc-swarm`'s `print_swarm_event`
   interpret every variant — that's the vocabulary of what to show.
-- `crates/dc-cli/src/lib.rs` — the `Cli` struct IS the config surface (backends,
+- `crates/sc-cli/src/lib.rs` — the `Cli` struct IS the config surface (backends,
   models, advisor/orchestrator, verify command, `--max-workers`/`--max-retries`/
   `--frozen`, `--dry-run`/`--yolo`/`--allow`). The GUI is just another front-end
   producing the same config; mirror these fields as UI controls.
-- `crates/dc-cli/src/main.rs` — how a run and a swarm are actually wired
+- `crates/sc-cli/src/main.rs` — how a run and a swarm are actually wired
   (`cli.backend()`/`cli.orchestrator()`, `swarm_config`, the sinks). The app calls
-  the same `dc_core` / `dc_swarm` entry points on a worker thread and pumps events
+  the same `sc_core` / `sc_swarm` entry points on a worker thread and pumps events
   to the UI.
-- `crates/dc-web` and `crates/dc-tui` — ONLY as references for *what* is worth
+- `crates/sc-web` and `crates/sc-tui` — ONLY as references for *what* is worth
   surfacing (Hub/sink pattern, event→view mapping). Do not wrap or embed them; the
   user wants native.
 
@@ -74,13 +74,13 @@ the native GUI stack.** Options for a Rust-native Windows desktop app:
 Lead with **egui/eframe** and a concrete v0, get the user's pick, then plan.
 
 Suggested v0 (confirm/trim with the user in plan mode):
-- A new THIN shell crate `crates/dc-win` (cdylib? no — a `bin` producing the native
+- A new THIN shell crate `crates/sc-win` (cdylib? no — a `bin` producing the native
   `.exe`). Add to workspace `members`. Keep logic in the core (spec 01).
 - One window, modern layout: an **intent input** (type what you want, submit), a
   **live activity view** that renders the `AgentEvent`/`SwarmEvent` stream as it
   arrives (steps, tool calls, retries, integration, the honest stop line), a
   **plan / task-board panel**, and a **diff + test-results panel** (read-only —
-  there's no editor; show `dc_verify::TestReport` failure-first per spec 05/11).
+  there's no editor; show `sc_verify::TestReport` failure-first per spec 05/11).
 - **Approval gates as first-class UI**: confirm-gated `run_command` and the staged
   workflow checkpoints (spec 09) become approve/revise/abort buttons, not a CLI
   prompt. This is the core interaction that makes it "drive a coding agent", not
@@ -105,11 +105,11 @@ Working rules (unchanged):
   part — keep it thin so most logic stays tested.
 - Gate every change: `cargo test` (touched crates) + `cargo clippy --all-targets --
   -D warnings` + `cargo fmt --all`. Python-based verify commands in tests, never
-  `sh` (not on this Windows box). Two pre-existing `dc-core/tests/tdd_loop.rs`
+  `sh` (not on this Windows box). Two pre-existing `sc-core/tests/tdd_loop.rs`
   shell-based failures are NOT regressions (confirm with `git stash` if unsure).
 - Live backends are Docker containers: advisor-e4b :11434, coder-0 :11435,
   coder-1 :11436 (`GET /v1/models` to check). Build and run the native app, plus the
-  fresh `target/debug/dumb-coder.exe` for any CLI cross-check — not the stale
+  fresh `target/debug/smart-coder.exe` for any CLI cross-check — not the stale
   `~/.cargo/bin` copy. Rebuild before a live run.
 - A GUI app can't be proven by a unit test alone — plan to actually launch it on
   this Windows box and drive a real task through a live backend as the exit check

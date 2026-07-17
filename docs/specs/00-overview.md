@@ -2,7 +2,7 @@
 
 ## Vision
 
-`dumb-coder` is a terminal-based agentic coding assistant whose defining
+`smart-coder` is a terminal-based agentic coding assistant whose defining
 constraint is that it runs on **small** language models — never larger than 12B
 parameters, and ideally on a model as small as **Gemma 4 E4B**.
 
@@ -15,7 +15,7 @@ schema-enforced outputs, and verification loops.
 ## Why this is hard (and the design follows from it)
 
 Small models differ from frontier models in specific, predictable ways. Every
-major design decision in `dumb-coder` is a direct response to one of these:
+major design decision in `smart-coder` is a direct response to one of these:
 
 | Small-model weakness | Consequence | Design response |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ major design decision in `dumb-coder` is a direct response to one of these:
 1. **Run a real coding task end-to-end** on Gemma 4 E4B class models: read a
    repo, make a focused change across a few files, run tests, iterate.
 2. **Backend-agnostic.** The same agent runs against Ollama, a llama.cpp
-   server, vLLM, or an on-device Android runtime with only config changes.
+   server, vLLM, or any OpenAI-compatible endpoint with only config changes.
 3. **Deterministic, auditable loop.** Every model turn, tool call, and context
    decision is logged and replayable. The user can always see *why* the agent
    did something.
