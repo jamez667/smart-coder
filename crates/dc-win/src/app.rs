@@ -37,6 +37,9 @@ const GOOD: Color = Color::from_rgb(0.45, 0.78, 0.55);
 const BAD: Color = Color::from_rgb(0.93, 0.45, 0.50);
 /// Amber — the "agent is working on these lines" highlight (pulses while a fix is in flight).
 const AMBER: Color = Color::from_rgb(0.95, 0.72, 0.35);
+/// Orange — the primary action buttons (Send / build / iterate / Execute). A warm, confident
+/// call-to-action against the cool dark canvas.
+const ORANGE: Color = Color::from_rgb(0.96, 0.55, 0.24);
 
 // --- Spacing / shape tokens (the modern flat look) --------------------------------
 // One radius and one panel padding, so the whole UI reads as a single system and the
@@ -119,17 +122,17 @@ fn h_divider<'a>() -> Element<'a, Message> {
 
 /// Primary (accent-filled) button style for the build action.
 fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
-    // A clean, crisp accent button: solid fill that brightens on hover and dims on press. No
-    // shadow or fake bevel — flat and modern, matching the rest of the UI. The label is centered
-    // by the caller (a Fill-sized, centered text).
+    // A clean, crisp orange action button: solid fill that brightens on hover and dims on press.
+    // No shadow or fake bevel — flat and modern, matching the rest of the UI. The label is
+    // centered by the caller (a Fill-sized, centered text).
     let bg = match status {
-        button::Status::Hovered => Color::from_rgb(0.58, 0.73, 1.0),
-        button::Status::Pressed => Color::from_rgb(0.40, 0.56, 0.90),
-        _ => ACCENT,
+        button::Status::Hovered => Color::from_rgb(1.0, 0.63, 0.33),
+        button::Status::Pressed => Color::from_rgb(0.85, 0.47, 0.18),
+        _ => ORANGE,
     };
     button::Style {
         background: Some(Background::Color(bg)),
-        text_color: Color::from_rgb(0.05, 0.06, 0.10),
+        text_color: Color::from_rgb(0.12, 0.06, 0.02),
         border: Border {
             radius: RADIUS.into(),
             ..Default::default()
@@ -4048,7 +4051,7 @@ impl App {
             (
                 "Talk through the plan — ask, refine, decide what's next…",
                 Message::ChatSend,
-                "send",
+                "Send",
             )
         } else {
             (
