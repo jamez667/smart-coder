@@ -3923,14 +3923,15 @@ impl App {
                 }
             }
         }
-        let thread = scrollable(thread).height(Fill);
+        // The thread scrolls inside its own padding; the composer below spans the panel edge
+        // to edge (its divider + input reach the left/right/bottom), so there's no gutter
+        // around the input. Hence the panel container itself is unpadded.
+        let thread = container(scrollable(thread).height(Fill)).padding(PAD);
 
         let composer = self.view_composer();
-        // A single-pixel divider separates the scrolling thread from the composer below it.
-        container(column![thread, h_divider(), composer].spacing(8))
+        container(column![thread, composer])
             .width(Length::FillPortion(2))
             .height(Fill)
-            .padding(PAD)
             .style(card_style)
             .into()
     }
@@ -4044,10 +4045,14 @@ impl App {
         // A fix/iterate run in flight → a Cancel button (the run is the slow, cancellable
         // thing). A quick chat/triage reply just shows a busy "…".
         let run_active = self.session.is_some();
+        // The composer is exactly one input tall — a fixed height so the stacked think/debug
+        // toggles (which are naturally taller than a single-line input) don't inflate the row
+        // and leave dead space above/below the input.
+        const INPUT_H: f32 = 38.0;
         let input = text_input(placeholder, &self.intent)
             .on_input(Message::IntentChanged)
             .on_submit(send_msg.clone())
-            .padding(10)
+            .padding([8, 10])
             .style(input_style)
             .width(Fill);
         let btn = if run_active {
@@ -4105,9 +4110,17 @@ impl App {
                 .style(checkbox_style),
         );
         bar = bar.push(toggles);
-        // The row's height comes from the (single-line) input; the send button's `height(Fill)`
-        // then matches it exactly, sitting flush. Toggles are centered against that height.
-        bar.align_y(iced::Alignment::Center).height(Length::Shrink).into()
+        // Fix the row to one input height: the send button's `height(Fill)` then matches the
+        // input exactly (flush), and the row no longer stretches to the taller toggle stack —
+        // killing the dead space above/below the input. Toggles center against that height.
+        let bar = bar
+            .align_y(iced::Alignment::Center)
+            .height(Length::Fixed(INPUT_H));
+        // The divider spans the full panel width; the input bar gets a little horizontal
+        // breathing room but no vertical padding, so it sits flush to the bottom with the
+        // divider right on top of it.
+        let bar = container(bar).padding([0, PAD]);
+        column![h_divider(), bar].spacing(0).into()
     }
 
     fn view_topology(&self) -> Element<'_, Message> {
