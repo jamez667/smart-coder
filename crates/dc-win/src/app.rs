@@ -25,6 +25,9 @@ use dc_workflow::{Decision, Phase};
 
 /// Panel/card surface — a hair lighter than the window background.
 const SURFACE: Color = Color::from_rgb(0.106, 0.118, 0.18);
+/// Input field fill — a touch lighter than [`SURFACE`], so the composer input stands out
+/// gently from the panel behind it.
+const INPUT_BG: Color = Color::from_rgb(0.15, 0.165, 0.24);
 /// A subtle border around cards.
 const CARD_BORDER: Color = Color::from_rgb(0.20, 0.22, 0.32);
 /// Primary text.
@@ -292,7 +295,7 @@ fn input_style_borderless(t: &Theme, status: text_input::Status) -> text_input::
     let mut s = text_input::default(t, status);
     s.border.width = 0.0;
     s.border.radius = RADIUS.into();
-    s.background = Background::Color(SURFACE);
+    s.background = Background::Color(INPUT_BG);
     s
 }
 
