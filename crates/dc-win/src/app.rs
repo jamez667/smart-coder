@@ -96,12 +96,13 @@ fn v_divider<'a>() -> Element<'a, Message> {
 /// invisible grab strip that shows the horizontal-resize cursor and starts a divider drag
 /// on mouse-down. Used only between the chat and code panels.
 fn v_divider_draggable<'a>() -> Element<'a, Message> {
-    // A 1px visible line centered in a 7px hit strip, so the handle is easy to grab without
-    // widening the seam the user sees.
+    // A 1px visible line at the LEFT of a 7px hit strip: the line sits flush against the chat
+    // panel's edge (so the composer's horizontal divider meets it with no gap), while the grab
+    // area still extends 6px rightward for an easy drag target.
     let handle = container(v_divider())
         .width(Length::Fixed(7.0))
         .height(Fill)
-        .align_x(iced::alignment::Horizontal::Center);
+        .align_x(iced::alignment::Horizontal::Left);
     iced::widget::mouse_area(handle)
         .on_press(Message::SplitDragStart)
         .interaction(iced::mouse::Interaction::ResizingHorizontally)
