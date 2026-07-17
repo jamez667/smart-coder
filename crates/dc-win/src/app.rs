@@ -98,11 +98,17 @@ fn v_divider<'a>() -> Element<'a, Message> {
 fn v_divider_draggable<'a>() -> Element<'a, Message> {
     // A 1px visible line at the LEFT of a 7px hit strip: the line sits flush against the chat
     // panel's edge (so the composer's horizontal divider meets it with no gap), while the grab
-    // area still extends 6px rightward for an easy drag target.
+    // area still extends 6px rightward for an easy drag target. The strip is filled with the
+    // panel SURFACE so the 6px right of the line matches the code panel it borders (otherwise
+    // the bare strip showed the darker window background as a faint band).
     let handle = container(v_divider())
         .width(Length::Fixed(7.0))
         .height(Fill)
-        .align_x(iced::alignment::Horizontal::Left);
+        .align_x(iced::alignment::Horizontal::Left)
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(SURFACE)),
+            ..container::Style::default()
+        });
     iced::widget::mouse_area(handle)
         .on_press(Message::SplitDragStart)
         .interaction(iced::mouse::Interaction::ResizingHorizontally)
