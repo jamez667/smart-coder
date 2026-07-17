@@ -4152,16 +4152,12 @@ impl App {
         // Fix the row to one input height: the send button's `height(Fill)` then matches the
         // input exactly (flush), and the row no longer stretches to the taller toggle stack —
         // killing the dead space above/below the input. Toggles center against that height.
-        let bar = bar
-            .align_y(iced::Alignment::Center)
-            .height(Length::Fixed(INPUT_H));
-        // The divider spans the full panel width; the input bar gets a little horizontal
-        // breathing room but no vertical padding, so it sits flush to the bottom with the
-        // divider right on top of it.
-        let bar = container(bar).padding([0, PAD]).width(Fill);
-        // Force the column full-width so the top divider spans the whole panel — otherwise the
-        // column shrinks to content and the hairline stops just short of the right edge.
-        column![h_divider(), bar].spacing(0).width(Fill).into()
+        // The input bar fills the composer edge-to-edge: no horizontal padding (so it reaches the
+        // panel's left/right) and no top divider (so it reaches the top). One flush block.
+        bar.align_y(iced::Alignment::Center)
+            .height(Length::Fixed(INPUT_H))
+            .width(Fill)
+            .into()
     }
 
     fn view_topology(&self) -> Element<'_, Message> {
