@@ -62,18 +62,43 @@ fn code_scroll_id() -> iced::advanced::widget::Id {
 /// clicked minimap line into a scroll offset.
 const CODE_LINE_PX: f32 = 17.0;
 
-/// Card surface style: filled rounded panel with a thin border.
+/// Card surface style: a flat filled panel. Borderless — panels are separated by explicit
+/// 1px [`v_divider`]/[`h_divider`] lines between them, so an interior seam is exactly one
+/// pixel (two touching card borders would have doubled it to 2px).
 fn card_style(_t: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(SURFACE)),
         border: Border {
-            color: CARD_BORDER,
-            width: 1.0,
             radius: RADIUS.into(),
+            ..Default::default()
         },
         text_color: Some(FG),
         ..container::Style::default()
     }
+}
+
+/// A 1px vertical hairline between side-by-side panels, in the card-border tone.
+fn v_divider<'a>() -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fixed(1.0))
+        .height(Fill)
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(CARD_BORDER)),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A 1px horizontal hairline between stacked panels, in the card-border tone.
+fn h_divider<'a>() -> Element<'a, Message> {
+    container(Space::new())
+        .width(Fill)
+        .height(Length::Fixed(1.0))
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(CARD_BORDER)),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Primary (accent-filled) button style for the build action.
@@ -2539,12 +2564,12 @@ impl App {
         // the intent composer beneath it) · CODE (the file being edited). VS-Code-style.
         let center: Element<'_, Message> = if self.plan.started() && self.is_swarm() {
             // A swarm build in flight: the plan panel + live topology are the story.
-            row![self.view_plan(), self.view_topology()]
+            row![self.view_plan(), v_divider(), self.view_topology()]
                 .spacing(GAP)
                 .into()
         } else if self.plan.started() {
             // A staged build (single agent): plan panel beside the activity stream.
-            row![self.view_plan(), self.view_center()]
+            row![self.view_plan(), v_divider(), self.view_center()]
                 .spacing(GAP)
                 .into()
         } else {
@@ -2554,7 +2579,9 @@ impl App {
 
         let body = row![
             self.view_explorer(),
+            v_divider(),
             container(center).width(Length::FillPortion(4)).height(Fill),
+            v_divider(),
             self.view_code(),
         ]
         .spacing(GAP)
@@ -2571,6 +2598,7 @@ impl App {
         }
         body_col = body_col.push(body);
         if let Some(strip) = self.view_bottom_strip() {
+            body_col = body_col.push(h_divider());
             body_col = body_col.push(strip);
         }
         if let Some(g) = gate {
@@ -2651,7 +2679,7 @@ impl App {
             .padding(PAD)
             .style(card_style);
 
-        container(column![git_section, files_section].spacing(GAP))
+        container(column![git_section, h_divider(), files_section])
             .width(Length::FillPortion(2))
             .height(Fill)
             .into()
