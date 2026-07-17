@@ -3947,7 +3947,10 @@ impl App {
         let thread = container(scrollable(thread).height(Fill)).padding(PAD);
 
         let composer = self.view_composer();
-        container(column![thread, composer])
+        // The outer column must be Fill-width, else its Fill children (incl. the composer's
+        // full-width top divider) collapse to content width and the hairline stops short of the
+        // panel's right edge.
+        container(column![thread, composer].width(Fill))
             .width(Length::FillPortion(2))
             .height(Fill)
             .style(card_style)
@@ -4145,8 +4148,10 @@ impl App {
         // The divider spans the full panel width; the input bar gets a little horizontal
         // breathing room but no vertical padding, so it sits flush to the bottom with the
         // divider right on top of it.
-        let bar = container(bar).padding([0, PAD]);
-        column![h_divider(), bar].spacing(0).into()
+        let bar = container(bar).padding([0, PAD]).width(Fill);
+        // Force the column full-width so the top divider spans the whole panel — otherwise the
+        // column shrinks to content and the hairline stops just short of the right edge.
+        column![h_divider(), bar].spacing(0).width(Fill).into()
     }
 
     fn view_topology(&self) -> Element<'_, Message> {
