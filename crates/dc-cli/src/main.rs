@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         Command::Serve { task } => serve_task(&cli, task.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
+        Command::Staged { task } => staged_task_json(&cli, task.clone()),
         Command::Replay { session } => replay(session.clone()),
     }
 }
@@ -677,6 +678,107 @@ fn run_task_json(cli: &Cli, task: String) -> ExitCode {
             eprintln!("error: run failed: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `staged <task>` — the headless staged-decomposition BUILD the MCP drives. Unlike
+/// `run` (one agent loop over the whole task), this first runs the plan-only workflow to
+/// a stage breakdown, then lands each scoped stage with `staged_build`, gated by a
+/// per-stage verify (default `cargo check --workspace`, overridable with `--verify`).
+/// Emits the same JSON-lines `AgentEvent` stream on stdout as `run --json` (staged_build
+/// takes the same `EventSink`), so the MCP parses it unchanged; phase and stage
+/// boundaries are logged to stderr to keep stdout pure NDJSON.
+fn staged_task_json(cli: &Cli, task: String) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let backend = cli.backend();
+    if let Err(e) = dc_cli::preflight(&[("model", &backend)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // Phase 1 — plan only, to a stage breakdown. The orchestrator and worker are the same
+    // backend here (one model); phases log to stderr so stdout stays pure NDJSON.
+    let on_phase = |p: dc_workflow::Phase, _content: &str| eprintln!("phase: {}", p.title());
+    let outcome = match dc_workflow::run_workflow_moded(
+        &backend,
+        &backend,
+        &task,
+        &workspace,
+        dc_workflow::ThinkPolicy::default(),
+        dc_workflow::WorkflowMode::plan_only(),
+        &on_phase,
+        &dc_workflow::AutoApprove,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: planning failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let breakdown = outcome
+        .state
+        .artifact(dc_workflow::Phase::StageBreakdown)
+        .map(|a| a.content.clone())
+        .unwrap_or_default();
+    let stages = dc_workflow::parse_stages(&breakdown);
+    if stages.is_empty() {
+        eprintln!("error: stage breakdown produced no stages; nothing to build");
+        return ExitCode::FAILURE;
+    }
+    eprintln!("planned {} stage(s)", stages.len());
+
+    // Phase 2 — build each stage, gated by the per-stage verify. Same NDJSON sinks as
+    // run_task_json: stdout stream + optional persisted log tee.
+    let stdout_sink = dc_core::JsonLinesSink::new(io::stdout().lock());
+    let (log_path, session_id) = dc_cli::session_log_path(&workspace, cli.log.as_deref());
+    let log_file = open_log(&log_path);
+    let log_sink = log_file.map(dc_core::JsonLinesSink::new);
+    let mut sinks: Vec<&dyn dc_core::EventSink> = vec![&stdout_sink];
+    if let Some(ref s) = log_sink {
+        sinks.push(s);
+    }
+    let tee = dc_core::TeeSink::new(sinks);
+
+    // The per-stage gate. Rust default; the container ships the Rust toolchain for exactly
+    // this (docker/mcp/Dockerfile). Overridable via --verify for other stacks.
+    let verify = cli
+        .verify_command
+        .clone()
+        .unwrap_or_else(|| "cargo check --workspace".to_string());
+    let on_stage = |i: usize, s: &dc_workflow::Stage| eprintln!("stage {i}: {}", s.title);
+
+    let report = match dc_workflow::staged_build(
+        &backend,
+        &stages,
+        &workspace,
+        &verify,
+        None, // no behavioral oracle over the MCP; the caller verifies on the host
+        &cli.agent_config(),
+        &on_stage,
+        &tee,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: staged build failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if log_sink.is_some() {
+        eprintln!("session {session_id} logged to {}", log_path.display());
+    }
+    if report.verified {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("staged build did not reach a verified state");
+        ExitCode::FAILURE
     }
 }
 

@@ -1,8 +1,8 @@
 //! `dc-mcp` — dumb-coder as an MCP server (spec 06 machine surface).
 //!
-//! Exposes dumb-coder's headless `run --json` / `swarm --json` agent to an MCP
-//! client (Claude Code) as a **fire-and-poll** parallel coding agent: a `code`
-//! tool starts a job and returns its id immediately; a `status` tool polls it.
+//! Exposes dumb-coder's headless `staged --json` agent to an MCP client (Claude
+//! Code) as a **fire-and-poll** parallel coding agent: a `code` tool starts a
+//! staged-decomposition build and returns its id immediately; a `status` tool polls it.
 //! Claude issues several `code` calls at once to run local workers in parallel
 //! while it does other work, then verifies each diff itself.
 //!

@@ -36,6 +36,12 @@ pub enum Command {
     /// `interactive` is set, halt at each phase boundary for a human
     /// approve/revise/send-back/abort decision; otherwise auto-approve every gate.
     Plan { task: String, interactive: bool },
+    /// Plan, then BUILD a task via the staged decomposition engine: run the
+    /// plan-only workflow to a stage breakdown, then land each scoped stage with
+    /// `staged_build`, gated by a per-stage verify (default `cargo check
+    /// --workspace`). Always emits the JSON-lines event stream — this is the
+    /// headless entry the MCP server drives (it never uses the single-loop `run`).
+    Staged { task: String },
     /// Re-render a recorded session from its JSON-lines log (spec 06). `session`
     /// is a session id (resolved under `.dumb-coder/sessions/`) or a path to a log.
     Replay { session: String },
@@ -177,7 +183,7 @@ impl Cli {
                     command = Some(Command::Replay { session });
                 }
                 // `run`/`serve`/`swarm`/`plan <task...>`: the rest forms the task + flags.
-                "run" | "serve" | "swarm" | "plan" if command.is_none() => {
+                "run" | "serve" | "swarm" | "plan" | "staged" if command.is_none() => {
                     let kind = arg.clone();
                     let rest: Vec<String> = it.by_ref().collect();
                     if rest.is_empty() {
@@ -191,6 +197,7 @@ impl Cli {
                     command = Some(match kind.as_str() {
                         "serve" => Command::Serve { task: parsed.task },
                         "swarm" => Command::Swarm { task: parsed.task },
+                        "staged" => Command::Staged { task: parsed.task },
                         "plan" => Command::Plan {
                             task: parsed.task,
                             interactive: parsed.interactive,
@@ -796,6 +803,7 @@ COMMANDS:
     serve <task>    Run a task and watch it in your browser (web dashboard)
     swarm <task>    Decompose + run with parallel workers (swarm dashboard)
     plan <task>     Staged planning workflow → .dumb-coder/plan/ (spec 09)
+    staged <task>   Plan + BUILD via the staged decomposition engine (JSON stream)
     replay <id>     Re-render a recorded session from its log (spec 06)
     doctor          Check the backend is reachable; print effective config
     help            Show this message
@@ -1123,6 +1131,18 @@ mod tests {
         assert_eq!(sc.max_subtask_retries, 4);
         assert_eq!(sc.frozen_paths, vec!["tests/test_a.py", "tests/test_b.py"]);
         assert_eq!(sc.verify_command.as_deref(), Some("pytest -q"));
+    }
+
+    #[test]
+    fn staged_subcommand_parses_task_and_verify() {
+        // `staged` is the MCP's headless entry; the task must peel cleanly and
+        // `--verify` (the per-stage gate override) must survive the peel.
+        let cli = Cli::parse(["staged", "wire the invite list", "--verify", "cargo check"]).unwrap();
+        match &cli.command {
+            Command::Staged { task } => assert_eq!(task, "wire the invite list"),
+            other => panic!("expected Staged, got {other:?}"),
+        }
+        assert_eq!(cli.verify_command.as_deref(), Some("cargo check"));
     }
 
     #[test]

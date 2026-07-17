@@ -1,35 +1,21 @@
-//! The job store: fire-and-poll over `dumb-coder run/swarm --json` subprocesses.
+//! The job store: fire-and-poll over `dumb-coder staged --json` subprocesses.
 //!
 //! A [`JobStore`] spawns the `dumb-coder` binary headless, reading its NDJSON
 //! event stream on a background thread into a shared [`Job`] record. The MCP
 //! `code` tool starts a job and returns its id immediately; the `status` tool
 //! reads the record. No async runtime — one blocking reader thread per job,
 //! mirroring `dc-web`'s worker-thread model over the same event stream.
+//!
+//! Every job runs the STAGED decomposition engine (`dumb-coder staged`): the
+//! backend model is weak enough that whole-task loops stall on coupled multi-file
+//! changes, so the harness always breaks the task into scoped stages and lands
+//! each one gated by a per-stage `cargo check`. There is no run/swarm choice.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
-/// How the child was launched — a single focused agent loop, or dumb-coder's
-/// own orchestrator+workers decomposition (Claude picks per task size).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// `dumb-coder run --json` — one agent loop, fast, for focused tasks.
-    Run,
-    /// `dumb-coder swarm --json` — decompose across parallel workers.
-    Swarm,
-}
-
-impl Mode {
-    fn subcommand(self) -> &'static str {
-        match self {
-            Mode::Run => "run",
-            Mode::Swarm => "swarm",
-        }
-    }
-}
 
 /// The lifecycle of a job, as reported to Claude by the `status` tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,10 +150,11 @@ impl JobStore {
         }
     }
 
-    /// Spawn a `dumb-coder` run for `task` in `workspace` and return its job id
-    /// immediately. A background thread drains the child's NDJSON stream into the
-    /// job record; the caller polls with [`JobStore::status`].
-    pub fn start(&self, task: &str, workspace: &str, mode: Mode) -> Result<String, String> {
+    /// Spawn a `dumb-coder staged` build for `task` in `workspace` and return its job
+    /// id immediately. A background thread drains the child's NDJSON stream into the
+    /// job record; the caller polls with [`JobStore::status`]. Every job is staged —
+    /// there is no run/swarm choice (see the module doc).
+    pub fn start(&self, task: &str, workspace: &str) -> Result<String, String> {
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = format!("j{seq}");
         // Round-robin across the configured backends: job N goes to pool N % len.
@@ -175,7 +162,7 @@ impl JobStore {
         let base_url = &self.cfg.base_urls[(seq as usize - 1) % self.cfg.base_urls.len()];
 
         let mut cmd = Command::new(&self.cfg.binary);
-        cmd.arg(mode.subcommand())
+        cmd.arg("staged")
             .arg(task)
             .arg("--json")
             .arg("--base-url")
@@ -186,12 +173,12 @@ impl JobStore {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        // No in-container verify: this image ships no language toolchains (see docker/mcp/
-        // Dockerfile). The agent edits the workspace and finishes on "edited"; the CALLER
-        // (host / planning agent) verifies against its own correct, warm toolchain. An
-        // in-container verify would fail on toolchain VERSION drift (the distro rustc/etc.
-        // lags the host) and cold-rebuild the world every run, so it's deliberately host-side.
-        // `swarm --json` needs the terminal path; `run --json` is already headless.
+        // `staged` gates each stage on a per-stage `cargo check` that runs IN THIS
+        // container — the image ships the Rust toolchain for exactly this (docker/mcp/
+        // Dockerfile). staged_build reverts a stage whose verify never goes green, so a
+        // working in-container cargo is what makes the staged guarantee real. `--json`
+        // keeps stdout as the pure NDJSON event stream; phase/stage progress goes to the
+        // child's stderr (dropped here).
         if self.cfg.yolo {
             cmd.arg("--yolo");
         }
@@ -493,12 +480,6 @@ mod tests {
         );
         ingest_event("not json at all", &mut j);
         assert!(j.stop_reason.is_none());
-    }
-
-    #[test]
-    fn mode_maps_to_subcommand() {
-        assert_eq!(Mode::Run.subcommand(), "run");
-        assert_eq!(Mode::Swarm.subcommand(), "swarm");
     }
 
     #[test]

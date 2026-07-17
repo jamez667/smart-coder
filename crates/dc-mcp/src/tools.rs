@@ -11,7 +11,7 @@
 
 use serde_json::{json, Value};
 
-use crate::jobs::{JobStore, Mode, State};
+use crate::jobs::{JobStore, State};
 
 /// The set of tools the server exposes. A trait so [`crate::protocol`] can be
 /// unit-tested against a stub without spawning real subprocesses.
@@ -27,12 +27,16 @@ pub fn tool_manifest() -> Value {
         {
             "name": "dumb_coder_code",
             "description":
-                "Delegate a coding task to a fast local small-model agent (dumb-coder) \
-                 that edits files in the target workspace directly. Returns a job id \
-                 immediately (fire-and-poll) — call dumb_coder_status with the id to \
-                 check progress. Runs several in parallel by issuing multiple calls at \
-                 once. It writes no tests and self-decides when done; verify the diff \
-                 yourself afterward (e.g. git diff + your own tests).",
+                "Delegate a coding task to a local small-model agent (dumb-coder) that \
+                 edits files in the target workspace directly. The task is always run \
+                 through the STAGED decomposition engine: dumb-coder plans the change, \
+                 breaks it into scoped stages, and lands each one gated by a per-stage \
+                 build check — so multi-file changes land coherently rather than stalling. \
+                 Returns a job id immediately (fire-and-poll) — call dumb_coder_status \
+                 with the id to check progress. Run several in parallel by issuing \
+                 multiple calls at once. Verify the diff yourself afterward (e.g. git \
+                 diff + your own tests). Note: planning runs a few model phases before the \
+                 first edit, so even small tasks take a little to start.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -44,13 +48,6 @@ pub fn tool_manifest() -> Value {
                         "type": "string",
                         "description": "Absolute path to the directory to work in. \
                                         Defaults to the server's working directory."
-                    },
-                    "decompose": {
-                        "type": "boolean",
-                        "description": "false (default): one focused agent loop — fast, for a \
-                                        single well-scoped change. true: dumb-coder's \
-                                        orchestrator breaks the task into subtasks run by \
-                                        parallel workers — for larger, multi-part tasks."
                     }
                 },
                 "required": ["task"]
@@ -112,22 +109,12 @@ impl StoreTools {
             .get("workspace")
             .and_then(|w| w.as_str())
             .unwrap_or(&self.default_workspace);
-        let mode = if args
-            .get("decompose")
-            .and_then(|d| d.as_bool())
-            .unwrap_or(false)
-        {
-            Mode::Swarm
-        } else {
-            Mode::Run
-        };
 
-        let id = self.store.start(task, workspace, mode)?;
-        let kind = if mode == Mode::Swarm { "swarm" } else { "run" };
+        let id = self.store.start(task, workspace)?;
         Ok(json!({
             "job_id": id,
             "state": "running",
-            "mode": kind,
+            "mode": "staged",
             "workspace": workspace,
             "hint": "poll dumb_coder_status with this job_id; verify the diff when done",
         })
@@ -202,10 +189,10 @@ mod tests {
         let m = tool_manifest();
         let code = &m[0];
         assert_eq!(code["inputSchema"]["required"], json!(["task"]));
-        // workspace + decompose are optional properties.
+        // workspace is the only optional property (mode is always staged now).
         let props = &code["inputSchema"]["properties"];
         assert!(props.get("workspace").is_some());
-        assert!(props.get("decompose").is_some());
+        assert!(props.get("decompose").is_none(), "decompose toggle was removed");
     }
 
     #[test]
