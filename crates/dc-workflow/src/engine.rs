@@ -46,7 +46,7 @@ pub fn phase_messages(
             "\n=== Reviewer feedback (address this) ===\n{notes}\n"
         ));
     }
-    user.push_str(&format!("\n{}", phase_instruction(phase, stack)));
+    user.push_str(&format!("\n{}", phase_instruction(phase, stack, &state.task)));
 
     let mut system = system_for(phase, stack);
     if think.suppress(phase) {
@@ -172,7 +172,50 @@ fn system_for(phase: Phase, stack: ProjectStack) -> String {
     )
 }
 
-fn phase_instruction(phase: Phase, stack: ProjectStack) -> String {
+/// Does this task read like an IN-PLACE edit of existing code (thread a parameter through
+/// an existing function and its call sites, add a struct field, change a signature) rather
+/// than a NEW feature/subsystem? In-place edits should NOT be decomposed into a new module —
+/// that invents a file the task never asked for and stalls the weak model on the extra seam.
+/// Conservative: only true on strong in-place signals AND absent new-thing signals, so a
+/// genuine "add feature X" still gets the module-extraction guidance.
+fn is_in_place_edit(task: &str) -> bool {
+    let t = task.to_ascii_lowercase();
+    // Strong signals that the change threads through EXISTING code.
+    let in_place = [
+        "call site",
+        "call sites",
+        "callers",
+        "every caller",
+        "signature",
+        "parameter",
+        "add a field",
+        "add a param",
+        "thread ",
+        "wire it through",
+        "wire through",
+        "forward it",
+        "pass &[]",
+        "pass `&[]`",
+    ]
+    .iter()
+    .any(|s| t.contains(s));
+    // Signals that a genuinely new subsystem/module is wanted — these VETO in-place so the
+    // module-extraction guidance still applies to real new features.
+    let new_thing = [
+        "new module",
+        "new subsystem",
+        "new system",
+        "implement a ",
+        "build a new",
+        "add a new screen",
+        "add a new page",
+    ]
+    .iter()
+    .any(|s| t.contains(s));
+    in_place && !new_thing
+}
+
+fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
     // The stage-breakdown / work-decomposition instructions below are written for the Python
     // eval ladder (test_app.py, pytest/vitest, Flask routes). They only apply to the Python
     // stack; for a real Rust/JS project the caller uses the skip-tests / plan-only path (2nd
@@ -186,23 +229,40 @@ fn phase_instruction(phase: Phase, stack: ProjectStack) -> String {
             // to review, not a pytest coverage array. Only the Python eval ladder gets the
             // test-first JSON below (kept byte-identical so the ladder is unaffected).
             if !matches!(stack, ProjectStack::Python) {
-                return "Break the work into an ORDERED set of small implementation stages — the \
+                let head = "Break the work into an ORDERED set of small implementation stages — the \
                      concrete build sequence for this change. For each stage give: a short title, \
                      the file(s) it touches (from the layout), and one or two sentences on what to \
                      build there. Order stages so each builds on the last (foundations first, then \
-                     what depends on them).\n\n\
-                     CRITICAL — KEEP EDITS TO LARGE EXISTING FILES TINY. Put the feature's CORE \
+                     what depends on them).\n\n";
+                // The module-extraction directive is right for a NEW feature/subsystem (its core
+                // logic belongs in a new small file so big files get only a tiny hook — this is what
+                // landed the idle-city-sim lakes). But for an IN-PLACE edit (thread a parameter
+                // through an existing fn and its call sites, add a field, change a signature) a new
+                // module is pure over-engineering: it invents a file the task never asked for, adds
+                // coupling, and the weak model then stalls wiring the extra seam (observed live on
+                // void-claim: the plan invented collide_invited.rs and never reached character.rs).
+                // Pick the guidance by task shape.
+                let core = if is_in_place_edit(task) {
+                    "CRITICAL — THIS IS AN IN-PLACE EDIT, NOT A NEW MODULE. Do NOT create any new \
+                     file or module. Edit the EXISTING files named in the task directly: change the \
+                     signature/struct where it already lives, then update its call sites. Each stage \
+                     is one existing file's edit (or a signature stage + a call-sites stage). Keep \
+                     the change minimal and local — inventing a new `<feature>.rs` module here is \
+                     WRONG and will be rejected.\n\n"
+                } else {
+                    "CRITICAL — KEEP EDITS TO LARGE EXISTING FILES TINY. Put the feature's CORE \
                      LOGIC in a NEW, small module file (e.g. a new `<feature>.rs`), which the first \
                      stage CREATES whole. The existing large files should get only MINIMAL edits: \
                      one stage adds the module declaration (`mod <feature>;`) and a field, and one \
                      or two stages add a few lines to wire it in (a call, a match arm). Do NOT plan \
                      a stage that adds a large block of logic INTO an existing 500+ line file — that \
                      logic belongs in the new module; the existing file only gets the small hook. \
-                     This keeps every edit to a big file down to a handful of lines.\n\n\
-                     This is a DESIGN breakdown to review, NOT tests and NOT code — do not write \
-                     test files or source code. Output a short Markdown document with a numbered \
-                     list of stages."
-                    .to_string();
+                     This keeps every edit to a big file down to a handful of lines.\n\n"
+                };
+                let tail = "This is a DESIGN breakdown to review, NOT tests and NOT code — do not \
+                     write test files or source code. Output a short Markdown document with a \
+                     numbered list of stages.";
+                return format!("{head}{core}{tail}");
             }
             // ONE test file per SOURCE file in the layout. This 1:1 alignment is what
             // makes the swarm work: each source file gets its own test, so each becomes a
@@ -288,6 +348,45 @@ mod tests {
         assert!(joined.to_lowercase().contains("ordered"), "ordered stages: {joined}");
         assert!(!joined.contains("test_app.py"), "no pytest file for a Rust breakdown");
         assert!(!joined.contains("JSON array"), "not the coverage JSON: {joined}");
+    }
+
+    #[test]
+    fn in_place_edit_task_forbids_a_new_module() {
+        // Threading a param through existing fns + call sites must NOT be told to extract a
+        // new module (that invented collide_invited.rs on void-claim and stalled at 2/3 files).
+        let s = WorkflowState::new(
+            "Add `invited_slots: &[u32]` to the tile_collide signature and pass &[] at every call site.",
+        );
+        let joined: String = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default(), ProjectStack::Rust)
+            .iter()
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(joined.contains("IN-PLACE EDIT"), "in-place directive present: {joined}");
+        assert!(
+            !joined.contains("NEW, small module file"),
+            "must NOT tell an in-place edit to extract a module"
+        );
+    }
+
+    #[test]
+    fn new_feature_task_keeps_the_module_extraction_guidance() {
+        // A genuine new subsystem still gets the module-extraction directive (the lakes pattern).
+        let s = WorkflowState::new("Add lakes to the terrain generator.");
+        let joined: String = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default(), ProjectStack::Rust)
+            .iter()
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(joined.contains("NEW, small module file"), "new feature keeps module guidance");
+        assert!(!joined.contains("IN-PLACE EDIT"));
+    }
+
+    #[test]
+    fn is_in_place_edit_heuristic() {
+        assert!(is_in_place_edit("update every caller to pass &[]"));
+        assert!(is_in_place_edit("add a parameter to the integrate signature"));
+        assert!(!is_in_place_edit("add lakes to the terrain")); // new feature
+        // A "new module" ask vetoes even if it mentions call sites.
+        assert!(!is_in_place_edit("implement a new module and update its call sites"));
     }
 
     #[test]
