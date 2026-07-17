@@ -119,13 +119,17 @@ fn h_divider<'a>() -> Element<'a, Message> {
 
 /// Primary (accent-filled) button style for the build action.
 fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
+    // A clean, crisp accent button: solid fill that brightens on hover and dims on press. No
+    // shadow or fake bevel — flat and modern, matching the rest of the UI. The label is centered
+    // by the caller (a Fill-sized, centered text).
     let bg = match status {
-        button::Status::Hovered => Color::from_rgb(0.56, 0.72, 1.0),
+        button::Status::Hovered => Color::from_rgb(0.58, 0.73, 1.0),
+        button::Status::Pressed => Color::from_rgb(0.40, 0.56, 0.90),
         _ => ACCENT,
     };
     button::Style {
         background: Some(Background::Color(bg)),
-        text_color: Color::from_rgb(0.06, 0.07, 0.11),
+        text_color: Color::from_rgb(0.05, 0.06, 0.10),
         border: Border {
             radius: RADIUS.into(),
             ..Default::default()
@@ -4067,10 +4071,11 @@ impl App {
             .style(input_style_borderless)
             .width(Fill);
         let btn = if run_active {
-            button(text("⏹ cancel").size(15))
+            button(text("⏹ cancel").size(15).width(Fill).height(Fill).center())
                 .on_press(Message::CancelRun)
                 .width(Length::Fixed(110.0))
                 .height(Fill)
+                .padding(0)
                 .style(|_t: &Theme, status| {
                     let hov = matches!(status, button::Status::Hovered);
                     button::Style {
@@ -4088,14 +4093,15 @@ impl App {
                     }
                 })
         } else if sending {
-            button(text("…"))
+            button(text("…").width(Fill).height(Fill).center())
                 .width(Length::Fixed(90.0))
                 .height(Fill)
         } else {
-            button(text(label).size(15))
+            button(text(label).size(15).width(Fill).height(Fill).center())
                 .on_press(send_msg)
                 .width(Length::Fixed(90.0))
                 .height(Fill)
+                .padding(0)
                 .style(primary_button)
         };
         // Send button is full composer height, sitting flush against the input.
