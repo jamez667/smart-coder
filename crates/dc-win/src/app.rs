@@ -271,6 +271,17 @@ fn input_style(t: &Theme, status: text_input::Status) -> text_input::Style {
     s
 }
 
+/// A borderless input style for the composer: the theme default with its border stripped and
+/// its fill matched to the panel surface, so the field reads as part of the composer block
+/// (filling the whole area) rather than a boxed widget floating inside it.
+fn input_style_borderless(t: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut s = text_input::default(t, status);
+    s.border.width = 0.0;
+    s.border.radius = RADIUS.into();
+    s.background = Background::Color(SURFACE);
+    s
+}
+
 /// Checkbox style: the theme default squared to our [`RADIUS`].
 fn checkbox_style(t: &Theme, status: checkbox::Status) -> checkbox::Style {
     let mut s = checkbox::primary(t, status);
@@ -4053,7 +4064,7 @@ impl App {
             .on_input(Message::IntentChanged)
             .on_submit(send_msg.clone())
             .padding([8, 10])
-            .style(input_style)
+            .style(input_style_borderless)
             .width(Fill);
         let btn = if run_active {
             button(text("⏹ cancel").size(15))
@@ -4089,15 +4100,18 @@ impl App {
         };
         // Send button is full composer height, sitting flush against the input.
         let mut bar = row![input, btn].spacing(8);
-        // The think/debug toggles stack vertically to the right of the send button, so the
-        // composer stays one tidy row tall instead of spreading its controls across the width.
-        let mut toggles = column![].spacing(4).align_x(iced::Alignment::Start);
+        // The think/debug toggles stack vertically to the right of the send button. They're kept
+        // small (14px box, 11px label, tight gap) so both fit within the one-input-tall composer.
+        let mut toggles = column![].spacing(2).align_x(iced::Alignment::Start);
         // The Think toggle (chat mode only): fast conclusions by default, deeper reasoning
         // when you flip it on for a hard planning question.
         if has_convo {
             toggles = toggles.push(
                 checkbox(self.think)
                     .label("think")
+                    .size(14)
+                    .text_size(11)
+                    .spacing(4)
                     .on_toggle(Message::ToggleThink)
                     .style(checkbox_style),
             );
@@ -4106,6 +4120,9 @@ impl App {
         toggles = toggles.push(
             checkbox(self.debug)
                 .label("debug")
+                .size(14)
+                .text_size(11)
+                .spacing(4)
                 .on_toggle(Message::ToggleDebug)
                 .style(checkbox_style),
         );
