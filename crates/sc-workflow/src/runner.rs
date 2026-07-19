@@ -11,7 +11,7 @@ use std::path::Path;
 
 use sc_model::ModelBackend;
 use sc_proto::Result;
-use sc_swarm::{parse_subtasks, TaskBoard};
+use sc_swarm::{parse_subtasks_on_stack, TaskBoard};
 
 use crate::engine::generate_phase;
 use crate::gate::{AutoApprove, Decision, Gate};
@@ -237,7 +237,7 @@ pub fn run_workflow_moded(
         }
     }
 
-    let board = board_from(&state, &test_files);
+    let board = board_from(&state, &test_files, stack);
     Ok(WorkflowOutcome {
         state,
         board,
@@ -383,14 +383,16 @@ fn artifact_content(state: &WorkflowState, phase: Phase) -> String {
 /// slipped in: ones that target a frozen test file, or that name no files at all
 /// (e.g. a "run the tests" step — the harness verifies, that's not worker work).
 /// Tests are already written and frozen; the swarm only implements.
-fn board_from(state: &WorkflowState, test_files: &[String]) -> TaskBoard {
+fn board_from(state: &WorkflowState, test_files: &[String], stack: ProjectStack) -> TaskBoard {
     let is_test = |f: &str| {
         let n = f.replace('\\', "/");
         test_files.iter().any(|t| t.replace('\\', "/") == n)
     };
+    // Parse against THIS project's stack, so the drift filter keeps its own files (the bug: the
+    // filter was hardcoded to Python and dropped every .rs subtask → empty board → nothing built).
     let subtasks: Vec<_> = state
         .artifact(Phase::WorkDecomposition)
-        .map(|a| parse_subtasks(&a.content))
+        .map(|a| parse_subtasks_on_stack(&a.content, stack.on_stack_exts()))
         .unwrap_or_default()
         .into_iter()
         .filter(|s| !s.files.is_empty() && !s.files.iter().all(|f| is_test(f)))

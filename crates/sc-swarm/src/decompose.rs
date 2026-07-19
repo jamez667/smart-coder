@@ -51,7 +51,12 @@ fn decompose_messages(task: &str, repo_overview: &str) -> Vec<Message> {
 
 /// Parse a decomposition reply (a JSON array of subtask objects, tolerating
 /// surrounding prose) into subtasks. Returns empty if nothing parseable.
-pub fn parse_subtasks(reply: &str) -> Vec<Subtask> {
+/// Parse the decomposition reply into subtasks. `on_stack_exts` is the set of file extensions
+/// that belong to THIS project's stack (e.g. `["rs"]` for a cargo repo, `["py","js","html","css"]`
+/// for the Python eval ladder); a subtask whose files are ALL off-stack is dropped as language
+/// drift. Pass an empty slice to disable the filter (keep every file). Use [`parse_subtasks`] for
+/// the historical Python-ladder defaults.
+pub fn parse_subtasks_on_stack(reply: &str, on_stack_exts: &[&str]) -> Vec<Subtask> {
     let Some(arr) = extract_json_array(reply) else {
         return Vec::new();
     };
@@ -85,7 +90,10 @@ pub fn parse_subtasks(reply: &str) -> Vec<Subtask> {
         // (e.g. a Node.js/TypeScript module when the backend must be Python) — skip it
         // so a drifted language can't derail the build. See `is_on_stack`.
         let had_files = !raw_files.is_empty();
-        let files: Vec<String> = raw_files.into_iter().filter(|f| is_on_stack(f)).collect();
+        let files: Vec<String> = raw_files
+            .into_iter()
+            .filter(|f| is_on_stack(f, on_stack_exts))
+            .collect();
         if had_files && files.is_empty() {
             continue;
         }
@@ -97,25 +105,52 @@ pub fn parse_subtasks(reply: &str) -> Vec<Subtask> {
     out
 }
 
-/// Whether a file is allowed on the locked stack: Python backend + plain JS/HTML/CSS
-/// frontend. Rejects off-stack languages (`.ts`/`.java`/`.go`/…), React (`.jsx`/`.tsx`),
-/// and Node-style backend JavaScript (a `.js` under a `server/`/`backend/` path — the
-/// backend must be Python). Plain frontend `.js`/`.html`/`.css` and data/config files
-/// (`.txt`, `.json`, `.sql`, templates) are allowed. This forces a Node/React
-/// decomposition to be rejected (observed live 2026-06-14: "restaurant review website"
-/// decomposed into a Node `.js` backend + React `.jsx`, which never matched the Python
-/// tests and cascaded to 0 integrated).
-fn is_on_stack(path: &str) -> bool {
-    const OFF_STACK_CODE: &[&str] = &[
-        ".ts", ".tsx", ".jsx", ".java", ".go", ".rb", ".php", ".rs", ".cs", ".cpp", ".c", ".kt",
-        ".swift", ".scala", ".ex", ".dart",
+/// The historical entry point: parse with the Python eval-ladder's on-stack set
+/// (`py`/`js`/`html`/`css` + data/config). Kept so existing callers/tests are unchanged; the
+/// stack-aware [`parse_subtasks_on_stack`] is what a real Rust/other-language project uses.
+pub fn parse_subtasks(reply: &str) -> Vec<Subtask> {
+    parse_subtasks_on_stack(reply, PY_LADDER_EXTS)
+}
+
+/// On-stack extensions for the Python eval ladder (the historical default).
+const PY_LADDER_EXTS: &[&str] = &["py", "js", "html", "css"];
+
+/// Whether a file belongs on THIS project's stack (per `on_stack_exts`), so language DRIFT can
+/// be dropped without discarding the project's own files. The bug this fixes: the extensions were
+/// hardcoded to the Python ladder, so `.rs`/`.cs`/`.go` were treated as off-stack — silently
+/// dropping EVERY subtask on a Rust/other-language project and leaving an empty board (the staged
+/// pipeline then "built" nothing).
+///
+/// Rules: an empty `on_stack_exts` disables the filter (keep everything). A file whose extension
+/// is in the set is on-stack. A file whose extension is a KNOWN CODE language NOT in the set is
+/// drift → off-stack. Non-code data/config files (`.txt`/`.json`/`.sql`/templates/no extension)
+/// are stack-neutral → kept. The Python-ladder special case — Node backend `.js` under a
+/// `server/`/`backend/` path — is still rejected when `js` is on-stack (the backend must be
+/// Python), preserving the original anti-Node-drift behavior.
+fn is_on_stack(path: &str, on_stack_exts: &[&str]) -> bool {
+    if on_stack_exts.is_empty() {
+        return true; // filter disabled
+    }
+    // Known code extensions (any language). A file with one of these that is NOT on this stack is
+    // drift; a file with a non-code extension (or none) is neutral and kept.
+    const KNOWN_CODE: &[&str] = &[
+        "rs", "py", "js", "ts", "tsx", "jsx", "java", "go", "rb", "php", "cs", "cpp", "cc", "c",
+        "h", "hpp", "kt", "swift", "scala", "ex", "exs", "dart", "m", "mm",
     ];
     let lower = path.to_ascii_lowercase();
-    if OFF_STACK_CODE.iter().any(|ext| lower.ends_with(ext)) {
-        return false;
+    let ext = lower.rsplit('.').next().filter(|e| *e != lower); // None if no '.'
+    let on_stack = |e: &str| on_stack_exts.iter().any(|x| x.eq_ignore_ascii_case(e));
+
+    if let Some(ext) = ext {
+        // A code file in a language that's NOT this project's stack → drift.
+        if KNOWN_CODE.contains(&ext) && !on_stack(ext) {
+            return false;
+        }
     }
-    // A `.js` file living under a backend path is Node — reject (backend must be Python).
+    // Python-ladder anti-Node-drift: a `.js` under a backend path is Node — reject only when JS is
+    // an on-stack frontend language (the backend must be Python).
     if lower.ends_with(".js")
+        && on_stack("js")
         && (lower.starts_with("server/")
             || lower.starts_with("backend/")
             || lower.contains("/server/")
@@ -360,6 +395,44 @@ pub fn decompose(
 mod tests {
     use super::*;
     use sc_model::MockBackend;
+
+    #[test]
+    fn rust_subtask_survives_on_a_rust_stack() {
+        // The root-cause regression: a `.rs` subtask was dropped because `.rs` was hardcoded as
+        // off-stack, leaving an empty board so the staged pipeline built nothing for a Rust repo.
+        let reply = r#"[{"id":"t1","goal":"add Gunner variant","files":["crates/void_sim/src/ship_template/schema.rs"],"deps":[]}]"#;
+        let subs = parse_subtasks_on_stack(reply, &["rs"]);
+        assert_eq!(subs.len(), 1, "the .rs subtask must survive: {subs:?}");
+        assert_eq!(subs[0].files, vec!["crates/void_sim/src/ship_template/schema.rs"]);
+        // Sanity: the OLD Python-default would have dropped it.
+        assert!(parse_subtasks(reply).is_empty(), "python default still drops .rs (drift)");
+    }
+
+    #[test]
+    fn language_drift_is_still_dropped() {
+        // On a Rust stack, a stray Python/TS subtask is drift → dropped.
+        let reply = r#"[{"id":"t1","goal":"stray python","files":["helper.py"],"deps":[]},
+                        {"id":"t2","goal":"real rust","files":["src/lib.rs"],"deps":[]}]"#;
+        let subs = parse_subtasks_on_stack(reply, &["rs"]);
+        assert_eq!(subs.len(), 1, "only the .rs task survives: {subs:?}");
+        assert_eq!(subs[0].id, "t2");
+    }
+
+    #[test]
+    fn empty_exts_keeps_everything() {
+        // Unknown stack → filter disabled → nothing dropped (better an unfiltered board than none).
+        let reply = r#"[{"id":"t1","goal":"go file","files":["main.go"],"deps":[]}]"#;
+        assert_eq!(parse_subtasks_on_stack(reply, &[]).len(), 1);
+    }
+
+    #[test]
+    fn non_code_files_are_stack_neutral() {
+        // A data/config/template file isn't a language, so it's kept on any stack.
+        let reply = r#"[{"id":"t1","goal":"config","files":["config.json","src/lib.rs"],"deps":[]}]"#;
+        let subs = parse_subtasks_on_stack(reply, &["rs"]);
+        assert_eq!(subs.len(), 1);
+        assert!(subs[0].files.contains(&"config.json".to_string()), "{:?}", subs[0].files);
+    }
 
     #[test]
     fn parses_a_clean_subtask_array() {

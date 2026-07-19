@@ -71,6 +71,20 @@ impl ProjectStack {
         }
     }
 
+    /// The file extensions that belong to this stack — the decomposition drift filter keeps
+    /// files with these and drops other-language code (see `sc_swarm::parse_subtasks_on_stack`).
+    /// An empty slice (for `Unknown`) disables the filter so a project in a language we don't
+    /// model isn't stripped to an empty board.
+    pub fn on_stack_exts(&self) -> &'static [&'static str] {
+        match self {
+            ProjectStack::Rust => &["rs"],
+            ProjectStack::JsWeb => &["js", "ts", "tsx", "jsx", "html", "css", "json"],
+            ProjectStack::Python => &["py", "js", "html", "css"],
+            ProjectStack::Unity => &["cs"],
+            ProjectStack::Unknown => &[],
+        }
+    }
+
     /// A short label for the stack, for logging / prompts.
     pub fn label(&self) -> &'static str {
         match self {
