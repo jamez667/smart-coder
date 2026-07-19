@@ -1396,6 +1396,16 @@ impl App {
 
     /// Open a planning conversation for the current project: read the plan files, pick the
     /// mode (scratch vs existing), and seed the thread with the agent's opening line.
+    /// The project's file paths (workspace-relative, `/`-separated) from the walked tree cache
+    /// — directories dropped. Fed to a plan conversation so "Files to touch" names real files.
+    fn project_file_paths(&self) -> Vec<String> {
+        self.tree_cache
+            .iter()
+            .filter(|r| !r.is_dir)
+            .map(|r| r.rel.clone())
+            .collect()
+    }
+
     fn open_conversation(&mut self) {
         let root = self.workspace_root();
         // Load persisted inline comments, ensure .dc/ is git-ignored, and pull the initial
@@ -1404,7 +1414,8 @@ impl App {
         sc_win::comments::ensure_gitignored(&root);
         self.refresh_git_view();
         let (readme, todo) = self.read_plan_files(&root);
-        let convo = sc_win::chat::Conversation::open(&readme, &todo);
+        let mut convo = sc_win::chat::Conversation::open(&readme, &todo);
+        convo.set_file_tree(self.project_file_paths());
         self.chat_turns.clear();
         self.chat_turns.push(sc_win::chat::Turn {
             role: sc_win::chat::Speaker::Agent,
@@ -1478,11 +1489,15 @@ impl App {
                 .map(|body| (rel.clone(), body))
         });
 
+        // Refresh the project file list (files may have been added/removed this session) so a
+        // plan grounds on the current tree. Computed before the mutable convo borrow.
+        let file_tree = self.project_file_paths();
         // Update the conversation, then spawn a planning turn (classify intent → generate). The
         // classification decides how the reply is shaped; the app no longer sniffs the text.
         let convo = {
             let convo = self.conversation.as_mut().expect("checked above");
             convo.set_open_file(open_file);
+            convo.set_file_tree(file_tree);
             convo.user_turn(&text);
             convo.clone()
         };

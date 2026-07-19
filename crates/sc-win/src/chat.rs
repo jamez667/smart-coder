@@ -135,7 +135,17 @@ pub struct Conversation {
     /// this do?" is answered against what the user is actually looking at. `None` when no
     /// file is open. Injected (head-clipped) into the system prompt.
     open_file: Option<(String, String)>,
+    /// The project's file paths (workspace-relative, `/`-separated), noise-filtered. Injected
+    /// into a FEATURE-PLAN prompt so "Files to touch" names REAL paths instead of hallucinated
+    /// ones — the file tree is cheap (paths only, not contents), unlike a full-file dump.
+    file_tree: Vec<String>,
 }
+
+/// Max file paths to inject into a feature-plan prompt. A big repo could have thousands of
+/// files; capping keeps a small model's window safe while still grounding "Files to touch" for
+/// the vast majority of projects. Paths are ~40 chars, so 400 ≈ 16k chars — comfortably within
+/// budget alongside README/TODO.
+const FILE_TREE_MAX: usize = 400;
 
 /// How much of an open file to inject into the system prompt. A small model's window is
 /// tight ([`crate::chat`] keeps the plan on disk for the same reason), so a long file is
@@ -158,7 +168,15 @@ impl Conversation {
             readme: readme.to_string(),
             todo: todo.to_string(),
             open_file: None,
+            file_tree: Vec::new(),
         }
+    }
+
+    /// Set the project's file paths (workspace-relative), injected into a feature-plan prompt so
+    /// the plan references REAL files. Cheap (paths only). The app refreshes this from its tree
+    /// cache when the plan conversation opens / a plan turn is sent.
+    pub fn set_file_tree(&mut self, files: Vec<String>) {
+        self.file_tree = files;
     }
 
     pub fn mode(&self) -> Mode {
@@ -337,6 +355,9 @@ impl Conversation {
         let produces_file = matches!(intent, TodoEdit | ReadmeEdit | FeaturePlan);
         let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan);
         let wants_todo = matches!(intent, TodoEdit | FeaturePlan);
+        // A plan needs to name REAL files. The tree (paths only) is cheap grounding — the fix
+        // for hallucinated "Files to touch" paths — without the cost of dumping file contents.
+        let wants_file_tree = matches!(intent, FeaturePlan);
         // A feature plan is about the PROJECT (README/TODO give the shape); the full open-file
         // dump was the bulk of a bloated ~49k-char prompt that buried the fence instruction and
         // eats a 32k-context small model's window. Questions/code changes still get the file.
@@ -385,6 +406,25 @@ impl Conversation {
             s.push_str("=== current TODO.md ===\n");
             s.push_str(self.todo.trim());
             s.push_str("\n\n");
+        }
+        // The real project file paths, so a plan's "Files to touch" names files that EXIST.
+        // Capped to keep a big repo from blowing a small model's window; paths are cheap.
+        if wants_file_tree && !self.file_tree.is_empty() {
+            s.push_str(
+                "=== project files (real paths — 'Files to touch' MUST use paths from this list, \
+                 do NOT invent paths) ===\n",
+            );
+            for path in self.file_tree.iter().take(FILE_TREE_MAX) {
+                s.push_str(path);
+                s.push('\n');
+            }
+            if self.file_tree.len() > FILE_TREE_MAX {
+                s.push_str(&format!(
+                    "… (+{} more files not shown)\n",
+                    self.file_tree.len() - FILE_TREE_MAX
+                ));
+            }
+            s.push('\n');
         }
         // The file the user is currently looking at, head-clipped — for questions/code/plan.
         if wants_open_file {
@@ -947,6 +987,24 @@ mod tests {
         assert!(sys.contains("void_engine"), "README present: {sys}");
         assert!(sys.contains("add lakes"), "TODO present: {sys}");
         assert!(!sys.contains("giant_file"), "open file NOT dumped into a plan: {sys}");
+    }
+
+    #[test]
+    fn feature_plan_prompt_injects_the_real_file_tree() {
+        // "Files to touch" must be grounded on real paths — the file tree is injected for a
+        // plan (paths only), and NOT for a plain question.
+        let mut c = Conversation::open("# void_engine", "- [ ] x");
+        c.set_file_tree(vec![
+            "crates/sc-core/src/agent/mod.rs".into(),
+            "crates/sc-win/src/app.rs".into(),
+        ]);
+        c.user_turn("plan out adding seats");
+        let plan = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
+        assert!(plan.contains("crates/sc-core/src/agent/mod.rs"), "real paths in plan: {plan}");
+        assert!(plan.to_lowercase().contains("do not invent paths"), "instructed to use real paths");
+        // A question doesn't get the tree (keeps it lean).
+        let q = c.request(false, ChatIntent::Question).messages[0].content.clone();
+        assert!(!q.contains("crates/sc-core"), "no file tree for a question: {q}");
     }
 
     #[test]
