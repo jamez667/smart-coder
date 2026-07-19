@@ -558,6 +558,9 @@ mod tests {
             ]),
         };
         let ws = temp("all");
+        // This exercises the Python TDD ladder path — mark the workspace Python explicitly now
+        // that a bare workspace detects as Unknown (a generic project) rather than Python.
+        std::fs::write(ws.join("requirements.txt"), "flask\n").unwrap();
         let seen = std::cell::RefCell::new(Vec::new());
         // Same backend stands in for both orchestrator and worker here.
         let outcome = run_workflow(
