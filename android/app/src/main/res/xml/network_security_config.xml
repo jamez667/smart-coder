@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Allow cleartext HTTP. The remote server runs plain HTTP bound to loopback and reached
+  over an encrypted Tailscale tunnel (or the local network) — Tailscale provides the
+  transport encryption, so app-level cleartext to those private endpoints is fine.
+  This app only ever talks to a user-supplied smart-coder server URL; it makes no other
+  network calls.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

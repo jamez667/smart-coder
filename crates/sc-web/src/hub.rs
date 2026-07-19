@@ -95,6 +95,33 @@ impl EventSink for HubSink {
     }
 }
 
+impl HubSink {
+    /// Push one event onto the underlying hub directly (for callers that wrap the sink
+    /// in their own closure, e.g. to observe events before forwarding).
+    pub fn record_event(&self, event: &AgentEvent) {
+        self.hub.push(event.clone());
+    }
+}
+
+/// An [`EventSink`] that runs a closure per event — the seam a caller uses to observe
+/// the stream (e.g. track which files the agent edits) while still forwarding to a hub.
+/// The closure is responsible for forwarding (call [`HubSink::record_event`] inside it).
+pub struct FnHubSink<F: Fn(&AgentEvent) + Send + Sync> {
+    f: F,
+}
+
+impl<F: Fn(&AgentEvent) + Send + Sync> FnHubSink<F> {
+    pub fn new(f: F) -> Self {
+        Self { f }
+    }
+}
+
+impl<F: Fn(&AgentEvent) + Send + Sync> EventSink for FnHubSink<F> {
+    fn record(&self, event: &AgentEvent) {
+        (self.f)(event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

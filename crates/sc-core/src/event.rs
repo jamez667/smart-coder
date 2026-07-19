@@ -93,6 +93,29 @@ pub enum AgentEvent {
     Diagnosis { trigger: String, report: String },
     /// The plan was revised mid-run (via `update_plan`).
     PlanRevised { steps: Vec<String> },
+    /// A confirm-gated action is blocking the run, awaiting a human's approve/deny
+    /// (spec 04 — the `Confirmer` seam). Carried on the event stream so a remote
+    /// viewer (the phone) sees the pending prompt through the same `Hub` replay the
+    /// rest of the stream uses — a client that reconnects mid-approval replays this
+    /// with no matching `ConfirmResolved` and re-renders its approve/deny buttons.
+    /// `id` correlates the later `ConfirmResolved` and the inbound approve/deny POST.
+    ConfirmPending {
+        id: u64,
+        command: String,
+        reason: String,
+    },
+    /// A pending confirmation was answered (by any connected client), so every
+    /// viewer clears the prompt. `allowed` is whether it was approved.
+    ConfirmResolved { id: u64, allowed: bool },
+    /// A completed chat/planning turn in the desktop conversation, mirrored to remote
+    /// clients (the phone). `role` is `"you"` / `"agent"`; `text` is the full message.
+    /// Carried on the same event stream as everything else so the phone renders the live
+    /// desktop chat with zero extra transport (the mirror feature).
+    ChatMessage { role: String, text: String },
+    /// The in-flight assistant reply as it streams, token by token — `cumulative` is the
+    /// full text so far this turn (a renderer replaces its live bubble). Superseded by the
+    /// terminal `ChatMessage` when the turn completes.
+    ChatDelta { cumulative: String },
     /// The run ended. Carries the structured reason.
     Stopped { reason: StopReason },
 }
@@ -234,11 +257,16 @@ impl<W: Write> TranscriptSink<W> {
             }
             AgentEvent::Stopped { reason } => format!("** STOPPED: {reason:?}\n"),
             // Not surfaced in a prompt transcript (covered by the reply / prompt blocks; a
-            // ContentDelta is just the live-view increment of the ModelTurn reply).
+            // ContentDelta is just the live-view increment of the ModelTurn reply;
+            // Confirm* events are live-view approval prompts, not transcript content).
             AgentEvent::ToolCall { .. }
             | AgentEvent::Planned { .. }
             | AgentEvent::PlanRevised { .. }
-            | AgentEvent::ContentDelta { .. } => String::new(),
+            | AgentEvent::ContentDelta { .. }
+            | AgentEvent::ConfirmPending { .. }
+            | AgentEvent::ConfirmResolved { .. }
+            | AgentEvent::ChatMessage { .. }
+            | AgentEvent::ChatDelta { .. } => String::new(),
         }
     }
 }

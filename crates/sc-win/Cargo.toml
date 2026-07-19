@@ -16,14 +16,19 @@ path = "src/lib.rs"
 
 [dependencies]
 sc-core = { path = "../sc-core" }
+sc-iterate = { path = "../sc-iterate" }
 sc-swarm = { path = "../sc-swarm" }
 sc-workflow = { path = "../sc-workflow" }
 sc-model = { path = "../sc-model" }
 sc-tools = { path = "../sc-tools" }
 sc-verify = { path = "../sc-verify" }
+sc-web = { path = "../sc-web" }
 sc-proto = { path = "../sc-proto" }
-iced = { version = "0.14", features = ["tokio", "canvas", "advanced"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "advanced", "image"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde_json = { workspace = true }
 tokio = { version = "1.52.4", features = ["rt"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

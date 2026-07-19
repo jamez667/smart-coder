@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- A Compose-hosted app: no XML view styling needed, so a bare Material3 base with
+         no action bar is enough. Compose's MaterialTheme provides the actual colors. -->
+    <style name="Theme.SmartCoder" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

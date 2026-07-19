@@ -7,12 +7,30 @@
 
 use std::path::{Path, PathBuf};
 
+/// How many recent projects to remember (most-recent first).
+const MAX_RECENTS: usize = 12;
+
 /// The persisted UI state. Kept deliberately small — just what's worth surviving a restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiState {
     /// The last project folder the user opened (the one that makes runs iterate in place),
     /// or `None` if they never opened one / cleared it.
     pub last_project: Option<PathBuf>,
+    /// Recently-opened project folders, most-recent first (deduped, capped, existing dirs
+    /// only). Drives the remote project picker and any future "recent projects" menu.
+    pub recents: Vec<PathBuf>,
+}
+
+impl UiState {
+    /// Promote `path` to the front of the recents list (dedup, cap) and set it as the last
+    /// project. Call whenever a project is opened.
+    pub fn record_project(&mut self, path: &Path) {
+        let path = path.to_path_buf();
+        self.recents.retain(|p| p != &path);
+        self.recents.insert(0, path.clone());
+        self.recents.truncate(MAX_RECENTS);
+        self.last_project = Some(path);
+    }
 }
 
 /// The directory the state file lives in: `%APPDATA%\smart-coder` on Windows (always set),
@@ -43,6 +61,9 @@ pub fn load() -> UiState {
             state.last_project = None;
         }
     }
+    // Drop recents whose folder no longer exists (renamed/deleted), so the picker only
+    // ever offers openable projects.
+    state.recents.retain(|p| p.is_dir());
     state
 }
 
@@ -60,7 +81,12 @@ fn serialize(state: &UiState) -> String {
         .last_project
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
-    serde_json::json!({ "last_project": last }).to_string()
+    let recents: Vec<String> = state
+        .recents
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    serde_json::json!({ "last_project": last, "recents": recents }).to_string()
 }
 
 /// Parse the JSON produced by [`serialize`]. A missing/blank/`null` field ⇒ no project.
@@ -74,13 +100,85 @@ fn parse(text: &str) -> UiState {
         .and_then(|x| x.as_str())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
-    UiState { last_project }
+    let recents = v
+        .get("recents")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    UiState {
+        last_project,
+        recents,
+    }
 }
 
 /// Convenience: does `p` look like a directory we can open? (Used by callers before
 /// adopting a remembered path.)
 pub fn is_openable(p: &Path) -> bool {
     p.is_dir()
+}
+
+// --- Remote-session history --------------------------------------------------------------
+// Each remote-mirror launch appends one JSON line here: the connection URL (token included),
+// port, PID, and a unix timestamp. A session is "active" if its PID is still alive. This lets
+// the user find the CURRENT url (the token rotates per launch) and see recent ones.
+
+/// The history file: one JSON object per line (JSONL).
+fn sessions_file() -> PathBuf {
+    state_dir().join("remote-sessions.jsonl")
+}
+
+/// One recorded remote-mirror session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSession {
+    pub url: String,
+    pub port: u16,
+    pub pid: u32,
+    /// Unix seconds when the session started.
+    pub started: u64,
+}
+
+/// Append a session record (best-effort — a write failure is ignored).
+pub fn record_session(url: &str, port: u16, pid: u32, started: u64) {
+    let _ = std::fs::create_dir_all(state_dir());
+    let line = serde_json::json!({
+        "url": url, "port": port, "pid": pid, "started": started,
+    })
+    .to_string();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(sessions_file())
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Read all recorded sessions, most-recent first. Malformed lines are skipped.
+pub fn load_sessions() -> Vec<RemoteSession> {
+    let Ok(text) = std::fs::read_to_string(sessions_file()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RemoteSession> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| {
+            Some(RemoteSession {
+                url: v.get("url")?.as_str()?.to_string(),
+                port: v.get("port")?.as_u64()? as u16,
+                pid: v.get("pid")?.as_u64()? as u32,
+                started: v.get("started")?.as_u64()?,
+            })
+        })
+        .collect();
+    out.reverse(); // newest first
+    out
 }
 
 #[cfg(test)]
@@ -91,10 +189,30 @@ mod tests {
     fn round_trips_a_project_path() {
         let state = UiState {
             last_project: Some(PathBuf::from(r"C:\Users\x\game")),
+            recents: vec![PathBuf::from(r"C:\Users\x\game")],
         };
         let json = serialize(&state);
         let back = parse(&json);
         assert_eq!(back, state);
+    }
+
+    #[test]
+    fn record_project_promotes_dedups_and_caps() {
+        let mut s = UiState::default();
+        s.record_project(Path::new("/a"));
+        s.record_project(Path::new("/b"));
+        s.record_project(Path::new("/a")); // re-open a → moves to front, no dup
+        assert_eq!(
+            s.recents,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            "most-recent first, deduped"
+        );
+        assert_eq!(s.last_project, Some(PathBuf::from("/a")));
+        // Cap holds.
+        for i in 0..20 {
+            s.record_project(Path::new(&format!("/p{i}")));
+        }
+        assert!(s.recents.len() <= MAX_RECENTS);
     }
 
     #[test]

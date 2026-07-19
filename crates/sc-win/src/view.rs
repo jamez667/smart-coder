@@ -91,6 +91,11 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
             vec![Row::ok("🔬", format!("diagnosis ({trigger}): {report}"))]
         }
         Stopped { reason } => vec![stop_row(reason)],
+        // Remote approve/deny prompts drive the web/phone client; the desktop GUI has
+        // its own local confirmer, so these aren't rendered as rows here.
+        ConfirmPending { .. } | ConfirmResolved { .. } => Vec::new(),
+        // Chat mirror events drive the remote (phone) client, not the desktop's own row view.
+        ChatMessage { .. } | ChatDelta { .. } => Vec::new(),
     }
 }
 

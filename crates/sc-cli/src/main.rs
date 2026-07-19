@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         Command::Run { task } if cli.json => run_task_json(&cli, task.clone()),
         Command::Run { task } => run_task(&cli, task.clone()),
         Command::Serve { task } => serve_task(&cli, task.clone()),
+        Command::Remote => remote_task(&cli),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
         Command::Staged { task } => staged_task_json(&cli, task.clone()),
@@ -509,6 +510,61 @@ fn print_swarm_event(ev: &sc_swarm::SwarmEvent) {
     }
 }
 
+/// Serve the remote iterate server for the Android client: idle until a phone POSTs a
+/// task to `/run`, then drives an in-place Iterate run over the current directory
+/// (whatever project the PC has open). Reached via a Tailscale tunnel.
+fn remote_task(cli: &Cli) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let backend = cli.backend();
+    if let Err(e) = sc_cli::preflight(&[("model", &backend)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    let strategy = sc_core::select_strategy(&backend.capabilities());
+
+    let spec = sc_web::IterateServer {
+        backend: std::sync::Arc::new(backend),
+        advisor: cli.advisor().map(std::sync::Arc::new),
+        registry: std::sync::Arc::new(sc_tools::default_registry()),
+        strategy: strategy.into(),
+        workspace: workspace.clone(),
+        base_config: cli.agent_config(),
+        configured_verify: cli.verify_command.clone(),
+    };
+
+    let token = sc_web::mint_token();
+    let addr = format!("127.0.0.1:{}", cli.port);
+    let ws_name = workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("(workspace)");
+    let result = sc_web::serve_iterate(spec, &addr, &token, |url| {
+        println!("smart-coder remote (iterate) live at {url}/?k={token}");
+        println!("workspace: {ws_name}  ({})", workspace.display());
+        println!("idle until a client POSTs a task to /run.");
+        println!(
+            "to reach it from your phone: run `tailscale serve {}` and open the",
+            cli.port
+        );
+        println!("printed https URL with ?k={token} on the phone (same tailnet).");
+    });
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: remote server failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Drive a task in the current directory and serve a live web dashboard.
 fn serve_task(cli: &Cli, task: String) -> ExitCode {
     let workspace = match std::env::current_dir() {
@@ -537,10 +593,16 @@ fn serve_task(cli: &Cli, task: String) -> ExitCode {
         config: cli.agent_config(),
     };
 
-    // Bind a localhost port (0 = OS-assigned) and print the URL to open.
-    let result = sc_web::serve(spec, "127.0.0.1:0", |url| {
-        println!("smart-coder dashboard live at {url}");
-        println!("open it in your browser to watch the run (Ctrl-C to stop)");
+    // Bind a fixed loopback port (never 0.0.0.0) and require a per-run token on every
+    // request — defense-in-depth behind a Tailscale tunnel, since the dashboard can
+    // approve/deny commands and cancel the run.
+    let token = sc_web::mint_token();
+    let addr = format!("127.0.0.1:{}", cli.port);
+    let result = sc_web::serve(spec, &addr, &token, |url| {
+        println!("smart-coder dashboard live at {url}/?k={token}");
+        println!("open it in your browser to watch and drive the run (Ctrl-C to stop)");
+        println!("to reach it from your phone: run `tailscale serve {}` and open the", cli.port);
+        println!("printed https URL with ?k={token} on the phone (same tailnet).");
     });
 
     match result {
@@ -906,8 +968,17 @@ fn print_event(ev: &sc_core::AgentEvent) {
         Stopped { reason } => {
             println!("■ stopped — {reason:?}");
         }
-        // The streaming increment isn't a CLI line (the ModelTurn carries the full reply).
-        ContentDelta { .. } => {}
+        ConfirmPending { id, command, .. } => {
+            println!("  ⏸ approval needed [{id}]: {command}");
+        }
+        ConfirmResolved { id, allowed } => {
+            println!("  {} resolved [{id}]", if *allowed { "✓" } else { "✗" });
+        }
+        ChatMessage { role, text } => {
+            println!("  💬 {role}: {text}");
+        }
+        // The streaming increments aren't discrete CLI lines (the full text arrives at end).
+        ContentDelta { .. } | ChatDelta { .. } => {}
     }
 }
 

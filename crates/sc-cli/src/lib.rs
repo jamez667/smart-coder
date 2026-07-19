@@ -28,6 +28,10 @@ pub enum Command {
     Run { task: String },
     /// Run a task and serve a live web dashboard in the browser (spec 06).
     Serve { task: String },
+    /// Serve the remote iterate server (for the Android client): idle until a phone
+    /// POSTs a task to `/run`, then drives an in-place Iterate run over the open
+    /// workspace. No task on the command line — the phone supplies it.
+    Remote,
     /// Run a task with the worker swarm (orchestrator + parallel workers) and
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
@@ -128,6 +132,10 @@ pub struct Cli {
     /// instead of serving the web dashboard (`--cli`, spec 06 "swarm rendering").
     /// `--json` implies this (NDJSON is itself a CLI surface).
     pub cli: bool,
+    /// Loopback port for the `serve`/`swarm` web dashboard (`--port`, default 8177).
+    /// Fixed (not OS-assigned) so a Tailscale `serve` tunnel can point at a stable
+    /// port. Always bound on `127.0.0.1` — never `0.0.0.0`.
+    pub port: u16,
 }
 
 impl Cli {
@@ -166,12 +174,14 @@ impl Cli {
         let mut dry_run = false;
         let mut verbose = false;
         let mut cli_render = false;
+        let mut port: u16 = 8177;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
+                "remote" if command.is_none() => command = Some(Command::Remote),
                 "replay" if command.is_none() => {
                     let session = it.next().ok_or_else(|| {
                         DcError::Eval(
@@ -302,6 +312,15 @@ impl Cli {
                             DcError::Eval("--max-workers requires a positive integer".to_string())
                         })?;
                 }
+                "--port" => {
+                    port = it
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .filter(|n| *n != 0)
+                        .ok_or_else(|| {
+                            DcError::Eval("--port requires a port number 1-65535".to_string())
+                        })?;
+                }
                 "--max-retries" => {
                     max_subtask_retries =
                         it.next().and_then(|v| v.parse().ok()).ok_or_else(|| {
@@ -397,6 +416,7 @@ impl Cli {
             dry_run,
             verbose,
             cli: cli_render,
+            port,
         })
     }
 

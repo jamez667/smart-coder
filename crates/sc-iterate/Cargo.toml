@@ -1,0 +1,12 @@
+[package]
+name = "sc-iterate"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The iterate-mode flavor (instruction, verify-command detection, git dirty/revert, finish summary), shared by the desktop GUI and the remote server. No UI deps."
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-tools = { path = "../sc-tools" }
+sc-verify = { path = "../sc-verify" }

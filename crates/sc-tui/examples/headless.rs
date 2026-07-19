@@ -118,6 +118,10 @@ fn fmt_event(e: &AgentEvent) -> String {
         AgentEvent::Advice { advice, .. } => format!("  💡 {advice}"),
         AgentEvent::Diagnosis { report, .. } => format!("  🔬 {report}"),
         AgentEvent::Stopped { reason } => format!("■ stopped: {reason:?}"),
-        AgentEvent::ContentDelta { .. } => String::new(),
+        AgentEvent::ContentDelta { .. }
+        | AgentEvent::ConfirmPending { .. }
+        | AgentEvent::ConfirmResolved { .. }
+        | AgentEvent::ChatMessage { .. }
+        | AgentEvent::ChatDelta { .. } => String::new(),
     }
 }

@@ -13,3 +13,6 @@ sc-win-launch-*.log
 # Tailscale TLS cert/key (local, never commit)
 *.ts.net.crt
 *.ts.net.key
+
+# Rust->Android native build output (regenerable from crates/sc-android)
+**/jniLibs/**/*.so

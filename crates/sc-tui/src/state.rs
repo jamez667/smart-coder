@@ -162,8 +162,13 @@ impl TuiState {
                 self.stop = Some(reason.clone());
                 self.push(LineKind::Stop, format!("■ {}", self.status_line()));
             }
-            // The live streaming increment isn't a discrete TUI line.
-            AgentEvent::ContentDelta { .. } => {}
+            // The live streaming increment isn't a discrete TUI line; remote
+            // approve/deny prompts are a web/phone concern, not a terminal line.
+            AgentEvent::ContentDelta { .. }
+            | AgentEvent::ConfirmPending { .. }
+            | AgentEvent::ConfirmResolved { .. }
+            | AgentEvent::ChatMessage { .. }
+            | AgentEvent::ChatDelta { .. } => {}
         }
     }
 

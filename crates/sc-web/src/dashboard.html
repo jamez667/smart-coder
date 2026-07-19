@@ -59,6 +59,23 @@
   footer .ok { color:var(--green); } footer .bad { color:var(--red); } footer .mag { color:var(--magenta); }
   .bar { height:6px; background:#21262d; border-radius:3px; width:120px; overflow:hidden; display:inline-block; vertical-align:middle; }
   .bar > div { height:100%; background:var(--accent); width:0; transition:width .2s; }
+
+  header .cancel { margin-left:12px; background:transparent; color:var(--red);
+    border:1px solid var(--red); border-radius:5px; padding:3px 10px; font:inherit;
+    cursor:pointer; }
+  header .cancel:hover { background:var(--red); color:#08111a; }
+  /* Pending approval banner — the phone taps approve/deny here. */
+  #approvals { display:flex; flex-direction:column; gap:8px; }
+  .approval { background:#2d2410; border:1px solid var(--yellow); border-radius:8px;
+    padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .approval .cmd { color:var(--yellow); white-space:pre-wrap; word-break:break-all; }
+  .approval .reason { color:var(--dim); }
+  .approval .btns { display:flex; gap:10px; }
+  .approval button { flex:1; font:inherit; font-weight:700; padding:9px 0; border-radius:6px;
+    border:0; cursor:pointer; min-height:40px; }
+  .approval .yes { background:var(--green); color:#08111a; }
+  .approval .no { background:var(--red); color:#08111a; }
+  .approval.resolving { opacity:.5; pointer-events:none; }
 </style>
 </head>
 <body>
@@ -66,8 +83,13 @@
   <span class="badge">smart-coder</span>
   <span class="task" id="task">connecting…</span>
   <span class="status" id="status">●</span>
+  <button class="cancel" id="cancel" title="Stop the run at the next turn">stop run</button>
 </header>
 <main>
+  <section class="box" id="approvals-box" style="display:none">
+    <h2><span class="dot" style="color:var(--yellow)">●</span> approvals <span class="who">(tap to approve/deny commands)</span></h2>
+    <div class="body"><div id="approvals"></div></div>
+  </section>
   <section class="box" id="advisor">
     <h2><span class="dot">●</span> advisor <span class="who" id="advisor-who">(senior — consulted on stalls)</span></h2>
     <div class="body"><div class="empty">No consults yet. The advisor is asked only when the coder stalls.</div></div>
@@ -86,7 +108,18 @@
 
 <script>
 const $ = id => document.getElementById(id);
+// The per-run token from our own URL (?k=...). Held in memory only; sent as a query
+// param on GET (this URL is how the phone was handed the token) and as a bearer
+// header on the state-changing POSTs (the CSRF defense).
+const TOKEN = new URLSearchParams(location.search).get('k') || '';
+const withK = path => path + (path.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(TOKEN);
+const post = (path, body) => fetch(path, {
+  method:'POST',
+  headers:{ 'Authorization':'Bearer ' + TOKEN, 'Content-Type':'application/json' },
+  body: JSON.stringify(body || {}),
+});
 const state = { step:0, budget:0, tokens:0, valid:0, invalid:0, nudges:0 };
+const pending = new Map();  // id -> approval DOM node
 const coderBody = $('coder-body');
 const advisorBody = $('advisor').querySelector('.body');
 let curTurn = null;           // the DOM node for the current turn
@@ -112,6 +145,33 @@ function coderLine(cls, text) {
   const stick = atBottom(coderBody);
   target.appendChild(el(cls, text));
   if (stick) coderBody.scrollTop = coderBody.scrollHeight;
+}
+
+function renderApproval(id, command, reason) {
+  if (pending.has(id)) return;               // already shown (replay dedup)
+  $('approvals-box').style.display = '';
+  const a = el('approval');
+  a.appendChild(el('cmd', '$ ' + command));
+  if (reason) a.appendChild(el('reason', reason));
+  const btns = el('btns');
+  const yb=document.createElement('button'); yb.className='yes'; yb.textContent='approve'; yb.onclick=()=>resolve(id,true);
+  const nb=document.createElement('button'); nb.className='no';  nb.textContent='deny';    nb.onclick=()=>resolve(id,false);
+  btns.appendChild(yb); btns.appendChild(nb);
+  a.appendChild(btns);
+  $('approvals').appendChild(a);
+  pending.set(id, a);
+}
+async function resolve(id, allow) {
+  const node = pending.get(id);
+  if (node) node.classList.add('resolving');   // optimistic; the event will remove it
+  try { await post(allow ? '/approve' : '/deny', { id }); }
+  catch (_) { if (node) node.classList.remove('resolving'); }
+}
+function clearApproval(id) {
+  const node = pending.get(id);
+  if (node) node.remove();
+  pending.delete(id);
+  if (pending.size === 0) $('approvals-box').style.display = 'none';
 }
 
 function addConsult(trigger, hint) {
@@ -156,6 +216,10 @@ function apply(e) {
     case 'Stalled': coderLine('stall', '⚠ stalled: ' + e.trigger); break;
     case 'Advice':
       state.nudges++; addConsult(e.trigger, e.advice); break;
+    case 'ConfirmPending':
+      renderApproval(e.id, e.command, e.reason); break;
+    case 'ConfirmResolved':
+      clearApproval(e.id); break;
     case 'Stopped': {
       const r = e.reason;
       const label = typeof r==='string' ? r : Object.keys(r)[0] + ': ' + Object.values(r)[0];
@@ -170,15 +234,20 @@ function apply(e) {
   refreshFooter();
 }
 
+$('cancel').onclick = async () => {
+  $('cancel').disabled = true; $('cancel').textContent = 'stopping…';
+  try { await post('/cancel'); } catch (_) { $('cancel').disabled = false; $('cancel').textContent = 'stop run'; }
+};
+
 let from = 0, done = false;
 async function poll() {
   try {
-    const res = await fetch('/events?from=' + from);
+    const res = await fetch(withK('/events?from=' + from));
     const data = await res.json();
     for (const e of data.events) apply(e);
     from = data.next; done = data.done;
   } catch (_) { done = true; }
-  if (!done) setTimeout(poll, 250);
+  if (!done) setTimeout(poll, 500);
 }
 poll();
 </script>

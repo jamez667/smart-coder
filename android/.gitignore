@@ -1,0 +1,18 @@
+# Gradle
+.gradle/
+build/
+
+# Android build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Local config (SDK paths, signing) — machine-specific
+local.properties
+
+# IDE
+.idea/
+*.iml
+.cxx/
+captures/
