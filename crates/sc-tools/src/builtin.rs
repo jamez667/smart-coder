@@ -60,7 +60,10 @@ pub fn default_registry() -> ToolRegistry {
         },
         ToolSpec {
             name: "search_code",
-            description: "Search files for a literal substring; returns file:line hits.",
+            description: "Search files with a REGEX (e.g. `match .*ShipRole`, `fn \\w+`, \
+                          `enum \\w+`); returns file:line hits. A plain string with no regex \
+                          metacharacters works as a literal substring. Use `.*` to match across a \
+                          line and `\\.` for a literal dot.",
             params: vec![ParamSpec::new(
                 "query",
                 ParamType::String,
@@ -600,11 +603,40 @@ fn list_dir(workspace: &Path, path: &str) -> String {
 /// A small literal-substring search over the workspace's text files. Skips the
 /// usual noise dirs and anything that isn't valid UTF-8. Caps hits so the result
 /// fits a small context window.
+/// A line matcher for [`search_code`]: a compiled regex when the query is valid regex, else a
+/// literal-substring fallback (so a plain string with no metachars, or an invalid pattern, still
+/// searches sensibly). Kept private to this module.
+enum Matcher {
+    Regex(regex::Regex),
+    Literal(String),
+}
+
+impl Matcher {
+    fn new(query: &str) -> Self {
+        match regex::Regex::new(query) {
+            Ok(re) => Matcher::Regex(re),
+            Err(_) => Matcher::Literal(query.to_string()),
+        }
+    }
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Matcher::Regex(re) => re.is_match(line),
+            Matcher::Literal(q) => line.contains(q.as_str()),
+        }
+    }
+}
+
 fn search_code(workspace: &Path, query: &str) -> String {
     const MAX_HITS: usize = 50;
     if query.is_empty() {
         return "search_code: empty query".to_string();
     }
+    // Treat the query as a REGEX (the model naturally reaches for `match.*ShipRole`,
+    // `fn \w+`, etc.). If it isn't valid regex, fall back to a literal substring so a plain
+    // string like `ShipRole::` still works. A regex whose literal meaning differs (contains
+    // regex metachars) is matched as regex; this is what makes "find the exhaustive matches"
+    // actually work instead of returning "no matches" and looping.
+    let matcher = Matcher::new(query);
     let mut hits = Vec::new();
     let mut walk = vec![workspace.to_path_buf()];
     while let Some(dir) = walk.pop() {
@@ -634,7 +666,7 @@ fn search_code(workspace: &Path, query: &str) -> String {
                     .to_string_lossy()
                     .replace('\\', "/");
                 for (i, line) in content.lines().enumerate() {
-                    if line.contains(query) {
+                    if matcher.is_match(line) {
                         hits.push(format!("{rel}:{}: {}", i + 1, line.trim()));
                         if hits.len() >= MAX_HITS {
                             hits.sort();
@@ -1809,6 +1841,36 @@ fn pick(r: Role) -> u32 {
         };
         assert!(o.contains("a.rs:2"), "got: {o}");
         assert!(!o.contains("b.rs"), "got: {o}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn search_code_matches_regex_patterns() {
+        let ws = temp_dir("searchre");
+        std::fs::write(
+            ws.join("a.rs"),
+            "fn alpha() {}\nfn beta_two() {}\nlet x = ShipRole::Miner;\n",
+        )
+        .unwrap();
+        // `fn \w+` matches both function lines via regex (would be literal-nomatch before).
+        let o = obs(execute(&call(json!({"tool":"search_code","query":r"fn \w+"})), &ws));
+        assert!(o.contains("a.rs:1") && o.contains("a.rs:2"), "regex fn: {o}");
+        // `ShipRole::\w+` finds the enum use.
+        let o2 = obs(execute(
+            &call(json!({"tool":"search_code","query":r"ShipRole::\w+"})),
+            &ws,
+        ));
+        assert!(o2.contains("a.rs:3"), "regex enum use: {o2}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn search_code_falls_back_to_literal_for_invalid_regex() {
+        let ws = temp_dir("searchlit");
+        // `[` alone is invalid regex — must fall back to a literal substring search, not error.
+        std::fs::write(ws.join("a.rs"), "let v = arr[0];\nno bracket here\n").unwrap();
+        let o = obs(execute(&call(json!({"tool":"search_code","query":"arr["})), &ws));
+        assert!(o.contains("a.rs:1"), "literal fallback for invalid regex: {o}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

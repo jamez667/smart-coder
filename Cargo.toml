@@ -7,7 +7,9 @@ members = [
     "crates/sc-context",
     "crates/sc-index",
     "crates/sc-verify",
+    "crates/sc-android",
     "crates/sc-core",
+    "crates/sc-iterate",
     "crates/sc-swarm",
     "crates/sc-workflow",
     "crates/sc-tui",
@@ -26,3 +28,4 @@ repository = "https://github.com/jamez667/smart-coder"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+regex = "1"

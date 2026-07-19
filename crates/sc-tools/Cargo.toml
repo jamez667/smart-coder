@@ -11,3 +11,4 @@ sc-proto = { path = "../sc-proto" }
 sc-index = { path = "../sc-index" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+regex = { workspace = true }
