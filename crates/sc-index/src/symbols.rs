@@ -131,6 +131,66 @@ pub fn extract_symbols(lang: Language, source: &str) -> FileSymbols {
     out
 }
 
+/// The 1-based, inclusive line span `(start, end)` of the function/method named `name` in
+/// `source`, via tree-sitter — the primitive behind function-level read/edit. Matches the
+/// FULL definition node (e.g. Rust `function_item`), so the span covers the whole function
+/// body, not just its signature line. `None` if there's no such function or parsing fails.
+///
+/// If several functions share the name (overloads, methods on different impls), the FIRST in
+/// source order is returned — the tools that use this note the ambiguity to the caller.
+pub fn function_span(lang: Language, source: &str, name: &str) -> Option<(usize, usize)> {
+    let ts_lang = lang.ts_language();
+    let mut parser = Parser::new();
+    parser.set_language(&ts_lang).ok()?;
+    let tree = parser.parse(source, None)?;
+    let bytes = source.as_bytes();
+
+    // The node kinds that are "a function/method definition" per language, and the field that
+    // holds the name. We walk the whole tree and return the first def node whose name matches.
+    let (def_kinds, name_field): (&[&str], &str) = match lang {
+        Language::Rust => (&["function_item"], "name"),
+        Language::Python => (&["function_definition"], "name"),
+        Language::CSharp => (&["method_declaration", "local_function_statement"], "name"),
+    };
+    find_fn_span(tree.root_node(), bytes, def_kinds, name_field, name)
+}
+
+/// Recursive pre-order search for the first def node named `name`, returning its 1-based
+/// inclusive line span. Pre-order visitation means the earliest definition in source order
+/// (and the outermost when nested) wins.
+fn find_fn_span(
+    node: tree_sitter::Node,
+    bytes: &[u8],
+    def_kinds: &[&str],
+    name_field: &str,
+    name: &str,
+) -> Option<(usize, usize)> {
+    if def_kinds.contains(&node.kind()) {
+        if let Some(name_node) = node.child_by_field_name(name_field) {
+            if name_node.utf8_text(bytes).ok() == Some(name) {
+                return Some((node.start_position().row + 1, node.end_position().row + 1));
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for c in node.children(&mut cursor) {
+        if let Some(span) = find_fn_span(c, bytes, def_kinds, name_field, name) {
+            return Some(span);
+        }
+    }
+    None
+}
+
+/// Count the functions/methods named `name` in `source`, so a caller can warn when a name is
+/// ambiguous (the [`function_span`] it edits is only the first).
+pub fn count_functions_named(lang: Language, source: &str, name: &str) -> usize {
+    extract_symbols(lang, source)
+        .defs
+        .iter()
+        .filter(|d| d.name == name)
+        .count()
+}
+
 fn capture_indices(query: &Query, name: &str) -> Vec<u32> {
     query
         .capture_names()
@@ -151,6 +211,41 @@ mod tests {
         assert_eq!(Language::from_path("x/y.py"), Some(Language::Python));
         assert_eq!(Language::from_path("README.md"), None);
         assert_eq!(Language::from_path("noext"), None);
+    }
+
+    #[test]
+    fn function_span_covers_the_whole_rust_fn() {
+        let src = "\
+fn first() -> u32 {
+    1
+}
+
+fn target(x: u32) -> u32 {
+    let y = x + 1;
+    y * 2
+}
+
+fn last() {}
+";
+        // `target` spans its full body (lines 5..=8, 1-based), not just the signature.
+        assert_eq!(function_span(Language::Rust, src, "target"), Some((5, 8)));
+        assert_eq!(function_span(Language::Rust, src, "first"), Some((1, 3)));
+        assert_eq!(function_span(Language::Rust, src, "nope"), None);
+    }
+
+    #[test]
+    fn function_span_handles_python_and_counts_dupes() {
+        let src = "\
+def a():
+    return 1
+
+def a():
+    return 2
+";
+        // First definition in source order wins.
+        assert_eq!(function_span(Language::Python, src, "a"), Some((1, 2)));
+        assert_eq!(count_functions_named(Language::Python, src, "a"), 2);
+        assert_eq!(count_functions_named(Language::Python, src, "a").max(0), 2);
     }
 
     #[test]

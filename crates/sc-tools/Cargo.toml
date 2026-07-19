@@ -8,5 +8,6 @@ description = "Tool Registry: strict tool schemas, validation, and built-in tool
 
 [dependencies]
 sc-proto = { path = "../sc-proto" }
+sc-index = { path = "../sc-index" }
 serde = { workspace = true }
 serde_json = { workspace = true }

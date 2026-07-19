@@ -172,6 +172,46 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "read_function",
+            description: "Read a SINGLE function/method by NAME (Rust/Python/C#) — its whole \
+                          body, line-numbered. PREFER this over read_file for a big file: you get \
+                          just the function you care about, not hundreds of unrelated lines.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new("name", ParamType::String, "the function/method name to read"),
+            ],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
+            name: "edit_function",
+            description: "Replace a whole function/method by NAME (Rust/Python/C#) with new_body. \
+                          BEST for changing a function: no snippet to copy exactly and no line \
+                          numbers to get right — name the function, give its full new text. Use \
+                          this to add a match arm, change a signature, or rewrite a body. (If the \
+                          function is very large, it suggests using edit_lines for a targeted \
+                          change instead.)",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "file path relative to the project root",
+                ),
+                ParamSpec::new("name", ParamType::String, "the function/method name to replace"),
+                ParamSpec::new(
+                    "new_body",
+                    ParamType::String,
+                    "the FULL new text of the function (signature + body), replacing the old one",
+                ),
+            ],
+            side_effect: SideEffect::Mutating,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "run_command",
             description: "Run a shell command in the workspace; returns exit code + output.",
             params: vec![ParamSpec::new(
@@ -297,6 +337,22 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
         )),
         "list_dir" => ToolOutcome::Observation(list_dir(workspace, arg(call, "path"))),
         "search_code" => ToolOutcome::Observation(search_code(workspace, arg(call, "query"))),
+        "read_function" => {
+            ToolOutcome::Observation(read_function(workspace, arg(call, "path"), arg(call, "name")))
+        }
+        "edit_function" => {
+            let path = arg(call, "path");
+            let body = arg(call, "new_body");
+            // Same nested-tool-call guard as the other writers.
+            if is_code_path(path) && looks_like_tool_call_json(body) {
+                ToolOutcome::Observation(format!(
+                    "edit_function {path} rejected: the new_body you sent is a tool-call JSON \
+                     object, not source code. Send the RAW function text as new_body."
+                ))
+            } else {
+                ToolOutcome::Observation(edit_function(workspace, path, arg(call, "name"), body))
+            }
+        }
         "write_file" | "create_file" | "append_file" | "edit_file" | "edit_lines" => {
             // Guard: the model sometimes nests its NEXT tool call (or a ```json fence wrapping one)
             // inside the content/new_str field, and we'd write that raw JSON scaffolding into the
@@ -398,6 +454,119 @@ fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option<i64
             String::new()
         };
         format!("read_file {path} (lines {start_1}-{end} of {total}):\n{body}{more}")
+    }
+}
+
+/// A function longer than this is "giant" — [`read_function`] still shows it but nudges the
+/// model to make a targeted `edit_lines` change rather than rewriting the whole thing, and
+/// [`edit_function`] warns that a full-rewrite of a function this size is error-prone.
+const GIANT_FN_LINES: usize = 120;
+
+/// Resolve `(language, source, (start,end))` for the function `name` in `path`, or an error
+/// string. Shared by [`read_function`] and [`edit_function`].
+fn locate_function(
+    workspace: &Path,
+    path: &str,
+    name: &str,
+) -> std::result::Result<(String, usize, usize, usize), String> {
+    let p = safe_join(workspace, path).map_err(|e| format!("{path} rejected: {e}"))?;
+    let Some(lang) = sc_index::Language::from_path(path) else {
+        return Err(format!(
+            "{path}: function tools support Rust/Python/C# only. Use read_file/edit_lines here."
+        ));
+    };
+    let src = std::fs::read_to_string(&p).map_err(|e| format!("{path} error: {e}"))?;
+    let src = src.replace("\r\n", "\n").replace('\r', "\n");
+    let Some((start, end)) = sc_index::function_span(lang, &src, name) else {
+        return Err(format!(
+            "{path}: no function named `{name}` found. Check the name (or use search_code / \
+             read_file to locate it)."
+        ));
+    };
+    let count = sc_index::count_functions_named(lang, &src, name);
+    Ok((src, start, end, count))
+}
+
+/// Read one function/method by name — its whole body, line-numbered. The model gets exactly the
+/// function it asked for instead of paging through a large file.
+fn read_function(workspace: &Path, path: &str, name: &str) -> String {
+    let (src, start, end, count) = match locate_function(workspace, path, name) {
+        Ok(v) => v,
+        Err(e) => return format!("read_function {e}"),
+    };
+    let lines: Vec<&str> = src.lines().collect();
+    let body: String = lines[start - 1..end]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{:>5}  {l}", start + i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let span_len = end - start + 1;
+    let mut note = String::new();
+    if count > 1 {
+        note.push_str(&format!(
+            "\n(note: {count} functions named `{name}` — this is the FIRST; edit_function edits \
+             this one.)"
+        ));
+    }
+    if span_len > GIANT_FN_LINES {
+        note.push_str(&format!(
+            "\n(this function is large — {span_len} lines. For a small change, prefer edit_lines \
+             on the specific lines above rather than rewriting the whole function.)"
+        ));
+    }
+    format!("read_function {path}:{name} (lines {start}-{end}):\n{body}{note}")
+}
+
+/// Replace a whole function/method by name with `new_body`. Resolves the function's span via
+/// tree-sitter, then splices — no exact snippet or line numbers for the model to get wrong.
+fn edit_function(workspace: &Path, path: &str, name: &str, new_body: &str) -> String {
+    let (src, start, end, count) = match locate_function(workspace, path, name) {
+        Ok(v) => v,
+        Err(e) => return format!("edit_function {e}"),
+    };
+    let p = match safe_join(workspace, path) {
+        Ok(p) => p,
+        Err(e) => return format!("edit_function {path} rejected: {e}"),
+    };
+    let new_body = new_body.replace("\r\n", "\n").replace('\r', "\n");
+    let had_trailing_nl = src.ends_with('\n');
+    let lines: Vec<&str> = src.lines().collect();
+
+    let mut out: Vec<String> = Vec::new();
+    out.extend(lines[..start - 1].iter().map(|l| l.to_string()));
+    out.extend(new_body.split('\n').map(|l| l.to_string()));
+    out.extend(lines[end..].iter().map(|l| l.to_string()));
+    let mut joined = out.join("\n");
+    if had_trailing_nl {
+        joined.push('\n');
+    }
+
+    // Reuse the brace-balance tripwire: replacing a whole function should keep the file balanced;
+    // if the new_body drops/adds a delimiter, reject with the same guidance rather than writing
+    // a file that won't compile.
+    if is_code_path(path) {
+        if let Some(msg) = delimiter_regression(&src, &joined) {
+            return format!(
+                "edit_function {path}:{name} rejected: {msg} Your new_body isn't brace-balanced \
+                 against the rest of the file — recount the braces in the function you sent."
+            );
+        }
+    }
+
+    match std::fs::write(&p, &joined) {
+        Ok(()) => {
+            let dup = if count > 1 {
+                format!(" (note: {count} functions named `{name}`; edited the FIRST)")
+            } else {
+                String::new()
+            };
+            format!(
+                "edit_function {path}:{name} ok (replaced lines {start}..={end}; file now {} lines){dup}",
+                joined.lines().count()
+            )
+        }
+        Err(e) => format!("edit_function {path}:{name} error: {e}"),
     }
 }
 
@@ -1130,6 +1299,8 @@ mod tests {
                 "append_file",
                 "edit_file",
                 "edit_lines",
+                "read_function",
+                "edit_function",
                 "run_command",
                 "run_verification",
                 "update_plan",
@@ -1158,6 +1329,66 @@ mod tests {
             ToolOutcome::Observation(o) => o,
             _ => panic!("expected observation"),
         }
+    }
+
+    #[test]
+    fn read_function_returns_just_that_function() {
+        let ws = temp_dir("rfn");
+        let src = "fn a() { 1 }\n\nfn target(x: u32) -> u32 {\n    x + 1\n}\n\nfn b() {}\n";
+        std::fs::write(ws.join("lib.rs"), src).unwrap();
+        let out = obs(execute(
+            &call(json!({"tool":"read_function","path":"lib.rs","name":"target"})),
+            &ws,
+        ));
+        assert!(out.contains("fn target"), "got: {out}");
+        assert!(out.contains("x + 1"), "body present: {out}");
+        assert!(!out.contains("fn a("), "only the target function: {out}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_function_replaces_the_whole_function() {
+        // The Gunner scenario in miniature: add a match arm by rewriting the function.
+        let ws = temp_dir("efn");
+        let src = "\
+enum Role { A, B }
+fn pick(r: Role) -> u32 {
+    match r {
+        Role::A => 1,
+        Role::B => 2,
+    }
+}
+";
+        std::fs::write(ws.join("m.rs"), src).unwrap();
+        let new_body = "\
+fn pick(r: Role) -> u32 {
+    match r {
+        Role::A => 1,
+        Role::B => 2,
+        Role::C => 3,
+    }
+}";
+        let out = obs(execute(
+            &call(json!({"tool":"edit_function","path":"m.rs","name":"pick","new_body":new_body})),
+            &ws,
+        ));
+        assert!(out.contains("ok"), "edit ok: {out}");
+        let after = std::fs::read_to_string(ws.join("m.rs")).unwrap();
+        assert!(after.contains("Role::C => 3"), "new arm landed: {after}");
+        assert!(after.contains("enum Role"), "rest of file intact: {after}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn edit_function_missing_name_is_a_clear_error() {
+        let ws = temp_dir("efn2");
+        std::fs::write(ws.join("m.rs"), "fn a() {}\n").unwrap();
+        let out = obs(execute(
+            &call(json!({"tool":"edit_function","path":"m.rs","name":"nope","new_body":"fn nope(){}"})),
+            &ws,
+        ));
+        assert!(out.contains("no function named `nope`"), "got: {out}");
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

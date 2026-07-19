@@ -904,13 +904,14 @@ pub fn run_agent_observed(
             } else if big_existing {
                 format!(
                     "Editing `{arg}` by exact snippet is failing — you keep matching code that \
-                     isn't in the file. STOP using edit_file on this large file. Use `edit_lines` \
-                     instead: it addresses lines by NUMBER, so you don't have to reproduce any \
-                     text. The file view shows `N| ` line numbers. To REPLACE lines, call \
-                     edit_lines with start/end = those line numbers and new_text = the replacement \
-                     (do NOT include the `N| ` prefix). To INSERT before line N without deleting, \
-                     pass start=N, end=N-1. To add a whole new method at the end, `append_file` \
-                     also works. Make the change now with edit_lines."
+                     isn't in the file. STOP using edit_file on this large file. If the code you \
+                     want to change is inside a function/method, use `edit_function`: pass its \
+                     `name` and the FULL new function text as `new_body` — no snippet to copy and \
+                     no line numbers to get right (the tool finds the function for you). This is \
+                     the easiest way to add a match arm or change a body. Otherwise use \
+                     `edit_lines` (address lines by NUMBER from the `N| ` view; do NOT include the \
+                     `N| ` prefix; to INSERT before line N pass start=N, end=N-1). Make the change \
+                     now with edit_function or edit_lines."
                 )
             } else {
                 format!(

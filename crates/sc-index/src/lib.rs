@@ -17,5 +17,7 @@ mod workspace;
 
 pub use pagerank::{pagerank, Edge};
 pub use repomap::{build_repo_map, render_repo_map, Boosts, RankedSymbol, SourceFile};
-pub use symbols::{extract_symbols, FileSymbols, Language, SymbolDef};
+pub use symbols::{
+    count_functions_named, extract_symbols, function_span, FileSymbols, Language, SymbolDef,
+};
 pub use workspace::{collect_sources, find_symbol, repo_map};
