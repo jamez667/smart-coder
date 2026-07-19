@@ -298,6 +298,16 @@ fn config_file() -> std::path::PathBuf {
     base.join("smart-coder").join("config.json")
 }
 
+/// The directory for model-call transcript logs: `%APPDATA%\smart-coder\logs` (next to
+/// config.json). `main` points sc-model's transcript logger here at startup. `Some` unless the
+/// base dir can't be resolved (never, given the temp-dir fallback).
+pub fn log_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    Some(base.join("smart-coder").join("logs"))
+}
+
 /// Pull `{"base_url": "...", "model": "..."}` out of the config JSON. Either key may be
 /// absent; a missing/blank/malformed file yields `(None, None)` and the caller keeps its
 /// default. Dependency-free (serde_json, already in the tree) — mirrors `persist::parse`.

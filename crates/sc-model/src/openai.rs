@@ -237,6 +237,19 @@ impl OpenAiBackend {
         req: &GenerateRequest,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<GenerateResponse> {
+        let started = std::time::Instant::now();
+        let result = self.generate_streaming_inner(req, on_token);
+        self.log_call("generate_streaming", req, started, &result);
+        result
+    }
+
+    /// The real SSE body of [`Self::generate_streaming`], split out so the public method can
+    /// time it and log the transcript around it.
+    fn generate_streaming_inner(
+        &self,
+        req: &GenerateRequest,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<GenerateResponse> {
         use std::io::BufRead;
 
         let messages: Vec<serde_json::Value> = req
@@ -429,6 +442,59 @@ impl ModelBackend for OpenAiBackend {
     }
 
     fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let started = std::time::Instant::now();
+        let result = self.generate_inner(req);
+        self.log_call("generate", req, started, &result);
+        result
+    }
+}
+
+impl OpenAiBackend {
+    /// Emit one [`crate::transcript`] entry for a completed call — the full messages sent and
+    /// the reply/error received. Always-on (best-effort); the transcript module no-ops when
+    /// logging is disabled, so this is cheap on the hot path.
+    fn log_call(
+        &self,
+        call: &str,
+        req: &GenerateRequest,
+        started: std::time::Instant,
+        result: &Result<GenerateResponse>,
+    ) {
+        if !crate::transcript::is_enabled() {
+            return;
+        }
+        let messages: Vec<(&str, &str)> = req
+            .messages
+            .iter()
+            .map(|m| (role_str(m.role), m.content.as_str()))
+            .collect();
+        let constraint = req.constraint.as_ref().map(|c| match c {
+            OutputConstraint::Tools(_) => ("tools", ""),
+            OutputConstraint::Grammar(g) => ("grammar", g.as_str()),
+        });
+        let endpoint = self.endpoint();
+        // Own the error string so its borrow lives across the log call.
+        let err_text = result.as_ref().err().map(|e| e.to_string());
+        let result_ref: std::result::Result<&str, &str> = match result {
+            Ok(r) => Ok(r.content.as_str()),
+            Err(_) => Err(err_text.as_deref().unwrap_or("<error>")),
+        };
+        crate::transcript::log(crate::transcript::Entry {
+            call,
+            model: &self.model,
+            endpoint: &endpoint,
+            messages: &messages,
+            constraint,
+            temperature: req.temperature,
+            max_tokens: req.max_tokens as u32,
+            result: result_ref,
+            ms: started.elapsed().as_millis(),
+        });
+    }
+
+    /// The real request/response body of [`ModelBackend::generate`], split out so the public
+    /// method can time it and log the transcript around it.
+    fn generate_inner(&self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()

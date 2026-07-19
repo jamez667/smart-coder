@@ -27,7 +27,12 @@ pub enum Mode {
 /// the right `file:` block) so the model can't misroute or forget the fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatIntent {
-    /// A question about the plan or the open file → answer in prose, no file.
+    /// GENERIC conversation not about this project ("hello", "how are you", "what can you
+    /// do?") → answer in prose with a MINIMAL prompt: no README/TODO/open-file, no planning
+    /// boilerplate. Keeps a plain greeting from dragging the whole project context along.
+    Chat,
+    /// A question ABOUT this project/plan/open file → answer in prose, with the relevant
+    /// context (open file) but no file block.
     Question,
     /// Add/remove/reorder whole-project backlog items → a `TODO.md` block.
     TodoEdit,
@@ -38,28 +43,36 @@ pub enum ChatIntent {
     /// A request to change source code → prose telling the user to comment on the code lines
     /// (this chat can't edit source).
     CodeChange,
+    /// A request to RUN something (build/launch/test/a shell command) → emit a ```command
+    /// block the app offers as a one-click Run in the integrated terminal. This is the intent
+    /// that turns "start the windows client" into `cargo run -p sc-win` instead of a PLAN.
+    Command,
 }
 
 impl ChatIntent {
     /// The classifier's label token for this intent (the single word the grammar allows).
     fn token(self) -> &'static str {
         match self {
+            ChatIntent::Chat => "chat",
             ChatIntent::Question => "question",
             ChatIntent::TodoEdit => "todo_edit",
             ChatIntent::ReadmeEdit => "readme_edit",
             ChatIntent::FeaturePlan => "feature_plan",
             ChatIntent::CodeChange => "code_change",
+            ChatIntent::Command => "command",
         }
     }
 
     /// Every intent, for building the classifier grammar / parsing its reply.
-    fn all() -> [ChatIntent; 5] {
+    fn all() -> [ChatIntent; 7] {
         [
+            ChatIntent::Chat,
             ChatIntent::Question,
             ChatIntent::TodoEdit,
             ChatIntent::ReadmeEdit,
             ChatIntent::FeaturePlan,
             ChatIntent::CodeChange,
+            ChatIntent::Command,
         ]
     }
 
@@ -231,16 +244,25 @@ impl Conversation {
         let sys = format!(
             "You classify a user's message in a project-planning chat into exactly ONE intent. \
              Reply with ONLY the intent word, nothing else.\n\
-             • question — asking about the plan/code, wants an answer or discussion (incl. \
-             \"what do you think of this file?\", \"anything you'd change?\"). Reviewing or \
-             critiquing a file is a question UNLESS they ask to write the result down.\n\
+             • chat — GENERIC conversation NOT about this specific project: greetings and small \
+             talk (\"hello\", \"how are you\", \"thanks\"), or general questions about coding / \
+             the tool itself (\"what can you do?\", \"what is Rust?\"). Use this when answering \
+             needs NO knowledge of this project's files.\n\
+             • question — a question ABOUT THIS project: its plan, code, or the open file (\"what \
+             does this file do?\", \"what's the architecture?\", \"anything you'd change?\"). \
+             Reviewing or critiquing a file is a question UNLESS they ask to write the result \
+             down. Use this only when answering needs this project's context.\n\
              • todo_edit — add/remove/reorder items in the whole-project TODO backlog.\n\
              • readme_edit — change the project overview/architecture in the README.\n\
              • feature_plan — design a feature, or WRITE DOWN / MAKE A PLAN to investigate or \
              improve something (\"make a plan to…\", \"plan out adding X\", \"write up how we'd \
-             fix this file\").\n\
+             fix this file\"). NOT for merely running/launching something.\n\
              • code_change — asking to actually edit source code (\"rename X\", \"fix this \
-             function\", \"change the code\").{open}"
+             function\", \"change the code\").\n\
+             • command — asking to RUN / LAUNCH / BUILD / START / TEST something, i.e. execute a \
+             shell command (\"start the windows client\", \"run the app\", \"build it\", \"cargo \
+             test\", \"launch the server\"). Choose this over feature_plan whenever the user wants \
+             something EXECUTED, not designed.{open}"
         );
         let messages = vec![
             Message::system(sys),
@@ -259,8 +281,20 @@ impl Conversation {
     /// `file:<name>` block — so the model structurally cannot forget the fence or pick the wrong
     /// target file. `think` controls the reasoning budget as before.
     pub fn request(&self, think: bool, intent: ChatIntent) -> GenerateRequest {
-        let mut sys = self.system_prompt();
-        sys.push_str(&intent_instruction(intent, self.plan_slug()));
+        // GENERIC chat gets a MINIMAL prompt — no README/TODO/open-file, no planning boilerplate.
+        // A plain "hello" must not drag the whole project context along (the whole point of the
+        // classify-first split). Everything else builds the context-bearing planning prompt,
+        // trimmed to what the intent actually needs by `system_prompt`.
+        let mut sys = if intent == ChatIntent::Chat {
+            "You are a friendly, concise assistant inside a desktop coding app. Answer the \
+             user's message directly in a sentence or two. This message isn't about their \
+             project's code, so don't invent project details or propose file changes.\n\n"
+                .to_string()
+        } else {
+            let mut s = self.system_prompt(intent);
+            s.push_str(&intent_instruction(intent, self.plan_slug()));
+            s
+        };
         // Qwen3-style directive: /no_think = answer directly, /think = reason first.
         sys.push_str(if think { "/think\n" } else { "/no_think\n" });
 
@@ -292,10 +326,19 @@ impl Conversation {
         slugify(stem)
     }
 
-    /// The system prompt — the design lever. Sets the planning posture, forbids writing code,
-    /// and specifies the ```file:NAME block format for plan-file proposals. Injects the
-    /// current README/TODO so the model always plans against the real files.
-    fn system_prompt(&self) -> String {
+    /// The planning system prompt — the design lever. Sets the posture and forbids writing
+    /// code, then injects ONLY the context the classified `intent` actually needs: the
+    /// file-block format for file-producing intents, the README for README/plan work, the TODO
+    /// for TODO/plan work, and the open file for questions/code/plan. A `Question` about the
+    /// project therefore no longer drags the whole README + TODO along — just the open file.
+    /// (Generic [`ChatIntent::Chat`] never reaches here; `request` gives it a minimal prompt.)
+    fn system_prompt(&self, intent: ChatIntent) -> String {
+        use ChatIntent::*;
+        let produces_file = matches!(intent, TodoEdit | ReadmeEdit | FeaturePlan);
+        let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan);
+        let wants_todo = matches!(intent, TodoEdit | FeaturePlan);
+        let wants_open_file = matches!(intent, Question | CodeChange | FeaturePlan);
+
         let mut s = String::new();
         s.push_str(
             "You are a planning partner inside a desktop coding app. You and the user shape a \
@@ -304,61 +347,58 @@ impl Conversation {
              no walls of text. Do NOT write source code here — this is planning, not \
              implementation; the user runs a separate build step for code.\n\n",
         );
-        match self.mode {
-            Mode::Scratch => s.push_str(
-                "This is a NEW, empty project. Ask what they want to build, then help draft a \
-                 README and a TODO. Propose them as files (see below) once there's enough to \
-                 write down.\n\n",
-            ),
-            Mode::Existing => s.push_str(
-                "This is an EXISTING project. Its current plan files are below. Continue from \
-                 them — refine the TODO, discuss the next item, or answer questions. Propose \
-                 updated files only when the plan actually changes.\n\n",
-            ),
+        // The NEW-vs-EXISTING framing only matters when we're actually working the plan files.
+        if produces_file {
+            match self.mode {
+                Mode::Scratch => s.push_str(
+                    "This is a NEW, empty project. Help draft a README and a TODO; propose them \
+                     as files (see below).\n\n",
+                ),
+                Mode::Existing => s.push_str(
+                    "This is an EXISTING project; its current plan files are below. Propose \
+                     updated files only when the plan actually changes.\n\n",
+                ),
+            }
+            // The shared file-block format — only needed by intents that emit one.
+            s.push_str(
+                "When you propose a plan file, output its FULL new contents in a fenced block \
+                 whose info string is `file:<name>`, e.g.\n\
+                 ```file:TODO.md\n- [ ] first task\n```\n\
+                 Always put a one-line prose lead-in BEFORE any file block. You cannot edit \
+                 source code here — only the plan (README/TODO/PLAN docs).\n\n",
+            );
         }
-        // The specific per-intent directive is appended by `intent_instruction` (the intent is
-        // classified by a separate call), so the base prompt only states the shared file-block
-        // format and the never-write-source rule.
-        s.push_str(
-            "When you propose a plan file, output its FULL new contents in a fenced block whose \
-             info string is `file:<name>`, e.g.\n\
-             ```file:TODO.md\n- [ ] first task\n```\n\
-             Always put a one-line prose lead-in BEFORE any file block. You cannot edit source \
-             code here — only the plan (README/TODO/PLAN docs).\n\n",
-        );
-        // Channel any reasoning into <think> tags so the user sees only the conclusion —
-        // thinking is welcome (it makes the plan better), but it must not be the visible
-        // reply. The app hides the <think> block from the chat bubble.
+        // Channel any reasoning into <think> tags so the user sees only the conclusion.
         s.push_str(
             "If you need to reason, put it inside <think>…</think> tags FIRST, then give your \
              short answer AFTER the closing tag. Never let raw reasoning be the visible reply.\n\n",
         );
-        if !self.readme.trim().is_empty() {
+        if wants_readme && !self.readme.trim().is_empty() {
             s.push_str("=== current README.md ===\n");
             s.push_str(self.readme.trim());
             s.push_str("\n\n");
         }
-        if !self.todo.trim().is_empty() {
+        if wants_todo && !self.todo.trim().is_empty() {
             s.push_str("=== current TODO.md ===\n");
             s.push_str(self.todo.trim());
             s.push_str("\n\n");
         }
-        // The file the user is currently looking at, head-clipped. A question like "what does
-        // this do?" or "add error handling here" refers to THIS file — inject it so the model
-        // answers against what's on screen rather than guessing.
-        if let Some((name, body)) = &self.open_file {
-            if !body.trim().is_empty() {
-                let (clipped, cut) = clip_lines(body, OPEN_FILE_MAX_LINES);
-                s.push_str(&format!(
-                    "=== file open in the code view: {name} ===\n\
-                     (This is what the user is looking at. Questions like \"what does this do?\" \
-                     or \"how would I change this?\" refer to this file.)\n",
-                ));
-                s.push_str(clipped.trim_end());
-                if cut {
-                    s.push_str("\n… (file truncated — only the first portion is shown)");
+        // The file the user is currently looking at, head-clipped — for questions/code/plan.
+        if wants_open_file {
+            if let Some((name, body)) = &self.open_file {
+                if !body.trim().is_empty() {
+                    let (clipped, cut) = clip_lines(body, OPEN_FILE_MAX_LINES);
+                    s.push_str(&format!(
+                        "=== file open in the code view: {name} ===\n\
+                         (This is what the user is looking at. Questions like \"what does this \
+                         do?\" or \"how would I change this?\" refer to this file.)\n",
+                    ));
+                    s.push_str(clipped.trim_end());
+                    if cut {
+                        s.push_str("\n… (file truncated — only the first portion is shown)");
+                    }
+                    s.push_str("\n\n");
                 }
-                s.push_str("\n\n");
             }
         }
         s
@@ -396,6 +436,9 @@ fn intent_grammar() -> String {
 /// menu for the model to misread. `slug` is the plan filename slug for a feature plan.
 fn intent_instruction(intent: ChatIntent, slug: String) -> String {
     match intent {
+        // Generic chat is handled with a minimal prompt in `request` and never reaches here;
+        // this arm is a defensive no-op so the match stays exhaustive.
+        ChatIntent::Chat => String::new(),
         ChatIntent::Question => "INTENT: the user asked a QUESTION or wants a review/discussion. \
              Answer in PLAIN PROSE only. Do NOT output any file block."
             .to_string(),
@@ -416,6 +459,14 @@ fn intent_instruction(intent: ChatIntent, slug: String) -> String {
         ChatIntent::CodeChange => "INTENT: the user asked to change SOURCE CODE, which you cannot \
              do from this chat. Reply in PROSE telling them to select the lines in the code view \
              on the right and comment on them. Do NOT edit TODO.md or README.md."
+            .to_string(),
+        ChatIntent::Command => "INTENT: the user wants to RUN something. Reply with a one-line \
+             prose lead-in, then the exact shell command to run in a ```command block (a fenced \
+             block whose info string is `command`), e.g.\n\
+             ```command\ncargo run -p sc-win\n```\n\
+             Output ONE command line only. Infer it from the project (a Rust crate → `cargo run \
+             -p <crate>` / `cargo build` / `cargo test`; a script → the run command). It will run \
+             in the integrated terminal. Do NOT output a file block, and do NOT write source code."
             .to_string(),
     }
 }
@@ -485,12 +536,53 @@ pub fn parse_reply(reply: &str) -> (String, Vec<ProposedFile>) {
                 name: name.to_string(),
                 content: body,
             });
+        } else if is_command_fence(line) {
+            // A ```command block: swallow it (its content is surfaced separately as a
+            // proposed command via `extract_command`) so it never lands in the chat prose.
+            for l in lines.by_ref() {
+                if l.trim_start().starts_with("```") {
+                    break;
+                }
+            }
         } else {
             prose.push_str(line);
             prose.push('\n');
         }
     }
     (prose.trim().to_string(), files)
+}
+
+/// The command line from a ```command block in `reply`, if present (the first one). Returns
+/// the trimmed single command, or `None` if there's no command block. The app offers this as a
+/// one-click Run in the integrated terminal (see the `Command` intent).
+pub fn extract_command(reply: &str) -> Option<String> {
+    let reply = strip_think(reply);
+    let mut lines = reply.lines();
+    while let Some(line) = lines.next() {
+        if is_command_fence(line) {
+            let mut cmd = String::new();
+            for l in lines.by_ref() {
+                if l.trim_start().starts_with("```") {
+                    break;
+                }
+                if !cmd.is_empty() {
+                    cmd.push('\n');
+                }
+                cmd.push_str(l);
+            }
+            let cmd = cmd.trim().to_string();
+            return (!cmd.is_empty()).then_some(cmd);
+        }
+    }
+    None
+}
+
+/// True if `line` opens a ```command fenced block (the run-this-command marker).
+fn is_command_fence(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("```")
+        .map(str::trim)
+        .is_some_and(|info| info.eq_ignore_ascii_case("command"))
 }
 
 /// What to show of a *partial* (mid-stream) reply: hide a `<think>` block (even if it hasn't
@@ -596,8 +688,9 @@ mod tests {
     #[test]
     fn request_carries_system_prompt_plus_turns_and_injects_plan_files() {
         let mut c = Conversation::open("# My Game\nA city sim.", "- [ ] add lakes");
-        c.user_turn("what's left to do?");
-        let req = c.request(false, ChatIntent::Question);
+        c.user_turn("plan out what's left to do");
+        // FeaturePlan is the context-heavy intent that injects both plan files.
+        let req = c.request(false, ChatIntent::FeaturePlan);
         assert_eq!(req.messages[0].role, sc_model::Role::System);
         let sys = &req.messages[0].content;
         assert!(sys.contains("My Game"), "README injected: {sys}");
@@ -768,6 +861,52 @@ mod tests {
     }
 
     #[test]
+    fn generic_chat_prompt_carries_no_project_context() {
+        // "hello" (classified Chat) must NOT drag the README/TODO/open-file or planning
+        // boilerplate along — the whole point of the generic/coding split.
+        let mut c = Conversation::open("# void_engine\nMMO space game", "- [ ] add lakes");
+        c.set_open_file(Some(("main.rs".into(), "fn main() { huge_file(); }".into())));
+        c.user_turn("hello");
+        let sys = c.request(false, ChatIntent::Chat).messages[0].content.clone();
+        assert!(!sys.contains("void_engine"), "no README injected: {sys}");
+        assert!(!sys.contains("add lakes"), "no TODO injected: {sys}");
+        assert!(!sys.contains("main.rs"), "no open file injected: {sys}");
+        assert!(!sys.contains("file:<name>"), "no file-block boilerplate: {sys}");
+        assert!(sys.len() < 500, "generic prompt stays small ({} chars)", sys.len());
+    }
+
+    #[test]
+    fn question_prompt_includes_open_file_but_not_readme_or_todo() {
+        // A project QUESTION gets the open file (so "what does this do?" works) but no longer
+        // the whole README + TODO dump.
+        let mut c = Conversation::open("# void_engine\nMMO", "- [ ] add lakes");
+        c.set_open_file(Some(("main.rs".into(), "fn main() {}".into())));
+        c.user_turn("what does this file do?");
+        let sys = c.request(false, ChatIntent::Question).messages[0].content.clone();
+        assert!(sys.contains("main.rs"), "open file injected for a question: {sys}");
+        assert!(!sys.contains("add lakes"), "no TODO for a plain question: {sys}");
+        assert!(!sys.contains("void_engine"), "no README for a plain question: {sys}");
+    }
+
+    #[test]
+    fn feature_plan_prompt_still_has_full_context() {
+        // The heavy intent legitimately needs it all: README + TODO + open file.
+        let mut c = Conversation::open("# void_engine", "- [ ] add lakes");
+        c.set_open_file(Some(("main.rs".into(), "fn main() {}".into())));
+        c.user_turn("plan out adding lakes");
+        let sys = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
+        assert!(sys.contains("void_engine"), "README present: {sys}");
+        assert!(sys.contains("add lakes"), "TODO present: {sys}");
+        assert!(sys.contains("main.rs"), "open file present: {sys}");
+    }
+
+    #[test]
+    fn classifier_offers_the_chat_token() {
+        assert!(intent_grammar().contains("\"chat\""), "{}", intent_grammar());
+        assert_eq!(ChatIntent::parse("chat"), ChatIntent::Chat);
+    }
+
+    #[test]
     fn question_intent_forbids_a_file_block() {
         // A classified QUESTION must instruct prose-only — no TODO/README rewrite for "what's
         // next?" (the original mis-route bug, now decided by the classifier not the model).
@@ -824,6 +963,47 @@ mod tests {
         );
         // Plain partial prose streams through as-is.
         assert_eq!(visible_so_far("I'd sugg"), "I'd sugg");
+    }
+
+    #[test]
+    fn command_intent_asks_for_a_command_block() {
+        let sys = Conversation::open("# X", "- a")
+            .request(false, ChatIntent::Command)
+            .messages[0]
+            .content
+            .to_lowercase();
+        assert!(sys.contains("```command"), "command intent → command block: {sys}");
+        assert!(sys.contains("integrated terminal"), "mentions the terminal: {sys}");
+        // The per-intent instruction explicitly forbids a file block for a command.
+        assert!(
+            sys.contains("do not output a file block"),
+            "command instruction forbids a file block: {sys}"
+        );
+    }
+
+    #[test]
+    fn extract_command_pulls_the_command_and_parse_reply_hides_it() {
+        let reply = "I'll start the client:\n```command\ncargo run -p sc-win\n```\nIt'll open a window.";
+        assert_eq!(extract_command(reply).as_deref(), Some("cargo run -p sc-win"));
+        let (prose, files) = parse_reply(reply);
+        assert!(files.is_empty(), "a command is not a file");
+        assert!(prose.contains("start the client"), "lead-in kept");
+        assert!(prose.contains("open a window"), "trailing prose kept");
+        assert!(!prose.contains("cargo run"), "command line not left in prose: {prose:?}");
+    }
+
+    #[test]
+    fn extract_command_none_when_no_block() {
+        assert_eq!(extract_command("just some prose, no command"), None);
+        // A plain (non-command) fence is left alone by the extractor.
+        assert_eq!(extract_command("```\ncargo run\n```"), None);
+    }
+
+    #[test]
+    fn classifier_offers_the_command_token() {
+        // The grammar must include `command` so the model can pick it.
+        assert!(intent_grammar().contains("\"command\""), "{}", intent_grammar());
+        assert_eq!(ChatIntent::parse("command"), ChatIntent::Command);
     }
 
     #[test]

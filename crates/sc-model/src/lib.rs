@@ -18,6 +18,7 @@
 
 mod constraint;
 mod openai;
+pub mod transcript;
 pub use constraint::{OutputConstraint, ToolCalling, ToolSchema};
 pub use openai::OpenAiBackend;
 

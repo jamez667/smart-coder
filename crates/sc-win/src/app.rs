@@ -695,6 +695,10 @@ struct App {
     chat_session: Option<sc_win::chat_session::ChatSession>,
     /// Plan-file changes the assistant proposed in its latest reply, awaiting Apply.
     proposed_files: Vec<sc_win::chat::ProposedFile>,
+    /// A shell command the chat proposed (from a ```command block, the `Command` intent),
+    /// awaiting a one-click Run into the integrated terminal. `None` when the latest reply
+    /// proposed no command.
+    proposed_command: Option<String>,
     /// Whether the next chat turn should let the model *reason* (slower, deeper) vs. answer
     /// directly (`/no_think`, fast). Off by default — this 8B rambles when left to think, so
     /// fast conclusions are the default and Think is opt-in per the composer toggle.
@@ -921,6 +925,7 @@ impl Default for App {
             chat_sig: (0, 0),
             chat_session: None,
             proposed_files: Vec::new(),
+            proposed_command: None,
             think: false,
             bottom_tab: BottomTab::Verification,
             terminal: sc_win::terminal::Terminal::default(),
@@ -1001,6 +1006,10 @@ pub(crate) enum Message {
     ChatSend,
     /// Copy a chat turn's text to the system clipboard (the per-turn copy button).
     CopyTurn(String),
+    /// Run the chat's proposed command (from a ```command block) in the integrated terminal.
+    RunProposedCommand,
+    /// Dismiss the chat's proposed command without running it.
+    DismissProposedCommand,
     /// An action inside a chat turn's read-only editor (selection/scroll only — edits are
     /// dropped so the message text stays immutable). `usize` is the turn index.
     ChatEditorAction(usize, iced::widget::text_editor::Action),
@@ -1485,6 +1494,7 @@ impl App {
             text,
         });
         self.proposed_files.clear();
+        self.proposed_command = None;
         self.intent.clear();
         if self.debug {
             // Show the generate prompt for the most likely intent path (feature plan is the one
@@ -2415,6 +2425,9 @@ impl App {
                     self.streaming = None; // the live bubble is replaced by the finished turn
                     self.working = None; // a question answer is done → drop the amber highlight
                     let (prose, files) = sc_win::chat::parse_reply(&raw);
+                    // A ```command block (the Command intent) → offer it as a one-click Run in
+                    // the terminal, rather than auto-executing.
+                    self.proposed_command = sc_win::chat::extract_command(&raw);
                     if let Some(convo) = self.conversation.as_mut() {
                         convo.record_reply(&raw);
                         // Fold any proposed plan-file content into the conversation's plan
@@ -2430,12 +2443,15 @@ impl App {
                             }
                         }
                     }
-                    let shown = if prose.is_empty() {
+                    let shown = if !prose.is_empty() {
+                        prose
+                    } else if let Some(cmd) = &self.proposed_command {
+                        // A reply that was only a command block → say what will run.
+                        format!("Run this in the terminal:  {cmd}")
+                    } else {
                         // A reply that was only file blocks → note what changed.
                         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
                         format!("Proposed changes to {}.", names.join(", "))
-                    } else {
-                        prose
                     };
                     self.chat_turns.push(sc_win::chat::Turn {
                         role: sc_win::chat::Speaker::Agent,
@@ -2915,6 +2931,20 @@ impl App {
             }
             Message::ChatSend => self.send_chat(),
             Message::CopyTurn(t) => return iced::clipboard::write(t),
+            Message::RunProposedCommand => {
+                if let Some(cmd) = self.proposed_command.take() {
+                    // Show the Terminal tab and run there, through the same sandbox path as a
+                    // typed command (strict containment applies — refused if it can't sandbox).
+                    self.bottom_tab = BottomTab::Terminal;
+                    if !self.terminal.running {
+                        match self.term_exec_mode() {
+                            Ok(mode) => self.term_rx = self.terminal.run(&cmd, &mode),
+                            Err(reason) => self.terminal.blocked(&cmd, &reason),
+                        }
+                    }
+                }
+            }
+            Message::DismissProposedCommand => self.proposed_command = None,
             Message::ChatEditorAction(i, action) => {
                 // Read-only: apply selection/cursor/scroll actions so drag-select + Ctrl+C
                 // work, but never edits — the message text is immutable.
@@ -4649,6 +4679,10 @@ impl App {
         for (i, pf) in self.proposed_files.iter().enumerate() {
             thread = thread.push(self.view_proposed_file(i, pf));
         }
+        // A proposed command (the Command intent) → a Run card that pipes it into the terminal.
+        if let Some(cmd) = &self.proposed_command {
+            thread = thread.push(self.view_proposed_command(cmd));
+        }
         // The live "typing" bubble while a reply streams in: show the growing text (with any
         // <think> block hidden), or a thinking cue before the first token arrives.
         if self.chat_session.is_some() {
@@ -4816,6 +4850,35 @@ impl App {
             apply.into()
         };
         container(column![head, actions].spacing(6))
+            .width(Fill)
+            .padding(10)
+            .style(dropdown_style)
+            .into()
+    }
+
+    /// A Run card for a command the chat proposed (the `Command` intent). Shows the exact
+    /// command and a Run button that pipes it into the integrated terminal (strict sandbox
+    /// applies), plus a Dismiss. Nothing runs until you click — commands execute, so the chat
+    /// proposes rather than auto-runs.
+    fn view_proposed_command(&self, cmd: &str) -> Element<'_, Message> {
+        let head = row![
+            text("▶ run command").size(13).color(ACCENT),
+            Space::new().width(Fill),
+        ]
+        .align_y(iced::Alignment::Center);
+        let cmd_line = text(cmd.to_string())
+            .size(13)
+            .font(iced::Font::MONOSPACE)
+            .color(FG);
+        let run = button(text("▶ Run in terminal").size(13))
+            .on_press(Message::RunProposedCommand)
+            .padding([5, 12])
+            .style(primary_button);
+        let dismiss = button(text("Dismiss").size(13).color(FG_MUTED))
+            .on_press(Message::DismissProposedCommand)
+            .padding([5, 12])
+            .style(menu_item_style);
+        container(column![head, cmd_line, row![run, dismiss].spacing(8)].spacing(6))
             .width(Fill)
             .padding(10)
             .style(dropdown_style)
