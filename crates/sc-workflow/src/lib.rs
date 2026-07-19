@@ -11,6 +11,7 @@
 //! self-approve or skip a phase. This crate currently runs the pipeline
 //! autonomously (every gate auto-approved); human checkpoints layer on top later.
 
+mod compile_driven;
 mod coverage;
 mod engine;
 mod gate;
@@ -23,6 +24,7 @@ mod staged;
 mod state;
 mod testwriter;
 
+pub use compile_driven::{build_compiler_driven, BuildEvent, BuildOutcome};
 pub use coverage::{group_by_file, parse_coverage, CoverageItem};
 pub use engine::{generate_phase, phase_messages};
 pub use gate::{AutoApprove, CeremonyGate, Decision, Gate};
