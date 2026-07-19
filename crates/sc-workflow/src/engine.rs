@@ -216,12 +216,10 @@ fn is_in_place_edit(task: &str) -> bool {
 }
 
 fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
-    // The stage-breakdown / work-decomposition instructions below are written for the Python
-    // eval ladder (test_app.py, pytest/vitest, Flask routes). They only apply to the Python
-    // stack; for a real Rust/JS project the caller uses the skip-tests / plan-only path (2nd
-    // pass), which supplies its own non-TDD wording. Guard the TDD-specific text on the stack
-    // so a Rust run never gets told to write `test_app.py`.
-    let _ = stack;
+    // The Python eval-ladder instructions (test_app.py, pytest, Flask, one-subtask-per-file) are
+    // guarded on `ProjectStack::Python`; a real Rust/JS project gets the non-Python branches
+    // (an ordered design breakdown, and small atomic change-chunks) so it's never told to write
+    // `test_app.py` or decompose per-file.
     match phase {
         Phase::StageBreakdown => {
             // Non-Python stacks (the plan-only Execute flow on a real Rust/JS project) don't do
@@ -284,6 +282,29 @@ fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
              frontend test (`<name>.test.js`, vitest) ONLY if the task asked for a UI file; if \
              the task is a backend/JSON API with no UI, output NO frontend tests. Do NOT invent \
              tests for files the task didn't ask for. No prose, just the JSON array."
+                .to_string()
+        }
+        // Non-Python (the Execute-plan flow on a real Rust/JS/etc project): decompose into
+        // SMALL, ATOMIC change-chunks grounded in the REAL files — one self-contained edit each,
+        // in dependency order. This is the "super small chunks" the chunked executor walks and
+        // cargo-checks one at a time. Deliberately finer than one-per-file: a change that spans
+        // several sites (add an enum variant, then fix each match on it) becomes SEPARATE chunks,
+        // the foundational one first (the variant) so the dependents (the match arms) build on it.
+        Phase::WorkDecomposition if !matches!(stack, ProjectStack::Python) => {
+            "Break the change into the SMALLEST sensible ATOMIC steps — one self-contained edit \
+             per subtask — grounded in the REAL files from the layout/breakdown above. Order them \
+             so each builds on the last (foundations first). Rules:\n\
+             • Each subtask is ONE concrete edit to ONE real file (use the exact paths above; do \
+             NOT invent files). Split a multi-site change into one subtask PER site — e.g. \
+             'add the enum variant' is one subtask, and adding the arm to EACH match that switches \
+             on it is a SEPARATE subtask, each depending on the variant subtask.\n\
+             • The goal must say exactly WHAT to change and WHERE (file + the function/match/type), \
+             concrete enough to do without searching.\n\
+             • Use deps to force order: the foundational change (new type/variant/signature) has \
+             no deps; every dependent edit deps on it.\n\
+             Output ONLY a JSON array; each item: \
+             {\"id\":\"t1\",\"goal\":\"Add ... to ... in <file>\",\"files\":[\"<real file>\"],\"deps\":[]}. \
+             No prose, just the JSON array."
                 .to_string()
         }
         Phase::WorkDecomposition => {
