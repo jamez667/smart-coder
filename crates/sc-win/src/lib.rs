@@ -19,6 +19,7 @@ pub mod persist;
 pub mod plan;
 pub mod proc;
 pub mod session;
+pub mod terminal;
 pub mod topology;
 pub mod view;
 pub mod welcome;

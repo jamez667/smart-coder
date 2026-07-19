@@ -8,3 +8,8 @@ Cargo.lock
 
 # Stray stdout/stderr redirect logs from launching the GUI during dev.
 sc-win-launch-*.log
+.dc/
+
+# Tailscale TLS cert/key (local, never commit)
+*.ts.net.crt
+*.ts.net.key

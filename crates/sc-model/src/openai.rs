@@ -12,8 +12,8 @@ use sc_proto::{DcError, Result};
 use serde::Deserialize;
 
 use crate::{
-    Capabilities, GenerateRequest, GenerateResponse, ModelBackend, OutputConstraint, Role,
-    ToolCalling,
+    BackendHealth, Capabilities, GenerateRequest, GenerateResponse, ModelBackend, OutputConstraint,
+    Role, ToolCalling,
 };
 
 /// A backend that talks to any OpenAI-compatible chat-completions endpoint.
@@ -110,6 +110,73 @@ impl OpenAiBackend {
             self.caps.max_context_tokens = n;
         }
         self
+    }
+
+    /// Probe backend health with a **real** tiny completion (not just a `/models` ping),
+    /// because a router/shim can advertise a model via `/models` while no weights are loaded —
+    /// only a completion proves the model is serving (see [`BackendHealth`]).
+    ///
+    /// Uses a short, dedicated timeout (`timeout_secs`) so a dead backend fails fast instead of
+    /// hanging on this backend's generous generation timeout. Distinguishes "reachable but no
+    /// model" from "unreachable" by whether the `/models` endpoint gave *any* HTTP response.
+    pub fn health_probe(&self, timeout_secs: u64) -> BackendHealth {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+            .build()
+            .into();
+
+        // Reachability: did the endpoint give ANY HTTP response? (Even a 4xx/5xx counts —
+        // it means something is listening and speaking HTTP, i.e. a router/shim is up.)
+        let models_url = format!("{}/models", self.base_url);
+        let mut get = agent.get(&models_url);
+        if let Some(key) = &self.api_key {
+            get = get.header("Authorization", &format!("Bearer {key}"));
+        }
+        let reachable = get.call().is_ok();
+
+        // The real test: a 1-token completion. Success ⇒ a model is actually loaded.
+        let completion = self.probe_completion(&agent);
+        BackendHealth::classify(reachable, completion)
+    }
+
+    /// Fire a minimal `chat/completions` (`max_tokens: 1`) against `agent` and reduce it to
+    /// `Ok(())` on a 2xx with a choice, or `Err(detail)` describing the failure. The cheapest
+    /// request that still exercises the model path.
+    fn probe_completion(&self, agent: &ureq::Agent) -> std::result::Result<(), String> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [{"role": "user", "content": "."}],
+            "max_tokens": 1,
+            "stream": false,
+        });
+        let mut call = agent.post(&url).header("Content-Type", "application/json");
+        if let Some(key) = &self.api_key {
+            call = call.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut resp = match call.send_json(&body) {
+            Ok(r) => r,
+            Err(e) => return Err(format!("request failed: {e}")),
+        };
+        let status = resp.status();
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        if !status.is_success() {
+            // The server responded but rejected the request — surface a trimmed reason (e.g.
+            // "model not found", "no model loaded"). Reachable-but-not-ready → NoModel.
+            let snippet = text.chars().take(200).collect::<String>();
+            return Err(format!("HTTP {}: {}", status.as_u16(), snippet.trim()));
+        }
+        // A 2xx with a parseable choice is proof the model produced a token.
+        if serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("choices").and_then(|c| c.get(0)).cloned())
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err("2xx but no completion choice in response".to_string())
+        }
     }
 
     /// GET `{base_url}/models` and pull `data[0].meta.n_ctx`. `None` on any error.

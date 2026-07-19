@@ -337,6 +337,18 @@ impl UiConfig {
                 cfg.model = m;
             }
         }
+        // The sandbox image and on/off are env-overridable too, so a machine can point the
+        // terminal/agent at a project-appropriate image (e.g. a rust image) without editing
+        // config.json. `SC_USE_DOCKER=0/false` forces host mode.
+        if let Ok(img) = std::env::var("SC_DOCKER_IMAGE") {
+            if !img.trim().is_empty() {
+                cfg.docker_image = img;
+            }
+        }
+        if let Ok(v) = std::env::var("SC_USE_DOCKER") {
+            let v = v.trim().to_ascii_lowercase();
+            cfg.use_docker = !matches!(v.as_str(), "0" | "false" | "no" | "off");
+        }
         cfg
     }
 

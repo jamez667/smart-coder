@@ -405,6 +405,107 @@ fn view_inline_comment(
 }
 
 /// Launch the desktop app.
+/// Start the remote-mirror server on a background thread and return the shared handle the
+/// `App` tees events into / drains commands from. Prints the connection URL + Tailscale hint.
+/// The port is `SC_REMOTE_PORT` (default 8178).
+fn start_mirror() -> sc_web::RemoteMirror {
+    let mirror = sc_web::RemoteMirror::new();
+    let token = sc_web::mint_token();
+    let port: u16 = std::env::var("SC_REMOTE_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8178);
+    let addr = format!("127.0.0.1:{port}");
+    // Prefer the Tailscale HTTPS URL (what the phone actually uses); fall back to loopback.
+    let phone_url = match tailnet_host() {
+        Some(host) => format!("https://{host}:{port}/?k={token}"),
+        None => format!("http://127.0.0.1:{port}/?k={token}"),
+    };
+    // Record this session so the user can find the current url later (the token rotates each
+    // launch) and see recent/active sessions.
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    sc_win::persist::record_session(&phone_url, port, std::process::id(), started);
+
+    let server_mirror = mirror.clone();
+    let tok = token.clone();
+    let printed_url = phone_url.clone();
+    std::thread::spawn(move || {
+        let _ = sc_web::serve_mirror(server_mirror, &addr, &tok, move |_url| {
+            println!("smart-coder remote mirror live — phone URL:");
+            println!("  {printed_url}");
+            println!("(if you haven't yet: run `tailscale serve {port}` once so the https URL works)");
+        });
+    });
+    mirror
+}
+
+/// Print the remote-mirror session history (newest first), flagging which are still ACTIVE
+/// (their process is alive). Used by `sc-win --remote-history`.
+pub fn print_remote_history() {
+    let sessions = sc_win::persist::load_sessions();
+    if sessions.is_empty() {
+        println!("No remote-mirror sessions recorded yet.");
+        println!("(Launch with SC_REMOTE=1 to start one.)");
+        return;
+    }
+    println!("Remote-mirror sessions (newest first):\n");
+    for s in &sessions {
+        let active = pid_alive(s.pid);
+        let flag = if active { "● ACTIVE " } else { "  ended  " };
+        let when = fmt_unix(s.started);
+        println!("{flag} port {}  pid {}  {when}", s.port, s.pid);
+        println!("           {}", s.url);
+    }
+    let active_count = sessions.iter().filter(|s| pid_alive(s.pid)).count();
+    println!("\n{active_count} active. Paste an ACTIVE url into the phone.");
+}
+
+/// Whether a process with `pid` is currently running (Windows: `tasklist`).
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let out = sc_win::proc::command("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output();
+        if let Ok(o) = out {
+            return String::from_utf8_lossy(&o.stdout).contains(&pid.to_string());
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+}
+
+/// Format a unix timestamp as a local-ish `YYYY-MM-DD HH:MM` (via chrono, already a dep).
+fn fmt_unix(secs: u64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(secs as i64, 0) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        _ => format!("t={secs}"),
+    }
+}
+
+/// The Tailscale MagicDNS hostname of this machine (e.g. `jcnash-pc4.tail146ad2.ts.net`),
+/// via the `tailscale` CLI. `None` if Tailscale isn't installed/logged in.
+fn tailnet_host() -> Option<String> {
+    let out = sc_win::proc::command("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let name = v.get("Self")?.get("DNSName")?.as_str()?;
+    // DNSName has a trailing dot; strip it.
+    Some(name.trim_end_matches('.').to_string())
+}
+
 pub fn run() -> iced::Result {
     // iced 0.14: `application(boot, update, view)` where boot returns the initial
     // (State, Task); title/subscription/theme are builder methods. If a project was
@@ -416,6 +517,15 @@ pub fn run() -> iced::Result {
                 app.show_welcome();
                 app.open_conversation();
             }
+            // Remote-mirror mode (Claude-Code-remote style): when SC_REMOTE is set, start a
+            // mirror server so a phone can attach to THIS live session — see the chat + agent
+            // activity, send chat, approve/deny, stop. Bound to 127.0.0.1 (front it with
+            // `tailscale serve`); every request needs the printed per-run token.
+            if std::env::var("SC_REMOTE").is_ok() {
+                app.remote = Some(start_mirror());
+                // Publish the initially-open project so the phone shows it on first connect.
+                app.publish_workspace_to_remote();
+            }
             (app, Task::none())
         },
         App::update,
@@ -424,12 +534,25 @@ pub fn run() -> iced::Result {
     .title(App::title)
     .subscription(App::subscription)
     .theme(App::theme)
+    .window(iced::window::Settings {
+        // The taskbar/title-bar icon of the RUNNING window is set here at runtime — the
+        // exe's embedded icon only governs how Explorer shows the file, not the live window.
+        icon: iced::window::icon::from_file_data(
+            include_bytes!("../../../assets/logo/sc-logo-256.png"),
+            None, // guess the format from the PNG header
+        )
+        .ok(),
+        ..Default::default()
+    })
     .run()
 }
 
 /// A pending decision surfaced to the human, with the reply channel to answer it.
 enum Gatebar {
     Confirm {
+        /// Remote-correlation id, set when the mirror is active so a phone `/approve id`
+        /// can find this entry (0 when there's no remote mirror). Local buttons ignore it.
+        id: u64,
         command: String,
         reason: String,
         reply: Sender<Confirmation>,
@@ -458,7 +581,19 @@ struct RunResult {
 }
 
 struct App {
+    /// The remote-session mirror (Claude-Code-remote style). `Some` when `SC_REMOTE` is
+    /// set at launch: the desktop tees its live agent/chat events out to a phone and
+    /// drains inbound chat/approve/cancel from it. `None` = local-only (the default).
+    remote: Option<sc_web::RemoteMirror>,
     cfg: UiConfig,
+    /// Latest backend health from the periodic probe (startup + every ~10s), shown as a
+    /// menu-bar badge and used to gate runs. `None` until the first probe returns.
+    backend_health: Option<sc_model::BackendHealth>,
+    /// Receiver for the in-flight background health probe, if one is running. Drained on tick.
+    health_rx: Option<std::sync::mpsc::Receiver<sc_model::BackendHealth>>,
+    /// Wall-clock of the last probe kick-off, to space probes ~10s apart. `None` = never
+    /// probed (kick one immediately).
+    last_health_probe: Option<std::time::Instant>,
     intent: String,
     /// Editable mirrors of the config for the settings panel. Seeded from
     /// `UiConfig::default()` so the boxes show the active values (and a run never
@@ -547,6 +682,15 @@ struct App {
     conversation: Option<sc_win::chat::Conversation>,
     /// The chat thread shown in the middle column (you ⟷ agent), in order.
     chat_turns: Vec<sc_win::chat::Turn>,
+    /// One read-only `text_editor` buffer per chat turn, so displayed messages are
+    /// drag-selectable + Ctrl+C-copyable (iced's plain `text` isn't). Kept in lock-step with
+    /// `chat_turns` by [`Self::sync_chat_editors`], which rebuilds them only when the thread
+    /// actually changes (detected via [`Self::chat_sig`]) — cheap, and avoids touching the
+    /// ~30 scattered `chat_turns.push` sites.
+    chat_editors: Vec<iced::widget::text_editor::Content>,
+    /// Change signature of `chat_turns` (count + last text length) at the last editor sync;
+    /// a mismatch triggers a rebuild.
+    chat_sig: (usize, usize),
     /// An in-flight chat turn (a `generate` call on a worker thread), if any.
     chat_session: Option<sc_win::chat_session::ChatSession>,
     /// Plan-file changes the assistant proposed in its latest reply, awaiting Apply.
@@ -557,6 +701,20 @@ struct App {
     think: bool,
     /// Which bottom-panel tab is selected (Activity / Verification / Build).
     bottom_tab: BottomTab,
+    /// The integrated command-runner terminal (bottom-strip "Terminal" tab). Host-testable
+    /// state; the running command's output channel is held in `term_rx`.
+    terminal: sc_win::terminal::Terminal,
+    /// The receiver for the currently-running terminal command, drained each tick. `None`
+    /// when no command is running.
+    term_rx: Option<std::sync::mpsc::Receiver<sc_win::terminal::TermMsg>>,
+    /// The workspace's persistent sandbox container, when sandboxing is on and a project is
+    /// open. Started lazily on the first terminal command and torn down on project switch /
+    /// close, so terminal commands `docker exec` into it rather than touching the host.
+    /// `None` when sandboxing is off (host mode) or no project is open.
+    term_container: Option<sc_verify::SessionContainer>,
+    /// Whether [`Self::term_container`]'s `docker run` has been issued this session (so we
+    /// start it exactly once, not per command).
+    term_container_started: bool,
 
     // --- Line comments (PR-style) ------------------------------------------------
     /// The committed line range being commented on (1-based, inclusive `(start, end)`), if a
@@ -673,6 +831,8 @@ struct ReplaceInFlight {
 pub(crate) enum BottomTab {
     Verification,
     Build,
+    /// The integrated command-runner terminal.
+    Terminal,
 }
 
 /// The top menu-bar dropdowns.
@@ -680,6 +840,15 @@ pub(crate) enum BottomTab {
 pub(crate) enum Menu {
     File,
     View,
+}
+
+impl Drop for App {
+    /// Force-remove the sandbox container on app exit so it never outlives the process. A
+    /// hard kill can skip this, but the container's `--rm` and the stale-cleanup on next
+    /// start cover that case.
+    fn drop(&mut self) {
+        self.teardown_term_container();
+    }
 }
 
 impl Default for App {
@@ -705,6 +874,8 @@ impl Default for App {
             .map(sc_win::filetree::full_rows)
             .unwrap_or_default();
         Self {
+            // Populated by `run()` when SC_REMOTE is set; default is local-only.
+            remote: None,
             url_input: cfg.base_url.clone(),
             model_input: cfg.model.clone(),
             advisor_input: cfg.advisor_model.clone().unwrap_or_default(),
@@ -714,6 +885,9 @@ impl Default for App {
             verify_input: cfg.verify_command.clone().unwrap_or_default(),
             suffix_input: cfg.system_suffix.clone().unwrap_or_default(),
             cfg,
+            backend_health: None,
+            health_rx: None,
+            last_health_probe: None,
             intent: String::new(),
             settings_open: false,
             rows: Vec::new(),
@@ -743,10 +917,16 @@ impl Default for App {
             open_menu: None,
             conversation: None,
             chat_turns: Vec::new(),
+            chat_editors: Vec::new(),
+            chat_sig: (0, 0),
             chat_session: None,
             proposed_files: Vec::new(),
             think: false,
             bottom_tab: BottomTab::Verification,
+            terminal: sc_win::terminal::Terminal::default(),
+            term_rx: None,
+            term_container: None,
+            term_container_started: false,
             comment_range: None,
             comment_draft: String::new(),
             drag: None,
@@ -798,6 +978,9 @@ pub(crate) enum Message {
     /// Run the in-place iterate loop (the default when a project folder is picked).
     RunIterate,
     Tick,
+    /// Slow always-on heartbeat that drives the backend health probe (independent of `Tick`,
+    /// which only fires when something is actively running).
+    HealthTick,
     /// Heartbeat while a project is open: kick off an OFF-THREAD re-walk of the tree + git state
     /// so externally-created/removed files appear without a manual refresh.
     SyncWorkspace,
@@ -816,6 +999,11 @@ pub(crate) enum Message {
     // Conversation.
     /// Send the composer text as a chat message to the planning agent.
     ChatSend,
+    /// Copy a chat turn's text to the system clipboard (the per-turn copy button).
+    CopyTurn(String),
+    /// An action inside a chat turn's read-only editor (selection/scroll only — edits are
+    /// dropped so the message text stays immutable). `usize` is the turn index.
+    ChatEditorAction(usize, iced::widget::text_editor::Action),
     /// Apply the Nth proposed plan-file to disk (writes README.md / TODO.md).
     ApplyFile(usize),
     /// Apply the Nth proposed plan-file, then kick off an iterate build to implement it —
@@ -848,6 +1036,19 @@ pub(crate) enum Message {
     CancelChat,
     /// Select a bottom-panel tab (Activity / Verification / Build).
     SelectBottomTab(BottomTab),
+    // Integrated terminal (bottom-strip "Terminal" tab).
+    /// The terminal input box text changed.
+    TermInput(String),
+    /// Submit the current input line as a command to run.
+    TermSubmit,
+    /// Kill the currently-running terminal command.
+    TermKill,
+    /// Clear the terminal scrollback.
+    TermClear,
+    /// Recall the previous command into the input box (Up).
+    TermHistoryPrev,
+    /// Recall the next command into the input box (Down).
+    TermHistoryNext,
     /// Cursor moved over the git list — track it so a right-click can place the context menu.
     GitCursorMoved(iced::Point),
     /// Right-clicked a git-tab row: open its context menu (stage / unstage / discard …).
@@ -908,6 +1109,10 @@ pub(crate) enum Message {
     ClearSelection,
     // Workspace folder.
     PickWorkspace,
+    /// Open a specific recent project (from the File ▸ Recent list).
+    OpenRecent(std::path::PathBuf),
+    /// A no-op (used by non-interactive dropdown labels like the "Recent" header).
+    NoOp,
     ClearWorkspace,
     /// Open the output folder of the last run in the system file manager.
     OpenOutputFolder,
@@ -941,7 +1146,11 @@ impl App {
             || self.replace.is_some()
             || self.working.is_some()
             || !self.gatebar.is_empty()
+            || self.term_rx.is_some()
             || glowing
+            // Remote mirror active: keep ticking so inbound phone commands (chat/cancel)
+            // are drained even when the desktop is otherwise idle.
+            || self.remote.is_some()
         {
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick)
         } else {
@@ -956,6 +1165,11 @@ impl App {
         } else {
             Subscription::none()
         };
+        // An always-on slow heartbeat that drives the backend health probe (startup + every
+        // ~10s; the 3s tick just gives the 10s gate resolution and adopts a finished probe
+        // promptly). Runs even when the app is otherwise idle — that's the whole point: know
+        // the backend is down BEFORE you try to use it.
+        let health = iced::time::every(Duration::from_secs(3)).map(|_| Message::HealthTick);
         // Track the window-absolute cursor position so a right-click in the git tab can pop its
         // context menu exactly at the pointer. `mouse_area::on_move` reports widget-relative
         // coordinates (useless for placing a window overlay); this window event is absolute.
@@ -977,7 +1191,7 @@ impl App {
             }
             _ => None,
         });
-        Subscription::batch([tick, sync, cursor])
+        Subscription::batch([tick, sync, cursor, health])
     }
 
     /// The run action for the primary button / intent submit, chosen by context: a
@@ -1012,6 +1226,14 @@ impl App {
         self.cfg.orchestrator_url = non_empty(&self.orch_url_input);
         self.cfg.verify_command = non_empty(&self.verify_input);
         self.cfg.system_suffix = non_empty(&self.suffix_input);
+
+        // Preflight: don't launch a run against a known-bad backend — surface the reason in the
+        // activity stream instead of failing several turns in.
+        if let Some(reason) = self.backend_unready_reason() {
+            self.rows
+                .push(Row::ok("⚠", format!("{reason} — check the backend badge (top bar)")));
+            return;
+        }
 
         self.rows.clear();
         self.board.clear();
@@ -1116,6 +1338,48 @@ impl App {
         self.rows.push(Row::ok(prompt_icon, w.prompt));
     }
 
+    /// Adopt `dir` as the working project: reset per-project view state, walk its tree,
+    /// remember it in recents, tell any remote mirror, and open its planning conversation.
+    /// Shared by the desktop "open folder" button and a remote `/open` command.
+    fn open_workspace(&mut self, dir: std::path::PathBuf) {
+        // Retire the previous project's sandbox container before switching — it mounts the
+        // old workspace and must not outlive it. A fresh one starts on the next command.
+        self.teardown_term_container();
+        self.picked_workspace = Some(dir.clone());
+        // A fresh project → drop any stale selection from the last one, and open the tree
+        // compacted: every top-level folder starts collapsed.
+        self.selected_file = None;
+        self.code = None;
+        self.collapsed_dirs = sc_win::filetree::top_level_dirs(&dir);
+        self.file_filter.clear();
+        self.tree_cache = sc_win::filetree::full_rows(&dir);
+        // Remember it (promotes to the front of recents) for next launch + the remote picker.
+        let mut state = sc_win::persist::load();
+        state.record_project(&dir);
+        sc_win::persist::save(&state);
+        self.publish_workspace_to_remote();
+        // Greet: show the README/roadmap in Activity, and open the planning conversation.
+        self.show_welcome();
+        self.open_conversation();
+    }
+
+    /// Push the current workspace name + recents list to the remote mirror, so the phone's
+    /// header shows the current repo and its picker lists recent projects. No-op without a mirror.
+    fn publish_workspace_to_remote(&self) {
+        if let Some(m) = &self.remote {
+            let current = self
+                .picked_workspace
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+            let recents: Vec<String> = sc_win::persist::load()
+                .recents
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            m.set_projects(current, recents);
+        }
+    }
+
     /// Open a planning conversation for the current project: read the plan files, pick the
     /// mode (scratch vs existing), and seed the thread with the agent's opening line.
     fn open_conversation(&mut self) {
@@ -1174,6 +1438,17 @@ impl App {
         if text.is_empty() || self.chat_session.is_some() || self.conversation.is_none() {
             return;
         }
+        // Preflight: refuse to send into a known-bad backend (the failure the health badge
+        // warns about), so you get a clear message instead of a mid-stream "connection
+        // refused". A not-yet-probed (`None`) or `Ready` backend passes.
+        if let Some(reason) = self.backend_unready_reason() {
+            self.chat_turns.push(sc_win::chat::Turn {
+                role: sc_win::chat::Speaker::Agent,
+                text: format!("⚠ {reason} — check the backend badge (top bar)."),
+            });
+            self.intent.clear();
+            return;
+        }
         // Commit connection settings (mirrors `start`), so a chat uses the current backend.
         self.cfg.model = self.model_input.clone();
         self.cfg.base_url = self.url_input.clone();
@@ -1197,6 +1472,14 @@ impl App {
             convo.user_turn(&text);
             convo.clone()
         };
+        // Mirror the user's message to any remote client (so the phone shows what was
+        // sent — whether it was typed on the desktop or came in from the phone itself).
+        if let Some(m) = &self.remote {
+            m.push(sc_core::AgentEvent::ChatMessage {
+                role: "you".into(),
+                text: text.clone(),
+            });
+        }
         self.chat_turns.push(sc_win::chat::Turn {
             role: sc_win::chat::Speaker::You,
             text,
@@ -2116,6 +2399,17 @@ impl App {
                     // (a reasoning delta shouldn't flash into the visible reply).
                     let buf = self.streaming.get_or_insert_with(String::new);
                     buf.push_str(&delta);
+                    // Mirror the live typing to any remote client — same cleaned view the
+                    // desktop shows (strips <think> reasoning + hides file-block fences), so
+                    // the phone doesn't flash raw reasoning.
+                    if let Some(m) = &self.remote {
+                        let visible = sc_win::chat::visible_so_far(buf);
+                        if !visible.is_empty() {
+                            m.push(sc_core::AgentEvent::ChatDelta {
+                                cumulative: visible,
+                            });
+                        }
+                    }
                 }
                 sc_win::chat_session::ChatEvent::Reply(raw) => {
                     self.streaming = None; // the live bubble is replaced by the finished turn
@@ -2145,8 +2439,15 @@ impl App {
                     };
                     self.chat_turns.push(sc_win::chat::Turn {
                         role: sc_win::chat::Speaker::Agent,
-                        text: shown,
+                        text: shown.clone(),
                     });
+                    // Mirror the finished assistant turn to any remote client.
+                    if let Some(m) = &self.remote {
+                        m.push(sc_core::AgentEvent::ChatMessage {
+                            role: "agent".into(),
+                            text: shown,
+                        });
+                    }
                     self.proposed_files = files;
                     // Auto-open the first proposed file so you see the plan taking shape.
                     if let Some(first) = self.proposed_files.first() {
@@ -2174,7 +2475,166 @@ impl App {
     }
 
     /// Drain the worker channels into UI state. Called each tick.
+    /// Apply commands a remote (phone) client sent this tick, through the same paths the
+    /// desktop's own buttons use: a chat message → `send_chat()`; a stop → `session.cancel()`.
+    /// Approve/deny are resolved inside the mirror server directly (they reach the reply
+    /// channel the gate bar shares), so they need no handling here.
+    fn pump_remote(&mut self) {
+        let Some(cmds) = self.remote.as_ref().map(|m| m.drain_inbound()) else {
+            return;
+        };
+        for cmd in cmds {
+            match cmd {
+                sc_web::InboundCmd::Chat(text) => {
+                    // A chat needs an open conversation; start one if the desktop hasn't yet.
+                    if self.conversation.is_none() {
+                        self.open_conversation();
+                    }
+                    self.intent = text;
+                    self.send_chat();
+                }
+                sc_web::InboundCmd::Cancel => {
+                    if let Some(session) = &self.session {
+                        session.cancel();
+                    }
+                }
+                sc_web::InboundCmd::Open(path) => {
+                    // Security: only open a path the desktop itself published in recents —
+                    // a remote client can never open an arbitrary folder on this machine.
+                    let allowed = sc_win::persist::load()
+                        .recents
+                        .iter()
+                        .any(|p| p.to_string_lossy() == path);
+                    let dir = std::path::PathBuf::from(&path);
+                    if allowed && dir.is_dir() {
+                        self.open_workspace(dir);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drain any output from a running terminal command into the scrollback. When the command
+    /// finishes (an `[exit]` was seen), drop the receiver so the tick can quiesce.
+    fn pump_terminal(&mut self) {
+        if let Some(rx) = &self.term_rx {
+            if self.terminal.drain(rx) {
+                self.term_rx = None;
+            }
+        }
+    }
+
+    /// Drive the backend health probe: adopt a finished probe's result, then kick a fresh
+    /// probe on startup and roughly every 10s. The probe runs on a background thread with a
+    /// short timeout so a dead backend never blocks the UI; the result returns via a channel.
+    /// A real 1-token completion is used (not a `/models` ping) so a router with no model
+    /// loaded reads as `NoModel`, not healthy.
+    fn tick_health_probe(&mut self) {
+        // 1) Adopt a completed probe.
+        if let Some(rx) = &self.health_rx {
+            if let Ok(h) = rx.try_recv() {
+                self.backend_health = Some(h);
+                self.health_rx = None;
+            }
+        }
+        // 2) Kick a new one if none is in flight and it's been ~10s (or we've never probed).
+        let due = self
+            .last_health_probe
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10));
+        if self.health_rx.is_none() && due {
+            let (base_url, model) = (self.cfg.base_url.clone(), self.cfg.model.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                // A bare backend (no context-detection HTTP at build time) with a short probe
+                // timeout — fail fast on a dead endpoint.
+                let backend = sc_model::OpenAiBackend::new(base_url, model);
+                let _ = tx.send(backend.health_probe(4));
+            });
+            self.health_rx = Some(rx);
+            self.last_health_probe = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Decide where the next terminal command runs, starting the sandbox container on first
+    /// use. Mirrors the agent: `self.cfg.sandbox()` is the single source of truth for Host vs
+    /// Docker, so the terminal and the agent always execute in the same place.
+    ///
+    /// **Strict containment:** when Docker is the configured intent (`use_docker`), this NEVER
+    /// silently falls back to the host. If it can't sandbox — no project open (nothing to
+    /// mount) or the container won't start (Docker down) — it returns `Err(reason)` and the
+    /// caller refuses to run the command. The host shell is used ONLY when sandboxing is
+    /// explicitly off. This guarantees you can never *think* you're contained while running on
+    /// the host.
+    fn term_exec_mode(&mut self) -> Result<sc_win::terminal::ExecMode, String> {
+        use sc_win::terminal::ExecMode;
+
+        // Sandbox off → an explicit, plain host scratch shell (in the workspace if one's open).
+        let image = match self.cfg.sandbox() {
+            sc_verify::Sandbox::Host => {
+                let cwd = self
+                    .picked_workspace
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                return Ok(ExecMode::Host { cwd });
+            }
+            sc_verify::Sandbox::Docker { image } => image,
+        };
+
+        // Docker is intended. A project must be open — the container mounts the workspace.
+        let Some(cwd) = self.picked_workspace.clone() else {
+            return Err(
+                "sandbox terminal needs a project open (open a folder to mount into the container)"
+                    .to_string(),
+            );
+        };
+
+        let sc = self
+            .term_container
+            .get_or_insert_with(|| sc_verify::SessionContainer::new(&cwd, image));
+        if !self.term_container_started {
+            // Clear any stale container from a previous session, then start fresh, detached.
+            // `docker run -d` returns once the container is up.
+            let _ = sc.stop_command().output();
+            match sc.start_command(&cwd).output() {
+                Ok(o) if o.status.success() => {
+                    self.terminal.note(format!(
+                        "▶ sandbox container `{}` started — commands run inside it",
+                        sc.name()
+                    ));
+                    self.term_container_started = true;
+                }
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    self.term_container = None;
+                    return Err(format!(
+                        "could not start sandbox container: {} — is Docker running?",
+                        err.trim()
+                    ));
+                }
+                Err(e) => {
+                    self.term_container = None;
+                    return Err(format!("docker not available: {e}"));
+                }
+            }
+        }
+        Ok(ExecMode::Container(
+            self.term_container.clone().expect("just inserted"),
+        ))
+    }
+
+    /// Tear down the workspace sandbox container (force-remove) and reset its state. Called on
+    /// project switch and app close so a container never outlives the project that owns it.
+    fn teardown_term_container(&mut self) {
+        if let Some(sc) = self.term_container.take() {
+            let _ = sc.stop_command().output();
+        }
+        self.term_container_started = false;
+    }
+
     fn pump(&mut self) {
+        self.pump_remote();
+        self.tick_health_probe();
+        self.pump_terminal();
         self.pump_chat();
         self.pump_triage();
         self.pump_replace();
@@ -2188,6 +2648,24 @@ impl App {
             return;
         };
         for ev in session.drain_events() {
+            // Tee this event out to any remote (phone) mirror. Agent/Swarm events are
+            // already serde `AgentEvent`s the Hub takes directly; the others become a
+            // short ChatMessage note so the remote log still reflects run boundaries.
+            if let Some(m) = &self.remote {
+                match &ev {
+                    UiEvent::Agent(e) => m.push(e.clone()),
+                    UiEvent::Done { summary, .. } => m.push(sc_core::AgentEvent::ChatMessage {
+                        role: "system".into(),
+                        text: format!("run finished: {summary}"),
+                    }),
+                    UiEvent::Failed(msg) => m.push(sc_core::AgentEvent::ChatMessage {
+                        role: "system".into(),
+                        text: format!("run failed: {msg}"),
+                    }),
+                    // Swarm/Phase mirroring is out of v1 scope (agent + chat only).
+                    _ => {}
+                }
+            }
             match ev {
                 UiEvent::Agent(e) => {
                     // Live "watch it type": as the model streams a write/edit, preview the
@@ -2294,17 +2772,30 @@ impl App {
         }
         // Move any new decision requests onto the gate bar.
         if let Some(session) = &self.session {
-            for p in session.drain_pending() {
+            let pending: Vec<Pending> = session.drain_pending();
+            for p in pending {
                 self.gatebar.push(match p {
                     Pending::Confirm {
                         command,
                         default_reason,
                         reply,
-                    } => Gatebar::Confirm {
-                        command,
-                        reason: default_reason,
-                        reply,
-                    },
+                    } => {
+                        // If the remote mirror is live, register this confirm so a phone can
+                        // approve/deny it. Both the local buttons and the remote resolve hold
+                        // a clone of the reply sender; whichever answers first wins (the
+                        // worker's `recv()` takes the first `send`). `id` = 0 with no mirror.
+                        let id = self
+                            .remote
+                            .as_ref()
+                            .map(|m| m.register_confirm(&command, &default_reason, reply.clone()))
+                            .unwrap_or(0);
+                        Gatebar::Confirm {
+                            id,
+                            command,
+                            reason: default_reason,
+                            reply,
+                        }
+                    }
                     Pending::Gate {
                         phase,
                         content,
@@ -2358,6 +2849,7 @@ impl App {
             Message::RunTdd => self.start(RunKind::Tdd),
             Message::RunIterate => self.start(RunKind::Iterate),
             Message::Tick => self.pump(),
+            Message::HealthTick => self.tick_health_probe(),
             Message::SyncWorkspace => {
                 // Re-walk the tree + git state OFF the UI thread — the walk and the git
                 // subprocesses are the slow part, so compute a snapshot on a background thread and
@@ -2422,6 +2914,16 @@ impl App {
                 };
             }
             Message::ChatSend => self.send_chat(),
+            Message::CopyTurn(t) => return iced::clipboard::write(t),
+            Message::ChatEditorAction(i, action) => {
+                // Read-only: apply selection/cursor/scroll actions so drag-select + Ctrl+C
+                // work, but never edits — the message text is immutable.
+                if !action.is_edit() {
+                    if let Some(content) = self.chat_editors.get_mut(i) {
+                        content.perform(action);
+                    }
+                }
+            }
             Message::ApplyFile(i) => self.apply_proposed_file(i),
             Message::ExecutePlan(i) => self.execute_plan(i),
             Message::ExecuteOpenPlan => self.execute_open_plan(),
@@ -2465,6 +2967,28 @@ impl App {
                 }
             }
             Message::SelectBottomTab(t) => self.bottom_tab = t,
+            Message::TermInput(s) => self.terminal.input = s,
+            Message::TermSubmit => {
+                if !self.terminal.running {
+                    let cmdline = self.terminal.input.clone();
+                    match self.term_exec_mode() {
+                        Ok(mode) => {
+                            self.term_rx = self.terminal.run(&cmdline, &mode);
+                        }
+                        // Strict containment: sandbox was intended but unavailable. Echo the
+                        // command as blocked and DO NOT run it on the host.
+                        Err(reason) => {
+                            if !cmdline.trim().is_empty() {
+                                self.terminal.blocked(cmdline.trim(), &reason);
+                            }
+                        }
+                    }
+                }
+            }
+            Message::TermKill => self.terminal.kill(),
+            Message::TermClear => self.terminal.clear(),
+            Message::TermHistoryPrev => self.terminal.history_prev(),
+            Message::TermHistoryNext => self.terminal.history_next(),
             Message::GitCursorMoved(p) => {
                 self.cursor_pos = p;
                 // While the chat|code divider is held, map the absolute cursor X to chat's share
@@ -2617,31 +3141,27 @@ impl App {
                     .set_title("Choose a project folder to work in")
                     .pick_folder()
                 {
-                    self.picked_workspace = Some(dir.clone());
-                    // A fresh project → drop any stale selection from the last one, and open the
-                    // tree compacted: every top-level folder starts collapsed.
-                    self.selected_file = None;
-                    self.code = None;
-                    self.collapsed_dirs = sc_win::filetree::top_level_dirs(&dir);
-                    self.file_filter.clear();
-                    self.tree_cache = sc_win::filetree::full_rows(&dir);
-                    // Remember it for next launch.
-                    sc_win::persist::save(&sc_win::persist::UiState {
-                        last_project: Some(dir),
-                    });
-                    // Greet: show the README/roadmap in Activity, and open the planning
-                    // conversation (mode-detected) in the chat column.
-                    self.show_welcome();
-                    self.open_conversation();
+                    self.open_workspace(dir);
                 }
             }
+            Message::OpenRecent(dir) => {
+                self.open_menu = None;
+                if dir.is_dir() {
+                    self.open_workspace(dir);
+                }
+            }
+            Message::NoOp => {}
             Message::ClearWorkspace => {
                 self.open_menu = None;
                 self.picked_workspace = None;
                 self.selected_file = None;
                 self.code = None;
-                // Forget the remembered project so a restart doesn't re-open it.
-                sc_win::persist::save(&sc_win::persist::UiState { last_project: None });
+                // Forget the *current* project so a restart doesn't re-open it, but keep the
+                // recents list (the user may want to re-pick one).
+                let mut state = sc_win::persist::load();
+                state.last_project = None;
+                sc_win::persist::save(&state);
+                self.publish_workspace_to_remote();
             }
             Message::OpenOutputFolder => {
                 if let Some(dir) = self.result.as_ref().and_then(|r| r.dir.clone()) {
@@ -2655,6 +3175,9 @@ impl App {
                 }
             }
         }
+        // Keep the per-turn selectable editors in step with the chat thread (no-op unless the
+        // thread changed). Runs after every message so streamed/appended turns are covered.
+        self.sync_chat_editors();
         Task::none()
     }
 
@@ -3583,20 +4106,25 @@ impl App {
         if self.is_swarm() {
             return Some(self.view_coder_io());
         }
-        // Nothing to build/verify → hide the strip entirely.
-        let has_content =
-            self.session.is_some() || self.verify_text.is_some() || self.result.is_some();
+        // Show the strip when there's build/verify content OR a project is open (so the
+        // integrated Terminal is always available while working in a project).
+        let has_content = self.session.is_some()
+            || self.verify_text.is_some()
+            || self.result.is_some()
+            || self.picked_workspace.is_some();
         if !has_content {
             return None;
         }
         let tabs = row![
             self.bottom_tab_button("Verification", BottomTab::Verification),
             self.bottom_tab_button("Build", BottomTab::Build),
+            self.bottom_tab_button("Terminal", BottomTab::Terminal),
         ]
         .spacing(4);
         let content = match self.bottom_tab {
             BottomTab::Verification => self.view_verification_tab(),
             BottomTab::Build => self.view_build_tab(),
+            BottomTab::Terminal => self.view_terminal_tab(),
         };
         Some(
             container(column![tabs, content].spacing(6))
@@ -3701,6 +4229,118 @@ impl App {
         scrollable(col).height(Fill).into()
     }
 
+    /// The Terminal tab: a VS-Code-style command runner. Scrollback (stderr in red, the
+    /// `$ cmd`/`[exit]` meta lines dimmed) above an input row; Run becomes Kill while a
+    /// command is in flight. Commands run in the open workspace via [`sc_win::terminal`].
+    /// A persistent one-line badge describing where terminal commands run right now, so
+    /// containment is never ambiguous: `(text, colour)`.
+    fn term_status_badge(&self) -> (String, iced::Color) {
+        match self.cfg.sandbox() {
+            sc_verify::Sandbox::Host => (
+                "⚠ HOST — commands run on this machine (sandbox off)".to_string(),
+                BAD,
+            ),
+            sc_verify::Sandbox::Docker { image } => {
+                if self.picked_workspace.is_none() {
+                    (
+                        "🔒 sandbox on — open a project to enable the terminal".to_string(),
+                        FG_MUTED,
+                    )
+                } else if self.term_container_started {
+                    (
+                        format!("🔒 sandboxed — running in container ({image})"),
+                        GOOD,
+                    )
+                } else {
+                    (
+                        format!("🔒 sandboxed — container starts on first command ({image})"),
+                        FG_MUTED,
+                    )
+                }
+            }
+        }
+    }
+
+    fn view_terminal_tab(&self) -> Element<'_, Message> {
+        use sc_win::terminal::Stream;
+        // Persistent containment badge — always visible so you know where commands execute.
+        let (badge_text, badge_color) = self.term_status_badge();
+        let badge = text(badge_text).size(11).color(badge_color);
+        // Scrollback: one monospace line per output line, coloured by originating stream.
+        let mut col = column![].spacing(0);
+        if self.terminal.lines.is_empty() {
+            col = col.push(
+                text("type a command and press Enter — e.g.  cargo build -p sc-win")
+                    .size(12)
+                    .color(FG_MUTED),
+            );
+        }
+        for line in &self.terminal.lines {
+            let color = match line.stream {
+                Stream::Stdout => FG,
+                Stream::Stderr => BAD,
+                Stream::Meta => FG_MUTED,
+            };
+            col = col.push(
+                text(line.text.clone())
+                    .size(12)
+                    .font(iced::Font::MONOSPACE)
+                    .color(color),
+            );
+        }
+        let scrollback = scrollable(col)
+            .height(Fill)
+            .anchor_bottom()
+            .width(Fill);
+
+        // Input row: prompt glyph · input box · Run/Kill · Clear.
+        let running = self.terminal.running;
+        let input = text_input("command…", &self.terminal.input)
+            .on_input(Message::TermInput)
+            .on_submit(Message::TermSubmit)
+            .padding([6, 8])
+            .font(iced::Font::MONOSPACE)
+            .style(input_style_borderless)
+            .width(Fill);
+        let action = if running {
+            button(text("⏹ Kill").size(13))
+                .on_press(Message::TermKill)
+                .padding([4, 12])
+                .style(menu_item_style)
+        } else {
+            button(text("▶ Run").size(13))
+                .on_press(Message::TermSubmit)
+                .padding([4, 12])
+                .style(menu_item_style)
+        };
+        let clear = button(text("Clear").size(13).color(FG_MUTED))
+            .on_press(Message::TermClear)
+            .padding([4, 12])
+            .style(menu_item_style);
+        // Command-history recall (↑ previous, ↓ next) — the arrow-key affordance as buttons,
+        // since `text_input` doesn't surface arrow keys.
+        let hist_prev = button(text("↑").size(13).font(iced::Font::MONOSPACE))
+            .on_press(Message::TermHistoryPrev)
+            .padding([4, 8])
+            .style(menu_item_style);
+        let hist_next = button(text("↓").size(13).font(iced::Font::MONOSPACE))
+            .on_press(Message::TermHistoryNext)
+            .padding([4, 8])
+            .style(menu_item_style);
+        let prompt = text(if running { "…" } else { "$" })
+            .size(13)
+            .font(iced::Font::MONOSPACE)
+            .color(if running { ACCENT } else { GOOD });
+        let input_row = row![prompt, input, hist_prev, hist_next, action, clear]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+
+        column![badge, scrollback, input_row]
+            .spacing(6)
+            .height(Fill)
+            .into()
+    }
+
     /// The horizontal step-flow at the top: each phase with arrows between, the current
     /// phase highlighted, done phases checked, plus a final "Build" step that lights up
     /// once planning is complete and implementation begins.
@@ -3761,28 +4401,73 @@ impl App {
     /// pushed to the right — the workspace/status line (what folder we're working in, and
     /// how). Clicking a title toggles its dropdown; items live in [`Self::view_menu_dropdown`].
     fn view_menu_bar(&self) -> Element<'_, Message> {
-        let title = text("smart-coder").size(14).color(ACCENT);
+        // No brand logo here — the window/taskbar icon already shows it right above.
         let file = self.menu_title("File", Menu::File);
         let view_m = self.menu_title("View", Menu::View);
-        // The status line, right-aligned in the bar.
+        // Layout: File/View at the left · workspace status centered · model health badge
+        // at the right. Two flexible spacers center the status between the fixed ends.
         let status = text(self.workspace_status())
             .size(11)
             .color(iced::Color::from_rgb(0.55, 0.58, 0.70));
+        let health = self.view_backend_badge();
         let bar = row![
-            title,
-            Space::new().width(Length::Fixed(16.0)),
             file,
             view_m,
-            Space::new().width(Fill), // push the status to the right edge
+            Space::new().width(Fill), // left spacer
             status,
+            Space::new().width(Fill), // right spacer → status sits centered
+            health,
         ]
-        .spacing(4)
+        .spacing(8)
         .align_y(iced::Alignment::Center);
         container(bar)
             .width(Fill)
             .padding([4, 10])
             .style(menu_bar_style)
             .into()
+    }
+
+    /// A human reason the backend is known-unusable, or `None` if it's `Ready` or not yet
+    /// probed. Used to preflight-gate runs so a bad backend fails loudly up front instead of
+    /// mid-stream. A `None` (unprobed) health is allowed through — we don't block the first
+    /// few seconds after launch before the first probe lands.
+    fn backend_unready_reason(&self) -> Option<String> {
+        use sc_model::BackendHealth::*;
+        match &self.backend_health {
+            Some(NoModel { .. }) => Some("backend is up but no model is loaded".to_string()),
+            Some(Unreachable { .. }) => {
+                Some(format!("backend unreachable at {}", self.cfg.base_url))
+            }
+            None | Some(Ready) => None,
+        }
+    }
+
+    /// The backend health badge in the top bar (after File/View): a coloured dot + short
+    /// label from the periodic probe. Green = a real completion succeeded (model serving);
+    /// amber = endpoint reachable but no model loaded; red = unreachable; grey = probing.
+    fn view_backend_badge(&self) -> Element<'_, Message> {
+        use sc_model::BackendHealth::*;
+        let (dot, label, color) = match &self.backend_health {
+            None => ("●", "checking backend…".to_string(), FG_MUTED),
+            Some(Ready) => ("●", format!("{} ready", self.cfg.model), GOOD),
+            Some(NoModel { .. }) => (
+                "●",
+                "backend up — no model loaded".to_string(),
+                Color::from_rgb(0.95, 0.72, 0.30), // amber
+            ),
+            Some(Unreachable { .. }) => (
+                "●",
+                format!("backend unreachable ({})", self.cfg.base_url),
+                BAD,
+            ),
+        };
+        row![
+            text(dot).size(12).color(color),
+            text(label).size(11).color(color),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 
     /// The one-line workspace status shown at the right of the top bar: where the app is
@@ -3820,7 +4505,7 @@ impl App {
         let which = self.open_menu?;
         let items: Vec<(String, Message)> = match which {
             Menu::File => {
-                if self.picked_workspace.is_some() {
+                let mut v: Vec<(String, Message)> = if self.picked_workspace.is_some() {
                     vec![
                         (
                             "📁  Open a different folder…".to_string(),
@@ -3830,7 +4515,27 @@ impl App {
                     ]
                 } else {
                     vec![("📁  Open folder…".to_string(), Message::PickWorkspace)]
+                };
+                // Recent projects (most-recent first), excluding the currently-open one.
+                let recents = sc_win::persist::load().recents;
+                let current = self.picked_workspace.clone();
+                let recent_items: Vec<_> = recents
+                    .into_iter()
+                    .filter(|p| Some(p) != current.as_ref())
+                    .take(8)
+                    .collect();
+                if !recent_items.is_empty() {
+                    v.push(("— Recent —".to_string(), Message::NoOp));
+                    for p in recent_items {
+                        let name = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("(project)")
+                            .to_string();
+                        v.push((format!("🕘  {name}"), Message::OpenRecent(p)));
+                    }
                 }
+                v
             }
             Menu::View => vec![(
                 if self.settings_open {
@@ -3843,22 +4548,31 @@ impl App {
         };
         let mut col = column![].spacing(0);
         for (label, msg) in items {
-            col = col.push(
-                button(text(label).size(13).color(FG))
-                    .on_press(msg)
-                    .padding([6, 14])
-                    .width(Length::Fixed(230.0))
-                    .style(menu_item_style),
-            );
+            // A "— … —" entry is a non-clickable section header, rendered as dimmed text.
+            if label.starts_with("— ") {
+                col = col.push(
+                    container(text(label).size(11).color(FG_MUTED))
+                        .padding([6, 14])
+                        .width(Length::Fixed(230.0)),
+                );
+            } else {
+                col = col.push(
+                    button(text(label).size(13).color(FG))
+                        .on_press(msg)
+                        .padding([6, 14])
+                        .width(Length::Fixed(230.0))
+                        .style(menu_item_style),
+                );
+            }
         }
         let card = container(col).padding(3).style(dropdown_style);
 
-        // Position under the right title: the menu bar is ~28px tall; File sits ~92px from
-        // the left, View ~130px. Spacers place the card; a transparent full-window backdrop
-        // behind it (a mouse_area) closes the menu on any outside click.
+        // Position under the right title. With the brand logo removed, File now starts right
+        // after the menu bar's 10px left padding; View follows it. Spacers place the card; a
+        // transparent full-window backdrop (a mouse_area) closes the menu on any outside click.
         let left = match which {
-            Menu::File => 88.0,
-            Menu::View => 128.0,
+            Menu::File => 8.0,
+            Menu::View => 48.0,
         };
         let positioned = column![
             Space::new().height(Length::Fixed(30.0)),
@@ -3928,8 +4642,8 @@ impl App {
                     .color(FG_MUTED),
             );
         }
-        for turn in &self.chat_turns {
-            thread = thread.push(self.view_chat_turn(turn));
+        for (i, turn) in self.chat_turns.iter().enumerate() {
+            thread = thread.push(self.view_chat_turn(i, turn));
         }
         // Proposed plan-file Apply cards, after the latest assistant message.
         for (i, pf) in self.proposed_files.iter().enumerate() {
@@ -3976,7 +4690,26 @@ impl App {
 
     /// One chat bubble: a small role label + the text, coloured by speaker. A Debug turn (the
     /// raw prompt echo) renders dimmed + monospace so it reads as diagnostic output, not chat.
-    fn view_chat_turn<'a>(&self, turn: &'a sc_win::chat::Turn) -> Element<'a, Message> {
+    /// Rebuild the per-turn selectable editor buffers when the chat thread changes. Cheap
+    /// change-detection via a `(len, last_text_len)` signature so this is a no-op on the vast
+    /// majority of update calls; only a new/edited turn triggers a full rebuild. Rebuilding
+    /// wholesale (rather than diffing) keeps it simple and correct — chat threads are short.
+    fn sync_chat_editors(&mut self) {
+        use iced::widget::text_editor::Content;
+        let last_len = self.chat_turns.last().map_or(0, |t| t.text.len());
+        let sig = (self.chat_turns.len(), last_len);
+        if sig == self.chat_sig && self.chat_editors.len() == self.chat_turns.len() {
+            return;
+        }
+        self.chat_sig = sig;
+        self.chat_editors = self
+            .chat_turns
+            .iter()
+            .map(|t| Content::with_text(&t.text))
+            .collect();
+    }
+
+    fn view_chat_turn<'a>(&'a self, i: usize, turn: &'a sc_win::chat::Turn) -> Element<'a, Message> {
         if turn.role == sc_win::chat::Speaker::Debug {
             return container(
                 column![
@@ -4005,12 +4738,39 @@ impl App {
             sc_win::chat::Speaker::You => ("you", ACCENT),
             _ => ("agent", GOOD),
         };
-        column![
+        // A small copy button beside the speaker label — copies the whole message in one click
+        // (alongside drag-select below).
+        let copy = button(text("⧉ copy").size(10).color(FG_MUTED))
+            .on_press(Message::CopyTurn(turn.text.clone()))
+            .padding([1, 6])
+            .style(menu_item_style);
+        let header = row![
             text(who).size(11).color(who_color),
-            text(turn.text.clone()).size(13).color(FG),
+            Space::new().width(Fill),
+            copy,
         ]
-        .spacing(2)
-        .into()
+        .align_y(iced::Alignment::Center);
+
+        // The message body: a read-only text_editor so it's drag-selectable + Ctrl+C-copyable.
+        // It's styled transparent/borderless to read as plain chat text, not an input box. The
+        // `on_action` handler drops edits (see `Message::ChatEditorAction`), so it's immutable.
+        // Falls back to plain text if the editor buffer isn't synced yet (shouldn't happen).
+        let body: Element<'a, Message> = match self.chat_editors.get(i) {
+            Some(content) => iced::widget::text_editor(content)
+                .size(13)
+                .padding(0)
+                .on_action(move |a| Message::ChatEditorAction(i, a))
+                .style(|_t: &Theme, _s| iced::widget::text_editor::Style {
+                    background: Background::Color(Color::TRANSPARENT),
+                    border: Border::default(),
+                    placeholder: FG_MUTED,
+                    value: FG,
+                    selection: Color { a: 0.35, ..ACCENT },
+                })
+                .into(),
+            None => text(turn.text.clone()).size(13).color(FG).into(),
+        };
+        column![header, body].spacing(2).into()
     }
 
     /// If debug mode is on, echo `prompt` into the chat as a Debug turn (the raw text the

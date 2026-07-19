@@ -98,6 +98,47 @@ pub struct GenerateResponse {
     pub content: String,
 }
 
+/// The health of an inference backend, as seen by a lightweight probe.
+///
+/// The crucial distinction is [`NoModel`](BackendHealth::NoModel) vs
+/// [`Ready`](BackendHealth::Ready): an OpenAI-compatible router/shim can answer `/models`
+/// (advertising a model from static config) while **no weights are actually loaded** — a real
+/// completion is the only thing that proves the model is serving. So a `/models` ping alone
+/// would report a hollow shim as healthy; the probe must attempt an actual (tiny) generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendHealth {
+    /// A real (tiny) completion succeeded — the model is loaded and serving.
+    Ready,
+    /// The endpoint is reachable (HTTP responds) but a real completion failed — typically the
+    /// router is up but no model is loaded (e.g. 0 VRAM), or the model name is wrong.
+    NoModel { detail: String },
+    /// The endpoint could not be reached at all (connection refused, DNS, connect timeout).
+    Unreachable { detail: String },
+}
+
+impl BackendHealth {
+    /// True only when a real completion succeeded — the sole state safe to start a run in.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, BackendHealth::Ready)
+    }
+
+    /// Classify from the two probe outcomes: whether the endpoint was *reachable* at all
+    /// (any HTTP response, even an error), and the result of the tiny completion. Pure, so
+    /// the state machine is unit-testable without a server.
+    ///
+    /// * completion ok → [`Ready`](BackendHealth::Ready).
+    /// * completion failed but endpoint reachable → [`NoModel`](BackendHealth::NoModel)
+    ///   (the shim answers but nothing serves).
+    /// * completion failed and endpoint unreachable → [`Unreachable`](BackendHealth::Unreachable).
+    pub fn classify(reachable: bool, completion: std::result::Result<(), String>) -> Self {
+        match completion {
+            Ok(()) => BackendHealth::Ready,
+            Err(detail) if reachable => BackendHealth::NoModel { detail },
+            Err(detail) => BackendHealth::Unreachable { detail },
+        }
+    }
+}
+
 /// What a backend can do, negotiated at runtime (spec 02 — capabilities).
 #[derive(Debug, Clone)]
 pub struct Capabilities {
@@ -243,6 +284,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_classify_completion_ok_is_ready() {
+        // A successful completion is Ready regardless of the /models reachability signal.
+        assert_eq!(BackendHealth::classify(true, Ok(())), BackendHealth::Ready);
+        assert_eq!(BackendHealth::classify(false, Ok(())), BackendHealth::Ready);
+        assert!(BackendHealth::Ready.is_ready());
+    }
+
+    #[test]
+    fn health_classify_reachable_but_no_completion_is_no_model() {
+        // The regression: a shim answers /models (reachable) but the completion fails because
+        // no weights are loaded. Must be NoModel, NOT Ready — a /models-only check would lie.
+        let h = BackendHealth::classify(true, Err("HTTP 503: no model loaded".into()));
+        assert_eq!(
+            h,
+            BackendHealth::NoModel {
+                detail: "HTTP 503: no model loaded".into()
+            }
+        );
+        assert!(!h.is_ready());
+    }
+
+    #[test]
+    fn health_classify_unreachable_when_endpoint_dead() {
+        let h = BackendHealth::classify(false, Err("request failed: connection refused".into()));
+        assert_eq!(
+            h,
+            BackendHealth::Unreachable {
+                detail: "request failed: connection refused".into()
+            }
+        );
+        assert!(!h.is_ready());
+    }
 
     #[test]
     fn mock_emits_scripted_responses_in_order() {
