@@ -91,6 +91,13 @@ impl TestReport {
             if let Some(raw) = &self.raw {
                 let raw = raw.trim();
                 if !raw.is_empty() {
+                    // Lead with a STRUCTURED checklist of file:line — message (survives context
+                    // compaction, so the model works a list instead of re-hunting locations each
+                    // turn). Then the raw error blocks for the details/code frames.
+                    if let Some(checklist) = compile_checklist(raw) {
+                        out.push('\n');
+                        out.push_str(&checklist);
+                    }
                     let body = error_first(raw);
                     out.push_str("\nOutput:\n");
                     out.push_str(&body);
@@ -116,6 +123,94 @@ impl TestReport {
         }
         out.trim_end().to_string()
     }
+}
+
+/// One compiler error, distilled to what the model needs to act: WHERE (file:line) and WHAT.
+/// Parsed from plain-text compiler output (rustc-style `error[..]: msg` + `--> file:line:col`,
+/// which tsc/gcc/clang also approximate), so the model gets a precise checklist instead of
+/// hunting through prose for the location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileError {
+    pub file: String,
+    pub line: u32,
+    /// The short message (the text after `error[CODE]:` / `error:`).
+    pub message: String,
+}
+
+/// Max compile errors to list in the checklist — enough to cover a multi-site change without
+/// letting a cascade of 200 errors blow the window.
+const MAX_CHECKLIST: usize = 12;
+
+/// Extract structured [`CompileError`]s from raw compiler output. Pairs each `error…:` line with
+/// the FIRST following `--> file:line:col` location. De-duplicated by (file, line, message) so a
+/// repeated diagnostic is listed once. Empty when there are no recognizable compiler errors
+/// (e.g. a test failure or a runtime panic — those keep the existing prose path).
+pub fn compile_errors(raw: &str) -> Vec<CompileError> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut out: Vec<CompileError> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        // An error headline: `error[E0004]: msg` or `error: msg` (but not `error: aborting…`).
+        let msg = t
+            .strip_prefix("error")
+            .and_then(|rest| {
+                // Optional `[CODE]`, then `: message`.
+                let rest = rest.strip_prefix('[').map_or(rest, |r| {
+                    r.split_once(']').map(|(_, after)| after).unwrap_or(r)
+                });
+                rest.strip_prefix(':').map(str::trim)
+            })
+            .filter(|m| !m.is_empty() && !m.starts_with("aborting") && !m.starts_with("could not"));
+        if let Some(message) = msg {
+            // Find the location in the following few lines (`--> file:line:col`).
+            if let Some((file, line)) = (i + 1..lines.len().min(i + 6))
+                .filter_map(|j| parse_location(lines[j]))
+                .next()
+            {
+                let ce = CompileError {
+                    file,
+                    line,
+                    message: message.to_string(),
+                };
+                if !out.contains(&ce) {
+                    out.push(ce);
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Parse a rustc `--> path:line:col` location line into `(file, line)`. `None` if the line
+/// isn't a location.
+fn parse_location(line: &str) -> Option<(String, u32)> {
+    let rest = line.trim_start().strip_prefix("-->")?.trim();
+    // rest = `path:line:col` — split off col, then line, keeping the (possibly Windows) path.
+    let (without_col, _col) = rest.rsplit_once(':')?;
+    let (file, line_s) = without_col.rsplit_once(':')?;
+    let line = line_s.trim().parse::<u32>().ok()?;
+    Some((file.trim().to_string(), line))
+}
+
+/// A crisp, unmissable checklist of the compile errors to fix, or `None` if the output isn't a
+/// compile failure. Leads the verify observation so the exact locations survive context
+/// compaction — the model works a list, it doesn't re-hunt each turn.
+pub fn compile_checklist(raw: &str) -> Option<String> {
+    let errs = compile_errors(raw);
+    if errs.is_empty() {
+        return None;
+    }
+    let mut s = format!("COMPILE ERRORS to fix ({}):", errs.len());
+    for e in errs.iter().take(MAX_CHECKLIST) {
+        s.push_str(&format!("\n  • {}:{} — {}", e.file, e.line, e.message));
+    }
+    if errs.len() > MAX_CHECKLIST {
+        s.push_str(&format!("\n  … and {} more", errs.len() - MAX_CHECKLIST));
+    }
+    s.push_str("\nGo to each file:line above and fix it (edit_function for a match arm / body).");
+    Some(s)
 }
 
 /// From raw build/command output, produce a bounded, ERROR-FIRST slice for the model: the
@@ -197,6 +292,66 @@ mod tests {
                 Some("assertion failed".into())
             },
         }
+    }
+
+    // The exact Gunner failure output, verbatim from a live cargo check.
+    const GUNNER_OUTPUT: &str = "\
+warning: unused variable: `x`
+error[E0004]: non-exhaustive patterns: `ShipRole::Gunner` not covered
+   --> crates/void_sim/src/ship_layout_gen.rs:77:42
+    |
+77  |     let (storage_cap, cargo_cap) = match role {
+    |                                          ^^^^ pattern `ShipRole::Gunner` not covered
+
+error[E0004]: non-exhaustive patterns: `ShipRole::Gunner` not covered
+   --> crates/void_sim/src/ship_template/schema.rs:35:15
+    |
+35  |         match self {
+    |               ^^^^ pattern `ShipRole::Gunner` not covered
+
+error: aborting due to 2 previous errors
+";
+
+    #[test]
+    fn compile_errors_extracts_file_line_and_message() {
+        let errs = compile_errors(GUNNER_OUTPUT);
+        assert_eq!(errs.len(), 2, "two distinct sites: {errs:?}");
+        assert_eq!(errs[0].file, "crates/void_sim/src/ship_layout_gen.rs");
+        assert_eq!(errs[0].line, 77);
+        assert!(errs[0].message.contains("ShipRole::Gunner"));
+        assert_eq!(errs[1].file, "crates/void_sim/src/ship_template/schema.rs");
+        assert_eq!(errs[1].line, 35);
+        // `error: aborting…` is NOT a real diagnostic.
+        assert!(!errs.iter().any(|e| e.message.contains("aborting")));
+    }
+
+    #[test]
+    fn compile_errors_dedupes_identical_diagnostics() {
+        // Same file:line:message twice → listed once.
+        let dup = format!("{GUNNER_OUTPUT}\n{GUNNER_OUTPUT}");
+        assert_eq!(compile_errors(&dup).len(), 2);
+    }
+
+    #[test]
+    fn compile_checklist_leads_with_every_location() {
+        let list = compile_checklist(GUNNER_OUTPUT).expect("a checklist");
+        assert!(list.contains("COMPILE ERRORS to fix (2)"), "{list}");
+        assert!(list.contains("ship_layout_gen.rs:77"), "{list}");
+        assert!(list.contains("schema.rs:35"), "{list}");
+    }
+
+    #[test]
+    fn compile_checklist_none_for_a_test_failure() {
+        // A pytest-style failure has no `error…: --> file:line` — no checklist, keep prose.
+        assert!(compile_checklist("=== 1 failed, 3 passed ===\nassert 1 == 2").is_none());
+    }
+
+    #[test]
+    fn observation_leads_with_the_compile_checklist() {
+        let report = TestReport::generic_with_output(false, GUNNER_OUTPUT);
+        let obs = report.observation();
+        assert!(obs.contains("COMPILE ERRORS to fix"), "{obs}");
+        assert!(obs.contains("schema.rs:35"), "location in obs: {obs}");
     }
 
     #[test]

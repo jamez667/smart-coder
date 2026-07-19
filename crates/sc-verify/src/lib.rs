@@ -13,7 +13,7 @@ mod report;
 mod run;
 
 pub use parse::{detect, parse, Framework};
-pub use report::{TestCase, TestReport};
+pub use report::{compile_checklist, compile_errors, CompileError, TestCase, TestReport};
 pub use run::{
     run_command, run_command_in, run_verification, run_verification_in, CommandResult, Sandbox,
     SessionContainer,
