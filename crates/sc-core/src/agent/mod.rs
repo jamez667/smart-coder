@@ -406,6 +406,12 @@ pub fn run_agent_observed(
     // fires (the call never parsed). After a couple, steer it to `edit_lines`, which takes line
     // NUMBERS and no big `old_str`, sidestepping the encoding problem (observed live 2026-07-15).
     let mut malformed_streak = 0usize;
+    // Read-thrash guard: how many read_file calls have happened since the last workspace change.
+    // A small model often re-reads the same files many times before acting (observed live on
+    // void-claim: schema.rs read 6+ times in one run, burning budget). Paging through a large
+    // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
+    // a firm "you have enough; act now" nudge and reset. Cleared on any change.
+    let mut reads_since_change = 0usize;
     // The same verification failure, seen N times in a row. A model stuck on a hard bug
     // edits ineffectively (each edit resets the stall, so the stall detector never trips)
     // or spams run_verification — burning the whole budget while the SAME tests keep
@@ -931,6 +937,32 @@ pub fn run_agent_observed(
                 advice: directive.clone(),
             });
             directive
+        } else {
+            obs
+        };
+
+        // Read-thrash guard: count reads since the last change; on a change, reset. Past the
+        // threshold with no edit, append a firm "you have enough — act now" nudge so the model
+        // stops re-reading files it already has in context and makes a concrete edit. Paging a
+        // large file is fine up to the threshold; this only fires when reads pile up WITHOUT any
+        // workspace change (the observed void-claim thrash: schema.rs read 6+ times, no edit).
+        const READ_THRASH_LIMIT: usize = 5;
+        if changed {
+            reads_since_change = 0;
+        } else if matches!(tool.as_str(), "read_file" | "read_function" | "search_code" | "list_dir")
+        {
+            reads_since_change += 1;
+        }
+        let obs = if reads_since_change >= READ_THRASH_LIMIT {
+            reads_since_change = 0;
+            interv.count += 1;
+            format!(
+                "{obs}\n\n[harness] You have read {READ_THRASH_LIMIT}+ times without changing any \
+                 file. You already have what you read in the context above — re-reading won't \
+                 help. Make a CONCRETE edit THIS turn: to change a function (add a match arm, edit \
+                 a body) call `edit_function` with its `name` and full `new_body`; for a small \
+                 anchored change use `edit_file`; then `run_verification`. Do not read again."
+            )
         } else {
             obs
         };
