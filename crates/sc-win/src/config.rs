@@ -72,6 +72,12 @@ pub struct UiConfig {
     /// `docker/pyenv/` image in the smart-coder-ops repo (`docker build -t
     /// smart-coder-pyenv docker/pyenv`).
     pub docker_image: String,
+    /// Runtime override for [`Self::sandbox`], set by the GUI to the LIVE per-workspace
+    /// [`sc_verify::SessionContainer`] so an agent run `docker exec`s into the SAME persistent
+    /// container the terminal uses (shared state) instead of spinning a fresh one per command.
+    /// `None` (the default, and always for CLI/config-loaded configs) → the `use_docker`
+    /// decision applies. Not serialized — a purely in-memory wiring field.
+    pub sandbox_override: Option<sc_verify::Sandbox>,
 }
 
 impl Default for UiConfig {
@@ -116,6 +122,7 @@ impl Default for UiConfig {
             workspace: default_workspace(),
             use_docker: true,
             docker_image: "smart-coder-pyenv".to_string(),
+            sandbox_override: None,
         }
     }
 }
@@ -491,8 +498,13 @@ impl UiConfig {
         }
     }
 
-    /// Where verify runs: a per-run Docker container (the default) or the host.
+    /// Where verify/agent commands run. A runtime `sandbox_override` (the GUI's live session
+    /// container) wins; otherwise the `use_docker` decision: a per-run Docker container or the
+    /// host.
     pub fn sandbox(&self) -> sc_verify::Sandbox {
+        if let Some(s) = &self.sandbox_override {
+            return s.clone();
+        }
         if self.use_docker {
             sc_verify::Sandbox::Docker {
                 image: self.docker_image.clone(),

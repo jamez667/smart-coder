@@ -25,8 +25,15 @@ pub enum Sandbox {
     #[default]
     Host,
     /// Run inside `docker run --rm` against `image`, with the workspace mounted at
-    /// `/workspace`.
+    /// `/workspace`. A FRESH ephemeral container per command (clean isolation; the
+    /// CLI/headless default). No state persists between commands.
     Docker { image: String },
+    /// `docker exec` into an already-running [`SessionContainer`] — the SAME long-lived
+    /// per-workspace container the GUI terminal uses, so working-directory changes, env, and
+    /// built dependencies persist across the agent's commands, and you can inspect what the
+    /// agent did from the terminal. The container must be started by its owner (the GUI)
+    /// before the agent runs; this variant only `exec`s.
+    Session(SessionContainer),
 }
 
 /// A **long-lived** per-workspace sandbox container: started once, then commands
@@ -67,6 +74,11 @@ impl SessionContainer {
     /// The container's docker name (also the handle used by [`Self::stop_command`]).
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The image this container runs.
+    pub fn image(&self) -> &str {
+        &self.image
     }
 
     /// Build the command that **starts** the detached, long-lived container: it mounts
@@ -161,6 +173,13 @@ fn build_command(sandbox: &Sandbox, workspace: &Path, command: &str) -> Command 
                 .arg(command);
             c
         }
+        Sandbox::Session(container) => {
+            // `docker exec` into the already-running per-workspace container — persistent
+            // state, shared with the terminal. The workspace is the container's mounted
+            // `/workspace` (set at start), so the host `workspace` path isn't used here.
+            let _ = workspace;
+            container.exec_command(command)
+        }
     }
 }
 
@@ -250,6 +269,24 @@ mod tests {
         assert!(args.contains(&"-w".to_string()) && args.contains(&"/workspace".to_string()));
         assert!(args.contains(&"smart-coder-pyenv".to_string()), "the image");
         assert_eq!(args.last().unwrap(), "pytest -q", "the verify command");
+    }
+
+    #[test]
+    fn session_sandbox_execs_into_the_running_container() {
+        // The agent's command routes through `docker exec` into the shared session container,
+        // NOT a fresh `docker run` — so state persists across commands.
+        let container = SessionContainer::new(Path::new("/tmp/ws"), "img");
+        let sandbox = Sandbox::Session(container.clone());
+        let cmd = build_command(&sandbox, Path::new("/tmp/ws"), "cargo test");
+        let prog = cmd.get_program().to_string_lossy().into_owned();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(prog, "docker");
+        assert_eq!(args[0], "exec", "exec into the container, not a fresh run");
+        assert!(args.contains(&container.name().to_string()), "targets our container");
+        assert_eq!(args.last().unwrap(), "cargo test");
     }
 
     #[test]

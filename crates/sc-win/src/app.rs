@@ -1252,6 +1252,11 @@ impl App {
         self.selected_coder = None;
         self.run_started = Some(Instant::now());
         self.verify_text = None;
+
+        // Route the agent's command execution through the SAME persistent container the
+        // terminal uses (starting it if needed), so its commands keep state and you can inspect
+        // its work from the terminal. Falls back to per-run/host inside `agent_sandbox`.
+        self.cfg.sandbox_override = Some(self.agent_sandbox());
         self.summary = None;
         self.result = None;
         self.gatebar.clear();
@@ -2594,22 +2599,40 @@ impl App {
                 return Ok(ExecMode::Host { cwd });
             }
             sc_verify::Sandbox::Docker { image } => image,
+            // Session is a runtime-only state built from the live container, never returned by
+            // `cfg.sandbox()`; use its image for exhaustiveness.
+            sc_verify::Sandbox::Session(c) => c.image().to_string(),
         };
 
         // Docker is intended. A project must be open — the container mounts the workspace.
-        let Some(cwd) = self.picked_workspace.clone() else {
+        if self.picked_workspace.is_none() {
             return Err(
                 "sandbox terminal needs a project open (open a folder to mount into the container)"
                     .to_string(),
             );
-        };
+        }
+        let sc = self.ensure_session_container(&image)?;
+        Ok(ExecMode::Container(sc))
+    }
 
+    /// Ensure the workspace's shared session container is running (starting it once on first
+    /// use, clearing any stale one first), and return a handle. Shared by the terminal and the
+    /// agent so BOTH `docker exec` into the SAME container — the agent's file/state changes are
+    /// then visible in the terminal and vice-versa. `Err` with a human reason if no project is
+    /// open or Docker won't start.
+    fn ensure_session_container(
+        &mut self,
+        image: &str,
+    ) -> Result<sc_verify::SessionContainer, String> {
+        let Some(cwd) = self.picked_workspace.clone() else {
+            return Err("no project open".to_string());
+        };
         let sc = self
             .term_container
-            .get_or_insert_with(|| sc_verify::SessionContainer::new(&cwd, image));
+            .get_or_insert_with(|| sc_verify::SessionContainer::new(&cwd, image))
+            .clone();
         if !self.term_container_started {
             // Clear any stale container from a previous session, then start fresh, detached.
-            // `docker run -d` returns once the container is up.
             let _ = sc.stop_command().output();
             match sc.start_command(&cwd).output() {
                 Ok(o) if o.status.success() => {
@@ -2633,9 +2656,29 @@ impl App {
                 }
             }
         }
-        Ok(ExecMode::Container(
-            self.term_container.clone().expect("just inserted"),
-        ))
+        Ok(sc)
+    }
+
+    /// The sandbox an agent run should use: the shared session container when sandboxing is on
+    /// and a project is open (so the agent execs into the same container as the terminal),
+    /// else whatever `cfg.sandbox()` decides (host, or per-run Docker as a fallback). Starting
+    /// the container can fail (Docker down) — on failure we log and fall back to `cfg.sandbox()`
+    /// so a run still proceeds rather than being blocked.
+    fn agent_sandbox(&mut self) -> sc_verify::Sandbox {
+        let image = match self.cfg.sandbox() {
+            sc_verify::Sandbox::Docker { image } if self.picked_workspace.is_some() => image,
+            other => return other,
+        };
+        match self.ensure_session_container(&image) {
+            Ok(sc) => sc_verify::Sandbox::Session(sc),
+            Err(reason) => {
+                self.rows.push(Row::ok(
+                    "⚠",
+                    format!("sandbox container unavailable ({reason}) — using per-run container"),
+                ));
+                sc_verify::Sandbox::Docker { image }
+            }
+        }
     }
 
     /// Tear down the workspace sandbox container (force-remove) and reset its state. Called on
@@ -4265,29 +4308,33 @@ impl App {
     /// A persistent one-line badge describing where terminal commands run right now, so
     /// containment is never ambiguous: `(text, colour)`.
     fn term_status_badge(&self) -> (String, iced::Color) {
-        match self.cfg.sandbox() {
-            sc_verify::Sandbox::Host => (
-                "⚠ HOST — commands run on this machine (sandbox off)".to_string(),
-                BAD,
-            ),
-            sc_verify::Sandbox::Docker { image } => {
-                if self.picked_workspace.is_none() {
-                    (
-                        "🔒 sandbox on — open a project to enable the terminal".to_string(),
-                        FG_MUTED,
-                    )
-                } else if self.term_container_started {
-                    (
-                        format!("🔒 sandboxed — running in container ({image})"),
-                        GOOD,
-                    )
-                } else {
-                    (
-                        format!("🔒 sandboxed — container starts on first command ({image})"),
-                        FG_MUTED,
-                    )
-                }
+        // `cfg.sandbox()` only yields Host/Docker; Session is a runtime-only state, folded in
+        // here for exhaustiveness (rendered like Docker).
+        let image = match self.cfg.sandbox() {
+            sc_verify::Sandbox::Host => {
+                return (
+                    "⚠ HOST — commands run on this machine (sandbox off)".to_string(),
+                    BAD,
+                );
             }
+            sc_verify::Sandbox::Docker { image } => image,
+            sc_verify::Sandbox::Session(c) => c.name().to_string(),
+        };
+        if self.picked_workspace.is_none() {
+            (
+                "🔒 sandbox on — open a project to enable the terminal".to_string(),
+                FG_MUTED,
+            )
+        } else if self.term_container_started {
+            (
+                format!("🔒 sandboxed — running in container ({image})"),
+                GOOD,
+            )
+        } else {
+            (
+                format!("🔒 sandboxed — container starts on first command ({image})"),
+                FG_MUTED,
+            )
         }
     }
 
