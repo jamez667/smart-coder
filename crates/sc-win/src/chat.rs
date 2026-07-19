@@ -337,7 +337,10 @@ impl Conversation {
         let produces_file = matches!(intent, TodoEdit | ReadmeEdit | FeaturePlan);
         let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan);
         let wants_todo = matches!(intent, TodoEdit | FeaturePlan);
-        let wants_open_file = matches!(intent, Question | CodeChange | FeaturePlan);
+        // A feature plan is about the PROJECT (README/TODO give the shape); the full open-file
+        // dump was the bulk of a bloated ~49k-char prompt that buried the fence instruction and
+        // eats a 32k-context small model's window. Questions/code changes still get the file.
+        let wants_open_file = matches!(intent, Question | CodeChange);
 
         let mut s = String::new();
         s.push_str(
@@ -575,6 +578,51 @@ pub fn extract_command(reply: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Wrap a bare-prose feature plan into a `PLAN-<slug>.md` [`ProposedFile`]. Used when the
+/// model returned a plan as plain prose instead of the requested ```file: block (common on
+/// small local models when the prompt is large) — so a plan ALWAYS yields an Apply/verify card
+/// rather than silently staying prose in the chat.
+///
+/// The filename is named after the plan's OWN `## Plan: <title>` heading when it has one (e.g.
+/// `## Plan: Add Alternate Seat Types` → `PLAN-add-alternate-seat.md`) — a far better name than
+/// the user's raw phrasing — falling back to `fallback_slug` (derived from the request) only
+/// when the plan has no title heading.
+pub fn wrap_plan_prose(prose: &str, fallback_slug: &str) -> ProposedFile {
+    let slug = plan_title(prose)
+        .map(|t| slugify(&t))
+        .filter(|s| s != "feature")
+        .unwrap_or_else(|| fallback_slug.to_string());
+    ProposedFile {
+        name: format!("PLAN-{slug}.md"),
+        content: prose.trim().to_string(),
+    }
+}
+
+/// The title from a `## Plan: <title>` heading in `prose`, if present (case-insensitive on the
+/// `Plan:` label). Used to name a wrapped plan file after its own subject.
+fn plan_title(prose: &str) -> Option<String> {
+    for line in prose.lines() {
+        let t = line.trim_start_matches('#').trim();
+        if let Some(rest) = t
+            .strip_prefix("Plan:")
+            .or_else(|| t.strip_prefix("plan:"))
+            .or_else(|| t.strip_prefix("PLAN:"))
+        {
+            let title = rest.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Public slugifier so the app can name a wrapped plan after the FEATURE (from the user's
+/// request) rather than the open file. E.g. "add alternate seat types" → "add-alternate-seat".
+pub fn slug_for(text: &str) -> String {
+    slugify(text)
 }
 
 /// True if `line` opens a ```command fenced block (the run-this-command marker).
@@ -889,15 +937,33 @@ mod tests {
     }
 
     #[test]
-    fn feature_plan_prompt_still_has_full_context() {
-        // The heavy intent legitimately needs it all: README + TODO + open file.
+    fn feature_plan_prompt_has_plan_files_but_not_the_open_file_dump() {
+        // A plan is about the PROJECT: it gets README + TODO, but NOT the full open-file dump
+        // (which bloated the prompt and buried the fence instruction on small models).
         let mut c = Conversation::open("# void_engine", "- [ ] add lakes");
-        c.set_open_file(Some(("main.rs".into(), "fn main() {}".into())));
+        c.set_open_file(Some(("main.rs".into(), "fn giant_file() {}".into())));
         c.user_turn("plan out adding lakes");
         let sys = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
         assert!(sys.contains("void_engine"), "README present: {sys}");
         assert!(sys.contains("add lakes"), "TODO present: {sys}");
-        assert!(sys.contains("main.rs"), "open file present: {sys}");
+        assert!(!sys.contains("giant_file"), "open file NOT dumped into a plan: {sys}");
+    }
+
+    #[test]
+    fn wrap_plan_prose_names_from_the_plan_title() {
+        // Prefer the plan's own `## Plan: <title>` heading over the fallback slug.
+        let pf = wrap_plan_prose(
+            "Here's a plan:\n## Plan: Add Alternate Seat Types\n**Approach:** add roles.",
+            "can-you-make-a",
+        );
+        assert_eq!(pf.name, "PLAN-add-alternate-seat-types.md");
+        assert!(pf.content.contains("## Plan: Add Alternate Seat Types"));
+    }
+
+    #[test]
+    fn wrap_plan_prose_falls_back_when_no_title() {
+        let pf = wrap_plan_prose("just some prose with no heading", "add-lakes");
+        assert_eq!(pf.name, "PLAN-add-lakes.md");
     }
 
     #[test]

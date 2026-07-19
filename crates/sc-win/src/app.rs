@@ -1642,7 +1642,7 @@ impl App {
             let reply = match ev {
                 // Triage is a one-word classify — ignore streamed tokens, act on the final.
                 sc_win::chat_session::ChatEvent::Token(_) => continue,
-                sc_win::chat_session::ChatEvent::Reply(r) => r,
+                sc_win::chat_session::ChatEvent::Reply(r, _) => r,
                 sc_win::chat_session::ChatEvent::Failed(_) => {
                     // On a failed triage, fall back to planning (the safe route).
                     "BIG".to_string()
@@ -1755,7 +1755,7 @@ impl App {
                         }
                     }
                 }
-                sc_win::chat_session::ChatEvent::Reply(raw) => {
+                sc_win::chat_session::ChatEvent::Reply(raw, _) => {
                     done = Some((raw, String::new()));
                     break;
                 }
@@ -2426,10 +2426,21 @@ impl App {
                         }
                     }
                 }
-                sc_win::chat_session::ChatEvent::Reply(raw) => {
+                sc_win::chat_session::ChatEvent::Reply(raw, intent) => {
                     self.streaming = None; // the live bubble is replaced by the finished turn
                     self.working = None; // a question answer is done → drop the amber highlight
-                    let (prose, files) = sc_win::chat::parse_reply(&raw);
+                    let (prose, mut files) = sc_win::chat::parse_reply(&raw);
+                    // Robustness for small local models: a FEATURE PLAN whose reply came back as
+                    // bare prose (the model ignored the ```file: fence instruction — common when
+                    // the prompt is large) is WRAPPED into a PLAN-<slug>.md proposal here, so a
+                    // plan always yields an Apply/verify card rather than silently staying prose.
+                    if intent == Some(sc_win::chat::ChatIntent::FeaturePlan)
+                        && files.is_empty()
+                        && !prose.trim().is_empty()
+                    {
+                        let slug = self.plan_slug_for_reply();
+                        files.push(sc_win::chat::wrap_plan_prose(&prose, &slug));
+                    }
                     // A ```command block (the Command intent) → offer it as a one-click Run in
                     // the terminal, rather than auto-executing.
                     self.proposed_command = sc_win::chat::extract_command(&raw);
@@ -2574,6 +2585,20 @@ impl App {
             self.health_rx = Some(rx);
             self.last_health_probe = Some(std::time::Instant::now());
         }
+    }
+
+    /// The slug for a wrapped feature plan, derived from the user's most recent request (the
+    /// feature they asked to plan) so it lands as `PLAN-<feature>.md` — not from the open file
+    /// (the old `plan_slug()` bug that produced `PLAN-todo.md` for a seat-types plan). Falls
+    /// back to `feature` when there's no user turn to name it after.
+    fn plan_slug_for_reply(&self) -> String {
+        self.chat_turns
+            .iter()
+            .rev()
+            .find(|t| t.role == sc_win::chat::Speaker::You)
+            .map(|t| sc_win::chat::slug_for(&t.text))
+            .filter(|s| s != "feature")
+            .unwrap_or_else(|| "feature".to_string())
     }
 
     /// Decide where the next terminal command runs, starting the sandbox container on first

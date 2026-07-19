@@ -21,9 +21,11 @@ pub enum ChatEvent {
     /// A token delta as the model generates it — appended to the in-flight bubble live
     /// (the "watch it type" effect).
     Token(String),
-    /// The turn finished: the full concatenated reply. The app parses THIS for plan-file
-    /// blocks / `<think>` stripping (the streamed tokens were the raw live view).
-    Reply(String),
+    /// The turn finished: the full concatenated reply, plus the classified [`ChatIntent`] (so
+    /// the app can, e.g., wrap a bare-prose feature plan into a PLAN file). The app parses the
+    /// text for plan-file blocks / `<think>` stripping (the streamed tokens were the raw live
+    /// view). `intent` is `None` for a non-classified turn (the plain `spawn` path).
+    Reply(String, Option<ChatIntent>),
     /// The turn failed (backend unreachable, etc.) — a human-readable reason.
     Failed(String),
 }
@@ -57,7 +59,7 @@ impl ChatSession {
             let result = backend.generate_streaming(&req, &mut on_token);
             match result {
                 Ok(resp) => {
-                    let _ = tx.send(ChatEvent::Reply(resp.content));
+                    let _ = tx.send(ChatEvent::Reply(resp.content, None));
                 }
                 Err(e) => {
                     let _ = tx.send(ChatEvent::Failed(format!("chat failed: {e}")));
@@ -103,7 +105,7 @@ impl ChatSession {
             };
             match backend.generate_streaming(&req, &mut on_token) {
                 Ok(resp) => {
-                    let _ = tx.send(ChatEvent::Reply(resp.content));
+                    let _ = tx.send(ChatEvent::Reply(resp.content, Some(intent)));
                 }
                 Err(e) => {
                     let _ = tx.send(ChatEvent::Failed(format!("chat failed: {e}")));
@@ -149,7 +151,7 @@ mod tests {
             }
         };
         assert!(
-            matches!(ev, Some(ChatEvent::Failed(_)) | Some(ChatEvent::Reply(_))),
+            matches!(ev, Some(ChatEvent::Failed(_)) | Some(ChatEvent::Reply(..))),
             "expected a terminal ChatEvent, got {ev:?}"
         );
     }
