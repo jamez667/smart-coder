@@ -1263,7 +1263,7 @@ impl App {
         // Re-arm follow so the code panel tracks the agent through this run.
         self.follow_agent = true;
         // Track this run's mode + which files it edits (for the honest iterate banner).
-        self.iterating = matches!(kind, RunKind::Iterate);
+        self.iterating = matches!(kind, RunKind::Iterate | RunKind::StagedBuild);
         self.edited_files.clear();
         // Jump to the Verification tab so the run's checks are visible as it works.
         self.bottom_tab = BottomTab::Verification;
@@ -2946,7 +2946,11 @@ impl App {
             Message::ToggleYolo(v) => self.cfg.yolo = v,
             Message::ToggleDryRun(v) => self.cfg.dry_run = v,
             Message::RunTdd => self.start(RunKind::Tdd),
-            Message::RunIterate => self.start(RunKind::Iterate),
+            // The composer's main run now goes through the DISCIPLINED path: staged plan →
+            // architecture → decompose → compiler-driven build (tiny compiler-verified steps),
+            // instead of the bare single-agent iterate loop. The line-comment small-fix path
+            // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
+            Message::RunIterate => self.start(RunKind::StagedBuild),
             Message::Tick => self.pump(),
             Message::HealthTick => self.tick_health_probe(),
             Message::SyncWorkspace => {
