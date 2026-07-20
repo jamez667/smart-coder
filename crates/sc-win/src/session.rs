@@ -17,7 +17,7 @@ use sc_core::{AgentEvent, FnSink};
 use sc_model::ModelBackend;
 use sc_swarm::{FnSwarmSink, SwarmEvent};
 
-use crate::bridge::{ChannelConfirmer, Pending};
+use crate::bridge::{ChannelConfirmer, ChannelGate, Pending};
 use crate::config::UiConfig;
 
 /// Everything the UI receives from a run: the live event streams, the terminal
@@ -104,7 +104,9 @@ impl Session {
             }
             RunKind::Iterate => run_iterate(cfg, task, workspace, ev_tx, pending_tx, cancel_worker),
             RunKind::Plan => run_plan(cfg, task, workspace, ev_tx),
-            RunKind::StagedBuild => run_staged_build(cfg, task, workspace, ev_tx, cancel_worker),
+            RunKind::StagedBuild => {
+                run_staged_build(cfg, task, workspace, ev_tx, pending_tx, cancel_worker)
+            }
         });
 
         Self {
@@ -374,15 +376,32 @@ fn run_plan(cfg: UiConfig, task: String, workspace: PathBuf, ev_tx: Sender<UiEve
 /// The full plan→build flow: run the staged pipeline through decomposition, then drive the
 /// compiler-driven executor to green. This is the disciplined path — design first, then build in
 /// tiny compiler-verified steps — replacing the bare iterate loop for a real change.
+/// If `task` references a `specs/<slug>/spec.md`, return the absolute `<workspace>/specs/<slug>/`
+/// directory so the design phases land beside the spec (OpenSpec layout). `None` otherwise (the
+/// workflow then uses its default `.smart-coder/plan/`).
+fn spec_artifact_dir(task: &str, workspace: &std::path::Path) -> Option<PathBuf> {
+    let token = task
+        .split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ','))
+        .map(|t| t.trim_end_matches('.').replace('\\', "/"))
+        .find(|t| t.to_ascii_lowercase().starts_with("specs/") && t.to_ascii_lowercase().ends_with("/spec.md"))?;
+    // Strip the trailing `/spec.md` to get the feature directory.
+    let dir_rel = token.strip_suffix("/spec.md").or_else(|| token.strip_suffix("/SPEC.MD"))?;
+    Some(workspace.join(dir_rel))
+}
+
 fn run_staged_build(
     cfg: UiConfig,
     task: String,
     workspace: PathBuf,
     ev_tx: Sender<UiEvent>,
+    pending_tx: Sender<Pending>,
     _cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let orchestrator = cfg.orchestrator();
     let worker = cfg.backend();
+    // Human-in-the-loop: pause at each design phase (Specs → Architecture → Layout → Breakdown)
+    // for Approve/Revise/Send-back via the gatebar, instead of AutoApprove barrelling through.
+    let gate = ChannelGate::new(pending_tx);
 
     // Stream each design phase into the plan panel as it lands.
     let phase_tx = ev_tx.clone();
@@ -399,7 +418,11 @@ fn run_staged_build(
         skip_tests: true,
         stop_after: None,
     };
-    let outcome = match sc_workflow::run_workflow_moded(
+    // Land the design artifacts NEXT TO the spec in its OpenSpec dir: if the task references
+    // `specs/<slug>/spec.md`, phases (architecture.md, layout.md, breakdown.md, …) go in
+    // `specs/<slug>/`. Falls back to the default `.smart-coder/plan/` when there's no spec dir.
+    let artifact_dir = spec_artifact_dir(&task, &workspace);
+    let outcome = match sc_workflow::run_workflow_moded_to(
         &orchestrator,
         &worker,
         &task,
@@ -407,7 +430,9 @@ fn run_staged_build(
         sc_workflow::ThinkPolicy::default(),
         mode,
         &on_phase,
-        &sc_workflow::AutoApprove,
+        &gate,
+        artifact_dir.as_deref(),
+        artifact_dir.is_some(), // OpenSpec filenames when writing into specs/<slug>/
     ) {
         Ok(o) => o,
         Err(e) => {
@@ -415,6 +440,15 @@ fn run_staged_build(
             return;
         }
     };
+
+    // If the user aborted at a gate, stop here — keep the approved design, don't build.
+    if outcome.aborted {
+        let _ = ev_tx.send(UiEvent::Done {
+            ok: true,
+            summary: "stopped at a checkpoint — approved design kept, not built".to_string(),
+        });
+        return;
+    }
 
     // 2) The foundational chunk: the first dep-free subtask (the one change the decomposition can
     // name; the compiler discovers the rest). Fall back to the whole task if the board is empty.
@@ -748,6 +782,16 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     use super::*;
     use sc_core::AgentEvent;
+
+    #[test]
+    fn spec_artifact_dir_resolves_the_openspec_folder() {
+        let ws = std::path::Path::new("/proj");
+        // A task naming specs/<slug>/spec.md → the artifact dir is specs/<slug>/.
+        let d = spec_artifact_dir("Design how to implement specs/alt-seats/spec.md.", ws);
+        assert_eq!(d, Some(ws.join("specs").join("alt-seats")));
+        // No spec reference → None (falls back to the default plan dir).
+        assert_eq!(spec_artifact_dir("just build something", ws), None);
+    }
 
     /// Run a git command in `dir`, ignoring failures (test setup).
     fn git(dir: &std::path::Path, args: &[&str]) {

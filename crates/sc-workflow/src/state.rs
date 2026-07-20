@@ -149,10 +149,21 @@ pub fn plan_dir(workspace: &Path) -> PathBuf {
 /// task + statuses to `state.json`, so the plan is a reviewable diff and the run
 /// resumes from disk.
 pub fn save(workspace: &Path, state: &WorkflowState) -> Result<()> {
-    let dir = plan_dir(workspace);
-    std::fs::create_dir_all(&dir)?;
+    save_to(&plan_dir(workspace), state, false)
+}
+
+/// Persist to an explicit `dir` with a choice of filename style: numbered (`NN-phase.md`, the
+/// default plan-dir layout) or OpenSpec (`spec.md`/`architecture.md`/… — for the `specs/<slug>/`
+/// layout). `state.json` is always written so a run can resume.
+pub fn save_to(dir: &Path, state: &WorkflowState, openspec_names: bool) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
     for a in &state.artifacts {
-        std::fs::write(dir.join(a.phase.filename()), &a.content)?;
+        let name = if openspec_names {
+            a.phase.openspec_filename().to_string()
+        } else {
+            a.phase.filename()
+        };
+        std::fs::write(dir.join(name), &a.content)?;
     }
     let json =
         serde_json::to_string_pretty(state).map_err(|e| sc_proto::DcError::Eval(e.to_string()))?;
@@ -230,6 +241,20 @@ mod tests {
         // A single un-approved phase breaks completion.
         s.set(Artifact::draft(Phase::Layout, "redo"));
         assert!(!s.is_complete());
+    }
+
+    #[test]
+    fn save_to_openspec_dir_uses_named_files() {
+        let ws = temp("openspec");
+        let dir = ws.join("specs").join("my-feature");
+        let mut s = WorkflowState::new("build it");
+        s.set(Artifact::draft(Phase::Specs, "# the spec"));
+        s.set(Artifact::draft(Phase::Architecture, "# the arch"));
+        save_to(&dir, &s, true).unwrap();
+        assert!(dir.join("spec.md").is_file(), "spec.md written");
+        assert!(dir.join("architecture.md").is_file(), "architecture.md written");
+        assert!(!dir.join("01-specs.md").exists(), "no numbered names in openspec mode");
+        assert_eq!(std::fs::read_to_string(dir.join("architecture.md")).unwrap(), "# the arch");
     }
 
     #[test]

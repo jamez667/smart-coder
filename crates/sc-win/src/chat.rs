@@ -344,7 +344,7 @@ impl Conversation {
 
     /// The plan slug for a feature-plan target, derived from the OPEN FILE's name (e.g.
     /// `Assets/Scripts/SolarPanelTracker.cs` → `solar-panel-tracker`) so a "make a plan for this
-    /// file" lands as `specs/solar-panel-tracker.md`. Falls back to `feature` when no file is open.
+    /// file" lands as `specs/solar-panel-tracker/spec.md`. Falls back to `feature` when no file is open.
     fn plan_slug(&self) -> String {
         let stem = self
             .open_file
@@ -515,7 +515,7 @@ fn intent_instruction(intent: ChatIntent, slug: String) -> String {
         // differ only in whether the TODO is in context (decided in `system_prompt`).
         ChatIntent::FeaturePlan | ChatIntent::PlanFromTodo => format!(
             "INTENT: write a SPEC for the feature (OpenSpec format) — WHAT it must do and WHY, \
-             NOT how. Output it as a ```file:specs/{slug}.md block, after a one-line prose lead-in \
+             NOT how. Output it as a ```file:specs/{slug}/spec.md block, after a one-line prose lead-in \
              (e.g. \"Here's the spec:\"). Structure:\n\
              `# <Feature> Specification`\n\
              `## Purpose` — 1–2 sentences: what this feature delivers and why.\n\
@@ -649,14 +649,16 @@ pub fn extract_command(reply: &str) -> Option<String> {
     None
 }
 
-/// The workspace-relative path a feature spec is saved at: `specs/<slug>.md`.
+/// The workspace-relative path a feature spec is saved at: `specs/<slug>/spec.md` — the spec
+/// lives in its own OpenSpec-style directory, so the design phases (architecture.md, layout.md,
+/// breakdown.md) can sit beside it when the plan is executed.
 pub fn spec_path(slug: &str) -> String {
-    format!("specs/{slug}.md")
+    format!("specs/{slug}/spec.md")
 }
 
-/// Whether `path` is a feature spec — a `.md` under the `specs/` directory. Replaces the old
-/// `PLAN-<slug>.md` prefix check; also accepts the legacy `PLAN-*.md` name so existing plans in
-/// a project still get the Execute-plan / grounding treatment.
+/// Whether `path` is a feature spec: `specs/<slug>/spec.md` (the current layout), a bare
+/// `specs/<name>.md` (the interim layout), or a legacy `PLAN-<slug>.md` — so existing specs and
+/// plans in a project still get the Execute-plan / grounding treatment.
 pub fn is_spec_path(path: &str) -> bool {
     let p = path.replace('\\', "/");
     let lower = p.to_ascii_lowercase();
@@ -885,7 +887,7 @@ mod tests {
 
     #[test]
     fn feature_plan_intent_targets_a_plan_file_named_after_the_open_file() {
-        // A feature-plan for an open `SolarPanelTracker.cs` → specs/solar-panel-tracker.md,
+        // A feature-plan for an open `SolarPanelTracker.cs` → specs/solar-panel-tracker/spec.md,
         // NOT a TODO edit (the reported bug).
         let mut c = Conversation::open("# X", "- a");
         c.set_open_file(Some(("Assets/Scripts/SolarPanelTracker.cs".into(), "class X {}".into())));
@@ -893,7 +895,7 @@ mod tests {
         let sys = c.request(false, ChatIntent::FeaturePlan).messages[0]
             .content
             .clone();
-        assert!(sys.contains("specs/solar-panel-tracker.md"), "slug from open file: {sys}");
+        assert!(sys.contains("specs/solar-panel-tracker/spec.md"), "slug from open file: {sys}");
         assert!(sys.to_lowercase().contains("do not touch todo"), "TODO off-limits: {sys}");
     }
 
@@ -1137,7 +1139,7 @@ mod tests {
             "Here's the spec:\n# Alternate Seat Types Specification\n## Purpose\nAdd roles.",
             "fallback",
         );
-        assert_eq!(pf.name, "specs/alternate-seat-types.md");
+        assert_eq!(pf.name, "specs/alternate-seat-types/spec.md");
     }
 
     #[test]
@@ -1147,14 +1149,14 @@ mod tests {
             "Here's a plan:\n## Plan: Add Alternate Seat Types\n**Approach:** add roles.",
             "can-you-make-a",
         );
-        assert_eq!(pf.name, "specs/add-alternate-seat-types.md");
+        assert_eq!(pf.name, "specs/add-alternate-seat-types/spec.md");
         assert!(pf.content.contains("## Plan: Add Alternate Seat Types"));
     }
 
     #[test]
     fn wrap_plan_prose_falls_back_when_no_title() {
         let pf = wrap_plan_prose("just some prose with no heading", "add-lakes");
-        assert_eq!(pf.name, "specs/add-lakes.md");
+        assert_eq!(pf.name, "specs/add-lakes/spec.md");
     }
 
     #[test]

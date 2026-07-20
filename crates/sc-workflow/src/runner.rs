@@ -18,7 +18,7 @@ use crate::gate::{AutoApprove, Decision, Gate};
 use crate::phase::Phase;
 use crate::policy::ThinkPolicy;
 use crate::stack::ProjectStack;
-use crate::state::{plan_dir, save, WorkflowState};
+use crate::state::WorkflowState;
 
 /// How much of the pipeline to run, and whether to write frozen tests.
 ///
@@ -154,6 +154,42 @@ pub fn run_workflow_moded(
     on_phase: &dyn Fn(Phase, &str),
     gate: &dyn Gate,
 ) -> Result<WorkflowOutcome> {
+    // Default artifact layout: `.smart-coder/plan/` with numbered filenames.
+    run_workflow_moded_to(
+        orchestrator,
+        worker,
+        task,
+        workspace,
+        think,
+        mode,
+        on_phase,
+        gate,
+        None,
+        false,
+    )
+}
+
+/// Like [`run_workflow_moded`], but persists phase artifacts to `artifact_dir` (default
+/// `.smart-coder/plan/` when `None`) with either numbered or OpenSpec filenames — so the staged
+/// build can land its design in `specs/<slug>/` (spec.md, architecture.md, …) beside the spec.
+#[allow(clippy::too_many_arguments)]
+pub fn run_workflow_moded_to(
+    orchestrator: &dyn ModelBackend,
+    worker: &dyn ModelBackend,
+    task: &str,
+    workspace: &Path,
+    think: ThinkPolicy,
+    mode: WorkflowMode,
+    on_phase: &dyn Fn(Phase, &str),
+    gate: &dyn Gate,
+    artifact_dir: Option<&Path>,
+    openspec_names: bool,
+) -> Result<WorkflowOutcome> {
+    // The directory phase artifacts are written to (and re-read on Revise).
+    let art_dir = artifact_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| crate::state::plan_dir(workspace));
+    let save_state = |state: &WorkflowState| crate::state::save_to(&art_dir, state, openspec_names);
     // Ground the task in reality BEFORE the first phase: a workflow phase is a direct model call
     // that otherwise sees only the task string — so with just "implement PLAN-lakes.md" the
     // orchestrator designed a generic module tree that ignored the plan AND the real files
@@ -184,14 +220,19 @@ pub fn run_workflow_moded(
         // Persist as a draft first, so the gate (and a human editing the file for a
         // Revise) is looking at exactly what's on disk.
         state.set(artifact);
-        save(workspace, &state)?;
+        save_state(&state)?;
 
         match gate.decide(phase, state.artifact(phase).expect("just set")) {
             Decision::Approve => {}
             Decision::Revise => {
                 // The human edited the artifact file on disk; re-read it as the
                 // accepted content. Fall back to the draft if the file is gone.
-                let edited = std::fs::read_to_string(plan_dir(workspace).join(phase.filename()))
+                let fname = if openspec_names {
+                    phase.openspec_filename().to_string()
+                } else {
+                    phase.filename()
+                };
+                let edited = std::fs::read_to_string(art_dir.join(fname))
                     .unwrap_or_else(|_| artifact_content(&state, phase));
                 state.set(crate::state::Artifact::draft(phase, edited));
             }
@@ -203,7 +244,7 @@ pub fn run_workflow_moded(
                 if let Some(notes) = notes {
                     state.set_feedback(target, notes);
                 }
-                save(workspace, &state)?;
+                save_state(&state)?;
                 // Test files written from a now-dropped coverage plan are stale.
                 if target.index() <= Phase::StageBreakdown.index() {
                     test_files.clear();
@@ -218,7 +259,7 @@ pub fn run_workflow_moded(
 
         // Accepted (Approve or Revise): freeze it as grounding for the next phase.
         state.approve(phase);
-        save(workspace, &state)?;
+        save_state(&state)?;
 
         // After the coverage plan is approved, have workers write the tests so
         // they exist on disk for the implementation phases to target. Skipped in the
@@ -767,7 +808,7 @@ mod tests {
             fn decide(&self, phase: Phase, _a: &Artifact) -> Decision {
                 if phase == Phase::Specs && !*self.edited.lock().unwrap() {
                     std::fs::write(
-                        plan_dir(&self.ws).join(phase.filename()),
+                        crate::state::plan_dir(&self.ws).join(phase.filename()),
                         "# Specs\nHUMAN EDITED",
                     )
                     .unwrap();

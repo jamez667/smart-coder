@@ -111,6 +111,19 @@ impl Phase {
         format!("{:02}-{}.md", self.index() + 1, self.slug())
     }
 
+    /// The OpenSpec-style filename for the `specs/<slug>/` layout: `spec.md`, `architecture.md`,
+    /// `layout.md`, `breakdown.md`, etc. — no number prefix, sits beside the spec.
+    pub fn openspec_filename(self) -> &'static str {
+        match self {
+            Phase::Specs => "spec.md",
+            Phase::Architecture => "architecture.md",
+            Phase::Layout => "layout.md",
+            Phase::StageBreakdown => "breakdown.md",
+            Phase::ImplementationPlan => "implementation.md",
+            Phase::WorkDecomposition => "decomposition.md",
+        }
+    }
+
     /// A human title for the phase.
     pub fn title(self) -> &'static str {
         match self {
@@ -280,6 +293,17 @@ mod tests {
         assert_eq!(Ceremony::parse("standard"), Some(Ceremony::Standard));
         assert_eq!(Ceremony::parse("full"), Some(Ceremony::Full));
         assert_eq!(Ceremony::parse("bogus"), None);
+    }
+
+    #[test]
+    fn openspec_filenames_are_named_and_unique() {
+        assert_eq!(Phase::Specs.openspec_filename(), "spec.md");
+        assert_eq!(Phase::Architecture.openspec_filename(), "architecture.md");
+        assert_eq!(Phase::Layout.openspec_filename(), "layout.md");
+        assert_eq!(Phase::StageBreakdown.openspec_filename(), "breakdown.md");
+        let names: std::collections::BTreeSet<_> =
+            Phase::ALL.iter().map(|p| p.openspec_filename()).collect();
+        assert_eq!(names.len(), Phase::ALL.len(), "all distinct");
     }
 
     #[test]

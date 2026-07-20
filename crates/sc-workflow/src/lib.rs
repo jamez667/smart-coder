@@ -31,7 +31,8 @@ pub use gate::{AutoApprove, CeremonyGate, Decision, Gate};
 pub use phase::{Ceremony, Phase, PhaseSet};
 pub use policy::ThinkPolicy;
 pub use runner::{
-    run_workflow, run_workflow_gated, run_workflow_moded, WorkflowMode, WorkflowOutcome,
+    run_workflow, run_workflow_gated, run_workflow_moded, run_workflow_moded_to, WorkflowMode,
+    WorkflowOutcome,
 };
 pub use stack::ProjectStack;
 pub use staged::{parse_stages, staged_build, Stage, StageResult, StagedReport};
