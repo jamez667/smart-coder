@@ -344,7 +344,7 @@ impl Conversation {
 
     /// The plan slug for a feature-plan target, derived from the OPEN FILE's name (e.g.
     /// `Assets/Scripts/SolarPanelTracker.cs` → `solar-panel-tracker`) so a "make a plan for this
-    /// file" lands as `PLAN-solar-panel-tracker.md`. Falls back to `feature` when no file is open.
+    /// file" lands as `specs/solar-panel-tracker.md`. Falls back to `feature` when no file is open.
     fn plan_slug(&self) -> String {
         let stem = self
             .open_file
@@ -515,7 +515,7 @@ fn intent_instruction(intent: ChatIntent, slug: String) -> String {
         // differ only in whether the TODO is in context (decided in `system_prompt`).
         ChatIntent::FeaturePlan | ChatIntent::PlanFromTodo => format!(
             "INTENT: write a SPEC for the feature (OpenSpec format) — WHAT it must do and WHY, \
-             NOT how. Output it as a ```file:PLAN-{slug}.md block, after a one-line prose lead-in \
+             NOT how. Output it as a ```file:specs/{slug}.md block, after a one-line prose lead-in \
              (e.g. \"Here's the spec:\"). Structure:\n\
              `# <Feature> Specification`\n\
              `## Purpose` — 1–2 sentences: what this feature delivers and why.\n\
@@ -649,22 +649,60 @@ pub fn extract_command(reply: &str) -> Option<String> {
     None
 }
 
+/// The workspace-relative path a feature spec is saved at: `specs/<slug>.md`.
+pub fn spec_path(slug: &str) -> String {
+    format!("specs/{slug}.md")
+}
+
+/// Whether `path` is a feature spec — a `.md` under the `specs/` directory. Replaces the old
+/// `PLAN-<slug>.md` prefix check; also accepts the legacy `PLAN-*.md` name so existing plans in
+/// a project still get the Execute-plan / grounding treatment.
+pub fn is_spec_path(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let lower = p.to_ascii_lowercase();
+    (lower.starts_with("specs/") && lower.ends_with(".md"))
+        || {
+            // Legacy PLAN-<slug>.md anywhere (back-compat with existing projects).
+            let name = p.rsplit('/').next().unwrap_or(&p);
+            let un = name.to_ascii_uppercase();
+            un.starts_with("PLAN-") && un.ends_with(".MD")
+        }
+}
+
+/// Prepend a `## Request` block quoting the user's verbatim `request` to a spec's `content`,
+/// so every saved spec records exactly what was asked for (provenance / traceability). Injected
+/// by the app (not the model) so it's the user's exact words, not a paraphrase. No-op if the
+/// content already opens with a Request block (idempotent) or the request is blank.
+pub fn prepend_request(content: &str, request: &str) -> String {
+    let req = request.trim();
+    if req.is_empty() || content.trim_start().starts_with("## Request") {
+        return content.to_string();
+    }
+    // Quote each line of the request as a markdown blockquote.
+    let quoted: String = req
+        .lines()
+        .map(|l| format!("> {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("## Request\n{quoted}\n\n{}", content.trim_start())
+}
+
 /// Wrap a bare-prose feature plan into a `PLAN-<slug>.md` [`ProposedFile`]. Used when the
 /// model returned a plan as plain prose instead of the requested ```file: block (common on
 /// small local models when the prompt is large) — so a plan ALWAYS yields an Apply/verify card
 /// rather than silently staying prose in the chat.
 ///
-/// The filename is named after the plan's OWN `## Plan: <title>` heading when it has one (e.g.
-/// `## Plan: Add Alternate Seat Types` → `PLAN-add-alternate-seat.md`) — a far better name than
-/// the user's raw phrasing — falling back to `fallback_slug` (derived from the request) only
-/// when the plan has no title heading.
+/// The spec is saved as `specs/<slug>.md`, named after the spec's OWN `# <Feature>
+/// Specification` heading when it has one (e.g. → `specs/add-alternate-seat-types.md`) — a far
+/// better name than the user's raw phrasing — falling back to `fallback_slug` (derived from the
+/// request) only when the spec has no title heading.
 pub fn wrap_plan_prose(prose: &str, fallback_slug: &str) -> ProposedFile {
     let slug = plan_title(prose)
         .map(|t| slugify(&t))
         .filter(|s| s != "feature")
         .unwrap_or_else(|| fallback_slug.to_string());
     ProposedFile {
-        name: format!("PLAN-{slug}.md"),
+        name: spec_path(&slug),
         content: prose.trim().to_string(),
     }
 }
@@ -847,7 +885,7 @@ mod tests {
 
     #[test]
     fn feature_plan_intent_targets_a_plan_file_named_after_the_open_file() {
-        // A feature-plan for an open `SolarPanelTracker.cs` → PLAN-solar-panel-tracker.md,
+        // A feature-plan for an open `SolarPanelTracker.cs` → specs/solar-panel-tracker.md,
         // NOT a TODO edit (the reported bug).
         let mut c = Conversation::open("# X", "- a");
         c.set_open_file(Some(("Assets/Scripts/SolarPanelTracker.cs".into(), "class X {}".into())));
@@ -855,7 +893,7 @@ mod tests {
         let sys = c.request(false, ChatIntent::FeaturePlan).messages[0]
             .content
             .clone();
-        assert!(sys.contains("PLAN-solar-panel-tracker.md"), "slug from open file: {sys}");
+        assert!(sys.contains("specs/solar-panel-tracker.md"), "slug from open file: {sys}");
         assert!(sys.to_lowercase().contains("do not touch todo"), "TODO off-limits: {sys}");
     }
 
@@ -1073,13 +1111,33 @@ mod tests {
     }
 
     #[test]
+    fn prepend_request_quotes_the_user_message_at_the_top() {
+        let out = prepend_request("# Seats Specification\n## Purpose\n...", "add gunner seats");
+        assert!(out.starts_with("## Request\n> add gunner seats\n"), "{out}");
+        assert!(out.contains("# Seats Specification"), "spec body preserved");
+    }
+
+    #[test]
+    fn prepend_request_is_idempotent_and_skips_blank() {
+        let with = prepend_request("# Spec", "do X");
+        assert_eq!(prepend_request(&with, "do X"), with, "not double-prepended");
+        assert_eq!(prepend_request("# Spec", "   "), "# Spec", "blank request is a no-op");
+    }
+
+    #[test]
+    fn prepend_request_quotes_multiline() {
+        let out = prepend_request("# Spec", "add seats\nfor gunners");
+        assert!(out.contains("> add seats\n> for gunners"), "{out}");
+    }
+
+    #[test]
     fn wrap_prose_names_from_the_openspec_heading() {
         // A spec starts `# <Feature> Specification` → the wrapped file is named after <Feature>.
         let pf = wrap_plan_prose(
             "Here's the spec:\n# Alternate Seat Types Specification\n## Purpose\nAdd roles.",
             "fallback",
         );
-        assert_eq!(pf.name, "PLAN-alternate-seat-types.md");
+        assert_eq!(pf.name, "specs/alternate-seat-types.md");
     }
 
     #[test]
@@ -1089,14 +1147,14 @@ mod tests {
             "Here's a plan:\n## Plan: Add Alternate Seat Types\n**Approach:** add roles.",
             "can-you-make-a",
         );
-        assert_eq!(pf.name, "PLAN-add-alternate-seat-types.md");
+        assert_eq!(pf.name, "specs/add-alternate-seat-types.md");
         assert!(pf.content.contains("## Plan: Add Alternate Seat Types"));
     }
 
     #[test]
     fn wrap_plan_prose_falls_back_when_no_title() {
         let pf = wrap_plan_prose("just some prose with no heading", "add-lakes");
-        assert_eq!(pf.name, "PLAN-add-lakes.md");
+        assert_eq!(pf.name, "specs/add-lakes.md");
     }
 
     #[test]

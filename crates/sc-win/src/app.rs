@@ -996,6 +996,9 @@ pub(crate) enum Message {
     /// Slow always-on heartbeat that drives the backend health probe (independent of `Tick`,
     /// which only fires when something is actively running).
     HealthTick,
+    /// The off-thread live-view reload finished: the shown file's fresh contents + its
+    /// changed-line set (green git-diff highlight). `None` if the background load failed.
+    LiveViewReloaded(Option<(sc_win::CodeView, std::collections::BTreeSet<usize>)>),
     /// Heartbeat while a project is open: kick off an OFF-THREAD re-walk of the tree + git state
     /// so externally-created/removed files appear without a manual refresh.
     SyncWorkspace,
@@ -2174,6 +2177,40 @@ impl App {
         self.refresh_changed_lines();
     }
 
+    /// The OFF-THREAD live-view refresh: while a run is in flight, reload the shown file's
+    /// contents + its git-diff highlight on a background thread and apply via
+    /// [`Message::LiveViewReloaded`] — never on the UI thread (the file read + `git diff` cost
+    /// 80–432ms per call and froze the UI when done synchronously in `pump`). Throttled to ~1s;
+    /// returns `Task::none()` when no reload is due or nothing is selected.
+    fn live_reload_task(&mut self) -> Task<Message> {
+        if !(self.iterate_from_comment && self.session.is_some()) {
+            return Task::none();
+        }
+        let due = self
+            .last_reload
+            .is_none_or(|t| t.elapsed() >= Duration::from_millis(750));
+        let Some(rel) = self.selected_file.clone() else {
+            return Task::none();
+        };
+        if !due {
+            return Task::none();
+        }
+        self.last_reload = Some(Instant::now());
+        let root = self.workspace_root();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let code = sc_win::codeview::load(&root, &rel);
+                    let diff = sc_win::gitdiff::file_diff(&root, &rel);
+                    (code, diff.added)
+                })
+                .await
+                .ok()
+            },
+            Message::LiveViewReloaded,
+        )
+    }
+
     /// Scroll the code view so `line` (1-based) sits in the MIDDLE of the viewport. Each rendered
     /// line is ~`CODE_LINE_PX` tall; back off by half the visible height so the target lands
     /// centered (falls back to a small top offset before the first scroll gives us a real
@@ -2492,15 +2529,24 @@ impl App {
                     // bare prose (the model ignored the ```file: fence instruction — common when
                     // the prompt is large) is WRAPPED into a PLAN-<slug>.md proposal here, so a
                     // plan always yields an Apply/verify card rather than silently staying prose.
-                    if matches!(
+                    let is_plan_intent = matches!(
                         intent,
                         Some(sc_win::chat::ChatIntent::FeaturePlan)
                             | Some(sc_win::chat::ChatIntent::PlanFromTodo)
-                    ) && files.is_empty()
-                        && !prose.trim().is_empty()
-                    {
+                    );
+                    if is_plan_intent && files.is_empty() && !prose.trim().is_empty() {
                         let slug = self.plan_slug_for_reply();
                         files.push(sc_win::chat::wrap_plan_prose(&prose, &slug));
+                    }
+                    // Record the user's VERBATIM request at the top of the spec (provenance),
+                    // whether the model emitted a file block or we wrapped its prose.
+                    if is_plan_intent {
+                        let request = self.last_user_request();
+                        for f in &mut files {
+                            if is_feature_plan(&f.name) {
+                                f.content = sc_win::chat::prepend_request(&f.content, &request);
+                            }
+                        }
                     }
                     // A ```command block (the Command intent) → offer it as a one-click Run in
                     // the terminal, rather than auto-executing.
@@ -2662,6 +2708,16 @@ impl App {
             .unwrap_or_else(|| "feature".to_string())
     }
 
+    /// The user's most recent message (verbatim), for recording as the spec's `## Request`.
+    fn last_user_request(&self) -> String {
+        self.chat_turns
+            .iter()
+            .rev()
+            .find(|t| t.role == sc_win::chat::Speaker::You)
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
     /// Decide where the next terminal command runs, starting the sandbox container on first
     /// use. Mirrors the agent: `self.cfg.sandbox()` is the single source of truth for Host vs
     /// Docker, so the terminal and the agent always execute in the same place.
@@ -2787,15 +2843,9 @@ impl App {
         // edits land live (the agent edits the real files). This does a SYNCHRONOUS `git diff`
         // on the UI thread, which at the 50ms tick rate froze the UI on a big repo (void-claim)
         // — throttle to ~1s so the view stays live without starving rendering.
-        if self.iterate_from_comment && self.session.is_some() {
-            let due = self
-                .last_reload
-                .is_none_or(|t| t.elapsed() >= Duration::from_millis(1000));
-            if due {
-                self.reload_selected();
-                self.last_reload = Some(Instant::now());
-            }
-        }
+        // Live-view refresh is now driven asynchronously by `live_reload_task()` (called from the
+        // Tick handler, which can return a Task) — never synchronously here, since it does a
+        // file read + git diff that was blocking the UI thread 80–432ms per call.
         let Some(session) = &self.session else {
             return;
         };
@@ -2873,18 +2923,10 @@ impl App {
                             self.select_file(rel);
                         }
                     }
-                    // A tool result means a file may have just changed on disk; refresh the
-                    // shown file so an edit/write to it is reflected (the ToolCall fired
-                    // before the bytes landed). Cheap: only when something is selected.
-                    if matches!(
-                        e,
-                        sc_core::AgentEvent::ToolResult {
-                            is_error: false,
-                            ..
-                        }
-                    ) {
-                        self.reload_selected();
-                    }
+                    // (A tool result may have changed the shown file on disk; the live view is
+                    // refreshed asynchronously by the Tick-driven `live_reload_task`, not
+                    // synchronously here — the reload does a file read + git diff that blocked the
+                    // UI thread 80–432ms per call when done per-event.)
                     self.rows.extend(agent_rows(&e));
                 }
                 UiEvent::Swarm(e) => {
@@ -3004,8 +3046,19 @@ impl App {
             // instead of the bare single-agent iterate loop. The line-comment small-fix path
             // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
             Message::RunIterate => self.start(RunKind::StagedBuild),
-            Message::Tick => self.pump(),
+            Message::Tick => {
+                self.pump();
+                // Drive the live code-view refresh OFF the UI thread (returns Task::none unless a
+                // reload is due). This is the fix for the Execute-plan freeze.
+                return self.live_reload_task();
+            }
             Message::HealthTick => self.tick_health_probe(),
+            Message::LiveViewReloaded(result) => {
+                if let Some((code, added)) = result {
+                    self.code = Some(code);
+                    self.changed_lines = added;
+                }
+            }
             Message::SyncWorkspace => {
                 // Re-walk the tree + git state OFF the UI thread — the walk and the git
                 // subprocesses are the slow part, so compute a snapshot on a background thread and
@@ -5541,12 +5594,11 @@ fn plan_task(plan_name: &str) -> String {
     )
 }
 
-/// Whether a proposed file is a *feature plan* (a `PLAN-<slug>.md`), as opposed to a
-/// README/TODO plan-file edit. Only feature plans get the "Execute plan" build button —
+/// Whether a proposed file is a feature spec (a `specs/<slug>.md`, or a legacy `PLAN-*.md`), as
+/// opposed to a README/TODO plan-file edit. Only specs get the "Execute plan" build button —
 /// README/TODO aren't things you "build".
 fn is_feature_plan(name: &str) -> bool {
-    let n = name.trim();
-    n.to_ascii_uppercase().starts_with("PLAN-") && n.to_ascii_lowercase().ends_with(".md")
+    sc_win::chat::is_spec_path(name.trim())
 }
 
 /// The prefix to remember when a user clicks "Allow & remember": the command up to

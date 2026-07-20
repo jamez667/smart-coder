@@ -299,15 +299,21 @@ fn ground_task(task: &str, workspace: &Path) -> String {
     out
 }
 
-/// If `task` names a `PLAN-<slug>.md` that exists in `workspace`, return `(name, contents)`.
-/// Mirrors the agent loop's `referenced_plan` (sc-core) so the workflow pins the same plan.
+/// If `task` names a feature spec that exists in `workspace` — `specs/<slug>.md` or a legacy
+/// `PLAN-<slug>.md` — return `(name, contents)`. Mirrors the agent loop's `referenced_plan` so
+/// the workflow pins the same spec.
 fn referenced_plan(task: &str, workspace: &Path) -> Option<(String, String)> {
     let token = task
         .split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ','))
         .map(|t| t.trim_end_matches('.'))
         .find(|t| {
-            let up = t.to_ascii_uppercase();
-            up.starts_with("PLAN-") && up.ends_with(".MD")
+            let norm = t.replace('\\', "/");
+            let low = norm.to_ascii_lowercase();
+            (low.starts_with("specs/") && low.ends_with(".md"))
+                || {
+                    let up = norm.to_ascii_uppercase();
+                    up.starts_with("PLAN-") && up.ends_with(".MD")
+                }
         })?;
     let body = std::fs::read_to_string(workspace.join(token)).ok()?;
     if body.trim().is_empty() {
