@@ -205,6 +205,25 @@ pub fn run_workflow_moded_to(
     // the serializable state.
     let stack = ProjectStack::detect(workspace);
 
+    // Adopt an existing feature spec instead of regenerating it. When the task references a real
+    // `specs/<slug>/*.md` (or legacy `PLAN-*.md`), that file already IS the approved spec —
+    // Purpose/Requirements/Scenarios and all. Regenerating a fresh Specs phase from it produces a
+    // near-duplicate that can DRIFT from what the user approved, and burns a gate click. So pre-seed
+    // the Specs artifact from the real spec body and approve it: `next_phase()` then skips Specs and
+    // the loop opens at Architecture, while `is_complete()` stays satisfiable (Specs is approved).
+    // When there's no referenced spec (the raw-task / Python eval-ladder flow), this is a no-op and
+    // the Specs phase generates and gates exactly as before. Pass the RAW `task`, not the grounded
+    // string — `referenced_plan` parses the original file token.
+    if let Some((_name, spec_body)) = referenced_plan(task, workspace) {
+        let spec_body = spec_body.trim();
+        if !spec_body.is_empty() {
+            state.set(crate::state::Artifact::draft(Phase::Specs, spec_body));
+            state.approve(Phase::Specs);
+            on_phase(Phase::Specs, spec_body); // still surface it to the UI as the Specs artifact
+            save_state(&state)?;
+        }
+    }
+
     while let Some(phase) = state.next_phase() {
         let artifact = generate_phase(orchestrator, phase, &state, think, stack);
         // Fail loudly on an empty artifact (after the engine's retries) rather than
@@ -591,8 +610,8 @@ mod tests {
         let backend = PhaseScripted {
             replies: Mutex::new(vec![
                 ("crisp spec", "# Specs\ngoals"),
-                ("high-level architecture", "# Architecture\nshape"),
-                ("concrete project layout", "# Layout\nfiles"),
+                ("DESIGN APPROACH", "# Architecture\nshape"),
+                ("file-change list", "# Layout\nfiles"),
                 (
                     "plan the TESTS",
                     r#"[{"file":"test_a.py","covers":"a works"}]"#,
@@ -646,8 +665,8 @@ mod tests {
         let backend = PhaseScripted {
             replies: Mutex::new(vec![
                 ("crisp spec", "# Specs\ngoals"),
-                ("high-level architecture", "# Architecture\nshape"),
-                ("concrete project layout", "# Layout\nfiles"),
+                ("DESIGN APPROACH", "# Architecture\nshape"),
+                ("file-change list", "# Layout\nfiles"),
                 // Rust stack → the stage-breakdown system prompt says "ordered set of small
                 // implementation stages", so key off that instead of "plan the TESTS".
                 ("ordered set of small implementation stages", "# Breakdown\n1. detect basins"),
@@ -698,8 +717,8 @@ mod tests {
         PhaseScripted {
             replies: Mutex::new(vec![
                 ("crisp spec", "# Specs\ngoals"),
-                ("high-level architecture", "# Architecture\nshape"),
-                ("concrete project layout", "# Layout\nfiles"),
+                ("DESIGN APPROACH", "# Architecture\nshape"),
+                ("file-change list", "# Layout\nfiles"),
                 (
                     "plan the TESTS",
                     r#"[{"file":"test_a.py","covers":"a works"}]"#,
@@ -842,6 +861,52 @@ mod tests {
     }
 
     #[test]
+    fn referenced_spec_is_adopted_verbatim_and_specs_gate_never_fires() {
+        // Building from an existing feature spec: the workflow must ADOPT that spec as the
+        // approved Specs artifact instead of regenerating one (which drifts and wastes a gate
+        // click). So after the run: the Specs artifact equals the spec file body verbatim and is
+        // approved, the backend never generated a Specs phase, and the FIRST gated phase the human
+        // saw is Architecture — not Specs.
+        let backend = full_backend();
+        let ws = temp("adopt-spec");
+        // A real feature spec on disk, referenced by the task.
+        let spec_body = "# Purpose\nA crisp, human-approved spec.\n\n# Requirements\n- R1\n- R2";
+        std::fs::create_dir_all(ws.join("specs/counter")).unwrap();
+        std::fs::write(ws.join("specs/counter/spec.md"), spec_body).unwrap();
+
+        let gate = ScriptedGate::new(vec![]); // approve everything; just record which phases it sees
+        let outcome = run_workflow_gated(
+            &backend,
+            &backend,
+            "implement specs/counter/spec.md",
+            &ws,
+            ThinkPolicy::default(),
+            &|_, _| {},
+            &gate,
+        )
+        .unwrap();
+
+        // The Specs artifact is the real spec body verbatim, and it is approved.
+        let specs = outcome.state.artifact(Phase::Specs).unwrap();
+        assert!(specs.is_approved(), "adopted spec is pre-approved");
+        assert_eq!(
+            specs.content, spec_body,
+            "Specs artifact equals the referenced spec body verbatim (not regenerated)"
+        );
+        // The gate never decided the Specs phase — the first phase it saw is Architecture.
+        let seen = gate.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.first(),
+            Some(&Phase::Architecture),
+            "first gated phase is Architecture, not Specs; got {seen:?}"
+        );
+        assert!(!seen.contains(&Phase::Specs), "Specs gate never fires: {seen:?}");
+        // The run still completes the full chain (Specs approved makes is_complete satisfiable).
+        assert!(outcome.state.is_complete());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn send_back_regenerates_with_feedback_and_completes() {
         let ws = temp("gated-sendback");
         // Count how many times the architecture phase is generated: a send-back from
@@ -877,7 +942,7 @@ mod tests {
                 }
                 fn generate(&self, req: &GenerateRequest) -> sc_proto::Result<GenerateResponse> {
                     let joined: String = req.messages.iter().map(|m| m.content.clone()).collect();
-                    if joined.contains("high-level architecture") {
+                    if joined.contains("DESIGN APPROACH") {
                         *self.arch_calls.borrow_mut() += 1;
                         if joined.contains("make it event-driven") {
                             *self.saw_feedback.borrow_mut() = true;

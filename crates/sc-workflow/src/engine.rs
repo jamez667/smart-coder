@@ -142,10 +142,15 @@ fn system_for(phase: Phase, stack: ProjectStack) -> String {
     let role = match phase {
         Phase::Specs => "You write a crisp spec: goals, non-goals, and constraints.",
         Phase::Architecture => {
-            "You design the high-level architecture: components, boundaries, data flow, key choices."
+            "You design the APPROACH, grounded in the REAL existing files surveyed in the task: \
+             the patterns to use, the specific existing code/modules to reuse (named), what shared \
+             helpers/abstractions to introduce, the key decisions, data flow, and boundaries — you \
+             do NOT list the concrete files to create or edit (that's Layout)."
         }
         Phase::Layout => {
-            "You define the concrete project layout: directories, modules/files, and each one's responsibility."
+            "You turn the spec + architecture into the concrete per-file change list: exactly \
+             which files to create or edit and each one's responsibility, applying the \
+             architecture's patterns and reuse decisions."
         }
         Phase::StageBreakdown if matches!(stack, ProjectStack::Python) => {
             "You plan the TESTS first (TDD). You don't write test code yourself — you list the \
@@ -323,6 +328,31 @@ fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
              Each `files` list has exactly ONE non-test source file. Use deps only when one \
              file must exist before another (e.g. a template before the route that renders \
              it). No prose, just the JSON array."
+                .to_string()
+        }
+        Phase::Architecture => {
+            "Describe the DESIGN APPROACH for this change. A SURVEY of this project's REAL \
+             existing files (and, for files the spec names, their full contents) is provided \
+             ABOVE in the task — you MUST mine it. Ground every reuse claim in that survey: \
+             name the SPECIFIC existing modules, files, types, and functions from THIS project \
+             (by their real path/name) that this feature should REUSE or extend. Do NOT hand-wave \
+             with generic categories like \"ECS patterns\" or \"the rendering system\" — if you \
+             cite a pattern, point at the exact place in THIS codebase where it already lives. \
+             Cover: the PATTERNS and abstractions to use (and where they already live here), the \
+             existing code to REUSE (named), any shared HELPERS worth introducing, the KEY design \
+             decisions and the DATA FLOW, and the BOUNDARIES between the parts. Naming existing \
+             files to REUSE is required; but do NOT enumerate the NEW files to create or edit and \
+             do NOT produce a file-change list — that is the next phase's (Layout's) job. Output a \
+             short Markdown document. Output only the document."
+                .to_string()
+        }
+        Phase::Layout => {
+            "Take the spec and the approved architecture and produce the CONCRETE file-change \
+             list: exactly which files to CREATE or EDIT (real paths where known), each with one \
+             line on its responsibility. APPLY the architecture's patterns and reuse decisions — \
+             reference them, don't re-explain the reasoning. This IS the per-file breakdown. \
+             Output a short Markdown document — e.g. a list of files, each with its \
+             responsibility. Output only the document."
                 .to_string()
         }
         _ => format!(
