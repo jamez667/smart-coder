@@ -594,6 +594,10 @@ struct App {
     /// Wall-clock of the last probe kick-off, to space probes ~10s apart. `None` = never
     /// probed (kick one immediately).
     last_health_probe: Option<std::time::Instant>,
+    /// When the live code view was last reloaded during a run. The reload does a synchronous
+    /// `git diff` on the UI thread, so at the 50ms tick rate it froze the UI on a big repo —
+    /// throttle it to ~1s so the view stays live without starving rendering.
+    last_reload: Option<std::time::Instant>,
     intent: String,
     /// Editable mirrors of the config for the settings panel. Seeded from
     /// `UiConfig::default()` so the boxes show the active values (and a run never
@@ -645,6 +649,10 @@ struct App {
     /// banner reports "N files changed" from what the agent actually edited — never a
     /// whole-repo "files built" scan (which would count thousands in an existing project).
     iterating: bool,
+    /// True while the current/last run is PLAN-ONLY (Execute-plan design pass): it produces
+    /// reviewable artifacts, not a build, so its outcome banner must NOT report "N files built"
+    /// (a whole-repo scan counted every source file — the bogus "13730 files built").
+    planning_only: bool,
     /// The files the agent actually *edited/wrote* this run (workspace-relative, de-duped),
     /// for the iterate outcome banner. Reset at each run start.
     edited_files: Vec<String>,
@@ -892,6 +900,7 @@ impl Default for App {
             backend_health: None,
             health_rx: None,
             last_health_probe: None,
+            last_reload: None,
             intent: String::new(),
             settings_open: false,
             rows: Vec::new(),
@@ -910,6 +919,7 @@ impl Default for App {
             run_dir: None,
             picked_workspace,
             iterating: false,
+            planning_only: false,
             edited_files: Vec::new(),
             collapsed_dirs,
             file_filter: String::new(),
@@ -1251,6 +1261,7 @@ impl App {
         self.topology = sc_win::Topology::default();
         self.selected_coder = None;
         self.run_started = Some(Instant::now());
+        self.last_reload = None; // reload the live view immediately on the first tick
         self.verify_text = None;
 
         // Route the agent's command execution through the SAME persistent container the
@@ -1264,6 +1275,7 @@ impl App {
         self.follow_agent = true;
         // Track this run's mode + which files it edits (for the honest iterate banner).
         self.iterating = matches!(kind, RunKind::Iterate | RunKind::StagedBuild);
+        self.planning_only = matches!(kind, RunKind::Plan);
         self.edited_files.clear();
         // Jump to the Verification tab so the run's checks are visible as it works.
         self.bottom_tab = BottomTab::Verification;
@@ -2016,18 +2028,31 @@ impl App {
         self.iterate_from_comment = true;
     }
 
-    /// Start a PLAN-ONLY workflow run from a ready-made task (the Execute-plan flow): run the
-    /// staged workflow through the stage breakdown and stop for review. The phases stream to
-    /// the plan panel. Mirrors `start_iterate_with` but with `RunKind::Plan`.
+    /// Start a PLAN-ONLY workflow run from a ready-made task: run the staged workflow through the
+    /// stage breakdown and stop for review (produces reviewable design artifacts, does NOT build).
     fn start_plan_with(&mut self, task: String) {
         if self.session.is_some() {
             return;
         }
-        self.debug_prompt("execute plan", &task);
+        self.debug_prompt("plan", &task);
         self.intent = task;
         self.start(RunKind::Plan);
         self.intent.clear();
-        // Report the plan's outcome back into the chat thread, like an iterate-from-comment run.
+        self.iterate_from_comment = true;
+    }
+
+    /// Start the full plan→BUILD flow (`RunKind::StagedBuild`) from a ready-made task: staged
+    /// design through decomposition, then the compiler-driven executor builds it to green. This
+    /// is what "Execute plan" does — it actually BUILDS the plan, not just re-designs it.
+    fn start_staged_build_with(&mut self, task: String) {
+        if self.session.is_some() {
+            return;
+        }
+        self.debug_prompt("execute plan (build)", &task);
+        self.intent = task;
+        self.start(RunKind::StagedBuild);
+        self.intent.clear();
+        // Report the build outcome back into the chat thread.
         self.iterate_from_comment = true;
     }
 
@@ -2055,7 +2080,9 @@ impl App {
         // can read the plan it's told to design against. This also clears it from the pending
         // proposals, so `i` is consumed exactly like a plain Apply.
         self.apply_proposed_file(i);
-        self.start_plan_with(plan_task(&pf.name));
+        // Execute = BUILD the plan (staged design → compiler-driven build to green), not just
+        // re-design it. `plan_task` names the PLAN file so the workflow grounds on its contents.
+        self.start_staged_build_with(plan_task(&pf.name));
     }
 
     /// Kick off an iterate build to implement the `PLAN-*.md` open in the code view. Unlike
@@ -2267,6 +2294,22 @@ impl App {
         self.working = None;
         if self.iterating {
             self.finish_iterate(ok, summary);
+            return;
+        }
+        // A plan-only (Execute-plan) run designs; it does NOT build. Report the plan outcome —
+        // never a "N files built" whole-repo scan (that produced the bogus "13730 files built").
+        if self.planning_only {
+            self.result = Some(RunResult {
+                ok,
+                headline: if ok {
+                    "plan ready".to_string()
+                } else {
+                    "planning did not finish".to_string()
+                },
+                reason: summary.to_string(),
+                files: Vec::new(),
+                dir: None,
+            });
             return;
         }
         let dir = self.run_dir.clone();
@@ -2737,11 +2780,18 @@ impl App {
         self.pump_chat();
         self.pump_triage();
         self.pump_replace();
-        // While a fix run is in flight, keep the code view + change-highlight fresh from disk
-        // so edits land live (the agent edits the real files). Cheap: reload the one shown
-        // file + one `git diff` on it per tick. Done before borrowing `session` below.
+        // While a run is in flight, keep the code view + change-highlight fresh from disk so
+        // edits land live (the agent edits the real files). This does a SYNCHRONOUS `git diff`
+        // on the UI thread, which at the 50ms tick rate froze the UI on a big repo (void-claim)
+        // — throttle to ~1s so the view stays live without starving rendering.
         if self.iterate_from_comment && self.session.is_some() {
-            self.reload_selected();
+            let due = self
+                .last_reload
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(1000));
+            if due {
+                self.reload_selected();
+                self.last_reload = Some(Instant::now());
+            }
         }
         let Some(session) = &self.session else {
             return;

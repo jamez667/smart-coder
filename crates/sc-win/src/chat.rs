@@ -357,7 +357,10 @@ impl Conversation {
         let wants_todo = matches!(intent, TodoEdit | FeaturePlan);
         // A plan needs to name REAL files. The tree (paths only) is cheap grounding — the fix
         // for hallucinated "Files to touch" paths — without the cost of dumping file contents.
-        let wants_file_tree = matches!(intent, FeaturePlan);
+        // The spec (FeaturePlan) is WHAT/WHY only — it names no files, so it needs no file tree.
+        // (The architecture step is where real file paths get resolved.) Keeping it off also
+        // shrinks the prompt for the small model.
+        let wants_file_tree = false;
         // A feature plan is about the PROJECT (README/TODO give the shape); the full open-file
         // dump was the bulk of a bloated ~49k-char prompt that buried the fence instruction and
         // eats a 32k-context small model's window. Questions/code changes still get the file.
@@ -492,11 +495,18 @@ fn intent_instruction(intent: ChatIntent, slug: String) -> String {
              contents of `README.md` in a ```file:README.md block, after a one-line prose lead-in."
             .to_string(),
         ChatIntent::FeaturePlan => format!(
-            "INTENT: write a FEATURE PLAN (design/investigation doc). Output it as a \
-             ```file:PLAN-{slug}.md block, after a one-line prose lead-in (e.g. \"Here's a \
-             plan:\"). Sections: `## Plan: <title>`, then **Approach** (2–3 sentences), **Files \
-             to touch** (a bullet per file, mark new files `(new)`), **Steps** (numbered build \
-             order), **Risks**. This is a DESIGN doc — describe the changes, do NOT write source \
+            "INTENT: write a SPEC for the feature (OpenSpec format) — WHAT it must do and WHY, \
+             NOT how. Output it as a ```file:PLAN-{slug}.md block, after a one-line prose lead-in \
+             (e.g. \"Here's the spec:\"). Structure:\n\
+             `# <Feature> Specification`\n\
+             `## Purpose` — 1–2 sentences: what this feature delivers and why.\n\
+             `## Requirements` — a bullet per requirement, each a `SHALL` statement of an \
+             observable capability (e.g. \"The system SHALL let a player assign a crew member to \
+             a gunner seat\").\n\
+             `## Scenarios` — for the key requirements, a Given/When/Then example (Given <state>, \
+             When <action>, Then <observable result>).\n\
+             Describe only WHAT and WHY. Do NOT name files, modules, functions, a build order, or \
+             any implementation detail — the architecture step decides how. Do NOT write source \
              code. Do NOT touch TODO.md or README.md."
         ),
         ChatIntent::CodeChange => "INTENT: the user asked to change SOURCE CODE, which you cannot \
@@ -645,6 +655,16 @@ pub fn wrap_plan_prose(prose: &str, fallback_slug: &str) -> ProposedFile {
 fn plan_title(prose: &str) -> Option<String> {
     for line in prose.lines() {
         let t = line.trim_start_matches('#').trim();
+        // New spec heading: `<Feature> Specification` → the feature name is the title.
+        if let Some(name) = t
+            .strip_suffix(" Specification")
+            .or_else(|| t.strip_suffix(" specification"))
+        {
+            if !name.trim().is_empty() {
+                return Some(name.trim().to_string());
+            }
+        }
+        // Back-compat: the old `Plan: <title>` heading.
         if let Some(rest) = t
             .strip_prefix("Plan:")
             .or_else(|| t.strip_prefix("plan:"))
@@ -990,9 +1010,9 @@ mod tests {
     }
 
     #[test]
-    fn feature_plan_prompt_injects_the_real_file_tree() {
-        // "Files to touch" must be grounded on real paths — the file tree is injected for a
-        // plan (paths only), and NOT for a plain question.
+    fn feature_plan_is_a_files_free_spec() {
+        // The plan is now a SPEC (what/why only) — no file tree injected, and it must instruct
+        // the model NOT to name files (the architecture step decides how).
         let mut c = Conversation::open("# void_engine", "- [ ] x");
         c.set_file_tree(vec![
             "crates/sc-core/src/agent/mod.rs".into(),
@@ -1000,11 +1020,20 @@ mod tests {
         ]);
         c.user_turn("plan out adding seats");
         let plan = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
-        assert!(plan.contains("crates/sc-core/src/agent/mod.rs"), "real paths in plan: {plan}");
-        assert!(plan.to_lowercase().contains("do not invent paths"), "instructed to use real paths");
-        // A question doesn't get the tree (keeps it lean).
-        let q = c.request(false, ChatIntent::Question).messages[0].content.clone();
-        assert!(!q.contains("crates/sc-core"), "no file tree for a question: {q}");
+        assert!(!plan.contains("crates/sc-core"), "spec must NOT get the file tree: {plan}");
+        let low = plan.to_lowercase();
+        assert!(low.contains("openspec") || low.contains("shall"), "spec/openspec format: {plan}");
+        assert!(low.contains("do not name files"), "instructed not to name files: {plan}");
+    }
+
+    #[test]
+    fn wrap_prose_names_from_the_openspec_heading() {
+        // A spec starts `# <Feature> Specification` → the wrapped file is named after <Feature>.
+        let pf = wrap_plan_prose(
+            "Here's the spec:\n# Alternate Seat Types Specification\n## Purpose\nAdd roles.",
+            "fallback",
+        );
+        assert_eq!(pf.name, "PLAN-alternate-seat-types.md");
     }
 
     #[test]
