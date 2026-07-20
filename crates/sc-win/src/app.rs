@@ -2492,8 +2492,11 @@ impl App {
                     // bare prose (the model ignored the ```file: fence instruction — common when
                     // the prompt is large) is WRAPPED into a PLAN-<slug>.md proposal here, so a
                     // plan always yields an Apply/verify card rather than silently staying prose.
-                    if intent == Some(sc_win::chat::ChatIntent::FeaturePlan)
-                        && files.is_empty()
+                    if matches!(
+                        intent,
+                        Some(sc_win::chat::ChatIntent::FeaturePlan)
+                            | Some(sc_win::chat::ChatIntent::PlanFromTodo)
+                    ) && files.is_empty()
                         && !prose.trim().is_empty()
                     {
                         let slug = self.plan_slug_for_reply();

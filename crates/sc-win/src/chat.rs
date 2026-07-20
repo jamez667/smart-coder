@@ -38,8 +38,14 @@ pub enum ChatIntent {
     TodoEdit,
     /// Change the project overview/architecture → a `README.md` block.
     ReadmeEdit,
-    /// Design a feature or investigate a file → a `PLAN-<slug>.md` block.
+    /// Spec a FRESH feature (not tied to the backlog) → a `PLAN-<slug>.md` spec. Gets the
+    /// README for project context, but NOT the TODO (a fresh feature spec doesn't need the
+    /// backlog).
     FeaturePlan,
+    /// Spec/plan something FROM the backlog ("plan the next TODO item", "what's next on the
+    /// backlog") → the same `PLAN-<slug>.md` spec, but WITH the TODO injected. Split from
+    /// `FeaturePlan` so a plain "plan feature X" doesn't drag the whole backlog into context.
+    PlanFromTodo,
     /// A request to change source code → prose telling the user to comment on the code lines
     /// (this chat can't edit source).
     CodeChange,
@@ -58,19 +64,21 @@ impl ChatIntent {
             ChatIntent::TodoEdit => "todo_edit",
             ChatIntent::ReadmeEdit => "readme_edit",
             ChatIntent::FeaturePlan => "feature_plan",
+            ChatIntent::PlanFromTodo => "plan_from_todo",
             ChatIntent::CodeChange => "code_change",
             ChatIntent::Command => "command",
         }
     }
 
     /// Every intent, for building the classifier grammar / parsing its reply.
-    fn all() -> [ChatIntent; 7] {
+    fn all() -> [ChatIntent; 8] {
         [
             ChatIntent::Chat,
             ChatIntent::Question,
             ChatIntent::TodoEdit,
             ChatIntent::ReadmeEdit,
             ChatIntent::FeaturePlan,
+            ChatIntent::PlanFromTodo,
             ChatIntent::CodeChange,
             ChatIntent::Command,
         ]
@@ -272,9 +280,15 @@ impl Conversation {
              down. Use this only when answering needs this project's context.\n\
              • todo_edit — add/remove/reorder items in the whole-project TODO backlog.\n\
              • readme_edit — change the project overview/architecture in the README.\n\
-             • feature_plan — design a feature, or WRITE DOWN / MAKE A PLAN to investigate or \
-             improve something (\"make a plan to…\", \"plan out adding X\", \"write up how we'd \
-             fix this file\"). NOT for merely running/launching something.\n\
+             • feature_plan — design/spec a SPECIFIC feature the user names (\"make a plan to add \
+             gunner seats\", \"plan out feature X\", \"write up how we'd fix this file\"). The \
+             feature is given IN the message; it does NOT come from the backlog. NOT for merely \
+             running/launching something.\n\
+             • plan_from_todo — plan/spec something taken FROM the TODO backlog, where the message \
+             refers to the backlog rather than naming the feature (\"plan the next TODO item\", \
+             \"what should we build next?\", \"pick something off the backlog and plan it\", \
+             \"plan the top todo\"). Use this ONLY when the request points at the backlog for what \
+             to plan.\n\
              • code_change — asking to actually edit source code (\"rename X\", \"fix this \
              function\", \"change the code\").\n\
              • command — asking to RUN / LAUNCH / BUILD / START / TEST something, i.e. execute a \
@@ -352,9 +366,12 @@ impl Conversation {
     /// (Generic [`ChatIntent::Chat`] never reaches here; `request` gives it a minimal prompt.)
     fn system_prompt(&self, intent: ChatIntent) -> String {
         use ChatIntent::*;
-        let produces_file = matches!(intent, TodoEdit | ReadmeEdit | FeaturePlan);
-        let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan);
-        let wants_todo = matches!(intent, TodoEdit | FeaturePlan);
+        let produces_file = matches!(intent, TodoEdit | ReadmeEdit | FeaturePlan | PlanFromTodo);
+        let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan | PlanFromTodo);
+        // The TODO (backlog) is injected ONLY when the request is ABOUT the backlog: a TODO edit,
+        // or a plan explicitly derived from it (PlanFromTodo). A plain feature spec (FeaturePlan)
+        // does NOT get the whole backlog dragged into context just because it's open on screen.
+        let wants_todo = matches!(intent, TodoEdit | PlanFromTodo);
         // A plan needs to name REAL files. The tree (paths only) is cheap grounding — the fix
         // for hallucinated "Files to touch" paths — without the cost of dumping file contents.
         // The spec (FeaturePlan) is WHAT/WHY only — it names no files, so it needs no file tree.
@@ -494,7 +511,9 @@ fn intent_instruction(intent: ChatIntent, slug: String) -> String {
         ChatIntent::ReadmeEdit => "INTENT: update the project overview. Output the FULL new \
              contents of `README.md` in a ```file:README.md block, after a one-line prose lead-in."
             .to_string(),
-        ChatIntent::FeaturePlan => format!(
+        // A fresh feature spec and a backlog-derived spec produce the SAME OpenSpec doc; they
+        // differ only in whether the TODO is in context (decided in `system_prompt`).
+        ChatIntent::FeaturePlan | ChatIntent::PlanFromTodo => format!(
             "INTENT: write a SPEC for the feature (OpenSpec format) — WHAT it must do and WHY, \
              NOT how. Output it as a ```file:PLAN-{slug}.md block, after a one-line prose lead-in \
              (e.g. \"Here's the spec:\"). Structure:\n\
@@ -796,9 +815,9 @@ mod tests {
     #[test]
     fn request_carries_system_prompt_plus_turns_and_injects_plan_files() {
         let mut c = Conversation::open("# My Game\nA city sim.", "- [ ] add lakes");
-        c.user_turn("plan out what's left to do");
-        // FeaturePlan is the context-heavy intent that injects both plan files.
-        let req = c.request(false, ChatIntent::FeaturePlan);
+        c.user_turn("plan the next backlog item");
+        // PlanFromTodo is the context-heavy intent that injects both plan files (README + TODO).
+        let req = c.request(false, ChatIntent::PlanFromTodo);
         assert_eq!(req.messages[0].role, sc_model::Role::System);
         let sys = &req.messages[0].content;
         assert!(sys.contains("My Game"), "README injected: {sys}");
@@ -808,7 +827,7 @@ mod tests {
         assert!(req
             .messages
             .iter()
-            .any(|m| m.role == sc_model::Role::User && m.content.contains("what's left")));
+            .any(|m| m.role == sc_model::Role::User && m.content.contains("next backlog item")));
     }
 
     #[test]
@@ -997,16 +1016,43 @@ mod tests {
     }
 
     #[test]
-    fn feature_plan_prompt_has_plan_files_but_not_the_open_file_dump() {
-        // A plan is about the PROJECT: it gets README + TODO, but NOT the full open-file dump
-        // (which bloated the prompt and buried the fence instruction on small models).
+    fn feature_plan_prompt_gets_readme_but_not_the_open_file_dump() {
+        // A fresh feature spec gets the README (project context) but NOT the full open-file dump
+        // (which bloated the prompt and buried the fence instruction on small models). The TODO
+        // exclusion is covered by `feature_plan_does_not_inject_the_todo`.
         let mut c = Conversation::open("# void_engine", "- [ ] add lakes");
         c.set_open_file(Some(("main.rs".into(), "fn giant_file() {}".into())));
         c.user_turn("plan out adding lakes");
         let sys = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
         assert!(sys.contains("void_engine"), "README present: {sys}");
-        assert!(sys.contains("add lakes"), "TODO present: {sys}");
         assert!(!sys.contains("giant_file"), "open file NOT dumped into a plan: {sys}");
+    }
+
+    #[test]
+    fn feature_plan_does_not_inject_the_todo() {
+        // A fresh feature spec must NOT drag the backlog into context just because it's open.
+        let mut c = Conversation::open("# proj", "- [ ] add lakes\n- [ ] add rivers");
+        c.user_turn("plan gunner and miner seats");
+        let sys = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
+        assert!(!sys.contains("add lakes"), "no TODO for a fresh feature spec: {sys}");
+        assert!(sys.contains("proj"), "but README stays for project context");
+    }
+
+    #[test]
+    fn plan_from_todo_injects_the_todo() {
+        // A backlog-derived plan DOES get the TODO.
+        let mut c = Conversation::open("# proj", "- [ ] add lakes\n- [ ] add rivers");
+        c.user_turn("plan the next todo item");
+        let sys = c.request(false, ChatIntent::PlanFromTodo).messages[0].content.clone();
+        assert!(sys.contains("add lakes"), "PlanFromTodo gets the backlog: {sys}");
+        // Same spec instruction as FeaturePlan.
+        assert!(sys.to_lowercase().contains("shall"), "still an OpenSpec spec");
+    }
+
+    #[test]
+    fn classifier_offers_plan_from_todo() {
+        assert!(intent_grammar().contains("\"plan_from_todo\""), "{}", intent_grammar());
+        assert_eq!(ChatIntent::parse("plan_from_todo"), ChatIntent::PlanFromTodo);
     }
 
     #[test]
