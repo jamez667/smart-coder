@@ -130,6 +130,27 @@ fn h_divider<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// A draggable version of [`h_divider`]: the same 1px hairline, but wrapped in a taller
+/// invisible grab strip that shows the vertical-resize cursor and starts a drag on mouse-down.
+/// Used between the Git and Files sections of the explorer column to resize their split.
+fn h_divider_draggable<'a>() -> Element<'a, Message> {
+    // A 1px visible line centered in a 7px hit strip: the grab area extends 3px above and below
+    // for an easy drag target. The strip is filled with the panel SURFACE so it matches the
+    // stacked sections it borders (otherwise the bare strip showed the darker window background).
+    let handle = container(h_divider())
+        .width(Fill)
+        .height(Length::Fixed(7.0))
+        .align_y(iced::alignment::Vertical::Center)
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(SURFACE)),
+            ..container::Style::default()
+        });
+    iced::widget::mouse_area(handle)
+        .on_press(Message::ExplorerDragStart)
+        .interaction(iced::mouse::Interaction::ResizingVertically)
+        .into()
+}
+
 /// Primary (accent-filled) button style for the build action.
 fn primary_button(_t: &Theme, status: button::Status) -> button::Style {
     // A clean, crisp orange action button: solid fill that brightens on hover and dims on press.
@@ -510,6 +531,22 @@ fn git_range(
     order[lo..=hi].iter().cloned().collect()
 }
 
+/// The tab to activate after closing the one at `closed_idx` from a list of tabs, given
+/// `len_after` = the number of tabs REMAINING after removal. Returns the new active index
+/// (into the post-removal list), or `None` if no tabs remain.
+///
+/// Semantics: activate `closed_idx.min(len_after - 1)` — i.e. the tab that shifted left into
+/// the closed slot, or the new last tab when we closed the rightmost one. This mirrors VS Code:
+/// closing a tab lands you on its right neighbour (which now occupies the vacated slot), or the
+/// left neighbour when the closed tab was the last one.
+fn tab_after_close(closed_idx: usize, len_after: usize) -> Option<usize> {
+    if len_after == 0 {
+        None
+    } else {
+        Some(closed_idx.min(len_after - 1))
+    }
+}
+
 /// The Tailscale MagicDNS hostname of this machine (e.g. `jcnash-pc4.tail146ad2.ts.net`),
 /// via the `tailscale` CLI. `None` if Tailscale isn't installed/logged in.
 fn tailnet_host() -> Option<String> {
@@ -579,6 +616,9 @@ enum Gatebar {
     },
     Gate {
         phase: Phase,
+        /// The artifact text as produced. Retained from the `Pending::Gate` request but no longer
+        /// displayed inline — the master list opens the on-disk file in CODE instead (Change A).
+        #[allow(dead_code)]
         content: String,
         reply: Sender<Decision>,
     },
@@ -694,6 +734,10 @@ struct App {
     /// The file shown in the code panel (workspace-relative). `None` before any file
     /// is chosen / touched.
     selected_file: Option<String>,
+    /// The files open as tabs in the CODE panel, in the order they were opened (left→right).
+    /// `selected_file` is the ACTIVE tab; this is the full open set. Opening a file adds it
+    /// here if absent; closing a tab removes it.
+    open_tabs: Vec<String>,
     /// When true, the code panel follows the agent (auto-jumps to the file it's
     /// editing). Clicking a file in the tree pins it (sets this false); it re-arms when
     /// a new run starts. This is the "watch it work" behaviour, escapable on demand.
@@ -851,6 +895,19 @@ struct App {
     window_w: f32,
     /// True while the chat|code divider is being dragged (mouse down on the handle).
     dragging_split: bool,
+
+    // --- Resizable git|files divider (explorer column) --------------------------
+    /// Fraction of the explorer column's height given to the Git section (the rest goes to
+    /// Files). Dragged via the horizontal divider between them. Clamped to a sane band.
+    explorer_frac: f32,
+    /// The window height, tracked so an explorer-divider drag maps cursor Y *delta* to a
+    /// fraction delta (the region height is what matters, not the absolute origin).
+    window_h: f32,
+    /// The grab anchor for a git|files divider drag: `(cursor_y_at_grab, explorer_frac_at_grab)`.
+    /// `None` when not dragging. We drag by DELTA from this anchor — the divider moves only by how
+    /// far the cursor actually travels — so it never jumps on grab (an absolute-Y mapping needs
+    /// the explorer's exact top offset, which we don't track; a delta needs none).
+    explorer_drag: Option<(f32, f32)>,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -959,6 +1016,7 @@ impl Default for App {
             tree_cache,
             sync_pending: false,
             selected_file: None,
+            open_tabs: Vec::new(),
             follow_agent: true,
             code: None,
             open_menu: None,
@@ -1007,6 +1065,9 @@ impl Default for App {
             chat_frac: 0.5,
             window_w: 1040.0,
             dragging_split: false,
+            explorer_frac: 0.25,
+            window_h: 800.0,
+            explorer_drag: None,
         }
     }
 }
@@ -1043,6 +1104,12 @@ pub(crate) enum Message {
     // Explorer / code-viewer interaction.
     /// Select a file in the tree → show it in the code panel (and pin, stop following).
     SelectFile(String),
+    /// Click a CODE-panel tab → make it the active file. Pins (stops following) and just
+    /// re-selects (no jump-to-first-change; that's a git-row nicety, not a plain tab switch).
+    SelectTab(String),
+    /// Close a CODE-panel tab (its ✕). Removes it from `open_tabs`; if it was the ACTIVE tab,
+    /// a neighbour is activated (see `tab_after_close`), else `selected_file` is unchanged.
+    CloseTab(String),
     /// Toggle a directory's collapsed state in the explorer.
     ToggleDir(String),
     /// The explorer's quick-filter text changed → narrow the tree to matching files/folders.
@@ -1162,9 +1229,11 @@ pub(crate) enum Message {
     // Workflow-gate answers.
     NotesChanged(String),
     GateApprove,
-    GateRevise,
     GateSendBack,
     GateAbort,
+    /// Open a plan phase's artifact file in the CODE view (master-list row click). The
+    /// artifact details live in the editor, not duplicated in the list.
+    OpenPhaseFile(String),
     // Topology canvas interaction.
     SelectCoder(String),
     ClearSelection,
@@ -1180,10 +1249,15 @@ pub(crate) enum Message {
     // Resizable chat|code divider.
     /// Mouse pressed on the chat|code divider → begin dragging it.
     SplitDragStart,
-    /// Mouse released anywhere → stop dragging the divider.
+    /// Mouse released anywhere → stop dragging the divider (either the chat|code or git|files one).
     SplitDragEnd,
-    /// The window was resized — remember its width so the drag can map cursor X to a fraction.
-    WindowResized(f32),
+    /// The window was resized — remember its width AND height so the divider drags can map an
+    /// absolute cursor X→chat fraction (width) and cursor Y→explorer fraction (height).
+    WindowSize(f32, f32),
+    // Resizable git|files divider (explorer column). Release is handled by `SplitDragEnd`,
+    // which clears both drag flags, so there's no separate ExplorerDragEnd.
+    /// Mouse pressed on the git|files divider → begin dragging it.
+    ExplorerDragStart,
 }
 
 impl App {
@@ -1239,16 +1313,18 @@ impl App {
                 Some(Message::GitCursorMoved(position))
             }
             // A button-release anywhere ends a divider drag (even if the cursor left the handle).
+            // `SplitDragEnd` ends BOTH the chat|code and git|files drags — they're mutually
+            // exclusive in practice, so one release message clears whichever is active.
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                 iced::mouse::Button::Left,
             )) => Some(Message::SplitDragEnd),
-            // Track the window width so a divider drag can map cursor X to a split fraction.
-            // `Opened` seeds it at startup; `Resized` keeps it current.
+            // Track the window size so a divider drag can map cursor X→width fraction and
+            // cursor Y→height fraction. `Opened` seeds it at startup; `Resized` keeps it current.
             iced::Event::Window(iced::window::Event::Resized(size)) => {
-                Some(Message::WindowResized(size.width))
+                Some(Message::WindowSize(size.width, size.height))
             }
             iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
-                Some(Message::WindowResized(size.width))
+                Some(Message::WindowSize(size.width, size.height))
             }
             // Keep a live view of the held modifiers, so a git-row button click (which doesn't
             // report modifiers in its press message) can branch on Ctrl/Shift for multi-select.
@@ -1423,6 +1499,8 @@ impl App {
         // compacted: every top-level folder starts collapsed.
         self.selected_file = None;
         self.code = None;
+        // Tabs held the old project's files — clear them so they don't linger into the new one.
+        self.open_tabs.clear();
         // Drop the git multi-selection + its shift anchor too — they keyed off the old project's
         // paths and would highlight/act on stale files in the new one.
         self.git_selection.clear();
@@ -2211,6 +2289,13 @@ impl App {
             self.code_viewport = None;
         }
         self.code = Some(sc_win::codeview::load(&root, &rel));
+        // Opening a file makes it a CODE-panel tab. Push before the move into `selected_file`
+        // (which becomes the ACTIVE tab); no duplicates, so re-opening an already-open file
+        // just re-selects it. Every open path (tree/git/plan/comment) funnels through here, so
+        // they all get a tab for free.
+        if !self.open_tabs.contains(&rel) {
+            self.open_tabs.push(rel.clone());
+        }
         self.selected_file = Some(rel);
         self.refresh_changed_lines();
     }
@@ -2988,10 +3073,13 @@ impl App {
                     phase,
                     content,
                     tests_written,
+                    dir,
                 } => {
                     // Fold a staged-workflow phase into the plan (the plan panel) and
-                    // note it in the activity stream.
-                    self.plan.apply(phase, &content, &tests_written);
+                    // note it in the activity stream. `dir` (workspace-relative artifact dir)
+                    // teaches the plan each phase's file path — the master list opens it in
+                    // the code view and harvests line-comments on it for send-back.
+                    self.plan.apply(phase, &content, &tests_written, dir.as_deref());
                     if tests_written.is_empty() {
                         self.rows
                             .push(Row::ok("◆", format!("plan · {}", phase.title())));
@@ -3013,8 +3101,14 @@ impl App {
             }
         }
         // Move any new decision requests onto the gate bar.
-        if let Some(session) = &self.session {
-            let pending: Vec<Pending> = session.drain_pending();
+        let pending: Vec<Pending> = match &self.session {
+            Some(session) => session.drain_pending(),
+            None => Vec::new(),
+        };
+        // When a workflow gate arrives, auto-open its phase file in CODE so the user can read
+        // (and line-comment) the artifact immediately — the details live in the editor now.
+        let mut open_gate_file: Option<String> = None;
+        {
             for p in pending {
                 self.gatebar.push(match p {
                     Pending::Confirm {
@@ -3042,13 +3136,25 @@ impl App {
                         phase,
                         content,
                         reply,
-                    } => Gatebar::Gate {
-                        phase,
-                        content,
-                        reply,
-                    },
+                    } => {
+                        // Remember to open this phase's artifact file once the borrow ends.
+                        if let Some(path) = self.plan.path_for(phase) {
+                            open_gate_file = Some(path);
+                        }
+                        Gatebar::Gate {
+                            phase,
+                            content,
+                            reply,
+                        }
+                    }
                 });
             }
+        }
+        // Auto-open the gating artifact (outside the loop so `select_file`'s `&mut self` is free).
+        // Pin the view (follow_agent = false) so a live run doesn't scroll it away.
+        if let Some(path) = open_gate_file {
+            self.follow_agent = false;
+            self.select_file(path);
         }
     }
 
@@ -3058,6 +3164,16 @@ impl App {
             if let Gatebar::Confirm { reply, .. } = self.gatebar.remove(0) {
                 let _ = reply.send(c);
             }
+        }
+    }
+
+    /// The phase currently stopped at a human gate, if any — the front gatebar entry when
+    /// it's a workflow `Gate` (the worker blocks on one at a time). The master list marks
+    /// this row as "gating" and shows its Approve / Send-back / Abort buttons inline.
+    fn gating_phase(&self) -> Option<Phase> {
+        match self.gatebar.first() {
+            Some(Gatebar::Gate { phase, .. }) => Some(*phase),
+            _ => None,
         }
     }
 
@@ -3135,6 +3251,33 @@ impl App {
                 // the next run re-arms follow.
                 self.follow_agent = false;
                 self.select_file(rel);
+            }
+            Message::SelectTab(path) => {
+                // Switching tabs pins the view and re-selects the file. `select_file` is
+                // idempotent for an already-open tab (it reloads + re-selects), and the active
+                // tab === `selected_file`, so the body just follows.
+                self.follow_agent = false;
+                self.select_file(path);
+            }
+            Message::CloseTab(path) => {
+                if let Some(i) = self.open_tabs.iter().position(|p| p == &path) {
+                    let was_active = self.selected_file.as_deref() == Some(path.as_str());
+                    self.open_tabs.remove(i);
+                    // Only the active tab closing changes what's shown; closing a background tab
+                    // leaves the active file alone.
+                    if was_active {
+                        match tab_after_close(i, self.open_tabs.len()) {
+                            Some(idx) => {
+                                let next = self.open_tabs[idx].clone();
+                                self.select_file(next);
+                            }
+                            None => {
+                                self.selected_file = None;
+                                self.code = None;
+                            }
+                        }
+                    }
+                }
             }
             Message::ModifiersChanged(m) => {
                 // Cache the held modifiers so the next git-row click can tell single- from
@@ -3308,10 +3451,35 @@ impl App {
                         self.chat_frac = frac.clamp(0.15, 0.85);
                     }
                 }
+                // While the git|files divider is held, move it by the cursor Y DELTA from the grab
+                // point — not an absolute mapping (which would need the explorer's exact top offset
+                // and snap on grab). `explorer_frac` is Git's share of the EXPLORER COLUMN's height,
+                // so a cursor delta of `d` px must be scaled by that column's height, NOT the whole
+                // window — dividing by `window_h` made the divider lag the cursor (the column is
+                // shorter than the window). `explorer_region_h()` is the column's true height, so
+                // the divider now tracks the cursor 1:1.
+                if let Some((y0, frac0)) = self.explorer_drag {
+                    let region_h = self.explorer_region_h();
+                    if region_h > 1.0 {
+                        let dfrac = (p.y - y0) / region_h;
+                        self.explorer_frac = (frac0 + dfrac).clamp(0.1, 0.8);
+                    }
+                }
             }
             Message::SplitDragStart => self.dragging_split = true,
-            Message::SplitDragEnd => self.dragging_split = false,
-            Message::WindowResized(w) => self.window_w = w,
+            Message::SplitDragEnd => {
+                self.dragging_split = false;
+                self.explorer_drag = None;
+            }
+            Message::WindowSize(w, h) => {
+                self.window_w = w;
+                self.window_h = h;
+            }
+            // Anchor the drag at the current cursor Y and current fraction — moves are deltas
+            // from here, so the divider never jumps on grab.
+            Message::ExplorerDragStart => {
+                self.explorer_drag = Some((self.cursor_pos.y, self.explorer_frac));
+            }
             Message::GitRowMenu(path, status) => {
                 self.git_menu_at = self.cursor_pos;
                 self.git_menu = Some((path, status));
@@ -3449,15 +3617,40 @@ impl App {
             }
             Message::NotesChanged(s) => self.sendback_notes = s,
             Message::GateApprove => self.answer_gate(Decision::Approve),
-            Message::GateRevise => self.answer_gate(Decision::Revise),
+            // (Revise dropped from the UI — send-back-with-comments supersedes it. `Decision::Revise`
+            //  stays in the workflow enum for the CLI; the GUI no longer surfaces a button for it.)
             Message::GateSendBack => {
-                let (target, notes) = match self.gatebar.first() {
-                    Some(Gatebar::Gate { phase, .. }) => (*phase, non_empty(&self.sendback_notes)),
-                    _ => (Phase::Specs, None),
+                // Change B: feedback comes from CODE-REVIEW line comments. Harvest every
+                // comment on the gating phase's artifact file and turn it into the send-back
+                // notes (one bullet per comment). This is the primary feedback path: the user
+                // reads the phase's `.md` in the code view, drops line comments where they want
+                // changes, and clicks Send back. Fall back to the free-text notes box when there
+                // are no line comments (so a general note still works).
+                let Some(target) = self.gating_phase() else {
+                    return Task::none();
                 };
+                let file = self.plan.path_for(target);
+                let harvested = file.as_deref().and_then(|f| {
+                    let on_file: Vec<&sc_win::comments::Comment> =
+                        self.comments.on_file(f).map(|(_, c)| c).collect();
+                    sc_win::comments::format_sendback_notes(&on_file)
+                });
+                let notes = harvested.or_else(|| non_empty(&self.sendback_notes));
                 self.answer_gate(Decision::SendBack { target, notes });
+                // The harvested comments have been DELIVERED as the send-back notes — drop them
+                // (and persist) so they don't re-deliver on the re-planned phase's next gate.
+                if let Some(f) = file {
+                    self.comments.items.retain(|c| c.file != f);
+                    sc_win::comments::save(&self.workspace_root(), &self.comments);
+                }
             }
             Message::GateAbort => self.answer_gate(Decision::Abort),
+            Message::OpenPhaseFile(path) => {
+                // A master-list row click: show the phase's artifact in the CODE editor (the
+                // reader) and pin the view so a live run doesn't follow the agent away from it.
+                self.follow_agent = false;
+                self.select_file(path);
+            }
             Message::SelectCoder(id) => self.selected_coder = Some(id),
             Message::ClearSelection => self.selected_coder = None,
             Message::PickWorkspace => {
@@ -3483,6 +3676,8 @@ impl App {
                 self.picked_workspace = None;
                 self.selected_file = None;
                 self.code = None;
+                // Clear the CODE-panel tabs too — they belonged to the closed project.
+                self.open_tabs.clear();
                 // Forget the *current* project so a restart doesn't re-open it, but keep the
                 // recents list (the user may want to re-pick one).
                 let mut state = sc_win::persist::load();
@@ -3585,6 +3780,28 @@ impl App {
         layers.width(Fill).height(Fill).into()
     }
 
+    /// The rendered height (px) of the EXPLORER column — `window_h` minus the chrome above and
+    /// below the body row. Used to scale a divider drag so it tracks the cursor 1:1. The layout
+    /// (see `view()`): a menu bar on top, then a padded body column that holds an optional
+    /// step-flow bar, the three-panel body row (which contains the explorer), and an optional
+    /// bottom strip (fixed 180px) — the explorer gets what's left. These are close estimates of
+    /// the fixed chrome; exact-to-the-pixel isn't needed, but the SCALE must be right so the drag
+    /// doesn't lag or race the cursor.
+    fn explorer_region_h(&self) -> f32 {
+        const MENU_BAR: f32 = 34.0; // top menu row + its padding
+        const STEP_FLOW: f32 = 52.0; // the phase step-flow card, shown only while planning
+        const BOTTOM_STRIP: f32 = 190.0; // the fixed 180px strip + its gap, when shown
+        const BODY_PAD: f32 = 2.0 * PAD as f32; // the body container's top+bottom padding
+        let mut h = self.window_h - MENU_BAR - BODY_PAD;
+        if self.plan.started() {
+            h -= STEP_FLOW;
+        }
+        if self.view_bottom_strip().is_some() {
+            h -= BOTTOM_STRIP;
+        }
+        h.max(1.0)
+    }
+
     /// The left EXPLORER column: a tabbed panel — **Files** (the workspace file tree) and
     /// **Git** (just the changed files, PR-style). A tab bar sits under a branch header that's
     /// shared across both tabs.
@@ -3623,21 +3840,25 @@ impl App {
         }
         git_col = git_col.push(self.view_git_tab());
 
-        // Each section is its own rounded card, stacked with a gap between them.
+        // Each section is its own rounded card, stacked with a draggable divider between them.
+        // `explorer_frac` (0.1..0.8) splits the height; the clamp guarantees both portions are
+        // ≥100, so neither FillPortion is ever zero.
+        let git_portion = (self.explorer_frac * 1000.0).round() as u16;
+        let files_portion = 1000u16.saturating_sub(git_portion);
         let git_section = container(git_col.spacing(6))
-            .height(Length::FillPortion(1))
+            .height(Length::FillPortion(git_portion))
             .width(Fill)
             .padding(PAD)
             .style(card_style);
         let files_section = container(self.view_files_tab())
-            .height(Length::FillPortion(3))
+            .height(Length::FillPortion(files_portion))
             .width(Fill)
             .padding(PAD)
             .style(card_style);
 
         // 200 of the 1000-portion total (chat+code share the other 800) → a fixed ~20% width,
         // so dragging the chat|code divider never moves the explorer.
-        container(column![git_section, h_divider(), files_section])
+        container(column![git_section, h_divider_draggable(), files_section])
             .width(Length::FillPortion(200))
             .height(Fill)
             .into()
@@ -4112,12 +4333,6 @@ impl App {
     /// instead of wrapping into — and interrupting — the number gutter. One vertical
     /// scroll (whole editor) + one horizontal scroll (the code column) is what you get.
     fn view_code(&self, portion: u16) -> Element<'_, Message> {
-        let header = match (&self.selected_file, self.follow_agent) {
-            (Some(rel), true) => format!("CODE  ·  {rel}  ·  following"),
-            (Some(rel), false) => format!("CODE  ·  {rel}  ·  pinned"),
-            (None, _) => "CODE".to_string(),
-        };
-
         let inner: Element<'_, Message> = match &self.code {
             Some(cv) if cv.note.is_some() => text(cv.note.clone().unwrap_or_default())
                 .size(12)
@@ -4425,26 +4640,66 @@ impl App {
         };
 
         // Header stays fixed; the code area is the single scrollable (no outer scroll wrap,
-        // which is what previously collapsed the inner one). When the open file is a feature
-        // plan (PLAN-<slug>.md), the header carries an "⚒ Execute plan" button — the same
-        // one-click build the proposal card offers, but for a plan opened from the tree.
+        // which is what previously collapsed the inner one). The header is now a TAB STRIP — one
+        // tab per open file, the ACTIVE tab (=== `selected_file`) highlighted, each closeable.
+        // When the active file is a feature plan (PLAN-<slug>.md) and no session is running, the
+        // strip's right end carries an "⚒ Execute plan" button — the same one-click build the
+        // proposal card offers, acting on the active file.
         let is_open_plan = self
             .selected_file
             .as_deref()
             .is_some_and(is_feature_plan);
-        let header_bar: Element<'_, Message> = if is_open_plan && self.session.is_none() {
-            row![
-                text(header).size(12).color(FG_MUTED),
-                Space::new().width(Fill),
-                button(text("⚒ Execute plan").size(12))
-                    .on_press(Message::ExecuteOpenPlan)
-                    .padding([3, 10])
-                    .style(primary_button),
-            ]
-            .align_y(iced::Alignment::Center)
-            .into()
+        let header_bar: Element<'_, Message> = if self.open_tabs.is_empty() {
+            // No files open → the old "CODE" placeholder (matches the former (None, _) header).
+            text("CODE").size(12).color(FG_MUTED).into()
         } else {
-            text(header).size(12).color(FG_MUTED).into()
+            // One tab per open file, in open order. Each tab is a label button (switches to it)
+            // plus a SIBLING ✕ button (buttons can't nest) that closes it. The active tab reads
+            // in ACCENT on a card-ish wash; inactive tabs are FG_MUTED and transparent.
+            let mut strip = row![].spacing(4).align_y(iced::Alignment::Center);
+            for path in &self.open_tabs {
+                let active = self.selected_file.as_deref() == Some(path.as_str());
+                // Show the basename (full path is too long for a tab); duplicate basenames across
+                // open files are acceptable for v1.
+                let base = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str());
+                let label = button(
+                    text(base.to_string())
+                        .size(12)
+                        .color(if active { ACCENT } else { FG_MUTED }),
+                )
+                .on_press(Message::SelectTab(path.clone()))
+                .padding([2, 6])
+                .style(if active { menu_item_style } else { tree_button });
+                let close = button(
+                    text("✕")
+                        .size(11)
+                        .color(if active { ACCENT } else { FG_MUTED }),
+                )
+                .on_press(Message::CloseTab(path.clone()))
+                .padding([2, 4])
+                .style(tree_button);
+                strip = strip.push(row![label, close].spacing(0).align_y(iced::Alignment::Center));
+            }
+            // Follow/pinned hint at the left, so it isn't lost from the old header.
+            let hint = text(if self.follow_agent { "following" } else { "pinned" })
+                .size(11)
+                .color(FG_MUTED);
+            // The strip scrolls horizontally so many open files don't blow out the panel width.
+            let scroller = scrollable(strip).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(2).scroller_width(2),
+            ));
+            let mut bar = row![hint, scroller, Space::new().width(Fill)]
+                .spacing(8)
+                .align_y(iced::Alignment::Center);
+            if is_open_plan && self.session.is_none() {
+                bar = bar.push(
+                    button(text("⚒ Execute plan").size(12))
+                        .on_press(Message::ExecuteOpenPlan)
+                        .padding([3, 10])
+                        .style(primary_button),
+                );
+            }
+            bar.into()
         };
         let body = column![header_bar, inner].spacing(6);
         container(body)
@@ -5393,24 +5648,75 @@ impl App {
     /// The always-visible plan panel (TDD mode): the six workflow phases with status,
     /// the frozen tests written, and the readable subtask list — so you can see what it
     /// intends to do, before and while it does it.
+    /// The PLAN master list (Change A): a persistent index of the six workflow phases. Each row
+    /// is a status glyph + the phase title, colored by state (done/approved · gating · pending),
+    /// and is a BUTTON that opens the phase's artifact file in the CODE editor — the details live
+    /// there, not duplicated here. The row for the phase currently at a human gate additionally
+    /// carries the Approve / Send-back / Abort buttons inline (the gate approval used to be a
+    /// transient card at the bottom; it now lives beside the phase it's approving).
     fn view_plan(&self) -> Element<'_, Message> {
+        let gating = self.gating_phase();
         let mut col = column![section("PLAN  ·  TDD")].spacing(4);
         for step in self.plan.steps() {
-            let mark = if step.done { "✓" } else { "·" };
-            let line = text(format!("{mark} {}", step.title)).size(13);
-            let line = if step.done {
-                line.color(GOOD)
+            let is_gating = gating == Some(step.phase);
+            // Status glyph + color: gating (amber, awaiting you) · done/approved (green ✓) ·
+            // pending (muted ·).
+            let (mark, color) = if is_gating {
+                ("⛳", AMBER)
+            } else if step.done {
+                ("✓", GOOD)
             } else {
-                line.color(FG_MUTED)
+                ("·", FG_MUTED)
             };
-            col = col.push(line);
-            // Show the produced artifact text under each completed phase.
-            if step.done && !step.content.is_empty() {
-                let preview: String = step.content.lines().take(10).collect::<Vec<_>>().join("\n");
+            let label = text(format!("{mark} {}", step.title)).size(13).color(color);
+            // The row opens the phase's FILE in CODE — but only when its path is known (the
+            // StagedBuild specs/<slug>/ flow) and it has landed. Older numbered-plan runs have
+            // no OpenSpec file, so their rows stay as plain labels (not clickable).
+            let row_el: Element<'_, Message> = match self.plan.path_for(step.phase) {
+                Some(path) if step.done || is_gating => button(label)
+                    .width(Fill)
+                    .padding([2, 4])
+                    .on_press(Message::OpenPhaseFile(path))
+                    .style(tree_button)
+                    .into(),
+                _ => label.into(),
+            };
+            col = col.push(row_el);
+            // The gating row carries the approval controls inline. Send back harvests the line
+            // comments the user left on this phase's file in the code view (Change B).
+            if is_gating {
+                let buttons = row![
+                    button(text("Approve").size(12))
+                        .on_press(Message::GateApprove)
+                        .padding([2, 10])
+                        .style(primary_button),
+                    button(text("Send back").size(12))
+                        .on_press(Message::GateSendBack)
+                        .padding([2, 10])
+                        .style(stage_toggle_button),
+                    button(text("Abort").size(12))
+                        .on_press(Message::GateAbort)
+                        .padding([2, 10])
+                        .style(stage_toggle_button),
+                ]
+                .spacing(6);
+                // Optional free-text note: the fallback when no line comments were left. The
+                // line-comment harvest is the primary path; this catches a general remark.
+                let notes = text_input("or a general send-back note…", &self.sendback_notes)
+                    .on_input(Message::NotesChanged)
+                    .padding(4)
+                    .size(12)
+                    .style(input_style);
                 col = col.push(
-                    text(preview)
-                        .size(11)
-                        .color(iced::Color::from_rgb(0.7, 0.73, 0.84)),
+                    column![
+                        text("← open this file in CODE, comment the lines to change, then Send back")
+                            .size(10)
+                            .color(FG_MUTED),
+                        buttons,
+                        notes,
+                    ]
+                    .spacing(4)
+                    .padding(iced::Padding::ZERO.top(2).bottom(6).left(12)),
                 );
             }
         }
@@ -5498,8 +5804,14 @@ impl App {
             .into()
     }
 
+    /// The bottom decision card — now ONLY for shell-command confirms. Workflow-phase gate
+    /// approval moved into the PLAN master list (Change A): each phase's Approve/Send-back/Abort
+    /// buttons sit inline on its row, beside the file you review in CODE. A `Gate` at the front of
+    /// the queue therefore renders nothing here (the master list owns it).
     fn view_gatebar(&self) -> Option<Element<'_, Message>> {
         match self.gatebar.first()? {
+            // Workflow gate → handled by the master list, not this bottom card.
+            Gatebar::Gate { .. } => None,
             Gatebar::Confirm {
                 command, reason, ..
             } => {
@@ -5513,30 +5825,6 @@ impl App {
                 .spacing(8);
                 Some(
                     container(column![head, why, buttons].spacing(6))
-                        .width(Fill)
-                        .padding(12)
-                        .style(card_style)
-                        .into(),
-                )
-            }
-            Gatebar::Gate { phase, content, .. } => {
-                let head = text(format!("⛳ checkpoint — {} phase", phase.title())).size(14);
-                // Show the produced artifact so the human can read it before deciding.
-                let preview = container(scrollable(text(content.clone()).size(12)))
-                    .height(Length::Fixed(160.0));
-                let notes = text_input("send-back notes (optional)…", &self.sendback_notes)
-                    .on_input(Message::NotesChanged)
-                    .padding(6)
-                    .style(input_style);
-                let buttons = row![
-                    button(text("Approve")).on_press(Message::GateApprove),
-                    button(text("Revise")).on_press(Message::GateRevise),
-                    button(text("Send back")).on_press(Message::GateSendBack),
-                    button(text("Abort")).on_press(Message::GateAbort),
-                ]
-                .spacing(8);
-                Some(
-                    container(column![head, preview, notes, buttons].spacing(6))
                         .width(Fill)
                         .padding(12)
                         .style(card_style)
@@ -5800,6 +6088,20 @@ mod tests {
         // Missing anchor (stale) → fall back to just the target.
         let r = git_range(&order, "zzz", "d");
         assert_eq!(r, ["d"].iter().map(|s| s.to_string()).collect());
+    }
+
+    #[test]
+    fn tab_after_close_activates_the_right_neighbour() {
+        // Start with tabs [a, b, c, d] (indices 0..3).
+        // Close the active MIDDLE tab (index 1, "b") → after removal len is 3, the tab that
+        // shifted into slot 1 ("c") activates.
+        assert_eq!(tab_after_close(1, 3), Some(1));
+        // Close the FIRST tab (index 0) → the new first tab ("b") slides into slot 0.
+        assert_eq!(tab_after_close(0, 3), Some(0));
+        // Close the LAST tab (index 3) → len is 3, clamp to the new last (index 2).
+        assert_eq!(tab_after_close(3, 3), Some(2));
+        // Close the ONLY tab → nothing remains.
+        assert_eq!(tab_after_close(0, 0), None);
     }
 
     #[test]

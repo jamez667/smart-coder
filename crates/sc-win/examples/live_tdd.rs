@@ -33,8 +33,9 @@ fn main() {
                     phase,
                     content,
                     tests_written,
+                    dir,
                 } => {
-                    plan.apply(phase, &content, &tests_written);
+                    plan.apply(phase, &content, &tests_written, dir.as_deref());
                     if tests_written.is_empty() {
                         println!("◆ PHASE {}", phase.title());
                         for l in content.lines().take(4) {

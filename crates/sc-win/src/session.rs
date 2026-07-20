@@ -31,11 +31,15 @@ pub enum UiEvent {
     Swarm(SwarmEvent),
     /// A staged-workflow phase completed (spec 09): the phase and its full artifact
     /// text. Drives the plan panel. `tests_written` lists the frozen test files once
-    /// the test-writing phase (StageBreakdown) lands.
+    /// the test-writing phase (StageBreakdown) lands. `dir` is the WORKSPACE-RELATIVE
+    /// directory the artifacts land in (e.g. `specs/alt-seats`) so the plan's master list
+    /// can open each phase's file in the code view and harvest line-comments on it for
+    /// send-back; `None` for run kinds with no OpenSpec dir (older `.smart-coder/plan/`).
     Phase {
         phase: sc_workflow::Phase,
         content: String,
         tests_written: Vec<String>,
+        dir: Option<String>,
     },
     /// The run finished. `ok` is the honest exit status (finished/all-done); `summary`
     /// is the human closing line (spec 06).
@@ -343,6 +347,7 @@ fn run_plan(cfg: UiConfig, task: String, workspace: PathBuf, ev_tx: Sender<UiEve
             phase,
             content: content.to_string(),
             tests_written: Vec::new(),
+            dir: None, // plan-only run writes to .smart-coder/plan/ — no OpenSpec dir to open
         });
     };
 
@@ -403,13 +408,29 @@ fn run_staged_build(
     // for Approve/Revise/Send-back via the gatebar, instead of AutoApprove barrelling through.
     let gate = ChannelGate::new(pending_tx);
 
+    // Land the design artifacts NEXT TO the spec in its OpenSpec dir: if the task references
+    // `specs/<slug>/spec.md`, phases (architecture.md, layout.md, breakdown.md, …) go in
+    // `specs/<slug>/`. Falls back to the default `.smart-coder/plan/` when there's no spec dir.
+    let artifact_dir = spec_artifact_dir(&task, &workspace);
+    // The WORKSPACE-RELATIVE form of the artifact dir (e.g. `specs/alt-seats`), for the UI:
+    // the plan's master list opens each phase file (`<dir>/<openspec_filename>`) in the code
+    // view and harvests line-comments on it for send-back — both need the path `select_file`
+    // uses, which is workspace-relative with forward slashes. `None` when there's no spec dir.
+    let artifact_dir_rel = artifact_dir.as_ref().and_then(|d| {
+        d.strip_prefix(&workspace)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+    });
+
     // Stream each design phase into the plan panel as it lands.
     let phase_tx = ev_tx.clone();
+    let phase_dir = artifact_dir_rel.clone();
     let on_phase = move |phase: sc_workflow::Phase, content: &str| {
         let _ = phase_tx.send(UiEvent::Phase {
             phase,
             content: content.to_string(),
             tests_written: Vec::new(),
+            dir: phase_dir.clone(),
         });
     };
 
@@ -418,10 +439,6 @@ fn run_staged_build(
         skip_tests: true,
         stop_after: None,
     };
-    // Land the design artifacts NEXT TO the spec in its OpenSpec dir: if the task references
-    // `specs/<slug>/spec.md`, phases (architecture.md, layout.md, breakdown.md, …) go in
-    // `specs/<slug>/`. Falls back to the default `.smart-coder/plan/` when there's no spec dir.
-    let artifact_dir = spec_artifact_dir(&task, &workspace);
     let outcome = match sc_workflow::run_workflow_moded_to(
         &orchestrator,
         &worker,
@@ -531,6 +548,7 @@ fn run_tdd(
             phase,
             content: content.to_string(),
             tests_written: Vec::new(),
+            dir: None, // TDD flow uses the default plan dir — no OpenSpec file to open
         });
     };
 
@@ -556,6 +574,7 @@ fn run_tdd(
             phase: sc_workflow::Phase::StageBreakdown,
             content: format!("frozen tests written:\n{}", outcome.test_files.join("\n")),
             tests_written: outcome.test_files.clone(),
+            dir: None,
         });
     }
 
@@ -672,6 +691,7 @@ fn run_sequential_build(
             phase,
             content: content.to_string(),
             tests_written: Vec::new(),
+            dir: None, // sequential build uses the default plan dir — no OpenSpec file to open
         });
     };
 

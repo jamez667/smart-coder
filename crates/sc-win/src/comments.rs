@@ -88,6 +88,31 @@ impl Comments {
     }
 }
 
+/// Format the pending comments on a phase's artifact file into send-back notes — the
+/// code-review path to workflow feedback (Change B): a human opens a gating phase's `.md` in
+/// the code view, drops line comments on the parts they want changed, and clicks "Send back";
+/// those comments BECOME the notes the workflow re-plans from. One bullet per comment, anchored
+/// to its line range so the model knows exactly what each note is about. `comments` should
+/// already be filtered to the phase's file. Returns `None` when there are none (so the caller
+/// can fall back to a free-text note). Host-testable — no iced, no I/O.
+pub fn format_sendback_notes(comments: &[&Comment]) -> Option<String> {
+    if comments.is_empty() {
+        return None;
+    }
+    let bullets: Vec<String> = comments
+        .iter()
+        .map(|c| {
+            let span = if c.start == c.end {
+                format!("line {}", c.start)
+            } else {
+                format!("lines {}-{}", c.start, c.end)
+            };
+            format!("- [{span}] {}", c.text.trim())
+        })
+        .collect();
+    Some(bullets.join("\n"))
+}
+
 /// The `.dc/comments.json` path under a project root.
 fn store_path(root: &Path) -> std::path::PathBuf {
     root.join(".dc").join("comments.json")
@@ -210,6 +235,22 @@ mod tests {
         c.add(Comment::new("a.rs", 2, 2, "z"));
         let got: Vec<&str> = c.on_file("a.rs").map(|(_, c)| c.text.as_str()).collect();
         assert_eq!(got, vec!["x", "z"]);
+    }
+
+    #[test]
+    fn format_sendback_notes_bullets_each_comment_with_its_range() {
+        let a = Comment::new("specs/x/spec.md", 3, 3, "tighten the goal");
+        let b = Comment::new("specs/x/spec.md", 10, 14, "this section is out of scope");
+        let notes = format_sendback_notes(&[&a, &b]).unwrap();
+        assert_eq!(
+            notes,
+            "- [line 3] tighten the goal\n- [lines 10-14] this section is out of scope"
+        );
+    }
+
+    #[test]
+    fn format_sendback_notes_none_when_no_comments() {
+        assert_eq!(format_sendback_notes(&[]), None);
     }
 
     #[test]
