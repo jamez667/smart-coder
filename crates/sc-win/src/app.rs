@@ -490,6 +490,26 @@ fn fmt_unix(secs: u64) -> String {
     }
 }
 
+/// The inclusive Shift-range selection over an ordered path list: every path between `anchor` and
+/// `target` (found by position in `order`), regardless of which comes first. If either isn't in
+/// `order`, falls back to selecting just `target` — the sane result for a stale anchor. Pure and
+/// index-based so the shift-range math is unit-testable without any GUI scaffolding.
+fn git_range(
+    order: &[String],
+    anchor: &str,
+    target: &str,
+) -> std::collections::BTreeSet<String> {
+    let (a, b) = match (
+        order.iter().position(|p| p == anchor),
+        order.iter().position(|p| p == target),
+    ) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return std::iter::once(target.to_string()).collect(),
+    };
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    order[lo..=hi].iter().cloned().collect()
+}
+
 /// The Tailscale MagicDNS hostname of this machine (e.g. `jcnash-pc4.tail146ad2.ts.net`),
 /// via the `tailscale` CLI. `None` if Tailscale isn't installed/logged in.
 fn tailnet_host() -> Option<String> {
@@ -808,6 +828,19 @@ struct App {
     staged_deltas: std::collections::BTreeMap<String, sc_win::gitdiff::LineDelta>,
     /// The commit-message draft typed in the git tab's VS-Code-style commit box.
     commit_msg: String,
+    /// Live view of which keyboard modifiers are held (Ctrl/Shift/…). iced button-press
+    /// messages don't carry the modifiers active at click time, so we track them here (updated
+    /// from `ModifiersChanged` events) and read this when a git row is clicked to decide
+    /// single- vs. ctrl-toggle vs. shift-range selection.
+    modifiers: iced::keyboard::Modifiers,
+    /// The multi-selected git files (workspace-relative paths, same keys as `file_status`), for
+    /// batch operations. Always contains the plainly-selected file too, so a single click leaves
+    /// a 1-element set. `selected_file` still drives the single-file diff preview; this set is
+    /// additive on top for Ctrl/Shift multi-select and only affects row highlighting for now.
+    git_selection: std::collections::BTreeSet<String>,
+    /// The anchor row for Shift-range selection (the last plainly/ctrl-clicked row). A Shift-click
+    /// re-selects the contiguous range from here to the clicked row. `None` until first click.
+    git_select_anchor: Option<String>,
 
     // --- Resizable chat|code divider --------------------------------------------
     /// Chat's share of the combined chat+code region (0.15..0.85). 0.5 = the old even
@@ -968,6 +1001,9 @@ impl Default for App {
             unstaged_deltas: std::collections::BTreeMap::new(),
             staged_deltas: std::collections::BTreeMap::new(),
             commit_msg: String::new(),
+            modifiers: iced::keyboard::Modifiers::empty(),
+            git_selection: std::collections::BTreeSet::new(),
+            git_select_anchor: None,
             chat_frac: 0.5,
             window_w: 1040.0,
             dragging_split: false,
@@ -1084,6 +1120,9 @@ pub(crate) enum Message {
     /// Discard this file's working-tree changes (`git checkout -- <path>`); restores a deleted
     /// file or reverts a modified one to its committed state.
     GitDiscard(String),
+    /// The held keyboard modifiers changed. Tracked so a git-row click (whose button-press
+    /// message carries no modifiers) can read whether Ctrl/Shift is down for multi-select.
+    ModifiersChanged(iced::keyboard::Modifiers),
     /// Select a file from the git tab → open it AND jump to its first changed line.
     SelectGitFile(String),
     /// Deferred second step of `SelectGitFile`: scroll to the first changed line once the new
@@ -1210,6 +1249,11 @@ impl App {
             }
             iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
                 Some(Message::WindowResized(size.width))
+            }
+            // Keep a live view of the held modifiers, so a git-row button click (which doesn't
+            // report modifiers in its press message) can branch on Ctrl/Shift for multi-select.
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
+                Some(Message::ModifiersChanged(m))
             }
             _ => None,
         });
@@ -1379,6 +1423,10 @@ impl App {
         // compacted: every top-level folder starts collapsed.
         self.selected_file = None;
         self.code = None;
+        // Drop the git multi-selection + its shift anchor too — they keyed off the old project's
+        // paths and would highlight/act on stale files in the new one.
+        self.git_selection.clear();
+        self.git_select_anchor = None;
         self.collapsed_dirs = sc_win::filetree::top_level_dirs(&dir);
         self.file_filter.clear();
         self.tree_cache = sc_win::filetree::full_rows(&dir);
@@ -3088,7 +3136,42 @@ impl App {
                 self.follow_agent = false;
                 self.select_file(rel);
             }
+            Message::ModifiersChanged(m) => {
+                // Cache the held modifiers so the next git-row click can tell single- from
+                // ctrl-toggle from shift-range selection (button presses carry no modifiers).
+                self.modifiers = m;
+            }
             Message::SelectGitFile(rel) => {
+                // Branch on the tracked modifiers (iced buttons don't report the modifiers held
+                // at click time, so we read the live `self.modifiers` cached from key events):
+                //   Ctrl → toggle this row into/out of the multi-selection (keep the rest).
+                //   Shift → re-select the contiguous range from the anchor to this row.
+                //   neither → plain single-select (clear the set, select just this row).
+                // In every case the last-clicked row becomes the previewed file (`selected_file`),
+                // since the CODE panel is single-file.
+                if self.modifiers.control() && !self.modifiers.shift() {
+                    // Ctrl-toggle: additive, doesn't clear the rest. Move the anchor here.
+                    if !self.git_selection.remove(&rel) {
+                        self.git_selection.insert(rel.clone());
+                    }
+                    self.git_select_anchor = Some(rel.clone());
+                } else if self.modifiers.shift() {
+                    // Shift-range: select the inclusive span between the anchor (or this row, if
+                    // no anchor yet) and this row in the CURRENT DISPLAYED ORDER, replacing the
+                    // set. The anchor is kept, so successive shift-clicks re-anchor from it.
+                    let order = self.git_display_order();
+                    let anchor = self.git_select_anchor.clone().unwrap_or_else(|| rel.clone());
+                    self.git_selection = git_range(&order, &anchor, &rel);
+                    if self.git_select_anchor.is_none() {
+                        self.git_select_anchor = Some(anchor);
+                    }
+                } else {
+                    // Plain click: single-select. The set always holds the selected file too, so a
+                    // click leaves a 1-element selection consistent with the previewed file.
+                    self.git_selection.clear();
+                    self.git_selection.insert(rel.clone());
+                    self.git_select_anchor = Some(rel.clone());
+                }
                 // Open the file, then jump the code view to its first changed line (git-tab
                 // click → land you on the change, VS-Code-diff style). The scroll is DEFERRED a
                 // beat so it runs against the newly-laid-out content, not the previous file's
@@ -3236,28 +3319,49 @@ impl App {
             Message::CloseGitMenu => self.git_menu = None,
             Message::GitStage(path) => {
                 self.git_menu = None;
-                self.run_git(&["add", "--", &path]);
+                // Batch: if this file is part of a multi-selection, stage every selected file in
+                // one call (the user picked a set with Ctrl/Shift and expects the ＋/menu to act on
+                // all of it). A lone or unselected file stages just itself.
+                let targets = self.git_action_targets(&path);
+                let mut args = vec!["add", "--"];
+                args.extend(targets.iter().map(String::as_str));
+                self.run_git(&args);
                 self.refresh_git_view();
             }
             Message::GitUnstage(path) => {
                 self.git_menu = None;
-                self.run_git(&["restore", "--staged", "--", &path]);
+                let targets = self.git_action_targets(&path);
+                let mut args = vec!["restore", "--staged", "--"];
+                args.extend(targets.iter().map(String::as_str));
+                self.run_git(&args);
                 self.refresh_git_view();
             }
             Message::GitDiscard(path) => {
                 self.git_menu = None;
-                // For an untracked file `checkout --` is a no-op, so clean it instead; for a
-                // tracked file it restores the committed content (reverting a modify or delete).
-                let is_untracked =
-                    self.file_status.get(&path) == Some(&sc_win::gitdiff::FileStatus::Added);
-                if is_untracked {
-                    self.run_git(&["clean", "-f", "--", &path]);
-                } else {
-                    self.run_git(&["checkout", "--", &path]);
+                // Batch: discard every file in the selection when this row is part of one. Split by
+                // tracked-ness — untracked files need `clean -f` (a `checkout --` is a no-op on
+                // them), tracked files need `checkout --` to restore the committed content.
+                let targets = self.git_action_targets(&path);
+                let (untracked, tracked): (Vec<&String>, Vec<&String>) = targets.iter().partition(
+                    |p| self.file_status.get(*p) == Some(&sc_win::gitdiff::FileStatus::Added),
+                );
+                if !untracked.is_empty() {
+                    let mut args = vec!["clean", "-f", "--"];
+                    args.extend(untracked.iter().map(|p| p.as_str()));
+                    self.run_git(&args);
+                }
+                if !tracked.is_empty() {
+                    let mut args = vec!["checkout", "--"];
+                    args.extend(tracked.iter().map(|p| p.as_str()));
+                    self.run_git(&args);
                 }
                 self.refresh_git_view();
-                // If the discarded file is the one on screen, reload it to show reverted content.
-                if self.selected_file.as_deref() == Some(path.as_str()) {
+                // If the file on screen was discarded, reload it to show reverted content.
+                if self
+                    .selected_file
+                    .as_ref()
+                    .is_some_and(|s| targets.contains(s))
+                {
                     self.reload_selected();
                 }
             }
@@ -3669,6 +3773,39 @@ impl App {
     /// The **Git** tab: a VS-Code-style Source Control panel — a commit-message box + Commit
     /// button on top, then a **Staged Changes** section and an unstaged **Changes** section
     /// (grouped Added / Modified / Deleted). Right-click any file for stage / unstage / discard.
+    /// The git files in the exact order the git tab renders them: the staged section first (keys
+    /// filtered to those `stage_states` marks staged), then the unstaged section (everything
+    /// unstaged/untracked). `view_git_tab` and the Shift-range selection both derive from this, so
+    /// the "displayed order" the range spans can never drift from what's on screen.
+    fn git_display_order(&self) -> Vec<String> {
+        let staged = self
+            .file_status
+            .keys()
+            .filter(|p| self.stage_states.get(*p).map(|s| s.staged).unwrap_or(false))
+            .cloned();
+        let unstaged = self
+            .file_status
+            .keys()
+            .filter(|p| self.stage_states.get(*p).map(|s| s.unstaged).unwrap_or(true))
+            .cloned();
+        staged.chain(unstaged).collect()
+    }
+
+    /// The files a stage/unstage/discard action should apply to, given the row it was invoked on.
+    /// When `path` is part of a multi-selection (the user Ctrl/Shift-picked a set), the action
+    /// fans out to every selected file — in displayed order, so the git call is deterministic.
+    /// Otherwise it's just `path` (a lone click, or acting on a row outside the current selection).
+    fn git_action_targets(&self, path: &str) -> Vec<String> {
+        if self.git_selection.len() > 1 && self.git_selection.contains(path) {
+            self.git_display_order()
+                .into_iter()
+                .filter(|p| self.git_selection.contains(p))
+                .collect()
+        } else {
+            vec![path.to_string()]
+        }
+    }
+
     fn view_git_tab(&self) -> Element<'_, Message> {
         use sc_win::gitdiff::FileStatus;
         if self.branch.is_none() {
@@ -3698,7 +3835,9 @@ impl App {
         let commit_box = column![input, commit_btn.padding([4, 12]).width(Fill)].spacing(4);
 
         // Partition the changed files into staged and unstaged. A file can be in BOTH (staged
-        // plus further working-tree edits) — VS Code shows it in each, and so do we.
+        // plus further working-tree edits) — VS Code shows it in each, and so do we. The
+        // staged/unstaged filters here MUST match `git_display_order` (which the Shift-range
+        // selection uses), so the on-screen order and the selectable order stay in lock-step.
         let staged: Vec<&String> = self
             .file_status
             .keys()
@@ -3794,7 +3933,10 @@ impl App {
             FileStatus::Modified => AMBER,
             FileStatus::Deleted => BAD,
         };
-        let is_selected = self.selected_file.as_deref() == Some(path);
+        // Highlight the row when it's the previewed file OR part of the multi-selection, so every
+        // Ctrl/Shift-selected row reads as selected (not just the last-clicked previewed one).
+        let is_selected =
+            self.selected_file.as_deref() == Some(path) || self.git_selection.contains(path);
         let name_color = if is_selected { ACCENT } else { color };
         let mut inner = row![
             text(status.badge().to_string())
@@ -3877,17 +4019,40 @@ impl App {
         let stage = self.stage_states.get(&path).copied();
         let has_unstaged = stage.map(|s| s.unstaged).unwrap_or(true);
         let has_staged = stage.map(|s| s.staged).unwrap_or(false);
-        let discard_label = match status {
-            FileStatus::Added => "🗑  Delete untracked file",
-            FileStatus::Deleted => "↩  Restore deleted file",
-            FileStatus::Modified => "↩  Discard changes",
+        // When the right-clicked file is part of a multi-selection, Stage/Unstage/Discard fan out
+        // to the whole set (see `git_action_targets`) — reflect that in the labels so it's clear
+        // the action isn't just this one file, and the count warns before a batch discard.
+        let batch = if self.git_selection.len() > 1 && self.git_selection.contains(&path) {
+            self.git_selection.len()
+        } else {
+            1
         };
-        let mut items: Vec<(&str, Message)> = Vec::new();
+        let discard_label = if batch > 1 {
+            format!("🗑  Discard {batch} files")
+        } else {
+            match status {
+                FileStatus::Added => "🗑  Delete untracked file",
+                FileStatus::Deleted => "↩  Restore deleted file",
+                FileStatus::Modified => "↩  Discard changes",
+            }
+            .to_string()
+        };
+        let stage_label = if batch > 1 {
+            format!("＋  Stage {batch} files")
+        } else {
+            "＋  Stage".to_string()
+        };
+        let unstage_label = if batch > 1 {
+            format!("－  Unstage {batch} files")
+        } else {
+            "－  Unstage".to_string()
+        };
+        let mut items: Vec<(String, Message)> = Vec::new();
         if has_unstaged {
-            items.push(("＋  Stage", Message::GitStage(path.clone())));
+            items.push((stage_label, Message::GitStage(path.clone())));
         }
         if has_staged {
-            items.push(("－  Unstage", Message::GitUnstage(path.clone())));
+            items.push((unstage_label, Message::GitUnstage(path.clone())));
         }
         // Discard acts on the working tree — only meaningful when there are unstaged changes.
         if has_unstaged {
@@ -5619,6 +5784,23 @@ const _: Option<ToolCalling> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_range_selects_inclusive_span_in_display_order() {
+        let order: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
+        // Forward range a..=c.
+        let r = git_range(&order, "a", "c");
+        assert_eq!(r, ["a", "b", "c"].iter().map(|s| s.to_string()).collect());
+        // Backward range (target before anchor) spans the same inclusive set.
+        let r = git_range(&order, "d", "b");
+        assert_eq!(r, ["b", "c", "d"].iter().map(|s| s.to_string()).collect());
+        // Anchor == target → a single-element selection.
+        let r = git_range(&order, "c", "c");
+        assert_eq!(r, ["c"].iter().map(|s| s.to_string()).collect());
+        // Missing anchor (stale) → fall back to just the target.
+        let r = git_range(&order, "zzz", "d");
+        assert_eq!(r, ["d"].iter().map(|s| s.to_string()).collect());
+    }
 
     #[test]
     fn feature_plans_are_buildable_but_readme_and_todo_are_not() {

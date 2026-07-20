@@ -180,7 +180,7 @@ fn is_untracked(workspace: &Path, rel: &str) -> bool {
     let out = crate::proc::git()
         .arg("-C")
         .arg(workspace)
-        .args(["status", "--porcelain", "--", rel])
+        .args(["status", "--porcelain", "-uall", "--", rel])
         .output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
@@ -369,7 +369,7 @@ pub fn stage_states(workspace: &Path) -> std::collections::BTreeMap<String, Stag
     let out = crate::proc::git()
         .arg("-C")
         .arg(workspace)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "-uall"])
         .output();
     match out {
         Ok(o) if o.status.success() => {
@@ -385,7 +385,7 @@ pub fn statuses(workspace: &Path) -> std::collections::BTreeMap<String, FileStat
     let out = crate::proc::git()
         .arg("-C")
         .arg(workspace)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "-uall"])
         .output();
     match out {
         Ok(o) if o.status.success() => parse_status(&String::from_utf8_lossy(&o.stdout)),
