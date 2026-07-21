@@ -154,7 +154,9 @@ pub fn run_workflow_moded(
     on_phase: &dyn Fn(Phase, &str),
     gate: &dyn Gate,
 ) -> Result<WorkflowOutcome> {
-    // Default artifact layout: `.smart-coder/plan/` with numbered filenames.
+    // Default artifact layout: `.smart-coder/plan/` with numbered filenames. This entry point
+    // has no live-token consumer (the CLI/examples stream to the plan panel via `on_phase`), so
+    // pass a no-op token callback.
     run_workflow_moded_to(
         orchestrator,
         worker,
@@ -166,12 +168,17 @@ pub fn run_workflow_moded(
         gate,
         None,
         false,
+        &mut |_p, _d| {},
     )
 }
 
 /// Like [`run_workflow_moded`], but persists phase artifacts to `artifact_dir` (default
 /// `.smart-coder/plan/` when `None`) with either numbered or OpenSpec filenames — so the staged
 /// build can land its design in `specs/<slug>/` (spec.md, architecture.md, …) beside the spec.
+///
+/// `on_token(phase, delta)` receives each streamed content delta of the phase currently
+/// generating, so a live UI can render the reply token-by-token (the staged run reads as alive,
+/// not frozen). Callers that don't want the live view pass a no-op `&mut |_p, _d| {}`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_workflow_moded_to(
     orchestrator: &dyn ModelBackend,
@@ -184,6 +191,7 @@ pub fn run_workflow_moded_to(
     gate: &dyn Gate,
     artifact_dir: Option<&Path>,
     openspec_names: bool,
+    on_token: &mut dyn FnMut(Phase, &str),
 ) -> Result<WorkflowOutcome> {
     // The directory phase artifacts are written to (and re-read on Revise).
     let art_dir = artifact_dir
@@ -225,7 +233,12 @@ pub fn run_workflow_moded_to(
     }
 
     while let Some(phase) = state.next_phase() {
-        let artifact = generate_phase(orchestrator, phase, &state, think, stack);
+        // Forward each streamed token tagged with its phase, so the caller (the desktop chat
+        // panel) can watch the reply type live and know which phase is speaking — a slow phase
+        // used to sit frozen with no sign of life.
+        let artifact = generate_phase(orchestrator, phase, &state, think, stack, &mut |delta| {
+            on_token(phase, delta)
+        });
         // Fail loudly on an empty artifact (after the engine's retries) rather than
         // chaining a broken plan downstream — the usual cause is a dead/unreachable
         // orchestrator backend (spec 00 — fail clearly, don't corrupt silently).

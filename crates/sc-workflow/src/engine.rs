@@ -65,12 +65,17 @@ pub fn phase_messages(
 /// `/no_think` for this phase so the model spends tokens on the answer, not
 /// deliberation. A persistently empty artifact is left empty for the runner to
 /// reject loudly rather than chaining a broken plan downstream.
+/// `on_token` is invoked with each streamed content delta of the *successful* attempt, so the
+/// caller can render the reply live (token by token) instead of the run looking frozen while a
+/// slow phase generates. On a RETRY the earlier attempt's partial tokens were already streamed —
+/// the reply visibly restarts; the caller resets its per-phase buffer at each phase start.
 pub fn generate_phase(
     orchestrator: &dyn ModelBackend,
     phase: Phase,
     state: &WorkflowState,
     think: ThinkPolicy,
     stack: ProjectStack,
+    on_token: &mut dyn FnMut(&str),
 ) -> Artifact {
     // A transient backend error (a 503 "Loading model" while a Docker container
     // reloads, or a network blip) needs the retries to span a few SECONDS — three
@@ -94,7 +99,10 @@ pub fn generate_phase(
         // site decomposition ran out of budget while still reasoning → no JSON → empty
         // board → nothing built). Give the phases real room; the JSON phases get more.
         req.max_tokens = if phase.produces_json() { 4096 } else { 2048 };
-        match orchestrator.generate(&req) {
+        // Stream the reply so the chat panel watches it type (a slow phase used to sit frozen).
+        // Tokens flow to `on_token` during THIS attempt; the retry/empty/JSON-gate logic below is
+        // unchanged — `generate_streaming` returns the same GenerateResponse with the full content.
+        match orchestrator.generate_streaming(&req, on_token) {
             Ok(resp) => {
                 let content = resp.content.trim().to_string();
                 // A JSON phase that came back as prose-only (no parseable array) is a
@@ -158,11 +166,14 @@ fn system_for(phase: Phase, stack: ProjectStack) -> String {
              from your coverage list. The stages are 'make these tests pass'."
         }
         Phase::StageBreakdown => {
+            // This role now subsumes the old ImplementationPlan phase: the breakdown gives BOTH
+            // the ordered build sequence AND the concrete per-stage steps, so no separate
+            // implementation-planning pass is needed for a small worker model.
             "You break the work into an ordered set of small implementation stages — the concrete \
-             build sequence, foundations first. A design breakdown to review, not tests or code."
-        }
-        Phase::ImplementationPlan => {
-            "For each stage, you write the concrete, ordered plan to make its tests pass (red → green)."
+             build sequence, foundations first — AND, for each stage, the concrete steps to \
+             implement it: the file(s) it touches and the specific edits (functions/types to add \
+             or change, call sites to update), in order. A design breakdown to review, not tests \
+             or code."
         }
         Phase::WorkDecomposition => {
             "You slice the implementation into subtasks — ONE per source file — each \
@@ -232,11 +243,16 @@ fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
             // to review, not a pytest coverage array. Only the Python eval ladder gets the
             // test-first JSON below (kept byte-identical so the ladder is unaffected).
             if !matches!(stack, ProjectStack::Python) {
+                // This breakdown now SUBSUMES the old implementation-plan phase: each stage carries
+                // its concrete per-stage steps (file(s) + the ordered edits within), so a small
+                // worker model can act on it without a separate implementation-planning pass.
                 let head = "Break the work into an ORDERED set of small implementation stages — the \
                      concrete build sequence for this change. For each stage give: a short title, \
-                     the file(s) it touches (from the layout), and one or two sentences on what to \
-                     build there. Order stages so each builds on the last (foundations first, then \
-                     what depends on them).\n\n";
+                     the file(s) it touches (from the layout), and an ORDERED list of the concrete \
+                     steps to implement it — the specific functions/types to add or change and the \
+                     call sites to update — precise enough to act on without a separate planning \
+                     pass. Order stages so each builds on the last (foundations first, then what \
+                     depends on them).\n\n";
                 // The module-extraction directive is right for a NEW feature/subsystem (its core
                 // logic belongs in a new small file so big files get only a tiny hook — this is what
                 // landed the idle-city-sim lakes). But for an IN-PLACE edit (thread a parameter
@@ -264,7 +280,7 @@ fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
                 };
                 let tail = "This is a DESIGN breakdown to review, NOT tests and NOT code — do not \
                      write test files or source code. Output a short Markdown document with a \
-                     numbered list of stages.";
+                     numbered list of stages, each with its file(s) and its ordered steps.";
                 return format!("{head}{core}{tail}");
             }
             // ONE test file per SOURCE file in the layout. This 1:1 alignment is what
@@ -498,7 +514,6 @@ mod tests {
             (Phase::Architecture, "ARCH_PROSE"),
             (Phase::Layout, "LAYOUT_FILES"),
             (Phase::StageBreakdown, "STAGE_TESTS"),
-            (Phase::ImplementationPlan, "IMPL_PLAN"),
         ] {
             s.set(Artifact::draft(p, body));
             s.approve(p);
@@ -511,10 +526,6 @@ mod tests {
         assert!(
             !joined.contains("ARCH_PROSE"),
             "must drop the architecture prose"
-        );
-        assert!(
-            !joined.contains("IMPL_PLAN"),
-            "must drop the impl-plan prose"
         );
     }
 
@@ -551,7 +562,7 @@ mod tests {
     fn generate_phase_returns_a_draft() {
         let backend = MockBackend::new(["# Specs\nGoals: ship it"]);
         let s = WorkflowState::new("ship it");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
         assert_eq!(a.phase, Phase::Specs);
         assert!(a.content.contains("Goals"));
         assert!(!a.is_approved());
@@ -563,7 +574,7 @@ mod tests {
         // reasoning); the engine retries and recovers.
         let backend = MockBackend::new(["", "  ", "# Specs\nrecovered"]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
         assert!(a.content.contains("recovered"), "got: {:?}", a.content);
     }
 
@@ -573,7 +584,7 @@ mod tests {
         // that into a loud error.
         let backend = MockBackend::new(["", "", "", ""]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
         assert!(a.content.is_empty());
     }
 
@@ -617,7 +628,7 @@ mod tests {
             calls: Cell::new(0),
         };
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
         assert!(
             a.content.contains("recovered after the blip"),
             "must recover from a transient error, got: {:?}",
@@ -642,6 +653,7 @@ mod tests {
             &s,
             ThinkPolicy::default(),
             ProjectStack::Python,
+            &mut |_d| {},
         );
         assert!(
             a.content.contains("\"id\""),
@@ -655,7 +667,7 @@ mod tests {
         // A non-JSON phase (specs) is happy with prose — the JSON gate must not apply.
         let backend = MockBackend::new(["## Goals\nship a great thing"]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
         assert!(a.content.contains("Goals"));
     }
 
