@@ -16,3 +16,8 @@ sc-win-launch-*.log
 
 # Rust->Android native build output (regenerable from crates/sc-android)
 **/jniLibs/**/*.so
+
+# Local secrets: API keys (Gemini, etc.) loaded at startup by sc_model::load_dotenv. NEVER commit.
+.env
+.env.*
+!.env.example

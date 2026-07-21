@@ -72,6 +72,9 @@ pub struct Cli {
     pub base_url: String,
     pub model: String,
     pub tool_calling: ToolCallingArg,
+    /// Bearer token for the coder endpoint — set to run on a hosted provider (e.g. Gemini's
+    /// OpenAI-compat endpoint). `--key`, or the `GEMINI_API_KEY` env var. Local servers ignore it.
+    pub api_key: Option<String>,
     /// The project's test command for `run` (enables the TDD whole-suite gate).
     pub verify_command: Option<String>,
     /// Ask the planner to decompose the task before running (`run` only).
@@ -85,10 +88,14 @@ pub struct Cli {
     /// A system-prompt suffix passed to the agent — a model-quirk hook (e.g.
     /// `/no_think` for Qwen3). Auto-set from the model name unless overridden.
     pub system_suffix: Option<String>,
-    /// The orchestrator (decomposer) model for `swarm`. Defaults to `model`.
+    /// The orchestrator (decomposer/planner) model. Defaults to `model`. Point this at a Gemini
+    /// model (with `--orchestrator-url` + `--orchestrator-key`) to run Gemini as the planner.
     pub orchestrator_model: Option<String>,
-    /// The orchestrator's endpoint for `swarm`. Defaults to `base_url`.
+    /// The orchestrator's endpoint. Defaults to `base_url`.
     pub orchestrator_url: Option<String>,
+    /// Bearer token for the orchestrator (planner) endpoint — the Gemini API key when the planner
+    /// is Gemini. `--orchestrator-key`, falling back to `--key`/`GEMINI_API_KEY`.
+    pub orchestrator_key: Option<String>,
     /// Max workers running at once for `swarm` (spec 08).
     pub max_workers: usize,
     /// Per-subtask retry cap for `swarm` (spec 08 — subtask retry). Default 2.
@@ -164,6 +171,8 @@ impl Cli {
         let mut system_suffix: Option<String> = None;
         let mut orchestrator_model = None;
         let mut orchestrator_url = None;
+        let mut api_key = None;
+        let mut orchestrator_key = None;
         let mut max_workers = 2usize;
         let mut max_subtask_retries = 2usize;
         let mut frozen_paths: Vec<String> = Vec::new();
@@ -228,6 +237,12 @@ impl Cli {
                     }
                     if parsed.orchestrator_url.is_some() {
                         orchestrator_url = parsed.orchestrator_url;
+                    }
+                    if parsed.api_key.is_some() {
+                        api_key = parsed.api_key;
+                    }
+                    if parsed.orchestrator_key.is_some() {
+                        orchestrator_key = parsed.orchestrator_key;
                     }
                     if let Some(n) = parsed.max_workers {
                         max_workers = n;
@@ -296,6 +311,17 @@ impl Cli {
                 "--orchestrator" => {
                     orchestrator_model = Some(it.next().ok_or_else(|| {
                         DcError::Eval("--orchestrator requires a model name".to_string())
+                    })?);
+                }
+                "--key" => {
+                    api_key = Some(
+                        it.next()
+                            .ok_or_else(|| DcError::Eval("--key requires a token".to_string()))?,
+                    );
+                }
+                "--orchestrator-key" => {
+                    orchestrator_key = Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--orchestrator-key requires a token".to_string())
                     })?);
                 }
                 "--orchestrator-url" => {
@@ -390,11 +416,19 @@ impl Cli {
         // thinking mode (confirmed live: zero <think> tags) — so it was dead prompt text the
         // model ignored. Pass `--no-think` explicitly if you run a thinking model that needs it.
 
+        // Fall back to the conventional GEMINI_API_KEY env var when no key flag was given, so a
+        // Gemini planner/coder lights up from the environment without repeating the token on the
+        // command line.
+        let env_key = std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.trim().is_empty());
+        let api_key = api_key.or_else(|| env_key.clone());
+        let orchestrator_key = orchestrator_key.or_else(|| api_key.clone()).or(env_key);
+
         Ok(Cli {
             command: command.unwrap_or(Command::Chat),
             base_url,
             model,
             tool_calling,
+            api_key,
             verify_command,
             plan_first,
             advisor_model,
@@ -402,6 +436,7 @@ impl Cli {
             system_suffix,
             orchestrator_model,
             orchestrator_url,
+            orchestrator_key,
             max_workers,
             max_subtask_retries,
             frozen_paths,
@@ -470,7 +505,9 @@ impl Cli {
             .orchestrator_model
             .clone()
             .unwrap_or_else(|| self.model.clone());
-        OpenAiBackend::new(url, model)
+        // The planner key (Gemini's, when the planner is Gemini) — its own key, else the coder's.
+        let key = self.orchestrator_key.clone().or_else(|| self.api_key.clone());
+        apply_key(OpenAiBackend::new(url, model), &key)
     }
 
     /// Build the advisor (senior) backend, if `--advisor` was given — on its own
@@ -481,9 +518,10 @@ impl Cli {
             .advisor_url
             .clone()
             .unwrap_or_else(|| self.base_url.clone());
+        let key = self.orchestrator_key.clone().or_else(|| self.api_key.clone());
         self.advisor_model
             .as_ref()
-            .map(|m| OpenAiBackend::new(url.clone(), m.clone()))
+            .map(|m| apply_key(OpenAiBackend::new(url.clone(), m.clone()), &key))
     }
 
     /// Build the configured backend, applying the requested enforcement (spec 02).
@@ -497,11 +535,24 @@ impl Cli {
                 OpenAiBackend::llama_cpp(self.base_url.clone(), self.model.clone())
             }
         };
+        // Attach the coder API key (hosted providers like Gemini need it; local ignore it),
+        // before context detection so the `/models` probe is authenticated too.
+        let b = apply_key(b, &self.api_key);
         // Adopt the real context window the server serves the model at (e.g. 12288/slot)
         // instead of the conservative 8192 default — best-effort, falls back to the default
         // if the server doesn't advertise it. Mirrors `sc_win::config::backend()`; without
         // it the prompt budget is squeezed to 5120 even on a pool served at -c 36864.
         b.with_detected_context()
+    }
+}
+
+/// Attach `key` as a bearer token when set and non-blank; else return the backend unchanged
+/// (the local-server default). Mirrors `sc_win::config`'s helper so both front-ends decide
+/// key attachment identically.
+fn apply_key(backend: OpenAiBackend, key: &Option<String>) -> OpenAiBackend {
+    match key.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(k) => backend.with_api_key(k),
+        None => backend,
     }
 }
 
@@ -514,6 +565,10 @@ struct RunArgs {
     advisor_url: Option<String>,
     orchestrator: Option<String>,
     orchestrator_url: Option<String>,
+    /// `--key` — bearer token for the coder endpoint (e.g. the Gemini API key).
+    api_key: Option<String>,
+    /// `--orchestrator-key` — bearer token for the planner endpoint (the Gemini key).
+    orchestrator_key: Option<String>,
     max_workers: Option<usize>,
     /// `--max-retries N` — per-subtask retry cap for `swarm` (spec 08).
     max_subtask_retries: Option<usize>,
@@ -562,6 +617,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut advisor_url = None;
     let mut orchestrator = None;
     let mut orchestrator_url = None;
+    let mut api_key = None;
+    let mut orchestrator_key = None;
     let mut max_workers = None;
     let mut max_subtask_retries = None;
     let mut frozen_paths = None;
@@ -594,6 +651,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
             "--advisor-url" => advisor_url = Some(need(&mut it, "--advisor-url")?),
             "--orchestrator" => orchestrator = Some(need(&mut it, "--orchestrator")?),
             "--orchestrator-url" => orchestrator_url = Some(need(&mut it, "--orchestrator-url")?),
+            "--key" => api_key = Some(need(&mut it, "--key")?),
+            "--orchestrator-key" => orchestrator_key = Some(need(&mut it, "--orchestrator-key")?),
             "--max-workers" => {
                 max_workers = Some(
                     need(&mut it, "--max-workers")?
@@ -663,6 +722,8 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         advisor_url,
         orchestrator,
         orchestrator_url,
+        api_key,
+        orchestrator_key,
         max_workers,
         max_subtask_retries,
         frozen_paths,
@@ -838,6 +899,8 @@ OPTIONS:
                           (\"junior asks senior\", spec 02).
     --advisor-url URL     Endpoint for the advisor when it runs on a different
                           server than the coder (a swarm). [default: --base-url]
+    --key TOKEN           Bearer token for the coder endpoint (e.g. a Gemini API key
+                          for a hosted provider). Also read from GEMINI_API_KEY.
     --no-think            Append /no_think to the prompt (needed for Qwen3 models;
                           auto-applied when the model name contains 'qwen3').
     --plan                Decompose the task into a plan before running (`run`)
@@ -856,8 +919,13 @@ OPTIONS:
     --cli                 Render the swarm to the terminal (task board · workers ·
                           integration) instead of serving the web dashboard. `--json`
                           implies this and emits one NDJSON SwarmEvent per line.
-    --orchestrator MODEL  The model that decomposes/plans         [default: --model]
-    --orchestrator-url U  Endpoint for the orchestrator           [default: --base-url]
+    --orchestrator MODEL  The model that decomposes/plans (the breakdown). For Gemini,
+                          prefer the cheap/fast gemini-2.5-flash-lite. [default: --model]
+    --orchestrator-url U  Endpoint for the orchestrator. For Gemini:
+                          https://generativelanguage.googleapis.com/v1beta/openai
+                                                                  [default: --base-url]
+    --orchestrator-key T  Bearer token for the orchestrator/planner endpoint (the
+                          Gemini API key). [default: --key / GEMINI_API_KEY]
     --max-workers N       Max parallel workers                    [default: 2]
     --interactive, --gate Halt at each `plan` phase boundary for a human checkpoint:
                           approve / revise / send-back / abort (spec 09). Default is
@@ -1104,6 +1172,42 @@ mod tests {
     #[test]
     fn run_requires_a_task() {
         assert!(Cli::parse(["run"]).is_err());
+    }
+
+    #[test]
+    fn parses_gemini_planner_flags() {
+        // The Gemini-as-planner invocation: local coder, orchestrator pointed at Gemini + a key.
+        let cli = Cli::parse([
+            "run",
+            "build a todo app",
+            "--orchestrator",
+            "gemini-2.5-flash-lite",
+            "--orchestrator-url",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "--orchestrator-key",
+            "AIzaSECRET",
+        ])
+        .unwrap();
+        assert_eq!(cli.orchestrator_model.as_deref(), Some("gemini-2.5-flash-lite"));
+        assert_eq!(
+            cli.orchestrator_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
+        assert_eq!(cli.orchestrator_key.as_deref(), Some("AIzaSECRET"));
+        // The coder was NOT given a key on the command line, so it stays local (no accidental
+        // key bleed) — unless the test environment happens to export GEMINI_API_KEY, which is a
+        // legitimate fallback the parser honors.
+        if std::env::var("GEMINI_API_KEY").is_err() {
+            assert_eq!(cli.api_key, None);
+        }
+    }
+
+    #[test]
+    fn coder_key_falls_through_to_the_planner_when_no_orchestrator_key() {
+        // A single --key set on the coder also authenticates a same-provider planner.
+        let cli = Cli::parse(["run", "task", "--key", "shared-key"]).unwrap();
+        assert_eq!(cli.api_key.as_deref(), Some("shared-key"));
+        assert_eq!(cli.orchestrator_key.as_deref(), Some("shared-key"));
     }
 
     #[test]

@@ -668,15 +668,23 @@ struct App {
     /// Editable mirrors of the config for the settings panel. Seeded from
     /// `UiConfig::default()` so the boxes show the active values (and a run never
     /// reads a blank input over a good default — see [`App::default`]).
-    model_input: String,
-    url_input: String,
-    advisor_input: String,
-    advisor_url_input: String,
-    orch_model_input: String,
-    orch_url_input: String,
+    ///
+    /// Two groups now: the **connection** inputs (endpoint + key for Local and Gemini) live on
+    /// the Connections tab; the **model** inputs (one per stage) live on the Routing tab alongside
+    /// the per-stage provider toggle (which is edited straight on `cfg`, like yolo/dry-run).
+    model_input: String,   // coder model
+    orch_model_input: String, // planner model
+    advisor_input: String, // advisor model (optional)
+    // Connection endpoints + keys.
+    local_url_input: String,
+    local_key_input: String,
+    gemini_url_input: String,
+    gemini_key_input: String,
     verify_input: String,
     suffix_input: String,
     settings_open: bool,
+    /// Which settings tab is showing (Connections vs Routing).
+    settings_tab: SettingsTab,
     /// Activity rows accumulated from the event stream.
     rows: Vec<Row>,
     /// The latest single-run plan steps (right panel, agent mode).
@@ -988,14 +996,17 @@ impl Default for App {
         Self {
             // Populated by `run()` when SC_REMOTE is set; default is local-only.
             remote: None,
-            url_input: cfg.base_url.clone(),
             model_input: cfg.model.clone(),
-            advisor_input: cfg.advisor_model.clone().unwrap_or_default(),
-            advisor_url_input: cfg.advisor_url.clone().unwrap_or_default(),
             orch_model_input: cfg.orchestrator_model.clone().unwrap_or_default(),
-            orch_url_input: cfg.orchestrator_url.clone().unwrap_or_default(),
+            advisor_input: cfg.advisor_model.clone().unwrap_or_default(),
+            // Connection inputs, seeded from the two connections resolved by `UiConfig::load`.
+            local_url_input: cfg.local_conn.base_url.clone(),
+            local_key_input: cfg.local_conn.key.clone().unwrap_or_default(),
+            gemini_url_input: cfg.gemini_conn.base_url.clone(),
+            gemini_key_input: cfg.gemini_conn.key.clone().unwrap_or_default(),
             verify_input: cfg.verify_command.clone().unwrap_or_default(),
             suffix_input: cfg.system_suffix.clone().unwrap_or_default(),
+            settings_tab: SettingsTab::default(),
             cfg,
             backend_health: None,
             health_rx: None,
@@ -1083,15 +1094,33 @@ impl Default for App {
     }
 }
 
+/// Which tab of the settings modal is showing. **Connections** edits the two endpoints + keys;
+/// **Routing** picks which connection + model each pipeline stage uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SettingsTab {
+    #[default]
+    Connections,
+    Routing,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     IntentChanged(String),
-    ModelChanged(String),
-    UrlChanged(String),
-    AdvisorChanged(String),
-    AdvisorUrlChanged(String),
-    OrchModelChanged(String),
-    OrchUrlChanged(String),
+    // --- Model inputs (Routing tab) ---
+    ModelChanged(String),     // coder model
+    OrchModelChanged(String), // planner model
+    AdvisorChanged(String),   // advisor model
+    // --- Connection inputs (Connections tab) ---
+    LocalUrlChanged(String),
+    LocalKeyChanged(String),
+    GeminiUrlChanged(String),
+    GeminiKeyChanged(String),
+    // --- Per-stage routing: which connection a stage uses ---
+    CoderProviderChanged(sc_win::config::Provider),
+    PlannerProviderChanged(sc_win::config::Provider),
+    AdvisorProviderChanged(sc_win::config::Provider),
+    /// Switch the settings modal tab (Connections / Routing).
+    SettingsTabChanged(SettingsTab),
     VerifyChanged(String),
     SuffixChanged(String),
     ToggleSettings,
@@ -1375,19 +1404,42 @@ impl App {
         }
     }
 
+    /// Fold every settings-panel input into `self.cfg` and persist the connection fields to
+    /// config.json, so the current backend (coder + Gemini planner) is used AND survives a
+    /// restart. Called before any run/chat/triage that talks to a model — the single place the
+    /// input boxes become config, so the three entry points can't drift.
+    fn commit_settings(&mut self) {
+        // Models (per stage) + the endpoint-agnostic knobs.
+        self.cfg.model = self.model_input.clone();
+        self.cfg.orchestrator_model = non_empty(&self.orch_model_input);
+        self.cfg.advisor_model = non_empty(&self.advisor_input);
+        self.cfg.verify_command = non_empty(&self.verify_input);
+        self.cfg.system_suffix = non_empty(&self.suffix_input);
+        // Connections (endpoint + key each). The per-stage provider routing is already live on
+        // `cfg` (edited by the toggle handlers). A blank local url keeps the current one rather
+        // than wiping the endpoint.
+        if !self.local_url_input.trim().is_empty() {
+            self.cfg.local_conn.base_url = self.local_url_input.trim().to_string();
+        }
+        self.cfg.local_conn.key = non_empty(&self.local_key_input);
+        if !self.gemini_url_input.trim().is_empty() {
+            self.cfg.gemini_conn.base_url = self.gemini_url_input.trim().to_string();
+        }
+        self.cfg.gemini_conn.key = non_empty(&self.gemini_key_input);
+        // Flatten connections + routing into the scalar fields the backend builders read, THEN
+        // persist. Without this the run would use stale base_url/orchestrator_* from before the
+        // edit. `resolve_stages` also clears a redundant orchestrator override when planner==coder.
+        self.cfg.resolve_stages();
+        // Persist (best-effort) so the connection/routing setup survives a restart.
+        self.cfg.save_config();
+    }
+
     fn start(&mut self, kind: RunKind) {
         if self.intent.trim().is_empty() || self.session.is_some() {
             return;
         }
-        // Commit the settings inputs into the config before the run.
-        self.cfg.model = self.model_input.clone();
-        self.cfg.base_url = self.url_input.clone();
-        self.cfg.advisor_model = non_empty(&self.advisor_input);
-        self.cfg.advisor_url = non_empty(&self.advisor_url_input);
-        self.cfg.orchestrator_model = non_empty(&self.orch_model_input);
-        self.cfg.orchestrator_url = non_empty(&self.orch_url_input);
-        self.cfg.verify_command = non_empty(&self.verify_input);
-        self.cfg.system_suffix = non_empty(&self.suffix_input);
+        // Commit the settings inputs into the config (and persist them) before the run.
+        self.commit_settings();
 
         // Preflight: don't launch a run against a known-bad backend — surface the reason in the
         // activity stream instead of failing several turns in.
@@ -1636,8 +1688,7 @@ impl App {
             return;
         }
         // Commit connection settings (mirrors `start`), so a chat uses the current backend.
-        self.cfg.model = self.model_input.clone();
-        self.cfg.base_url = self.url_input.clone();
+        self.commit_settings();
         let think = self.think;
 
         // Snapshot the file open in the code view so the model answers against what the user is
@@ -1758,8 +1809,7 @@ impl App {
         ));
         sc_win::comments::save(&self.workspace_root(), &self.comments);
         // Commit connection settings so the triage/edit use the current backend.
-        self.cfg.model = self.model_input.clone();
-        self.cfg.base_url = self.url_input.clone();
+        self.commit_settings();
         // Keep the commented lines highlighted (pulsing amber) while the agent works on them,
         // so the "thinking" gap between submit and the edit landing feels active. Cleared when
         // the run/answer finishes.
@@ -1840,8 +1890,7 @@ impl App {
                         self.comments.remove(i);
                         sc_win::comments::save(&self.workspace_root(), &self.comments);
                     }
-                    self.cfg.model = self.model_input.clone();
-                    self.cfg.base_url = self.url_input.clone();
+                    self.commit_settings();
                     let req = comment.question_request(self.think);
                     self.spawn_chat("question", req);
                 }
@@ -1853,8 +1902,7 @@ impl App {
                         role: sc_win::chat::Speaker::Agent,
                         text: "→ quick fix — rewriting the selection…".to_string(),
                     });
-                    self.cfg.model = self.model_input.clone();
-                    self.cfg.base_url = self.url_input.clone();
+                    self.commit_settings();
                     let req = comment.replace_request();
                     if self.debug {
                         let joined = req
@@ -3364,16 +3412,27 @@ impl App {
         match message {
             Message::IntentChanged(s) => self.intent = s,
             Message::ModelChanged(s) => self.model_input = s,
-            Message::UrlChanged(s) => self.url_input = s,
-            Message::AdvisorChanged(s) => self.advisor_input = s,
-            Message::AdvisorUrlChanged(s) => self.advisor_url_input = s,
             Message::OrchModelChanged(s) => self.orch_model_input = s,
-            Message::OrchUrlChanged(s) => self.orch_url_input = s,
+            Message::AdvisorChanged(s) => self.advisor_input = s,
+            Message::LocalUrlChanged(s) => self.local_url_input = s,
+            Message::LocalKeyChanged(s) => self.local_key_input = s,
+            Message::GeminiUrlChanged(s) => self.gemini_url_input = s,
+            Message::GeminiKeyChanged(s) => self.gemini_key_input = s,
+            Message::CoderProviderChanged(p) => self.cfg.coder_provider = p,
+            Message::PlannerProviderChanged(p) => self.cfg.planner_provider = p,
+            Message::AdvisorProviderChanged(p) => self.cfg.advisor_provider = p,
+            Message::SettingsTabChanged(t) => self.settings_tab = t,
             Message::VerifyChanged(s) => self.verify_input = s,
             Message::SuffixChanged(s) => self.suffix_input = s,
             Message::ToggleSettings => {
                 self.open_menu = None;
+                // Closing the modal COMMITS + persists the edits (save-on-close), so a user can
+                // set up connections/routing and just close the panel without starting a run.
+                let was_open = self.settings_open;
                 self.settings_open = !self.settings_open;
+                if was_open {
+                    self.commit_settings();
+                }
             }
             Message::ToggleYolo(v) => self.cfg.yolo = v,
             Message::ToggleDryRun(v) => self.cfg.dry_run = v,
@@ -6060,31 +6119,97 @@ impl App {
         }
     }
 
-    /// The settings form body (no outer card — the modal wraps it). A scrollable column of
-    /// the connection + posture controls.
+    /// The settings form body (no outer card — the modal wraps it). A tab strip (Connections /
+    /// Routing) over a scrollable body, so endpoints+keys are set once and stages are routed
+    /// separately. The active tab is [`Self::settings_tab`].
     fn view_settings_body(&self) -> Element<'_, Message> {
-        let model = text_input("model", &self.model_input)
+        // Tab strip: two toggle buttons, the active one highlighted (reuses the stage-toggle look).
+        let tab = |label: &str, which: SettingsTab| {
+            let active = self.settings_tab == which;
+            let color = if active { FG } else { FG_MUTED };
+            button(text(label.to_string()).size(13).color(color))
+                .on_press(Message::SettingsTabChanged(which))
+                .padding([6, 14])
+                .style(if active {
+                    primary_button
+                } else {
+                    stage_toggle_button
+                })
+        };
+        let tabs = row![
+            tab("Connections", SettingsTab::Connections),
+            tab("Routing", SettingsTab::Routing),
+        ]
+        .spacing(8);
+
+        let body = match self.settings_tab {
+            SettingsTab::Connections => self.view_connections_tab(),
+            SettingsTab::Routing => self.view_routing_tab(),
+        };
+
+        column![
+            tabs,
+            scrollable(body).height(Length::Fixed(400.0))
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    /// The CONNECTIONS tab: the two endpoints (Local + Gemini), each an url + secure key. This is
+    /// where the Gemini key lives — on the Gemini connection ONLY, so it never bleeds onto the
+    /// local coder endpoint.
+    fn view_connections_tab(&self) -> Element<'_, Message> {
+        let local_url = text_input("local url (e.g. http://localhost:11435/v1)", &self.local_url_input)
+            .on_input(Message::LocalUrlChanged)
+            .padding(6)
+            .style(input_style);
+        let local_key = text_input("local api key (usually blank)", &self.local_key_input)
+            .on_input(Message::LocalKeyChanged)
+            .secure(true)
+            .padding(6)
+            .style(input_style);
+        let gemini_url = text_input("gemini url", &self.gemini_url_input)
+            .on_input(Message::GeminiUrlChanged)
+            .padding(6)
+            .style(input_style);
+        let gemini_key = text_input("gemini api key", &self.gemini_key_input)
+            .on_input(Message::GeminiKeyChanged)
+            .secure(true)
+            .padding(6)
+            .style(input_style);
+
+        column![
+            text("LOCAL  (your llama.cpp / Ollama server)")
+                .size(11)
+                .color(FG_MUTED),
+            local_url,
+            local_key,
+            text("GEMINI  (Google's OpenAI-compatible endpoint)")
+                .size(11)
+                .color(FG_MUTED),
+            gemini_url,
+            gemini_key,
+            text("The Gemini key is read from .env (GEMINI_API_KEY) if present.")
+                .size(10)
+                .color(FG_MUTED),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    /// The ROUTING tab: for each stage, pick which connection it uses + its model. Plus the
+    /// verify command and posture toggles (endpoint-agnostic behaviour).
+    fn view_routing_tab(&self) -> Element<'_, Message> {
+        let model = text_input("coder model (e.g. qwen3-coder-30b)", &self.model_input)
             .on_input(Message::ModelChanged)
             .padding(6)
             .style(input_style);
-        let url = text_input("backend url", &self.url_input)
-            .on_input(Message::UrlChanged)
-            .padding(6)
-            .style(input_style);
-        let orch_model = text_input("orchestrator model (decomposer)", &self.orch_model_input)
+        let orch_model = text_input("planner model (e.g. gemini-2.5-flash-lite)", &self.orch_model_input)
             .on_input(Message::OrchModelChanged)
             .padding(6)
             .style(input_style);
-        let orch_url = text_input("orchestrator url", &self.orch_url_input)
-            .on_input(Message::OrchUrlChanged)
-            .padding(6)
-            .style(input_style);
-        let advisor = text_input("advisor model (senior)", &self.advisor_input)
+        let advisor = text_input("advisor model (optional)", &self.advisor_input)
             .on_input(Message::AdvisorChanged)
-            .padding(6)
-            .style(input_style);
-        let advisor_url = text_input("advisor url", &self.advisor_url_input)
-            .on_input(Message::AdvisorUrlChanged)
             .padding(6)
             .style(input_style);
         let verify = text_input("verify command (optional)", &self.verify_input)
@@ -6104,32 +6229,44 @@ impl App {
             .on_toggle(Message::ToggleDryRun)
             .style(checkbox_style);
 
-        let form = column![
-            text("CODER  (does the file writing)")
-                .size(11)
-                .color(FG_MUTED),
+        column![
+            text("CODER  (does the file writing)").size(11).color(FG_MUTED),
+            provider_toggle(self.cfg.coder_provider, Message::CoderProviderChanged),
             model,
-            url,
-            text("ORCHESTRATOR  (decomposes the task — needs a reasoning model)")
-                .size(11)
-                .color(FG_MUTED),
+            text("PLANNER  (does the breakdown)").size(11).color(FG_MUTED),
+            provider_toggle(self.cfg.planner_provider, Message::PlannerProviderChanged),
             orch_model,
-            orch_url,
-            text("ADVISOR  (junior asks senior on a stall)")
-                .size(11)
-                .color(FG_MUTED),
+            text("ADVISOR  (junior asks senior on a stall)").size(11).color(FG_MUTED),
+            provider_toggle(self.cfg.advisor_provider, Message::AdvisorProviderChanged),
             advisor,
-            advisor_url,
             text("VERIFY & BEHAVIOUR").size(11).color(FG_MUTED),
             verify,
             suffix,
             yolo,
             dry,
         ]
-        .spacing(8);
-
-        scrollable(form).height(Length::Fixed(440.0)).into()
+        .spacing(8)
+        .into()
     }
+}
+
+/// A two-button segmented control choosing a [`Provider`] for one stage; the selected side is
+/// highlighted. `on_pick` turns a chosen provider into the stage's routing message.
+fn provider_toggle(
+    selected: sc_win::config::Provider,
+    on_pick: fn(sc_win::config::Provider) -> Message,
+) -> Element<'static, Message> {
+    use sc_win::config::Provider;
+    let seg = |p: Provider| {
+        let active = selected == p;
+        button(text(p.label().to_string()).size(12).color(if active { FG } else { FG_MUTED }))
+            .on_press(on_pick(p))
+            .padding([4, 12])
+            .style(if active { primary_button } else { stage_toggle_button })
+    };
+    row![seg(Provider::Local), seg(Provider::Gemini)]
+        .spacing(6)
+        .into()
 }
 
 /// Map a live `AgentEvent` to a concise chat line for the line-comment fix feed, or `None`

@@ -163,6 +163,47 @@ swapping models doesn't churn this source tree:
 - **Verify sandbox** (`docker/pyenv/`) — the pinned Python image generated code is
   tested in, referenced by name (`smart-coder-pyenv`).
 
+### Using Gemini as the planner
+
+Each pipeline stage — **coder** (execution), **planner** (breakdown), **advisor** — can
+run on a different backend. Gemini exposes an OpenAI-compatible endpoint, so no special
+backend is needed: define a connection to it and route a stage there. The common setup is
+a **local coder + Gemini planner**; you can also run the whole pipeline on Gemini.
+
+Prefer the **cheapest, fastest** Gemini tier for planning — `gemini-2.5-flash-lite`. It's
+the lowest-cost, lowest-latency model; step up to `gemini-2.5-flash` only if a plan needs
+more reasoning, and `gemini-2.5-pro` is rarely worth the cost/latency for breakdowns.
+
+- **In the desktop GUI**, settings has two tabs:
+  - **Connections** — set up your two endpoints once. **Local** (your llama.cpp/Ollama
+    url; key normally blank) and **Gemini** (url is preset; paste the API key here). The
+    Gemini key lives on the Gemini connection *only*, so it never touches the local coder.
+  - **Routing** — for each stage, a **Local / Gemini** toggle plus its model. Set CODER →
+    Local · `qwen3-coder-30b`, PLANNER → Gemini · `gemini-2.5-flash-lite`, ADVISOR as you
+    like. To run execution on Gemini too, flip CODER → Gemini and give it a Gemini model.
+
+  Changes persist to `%APPDATA%\smart-coder\config.json` when you close the panel and are
+  reused next launch. The Gemini key is also read from a root `.env` (`GEMINI_API_KEY`),
+  so if that's set you don't need to paste it at all.
+
+- **On the CLI**:
+
+  ```
+  smart-coder run "<task>" \
+    --orchestrator gemini-2.5-flash-lite \
+    --orchestrator-url https://generativelanguage.googleapis.com/v1beta/openai \
+    --orchestrator-key $GEMINI_API_KEY
+  ```
+
+  `--key` sets the coder's token (and is the planner's fallback); a bare
+  `GEMINI_API_KEY` env var (or a root `.env`) lights up both without repeating it.
+  `config.json` accepts the same fields: `orchestrator_url`, `orchestrator_model`,
+  `orchestrator_key`, and `key`.
+
+> Note: the GBNF grammar-constrained tool-calling (`--tool-calling gbnf`) is
+> llama.cpp-specific. Run a hosted coder in plain (`none`) or native function-calling
+> (`native`) mode instead.
+
 ## Running the apps
 
 - **Desktop GUI** — `cargo run -p sc-win --release` opens the vibe-coding window

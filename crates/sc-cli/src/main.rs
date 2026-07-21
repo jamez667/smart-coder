@@ -11,6 +11,10 @@ use sc_cli::{doctor_report, probe, usage, Cli, Command};
 use sc_model::{GenerateRequest, Message, ModelBackend};
 
 fn main() -> ExitCode {
+    // Load a root `.env` (if present) before parsing, so a key kept there — e.g. GEMINI_API_KEY
+    // for a Gemini planner/coder — is visible to the CLI's env fallback. Real env vars still win.
+    sc_model::load_dotenv();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = match Cli::parse(args) {
         Ok(c) => c,

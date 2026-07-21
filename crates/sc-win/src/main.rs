@@ -10,6 +10,11 @@ mod canvas;
 mod minimap;
 
 fn main() -> iced::Result {
+    // Load a root `.env` (if present) into the environment FIRST, so a key kept there — e.g.
+    // GEMINI_API_KEY for the Gemini planner — is visible to `UiConfig::load()`'s env layer.
+    // Real exported env vars still win over the file.
+    sc_model::load_dotenv();
+
     // Default the model-call transcript log into %APPDATA%\smart-coder\logs (next to config +
     // recents), unless the user already set SC_LOG_DIR or disabled logging with SC_NO_LOG.
     // sc-model writes one transcript-<ts>-<pid>.jsonl per launch there.
