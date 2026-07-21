@@ -17,10 +17,10 @@ single larger orchestrator (up to the 12B ceiling) that plans, assigns, and
 integrates their work. See [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md).
 
 The third bet: **structured, gated workflow.** Every non-trivial task moves
-through staged phases — specs → architecture → layout → test-first stage
-breakdown → implementation plan → work decomposition — with a **human checkpoint
-between each**. The agent works autonomously within a phase and stops for
-sign-off at the boundary. See [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md).
+through staged phases — specs → architecture → layout → stage breakdown → work
+decomposition — with a **human checkpoint between each**. The agent works
+autonomously within a phase and stops for sign-off at the boundary, where you
+Approve, Send-back with notes, or Abort. See [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md).
 
 The fourth bet: **tests are the control system.** Full TDD, mandatory at the unit
 level — every unit of work is defined by a failing test *before* it's
@@ -41,8 +41,22 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, 232 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, ~700 tests):
 
+- **M8 native Windows client** (`sc-win`, the vibe-coding desktop app — spec 12) —
+  an [iced](https://iced.rs) GUI over the proven core: type intent, watch the agent
+  and swarm work. It drives the full **staged workflow** end to end. **Breakdown**
+  runs the design pipeline (specs → architecture → layout → stage breakdown → work
+  decomposition) and **pauses at each phase for review**; **Build** carries the same
+  design through a **compiler-driven executor** that applies the change and loops
+  cargo-check → fix-each-diagnostic to green. Each phase **streams into the chat live**
+  (token by token) and its artifact opens in a **code editor** with tabs, a git diff
+  view, and a PR-style **review panel** — drag-select lines and comment, and those
+  comments become the **Send-back notes** that regenerate the phase. Approve /
+  Send-back / Abort live both in the plan list and in the editor header. A built-in
+  git panel (stage/unstage/discard, multi-select, commit/push/pull) and a
+  strict-sandbox integrated terminal round it out. A **phone mirror** (`sc-web` +
+  `sc-iterate`) lets a phone attach to the live desktop session over Tailscale.
 - **M7 worker swarm core** (`sc-swarm`) — the "scale out, not up" thesis (spec 08):
   a larger **orchestrator** model decomposes a task into a dependency-DAG **task
   board** of independent subtasks; a **bounded pool of tiny workers** runs the
@@ -148,6 +162,16 @@ swapping models doesn't churn this source tree:
   `SC_BASE_URL`/`SC_MODEL`), never hard-coded here.
 - **Verify sandbox** (`docker/pyenv/`) — the pinned Python image generated code is
   tested in, referenced by name (`smart-coder-pyenv`).
+
+## Running the apps
+
+- **Desktop GUI** — `cargo run -p sc-win --release` opens the vibe-coding window
+  (no CLI args; a model backend is only needed once you drive a task). Open a
+  project folder, type intent, and use **Breakdown**/**Build** on a spec to run the
+  staged workflow.
+- **CLI / TUI** — `smart-coder run "<task>"` (terminal dashboard) or
+  `smart-coder serve "<task>"` (prints a `localhost` URL for the web dashboard);
+  `smart-coder doctor` checks the backend.
 
 ## Key decisions
 
