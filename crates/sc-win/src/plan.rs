@@ -1,8 +1,8 @@
 //! The staged-workflow plan, folded from [`UiEvent::Phase`](crate::session::UiEvent)
 //! artifacts into a readable form for the plan panel — no iced types, so the "what to
 //! show" logic is host-tested. The workflow is the TDD pipeline (spec 09/11): specs →
-//! architecture → layout → stage breakdown (which WRITES THE TESTS) → implementation
-//! plan → work decomposition (the swarm's subtasks).
+//! architecture → layout → stage breakdown (which WRITES THE TESTS and carries the
+//! concrete per-stage steps) → work decomposition (the swarm's subtasks).
 
 use sc_workflow::Phase;
 
@@ -16,7 +16,7 @@ pub struct PlanStep {
     pub done: bool,
 }
 
-/// The accumulated plan across the six phases, plus the frozen tests and the parsed
+/// The accumulated plan across the five phases, plus the frozen tests and the parsed
 /// subtask goals from the final decomposition.
 #[derive(Debug, Clone)]
 pub struct Plan {
@@ -96,7 +96,7 @@ impl Plan {
             .map(|d| format!("{d}/{}", phase.openspec_filename()))
     }
 
-    /// The six steps in pipeline order.
+    /// The five steps in pipeline order.
     pub fn steps(&self) -> &[PlanStep] {
         &self.steps
     }
@@ -147,11 +147,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_has_all_six_phases_in_order_none_done() {
+    fn default_has_all_five_phases_in_order_none_done() {
         let p = Plan::default();
-        assert_eq!(p.steps().len(), 6);
+        assert_eq!(p.steps().len(), 5);
         assert_eq!(p.steps()[0].phase, Phase::Specs);
-        assert_eq!(p.steps()[5].phase, Phase::WorkDecomposition);
+        assert_eq!(p.steps()[4].phase, Phase::WorkDecomposition);
         assert!(p.steps().iter().all(|s| !s.done));
         assert!(!p.started());
     }
@@ -190,7 +190,7 @@ mod tests {
         p.apply(Phase::WorkDecomposition, json, &[], None);
         assert_eq!(p.subtasks, vec!["write the parser", "add the lexer"]);
         // And the raw artifact is still stored on the step.
-        assert!(p.steps()[5].done);
+        assert!(p.steps()[4].done);
     }
 
     #[test]

@@ -64,6 +64,12 @@ fn code_scroll_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("code-view")
 }
 
+/// A stable id for the chat thread scrollable, so we can keep it pinned to the bottom as new
+/// messages stream in (unless the user has scrolled up to read).
+fn chat_scroll_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("chat-thread")
+}
+
 /// Approx. pixel height of one rendered code line (size-13 monospace) — used to convert a
 /// clicked minimap line into a scroll offset.
 const CODE_LINE_PX: f32 = 17.0;
@@ -813,6 +819,10 @@ struct App {
     /// The in-flight assistant reply as it streams in token-by-token (the live "typing"
     /// bubble). `None` when nothing is streaming; replaced by a finished turn on completion.
     streaming: Option<String>,
+    /// Whether the chat thread auto-scrolls to the bottom as new content arrives. True by default
+    /// and re-armed when the user scrolls back to the bottom; cleared when they scroll UP to read,
+    /// so streaming replies don't yank them away from what they're looking at.
+    chat_stuck_to_bottom: bool,
     /// Debug mode: when on, every prompt sent to the model is echoed into the chat as a
     /// (dimmed, collapsible) debug turn, so you can see exactly what the agent receives.
     debug: bool,
@@ -1040,6 +1050,7 @@ impl Default for App {
             replace: None,
             iterate_from_comment: false,
             streaming: None,
+            chat_stuck_to_bottom: true,
             debug: false,
             changed_lines: std::collections::BTreeSet::new(),
             file_diff: sc_win::gitdiff::FileDiff::default(),
@@ -1131,12 +1142,18 @@ pub(crate) enum Message {
     ChatEditorAction(usize, iced::widget::text_editor::Action),
     /// Apply the Nth proposed plan-file to disk (writes README.md / TODO.md).
     ApplyFile(usize),
-    /// Apply the Nth proposed plan-file, then kick off an iterate build to implement it —
-    /// the one-click bridge from a `PLAN-<slug>.md` design doc to a real build run.
+    /// Apply the Nth proposed plan-file, then run the FULL plan→build flow (staged design +
+    /// compiler-driven build to green) — the one-click "Build" on the proposal card.
     ExecutePlan(usize),
-    /// Kick off an iterate build to implement the PLAN-*.md currently open in the code view
-    /// (already on disk — no apply needed). The button lives on the code-view header.
+    /// Apply the Nth proposed plan-file, then run the DESIGN-only staged pipeline (Breakdown):
+    /// staged phases through decomposition, gated for review, no code build.
+    BreakdownPlan(usize),
+    /// Run the DESIGN-only staged pipeline (Breakdown) on the plan open in the code view — the
+    /// staged phases through decomposition, gated for review, no code build. Header button.
     ExecuteOpenPlan,
+    /// Run the FULL plan→build flow on the plan open in the code view: staged design then the
+    /// compiler-driven executor builds it to green. Header "⚒ Build" button.
+    BuildOpenPlan,
     /// Toggle "think" mode for the next chat turn (reason vs. answer directly).
     ToggleThink(bool),
     /// Toggle debug mode: echo every prompt sent to the model into the chat.
@@ -1155,6 +1172,9 @@ pub(crate) enum Message {
     /// The code view was scrolled — carries the viewport so the minimap can draw a "you are here"
     /// box tracking the visible slice of the file.
     CodeScrolled(scrollable::Viewport),
+    /// The chat thread was scrolled — carries the viewport so we can tell whether the user is at
+    /// the bottom (keep auto-scrolling) or has scrolled up to read (stop yanking them down).
+    ChatScrolled(scrollable::Viewport),
     /// Cancel the in-flight run/fix (stops the agent at its next turn; reverts partial edits).
     CancelRun,
     /// Cancel the in-flight chat/plan turn (interrupts the streaming model call).
@@ -2214,6 +2234,28 @@ impl App {
         self.start_staged_build_with(plan_task(&pf.name));
     }
 
+    /// Apply the Nth proposed plan-file, then run the DESIGN-only staged pipeline (Breakdown):
+    /// the staged phases through decomposition, gated for review, WITHOUT building code. Sibling
+    /// of [`Self::execute_plan`] (which continues into the build). Same guards + apply-first.
+    fn breakdown_plan(&mut self, i: usize) {
+        let Some(pf) = self.proposed_files.get(i).cloned() else {
+            return;
+        };
+        if self.session.is_some() {
+            return;
+        }
+        if self.picked_workspace.is_none() {
+            self.chat_turns.push(sc_win::chat::Turn {
+                role: sc_win::chat::Speaker::Agent,
+                text: "⚠ Open a project folder first — the breakdown designs against it."
+                    .to_string(),
+            });
+            return;
+        }
+        self.apply_proposed_file(i);
+        self.start_plan_with(plan_task(&pf.name));
+    }
+
     /// Kick off an iterate build to implement the `PLAN-*.md` open in the code view. Unlike
     /// [`Self::execute_plan`], the file is already on disk (opened from the tree), so there's
     /// nothing to apply — just point an iterate run at it. Same guards: needs an open project
@@ -2234,6 +2276,27 @@ impl App {
             return;
         }
         self.start_plan_with(plan_task(&rel));
+    }
+
+    /// Build the plan open in the code view: the full staged design → compiler-driven build to
+    /// green (`RunKind::StagedBuild`). Sibling of [`Self::execute_open_plan`] (which stops at the
+    /// design breakdown); the file is already on disk, so nothing to apply. Same guards.
+    fn build_open_plan(&mut self) {
+        let Some(rel) = self.selected_file.clone() else {
+            return;
+        };
+        if !is_feature_plan(&rel) || self.session.is_some() {
+            return;
+        }
+        if self.picked_workspace.is_none() {
+            self.chat_turns.push(sc_win::chat::Turn {
+                role: sc_win::chat::Speaker::Agent,
+                text: "⚠ Open a project folder first — building a plan builds into it."
+                    .to_string(),
+            });
+            return;
+        }
+        self.start_staged_build_with(plan_task(&rel));
     }
 
     /// Write the Nth proposed plan-file to disk (README.md / TODO.md), then refresh the
@@ -2300,6 +2363,31 @@ impl App {
         self.refresh_changed_lines();
     }
 
+    /// Close the CODE-panel tab for `path` (no-op if it isn't open). If it was the active tab,
+    /// a neighbour becomes active (see `tab_after_close`); if none remain, the panel clears.
+    /// Called by the ✕ button and when a file is deleted/discarded out from under it — a tab on
+    /// a file that no longer exists is dead weight.
+    fn close_tab(&mut self, path: &str) {
+        if let Some(i) = self.open_tabs.iter().position(|p| p == path) {
+            let was_active = self.selected_file.as_deref() == Some(path);
+            self.open_tabs.remove(i);
+            // Only the active tab closing changes what's shown; closing a background tab leaves
+            // the active file alone.
+            if was_active {
+                match tab_after_close(i, self.open_tabs.len()) {
+                    Some(idx) => {
+                        let next = self.open_tabs[idx].clone();
+                        self.select_file(next);
+                    }
+                    None => {
+                        self.selected_file = None;
+                        self.code = None;
+                    }
+                }
+            }
+        }
+    }
+
     /// Re-read the currently selected file from disk (after the agent edited it), so the
     /// code panel reflects the latest bytes — and refresh which lines differ from HEAD.
     fn reload_selected(&mut self) {
@@ -2348,6 +2436,38 @@ impl App {
     /// line is ~`CODE_LINE_PX` tall; back off by half the visible height so the target lands
     /// centered (falls back to a small top offset before the first scroll gives us a real
     /// viewport height). Shared by the minimap jump and the git-tab "open at first change".
+    /// Commit the in-flight streamed reply (`self.streaming`) as a finished agent turn, then clear
+    /// the live bubble. A no-op when nothing is streaming. Used wherever a stream ENDS (the next
+    /// phase header, a gate decision, run completion) so the streamed text sticks in the thread
+    /// instead of vanishing with the bubble. Strips any hidden `<think>` block, matching what the
+    /// live bubble showed via `visible_so_far`.
+    fn commit_streaming_turn(&mut self) {
+        if let Some(buf) = self.streaming.take() {
+            let visible = sc_win::chat::visible_so_far(&buf);
+            if !visible.trim().is_empty() {
+                self.chat_turns.push(sc_win::chat::Turn {
+                    role: sc_win::chat::Speaker::Agent,
+                    text: visible,
+                });
+            }
+        }
+    }
+
+    /// Keep the chat thread pinned to the bottom as content streams in — `Task::none` unless
+    /// auto-scroll is armed (the user is at the bottom, not reading back). `snap_to` with a
+    /// relative y of 1.0 jumps to the end; it's cheap and idempotent when already there, so
+    /// running it every tick is fine. Disarmed by `ChatScrolled` when the user scrolls up.
+    fn chat_autoscroll_task(&self) -> Task<Message> {
+        if self.chat_stuck_to_bottom {
+            iced::widget::operation::snap_to(
+                chat_scroll_id(),
+                iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+            )
+        } else {
+            Task::none()
+        }
+    }
+
     fn scroll_code_to_line(&self, line: usize) -> Task<Message> {
         let center = line as f32 * CODE_LINE_PX;
         // `code_view_h` is 0 until the view's first scroll event; fall back to a typical editor
@@ -2457,6 +2577,9 @@ impl App {
     ///    output folder" (you're already in your own repo).
     ///  • FROM-SCRATCH build → the "N files built" summary + open-folder, as before.
     fn finish_run(&mut self, ok: bool, summary: &str) {
+        // Commit the final phase's streamed reply as a turn — the run ending is the last chance;
+        // nothing after it would flush the live bubble, so its content would otherwise vanish.
+        self.commit_streaming_turn();
         // Surface the outcome: jump to the Build tab when a run ends.
         self.bottom_tab = BottomTab::Build;
         // The agent's done working the selection — drop the amber "working" highlight (the
@@ -3003,6 +3126,36 @@ impl App {
             }
             match ev {
                 UiEvent::Agent(e) => {
+                    // A staged run streams its per-phase prompt + reply into the chat thread as
+                    // ChatMessage/ChatDelta (so a slow phase reads as alive, not frozen). Fold them
+                    // the same way `pump_chat` folds a live chat turn: a ChatMessage is a terminal
+                    // turn, a ChatDelta grows the live "typing" bubble. (The regular agent/iterate
+                    // flow uses the ChatEvent path in `pump_chat`; the session's staged run has no
+                    // ChatSession, so it routes through UiEvent::Agent here.)
+                    if let sc_core::AgentEvent::ChatMessage { role, text } = &e {
+                        // COMMIT any in-flight streamed reply as a finished turn before this new
+                        // message — otherwise the streamed phase reply (which only lived in the
+                        // transient `streaming` bubble) is thrown away when the NEXT phase's header
+                        // arrives, and the chat shows headers with no content (the bug: only the
+                        // last phase's reply survived).
+                        self.commit_streaming_turn();
+                        let speaker = match role.as_str() {
+                            "you" => sc_win::chat::Speaker::You,
+                            _ => sc_win::chat::Speaker::Agent,
+                        };
+                        self.chat_turns.push(sc_win::chat::Turn {
+                            role: speaker,
+                            text: text.clone(),
+                        });
+                        continue;
+                    }
+                    if let sc_core::AgentEvent::ChatDelta { cumulative } = &e {
+                        // Grow the live bubble with the full cumulative reply so far. The view
+                        // renders `self.streaming` whenever it's Some, so this types on screen; the
+                        // next phase's header ChatMessage finalizes it (no duplicate terminal turn).
+                        self.streaming = Some(cumulative.clone());
+                        continue;
+                    }
                     // Live "watch it type": as the model streams a write/edit, preview the
                     // growing file content in the code view, word by word, before it lands.
                     if let sc_core::AgentEvent::ContentDelta { cumulative, .. } = &e {
@@ -3180,7 +3333,27 @@ impl App {
     /// Answer the oldest pending workflow gate with `d`.
     fn answer_gate(&mut self, d: Decision) {
         if matches!(self.gatebar.first(), Some(Gatebar::Gate { .. })) {
-            if let Gatebar::Gate { reply, .. } = self.gatebar.remove(0) {
+            if let Gatebar::Gate { phase, reply, .. } = self.gatebar.remove(0) {
+                // Narrate the gate DECISION into the chat thread, so the staged run's back-and-forth
+                // (prompt → streamed reply → decision) reads as a complete conversation. The session
+                // can't see the decision itself — it's resolved here in the app over the gate's
+                // private reply channel — so this is where it becomes a visible turn.
+                let note = match &d {
+                    Decision::Approve => format!("✓ {} approved", phase.title()),
+                    Decision::Revise => format!("✎ {} revised", phase.title()),
+                    Decision::SendBack { target, notes } => match notes {
+                        Some(n) => format!("↩ sent {} back to {} — {n}", phase.title(), target.title()),
+                        None => format!("↩ sent {} back to {}", phase.title(), target.title()),
+                    },
+                    Decision::Abort => format!("■ aborted at {}", phase.title()),
+                };
+                // Commit the phase's streamed reply as a turn, THEN log the decision after it — so
+                // the gated phase's content sticks in the thread instead of vanishing.
+                self.commit_streaming_turn();
+                self.chat_turns.push(sc_win::chat::Turn {
+                    role: sc_win::chat::Speaker::You,
+                    text: note,
+                });
                 let _ = reply.send(d);
             }
             self.sendback_notes.clear();
@@ -3214,7 +3387,9 @@ impl App {
                 self.pump();
                 // Drive the live code-view refresh OFF the UI thread (returns Task::none unless a
                 // reload is due). This is the fix for the Execute-plan freeze.
-                return self.live_reload_task();
+                // Also keep the chat pinned to the bottom as content streams in (unless the user
+                // scrolled up) — batched so both run this tick.
+                return Task::batch([self.live_reload_task(), self.chat_autoscroll_task()]);
             }
             Message::HealthTick => self.tick_health_probe(),
             Message::LiveViewReloaded(result) => {
@@ -3259,26 +3434,7 @@ impl App {
                 self.follow_agent = false;
                 self.select_file(path);
             }
-            Message::CloseTab(path) => {
-                if let Some(i) = self.open_tabs.iter().position(|p| p == &path) {
-                    let was_active = self.selected_file.as_deref() == Some(path.as_str());
-                    self.open_tabs.remove(i);
-                    // Only the active tab closing changes what's shown; closing a background tab
-                    // leaves the active file alone.
-                    if was_active {
-                        match tab_after_close(i, self.open_tabs.len()) {
-                            Some(idx) => {
-                                let next = self.open_tabs[idx].clone();
-                                self.select_file(next);
-                            }
-                            None => {
-                                self.selected_file = None;
-                                self.code = None;
-                            }
-                        }
-                    }
-                }
-            }
+            Message::CloseTab(path) => self.close_tab(&path),
             Message::ModifiersChanged(m) => {
                 // Cache the held modifiers so the next git-row click can tell single- from
                 // ctrl-toggle from shift-range selection (button presses carry no modifiers).
@@ -3375,7 +3531,9 @@ impl App {
             }
             Message::ApplyFile(i) => self.apply_proposed_file(i),
             Message::ExecutePlan(i) => self.execute_plan(i),
+            Message::BreakdownPlan(i) => self.breakdown_plan(i),
             Message::ExecuteOpenPlan => self.execute_open_plan(),
+            Message::BuildOpenPlan => self.build_open_plan(),
             Message::ToggleThink(v) => self.think = v,
             Message::ToggleDebug(v) => self.debug = v,
             Message::UndoLastChange => self.undo_last_change(),
@@ -3400,6 +3558,16 @@ impl App {
                 self.code_scroll_y = vp.absolute_offset().y;
                 let height = (view_h / content_h).clamp(0.0, 1.0);
                 self.code_viewport = Some((top * (1.0 - height), height));
+            }
+            Message::ChatScrolled(vp) => {
+                // Arm auto-scroll only when the user is at (or within a line of) the bottom; scrolling
+                // UP disarms it so a streaming reply doesn't yank them back down while they read. The
+                // last few px of tolerance keeps it "stuck" through the tiny jitter as content grows.
+                let content_h = vp.content_bounds().height;
+                let view_h = vp.bounds().height;
+                let bottom = (content_h - view_h).max(0.0);
+                let at_bottom = bottom - vp.absolute_offset().y <= 8.0;
+                self.chat_stuck_to_bottom = at_bottom;
             }
             Message::CancelRun => {
                 if let Some(s) = &self.session {
@@ -3524,7 +3692,20 @@ impl App {
                     self.run_git(&args);
                 }
                 self.refresh_git_view();
-                // If the file on screen was discarded, reload it to show reverted content.
+                // Close tabs for files the discard REMOVED from disk (deleting an untracked file
+                // with `clean -f`) — a tab on a file that no longer exists is dead weight. Files
+                // that were merely reverted still exist, so their tabs stay (reloaded below).
+                let root = self.workspace_root();
+                let gone: Vec<String> = targets
+                    .iter()
+                    .filter(|p| !root.join(p).exists())
+                    .cloned()
+                    .collect();
+                for p in &gone {
+                    self.close_tab(p);
+                }
+                // If the file still on screen was reverted (not deleted), reload it to show the
+                // reverted content.
                 if self
                     .selected_file
                     .as_ref()
@@ -4680,21 +4861,53 @@ impl App {
                 .style(tree_button);
                 strip = strip.push(row![label, close].spacing(0).align_y(iced::Alignment::Center));
             }
-            // Follow/pinned hint at the left, so it isn't lost from the old header.
-            let hint = text(if self.follow_agent { "following" } else { "pinned" })
-                .size(11)
-                .color(FG_MUTED);
             // The strip scrolls horizontally so many open files don't blow out the panel width.
             let scroller = scrollable(strip).direction(scrollable::Direction::Horizontal(
                 scrollable::Scrollbar::new().width(2).scroller_width(2),
             ));
-            let mut bar = row![hint, scroller, Space::new().width(Fill)]
+            let mut bar = row![scroller, Space::new().width(Fill)]
                 .spacing(8)
                 .align_y(iced::Alignment::Center);
-            if is_open_plan && self.session.is_none() {
+            // If the file being viewed IS the phase currently at a gate, put its Approve / Send
+            // back / Abort controls right here in the editor header — so you review the artifact
+            // and act on it in the same place (Send back harvests the line-comments on this file
+            // as the revision notes). This mirrors the master-list gate row; whichever you click
+            // answers the same gate.
+            let viewing_gated_phase = self.gating_phase().is_some_and(|p| {
+                self.plan.path_for(p).as_deref() == self.selected_file.as_deref()
+            });
+            if viewing_gated_phase {
                 bar = bar.push(
-                    button(text("⚒ Execute plan").size(12))
+                    button(text("✓ Approve").size(12))
+                        .on_press(Message::GateApprove)
+                        .padding([3, 10])
+                        .style(primary_button),
+                );
+                bar = bar.push(
+                    button(text("↩ Send back").size(12))
+                        .on_press(Message::GateSendBack)
+                        .padding([3, 10])
+                        .style(menu_item_style),
+                );
+                bar = bar.push(
+                    button(text("■ Abort").size(12))
+                        .on_press(Message::GateAbort)
+                        .padding([3, 10])
+                        .style(menu_item_style),
+                );
+            } else if is_open_plan && self.session.is_none() {
+                // Two actions on an open plan: Breakdown runs the staged DESIGN pipeline and stops
+                // for review (no code written); Build runs the whole thing through to a green
+                // compile. Breakdown first — it's the review-then-build path.
+                bar = bar.push(
+                    button(text("☷ Breakdown").size(12))
                         .on_press(Message::ExecuteOpenPlan)
+                        .padding([3, 10])
+                        .style(menu_item_style),
+                );
+                bar = bar.push(
+                    button(text("⚒ Build").size(12))
+                        .on_press(Message::BuildOpenPlan)
                         .padding([3, 10])
                         .style(primary_button),
                 );
@@ -5301,8 +5514,10 @@ impl App {
             thread = thread.push(self.view_proposed_command(cmd));
         }
         // The live "typing" bubble while a reply streams in: show the growing text (with any
-        // <think> block hidden), or a thinking cue before the first token arrives.
-        if self.chat_session.is_some() {
+        // <think> block hidden), or a thinking cue before the first token arrives. Shown for a
+        // chat/plan turn (a ChatSession) AND for a staged run streaming phases through `streaming`
+        // (no ChatSession there — the session emits ChatDelta over UiEvent::Agent).
+        if self.chat_session.is_some() || self.streaming.is_some() {
             let live = self
                 .streaming
                 .as_deref()
@@ -5326,7 +5541,13 @@ impl App {
         // The thread scrolls inside its own padding; the composer below spans the panel edge
         // to edge (its divider + input reach the left/right/bottom), so there's no gutter
         // around the input. Hence the panel container itself is unpadded.
-        let thread = container(scrollable(thread).height(Fill)).padding(PAD);
+        let thread = container(
+            scrollable(thread)
+                .id(chat_scroll_id())
+                .on_scroll(Message::ChatScrolled)
+                .height(Fill),
+        )
+        .padding(PAD);
 
         let composer = self.view_composer();
         // The outer column must be Fill-width, else its Fill children (incl. the composer's
@@ -5455,14 +5676,19 @@ impl App {
             .on_press(Message::ApplyFile(i))
             .padding([5, 12])
             .style(primary_button);
-        // A feature plan (PLAN-<slug>.md) gets a one-click build: apply it, then iterate the
-        // project to implement it. README/TODO edits aren't buildable, so they show Apply only.
+        // A feature plan (PLAN-<slug>.md) gets two one-click actions (both apply it to disk
+        // first): Breakdown runs the staged DESIGN pipeline and stops for review; Build runs the
+        // whole thing through to a green compile. README/TODO edits aren't buildable → Apply only.
         let actions: Element<'_, Message> = if is_feature_plan(&pf.name) {
-            let execute = button(text("⚒ Execute plan").size(13))
+            let breakdown = button(text("☷ Breakdown").size(13))
+                .on_press(Message::BreakdownPlan(i))
+                .padding([5, 12])
+                .style(menu_item_style);
+            let build = button(text("⚒ Build").size(13))
                 .on_press(Message::ExecutePlan(i))
                 .padding([5, 12])
                 .style(primary_button);
-            row![apply, execute].spacing(8).into()
+            row![apply, breakdown, build].spacing(8).into()
         } else {
             apply.into()
         };

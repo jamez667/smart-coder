@@ -107,7 +107,7 @@ impl Session {
                 run_sequential_build(cfg, task, workspace, ev_tx, pending_tx)
             }
             RunKind::Iterate => run_iterate(cfg, task, workspace, ev_tx, pending_tx, cancel_worker),
-            RunKind::Plan => run_plan(cfg, task, workspace, ev_tx),
+            RunKind::Plan => run_plan(cfg, task, workspace, ev_tx, pending_tx),
             RunKind::StagedBuild => {
                 run_staged_build(cfg, task, workspace, ev_tx, pending_tx, cancel_worker)
             }
@@ -337,21 +337,64 @@ fn run_swarm(
 /// tests, no decomposition, no build — the user reads specs → architecture → layout →
 /// breakdown and kicks off the build separately. The plan doc the user is executing rides in
 /// as the task, so every phase grounds on it.
-fn run_plan(cfg: UiConfig, task: String, workspace: PathBuf, ev_tx: Sender<UiEvent>) {
+fn run_plan(
+    cfg: UiConfig,
+    task: String,
+    workspace: PathBuf,
+    ev_tx: Sender<UiEvent>,
+    pending_tx: Sender<Pending>,
+) {
     let orchestrator = cfg.orchestrator();
     let worker = cfg.backend();
+    // Human-in-the-loop: pause at each design phase for Approve/Send-back via the gatebar/master
+    // list — a Breakdown is a REVIEW pass, so it must gate exactly like a staged build (it just
+    // stops before the code build). `AutoApprove` would barrel through with nothing to approve.
+    let gate = ChannelGate::new(pending_tx);
+
+    // Land the artifacts in the spec's OpenSpec dir when the task references `specs/<slug>/spec.md`,
+    // so each phase file (architecture.md, layout.md, …) opens in the code view for review and can
+    // carry line-comments for send-back. Falls back to `.smart-coder/plan/` (numbered) otherwise.
+    let artifact_dir = spec_artifact_dir(&task, &workspace);
+    let artifact_dir_rel = artifact_dir.as_ref().and_then(|d| {
+        d.strip_prefix(&workspace)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+    });
 
     let phase_tx = ev_tx.clone();
+    let phase_dir = artifact_dir_rel.clone();
     let on_phase = move |phase: sc_workflow::Phase, content: &str| {
         let _ = phase_tx.send(UiEvent::Phase {
             phase,
             content: content.to_string(),
             tests_written: Vec::new(),
-            dir: None, // plan-only run writes to .smart-coder/plan/ — no OpenSpec dir to open
+            dir: phase_dir.clone(),
         });
     };
 
-    let outcome = match sc_workflow::run_workflow_moded(
+    // Stream each phase's generation LIVE into the chat thread (same as `run_staged_build`), so a
+    // Breakdown run reads as alive token-by-token instead of frozen. A "you"-side header per phase,
+    // then the reply grows as ChatDelta. (This is why `run_plan` uses `run_workflow_moded_to` with
+    // an explicit token callback rather than the no-op `run_workflow_moded` delegator.)
+    let chat_tx = ev_tx.clone();
+    let mut cumulative = String::new();
+    let mut last_phase: Option<sc_workflow::Phase> = None;
+    let mut on_token = move |phase: sc_workflow::Phase, delta: &str| {
+        if last_phase != Some(phase) {
+            cumulative.clear();
+            last_phase = Some(phase);
+            let _ = chat_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatMessage {
+                role: "you".into(),
+                text: format!("▶ {} — generating…", phase.title()),
+            }));
+        }
+        cumulative.push_str(delta);
+        let _ = chat_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatDelta {
+            cumulative: cumulative.clone(),
+        }));
+    };
+
+    let outcome = match sc_workflow::run_workflow_moded_to(
         &orchestrator,
         &worker,
         &task,
@@ -359,7 +402,10 @@ fn run_plan(cfg: UiConfig, task: String, workspace: PathBuf, ev_tx: Sender<UiEve
         sc_workflow::ThinkPolicy::default(),
         sc_workflow::WorkflowMode::plan_only(),
         &on_phase,
-        &sc_workflow::AutoApprove,
+        &gate,
+        artifact_dir.as_deref(),
+        artifact_dir.is_some(), // OpenSpec filenames when writing into specs/<slug>/
+        &mut on_token,
     ) {
         Ok(o) => o,
         Err(e) => {
@@ -368,12 +414,23 @@ fn run_plan(cfg: UiConfig, task: String, workspace: PathBuf, ev_tx: Sender<UiEve
         }
     };
 
+    // Aborted at a gate → stop; keep the approved design.
+    if outcome.aborted {
+        let _ = ev_tx.send(UiEvent::Done {
+            ok: true,
+            summary: "stopped at a checkpoint — approved design kept".to_string(),
+        });
+        return;
+    }
+
     let phases = outcome.state.approved().len();
+    let where_ = artifact_dir_rel
+        .clone()
+        .unwrap_or_else(|| ".smart-coder/plan/".to_string());
     let _ = ev_tx.send(UiEvent::Done {
         ok: true,
         summary: format!(
-            "plan ready — {phases} design phase(s) written to .smart-coder/plan/. \
-             Review the breakdown, then build."
+            "plan ready — {phases} design phase(s) in {where_}. Review the breakdown, then build."
         ),
     });
 }
@@ -434,6 +491,35 @@ fn run_staged_build(
         });
     };
 
+    // Stream the model's per-phase generation LIVE into the chat thread, so a staged run reads as
+    // alive (token by token) instead of sitting frozen while a slow phase generates. For each
+    // phase we emit a "you"-side header the moment its first token arrives, then grow the reply as
+    // ChatDelta (the FULL cumulative text so far — the app renders the last delta as the live
+    // bubble). The design artifacts still stream to the PLAN panel via `on_phase`; this is the
+    // separate chat back-and-forth the user asked to see.
+    let chat_tx = ev_tx.clone();
+    let mut cumulative = String::new();
+    let mut last_phase: Option<sc_workflow::Phase> = None;
+    let mut on_token = move |phase: sc_workflow::Phase, delta: &str| {
+        // A new phase: finalize nothing here (the last ChatDelta already carries the full reply —
+        // see below), just reset the buffer and post the prompt-side header for the new phase.
+        if last_phase != Some(phase) {
+            cumulative.clear();
+            last_phase = Some(phase);
+            let _ = chat_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatMessage {
+                role: "you".into(),
+                text: format!("▶ {} — generating…", phase.title()),
+            }));
+        }
+        cumulative.push_str(delta);
+        // Emit the growing reply. The app folds ChatDelta into its live "typing" bubble; the final
+        // delta of a phase leaves the full reply on screen, so no terminal ChatMessage is needed
+        // (a terminal message would duplicate the text). The next phase's header ends this turn.
+        let _ = chat_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatDelta {
+            cumulative: cumulative.clone(),
+        }));
+    };
+
     // 1) Design pipeline through decomposition (no frozen tests).
     let mode = sc_workflow::WorkflowMode {
         skip_tests: true,
@@ -450,6 +536,7 @@ fn run_staged_build(
         &gate,
         artifact_dir.as_deref(),
         artifact_dir.is_some(), // OpenSpec filenames when writing into specs/<slug>/
+        &mut on_token,
     ) {
         Ok(o) => o,
         Err(e) => {
