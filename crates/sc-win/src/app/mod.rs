@@ -607,7 +607,7 @@ pub fn run() -> iced::Result {
         // The taskbar/title-bar icon of the RUNNING window is set here at runtime — the
         // exe's embedded icon only governs how Explorer shows the file, not the live window.
         icon: iced::window::icon::from_file_data(
-            include_bytes!("../../../assets/logo/sc-logo-256.png"),
+            include_bytes!("../../../../assets/logo/sc-logo-256.png"),
             None, // guess the format from the PNG header
         )
         .ok(),
