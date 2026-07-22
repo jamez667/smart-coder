@@ -48,8 +48,27 @@ blanket allow.
 The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), so your
 local `cargo clippy` uses the exact same compiler and lint set as CI — "passes
 locally" means "passes CI". CI runs the same four gates via
-[`.woodpecker.yml`](.woodpecker.yml) (self-hosted Woodpecker) on every push and
-PR to `main`.
+[`.woodpecker/ci.yml`](.woodpecker/ci.yml) (self-hosted Woodpecker) on every push
+and PR to `main`.
+
+## Cutting a release
+
+Releases are built and published by [`.woodpecker/release.yml`](.woodpecker/release.yml)
+when a version tag is pushed:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+That builds the `sc-win` desktop client, packages it as
+`sc-win-<tag>-linux-x86_64.tar.gz`, and publishes it as a GitHub Release asset.
+Only the **3 newest** releases are kept — older ones (and their tags) are pruned
+automatically to save space. Currently Linux-only; the binary is dynamically
+linked, so its runtime library deps are listed in the release's `README.txt`.
+
+The release pipeline needs a Woodpecker repo secret named `github_token` (a
+GitHub token with `contents: write` on this repo).
 
 ## Guidelines
 

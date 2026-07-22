@@ -1,0 +1,90 @@
+# Release pipeline — builds the sc-win desktop client and publishes it to GitHub
+# Releases. Fires ONLY when a version tag is pushed:
+#
+#     git tag v0.1.0
+#     git push origin v0.1.0
+#
+# Currently Linux-only (the iced/wgpu GUI is hard to cross-compile to Windows
+# from a Linux agent; a Windows build waits for a Windows runner). The binary is
+# dynamically linked against the X11/Wayland/font libs installed below, so a user
+# running it needs those libraries present (documented in the release notes).
+#
+# REQUIRED SECRET: add a Woodpecker repo secret named `github_token` — a GitHub
+# token with `contents: write` on this repo (fine-grained PAT scoped to the repo,
+# or a classic token with the `repo` scope). It authenticates the `gh` release +
+# prune calls below. Without it this pipeline fails at the publish step.
+
+when:
+  - event: tag
+    ref: refs/tags/v*
+
+steps:
+  - name: release-linux
+    image: rust:1.97.1-bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+    secrets:
+      - github_token
+    commands:
+      # Build deps for the GUI crate, plus git/gh for publishing.
+      - apt-get update
+      - >-
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+        pkg-config git curl ca-certificates
+        libx11-dev libxcb1-dev libxrandr-dev libxi-dev
+        libxkbcommon-dev libwayland-dev
+        libfontconfig1-dev libfreetype6-dev
+      # Install the GitHub CLI (from GitHub's apt repo).
+      - >-
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+      - >-
+        echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]
+        https://cli.github.com/packages stable main"
+        > /etc/apt/sources.list.d/github-cli.list
+      - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
+
+      # Build the release binary and strip it (44MB unstripped -> ~1/2 the size).
+      - cargo build --release -p sc-win
+      - strip target/release/sc-win
+
+      # Package: the binary + LICENSE + a short runtime-deps note.
+      - export TAG="${CI_COMMIT_TAG}"
+      - export PKG="sc-win-${TAG}-linux-x86_64"
+      - mkdir -p "dist/${PKG}"
+      - cp target/release/sc-win "dist/${PKG}/"
+      - cp LICENSE "dist/${PKG}/"
+      - >-
+        printf '%s\n'
+        'smart-coder desktop client (sc-win), Linux x86_64.'
+        'Run: ./sc-win'
+        'Needs these shared libraries installed (Debian/Ubuntu names):'
+        '  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0'
+        '  libwayland-client0 libwayland-cursor0 libwayland-egl1'
+        '  libfontconfig1 libfreetype6'
+        > "dist/${PKG}/README.txt"
+      - tar -czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+
+      # Publish to GitHub Releases (create if missing; the tag already exists).
+      - export GH_TOKEN="$GITHUB_TOKEN"
+      - >-
+        gh release create "${TAG}"
+        "dist/${PKG}.tar.gz"
+        --repo "${CI_REPO}"
+        --title "${TAG}"
+        --generate-notes
+        || gh release upload "${TAG}" "dist/${PKG}.tar.gz" --repo "${CI_REPO}" --clobber
+
+      # Retention: keep only the 3 newest releases. Delete older releases AND
+      # their tags so old assets don't accumulate and eat disk. `--yes` also
+      # removes the git tag for each deleted release.
+      - >-
+        gh release list --repo "${CI_REPO}" --limit 100
+        --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName'
+        > old_releases.txt
+      - >-
+        while read -r old; do
+          [ -n "$old" ] || continue;
+          echo "pruning old release $old";
+          gh release delete "$old" --repo "${CI_REPO}" --yes --cleanup-tag;
+        done < old_releases.txt
