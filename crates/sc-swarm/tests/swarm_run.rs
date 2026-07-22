@@ -156,6 +156,7 @@ fn decomposes_runs_in_dependency_order_and_integrates_all() {
 /// `partial_fix_that_leaves_the_suite_red_is_not_reported_done` but proves recovery
 /// rather than just honest failure.
 #[test]
+#[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
 fn an_incomplete_subtask_is_retried_with_feedback_until_its_tests_pass() {
     let ws = temp("retry-recover");
     std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
@@ -238,6 +239,7 @@ fn an_incomplete_subtask_is_retried_with_feedback_until_its_tests_pass() {
 /// a partial fix integrates, the scoped check is skipped, and the run stops honestly
 /// on the final whole-suite verify (no retry attempted). Guards the `0` escape hatch.
 #[test]
+#[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
 fn zero_retries_restores_no_retry_behaviour() {
     let ws = temp("retry-zero");
     std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
@@ -292,6 +294,7 @@ fn zero_retries_restores_no_retry_behaviour() {
 /// AdvisorConsulted event fires exactly once, the advice reaches the worker, and the
 /// subtask recovers.
 #[test]
+#[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
 fn advisor_is_consulted_before_the_final_retry() {
     let ws = temp("advisor");
     std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
@@ -382,6 +385,7 @@ fn advisor_is_consulted_before_the_final_retry() {
 /// clean "no senior to ask", mirroring sc_core::advisor). Guards that escalation is
 /// strictly optional.
 #[test]
+#[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
 fn no_advisor_means_no_consult_but_retry_still_runs() {
     let ws = temp("no-advisor");
     std::fs::write(ws.join("target.py").as_path(), "X = 0\n").unwrap();
@@ -428,6 +432,7 @@ fn no_advisor_means_no_consult_but_retry_still_runs() {
 /// over a red suite, violating the honest-stop-line (spec 06). The run must report
 /// `all_done == false` when the final suite isn't green.
 #[test]
+#[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
 fn partial_fix_that_leaves_the_suite_red_is_not_reported_done() {
     let ws = temp("partial");
     // The target file and a frozen pytest that demands X == 2.

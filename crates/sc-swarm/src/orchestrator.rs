@@ -874,6 +874,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
     fn a_merge_that_breaks_the_suite_is_rejected_and_reverted() {
         let ws = temp("reject");
         // A working impl + a frozen pytest that passes for it. Python (not `sh`) so

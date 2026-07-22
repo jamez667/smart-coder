@@ -25,6 +25,8 @@ steps:
       CARGO_TERM_COLOR: always
     commands:
       # System libraries the iced/winit/wgpu GUI crate links against on Linux.
+      # (No Python: full agent/interpreter integration tests are #[ignore]d and
+      # don't run in CI — see below.)
       - apt-get update
       - >-
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
@@ -39,6 +41,8 @@ steps:
       - cargo fmt --all -- --check
       - cargo clippy --workspace --all-targets -- -D warnings
       - cargo check --workspace
-      # Live-model integration tests are #[ignore]d and need a backend, so the
-      # default `cargo test` run stays deterministic and backend-free.
+      # Full agent integration tests (live model backend, docker sandbox, or a
+      # real python/pytest interpreter) are #[ignore]d, so the default
+      # `cargo test` run stays deterministic and self-contained — no backend, no
+      # interpreter, no network.
       - cargo test --workspace

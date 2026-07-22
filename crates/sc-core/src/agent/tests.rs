@@ -43,6 +43,7 @@ fn writes_a_file_then_finishes() {
 }
 
 #[test]
+#[ignore = "live: drives a real `python -m pytest` verify; needs python on PATH"]
 fn diagnosis_fires_on_a_test_stall_then_is_bounded() {
     use crate::event::AgentEvent;
     use std::sync::Mutex;
