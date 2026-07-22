@@ -164,16 +164,26 @@ impl Terminal {
 
         let (tx, rx) = mpsc::channel();
         // One reader thread per stream, each pumping lines onto the shared channel.
-        if let Some(out) = child.stdout.take() {
-            spawn_reader(out, Stream::Stdout, tx.clone());
-        }
-        if let Some(err) = child.stderr.take() {
-            spawn_reader(err, Stream::Stderr, tx.clone());
-        }
-        // Waiter thread: block on the child, then report the exit code. Owns the last `tx`
-        // so the channel stays open until the process is truly done.
+        let out_reader = child
+            .stdout
+            .take()
+            .map(|out| spawn_reader(out, Stream::Stdout, tx.clone()));
+        let err_reader = child
+            .stderr
+            .take()
+            .map(|err| spawn_reader(err, Stream::Stderr, tx.clone()));
+        // Waiter thread: block on the child, then report the exit code. It first joins the
+        // reader threads so every stdout/stderr line is on the channel *before* the `Exited`
+        // footer — otherwise a fast command races the final output line past the exit marker
+        // (reproducibly on Linux). Owns the last `tx` so the channel stays open until done.
         thread::spawn(move || {
             let code = child.wait().ok().and_then(|s| s.code());
+            if let Some(h) = out_reader {
+                let _ = h.join();
+            }
+            if let Some(h) = err_reader {
+                let _ = h.join();
+            }
             let _ = tx.send(TermMsg::Exited(code));
         });
 
@@ -312,7 +322,7 @@ impl Terminal {
 
 /// Spawn a thread that reads `src` line-by-line and forwards each line onto `tx` tagged
 /// with `stream`. Ends (dropping its `tx` clone) when the stream closes at child exit.
-fn spawn_reader<R>(src: R, stream: Stream, tx: Sender<TermMsg>)
+fn spawn_reader<R>(src: R, stream: Stream, tx: Sender<TermMsg>) -> thread::JoinHandle<()>
 where
     R: std::io::Read + Send + 'static,
 {
@@ -328,7 +338,7 @@ where
                 Err(_) => break,
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]
