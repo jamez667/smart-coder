@@ -23,8 +23,11 @@ steps:
     image: rust:1.97.1-bookworm
     environment:
       CARGO_TERM_COLOR: always
-    secrets:
-      - github_token
+      # Woodpecker v3: secrets are consumed via `from_secret` (the old top-level
+      # `secrets:` list is gone). This maps the `github_token` repo secret to the
+      # $GITHUB_TOKEN env var the publish step below reads.
+      GITHUB_TOKEN:
+        from_secret: github_token
     commands:
       # Build deps for the GUI crate, plus git/gh for publishing.
       - apt-get update
@@ -48,44 +51,47 @@ steps:
       - cargo build --release -p sc-win
       - strip target/release/sc-win
 
-      # Package + publish + prune in ONE shell command. Woodpecker runs each
-      # `commands:` entry as a separate shell, so a variable exported in one
-      # entry is gone by the next — everything that shares $TAG/$PKG must live in
-      # a single entry. `set -eu` makes an empty tag or any failure hard-fail.
+      # Package + publish + prune in ONE shell entry (each `commands:` entry is a
+      # fresh shell, so $TAG/$PKG must all live together). CI_COMMIT_TAG, CI_REPO
+      # and GITHUB_TOKEN are real ENV VARS in the shell (built-ins + the mapped
+      # secret above) — reference them with plain `$NAME`, NOT Woodpecker `${...}`
+      # templating, which is not applied inside a literal block. `set -eu` +
+      # `${TAG:?}` hard-fail on an empty tag or missing token.
       - |
         set -eu
-        TAG="${CI_COMMIT_TAG}"
-        REPO="${CI_REPO}"
-        : "${TAG:?CI_COMMIT_TAG is empty — is this a tag build?}"
-        PKG="sc-win-${TAG}-linux-x86_64"
+        TAG="$CI_COMMIT_TAG"
+        REPO="$CI_REPO"
+        : "${TAG:?CI_COMMIT_TAG is empty - is this a tag build?}"
+        : "${GITHUB_TOKEN:?github_token secret is not set in Woodpecker}"
+        PKG="sc-win-$TAG-linux-x86_64"
         export GH_TOKEN="$GITHUB_TOKEN"
 
         # Assemble the package dir: binary + LICENSE + a runtime-deps note.
-        mkdir -p "dist/${PKG}"
-        cp target/release/sc-win "dist/${PKG}/"
-        cp LICENSE "dist/${PKG}/"
-        cat > "dist/${PKG}/README.txt" <<'NOTE'
-        smart-coder desktop client (sc-win), Linux x86_64.
-        Run: ./sc-win
-        Needs these shared libraries installed (Debian/Ubuntu names):
-          libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0
-          libwayland-client0 libwayland-cursor0 libwayland-egl1
-          libfontconfig1 libfreetype6
-        NOTE
-        tar -czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+        mkdir -p "dist/$PKG"
+        cp target/release/sc-win "dist/$PKG/"
+        cp LICENSE "dist/$PKG/"
+        printf '%s\n' \
+          'smart-coder desktop client (sc-win), Linux x86_64.' \
+          'Run: ./sc-win' \
+          'Needs these shared libraries installed (Debian/Ubuntu names):' \
+          '  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0' \
+          '  libwayland-client0 libwayland-cursor0 libwayland-egl1' \
+          '  libfontconfig1 libfreetype6' \
+          > "dist/$PKG/README.txt"
+        tar -czf "dist/$PKG.tar.gz" -C dist "$PKG"
 
         # Publish to GitHub Releases (create, or upload the asset if it exists).
-        gh release create "${TAG}" "dist/${PKG}.tar.gz" \
-          --repo "${REPO}" --title "${TAG}" --generate-notes \
-          || gh release upload "${TAG}" "dist/${PKG}.tar.gz" --repo "${REPO}" --clobber
+        gh release create "$TAG" "dist/$PKG.tar.gz" \
+          --repo "$REPO" --title "$TAG" --generate-notes \
+          || gh release upload "$TAG" "dist/$PKG.tar.gz" --repo "$REPO" --clobber
 
         # Retention: keep only the 3 newest releases; delete older releases AND
         # their tags (--cleanup-tag) so old assets don't accumulate and eat disk.
-        gh release list --repo "${REPO}" --limit 100 \
+        gh release list --repo "$REPO" --limit 100 \
           --json tagName,createdAt \
           --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
           | while read -r old; do
               [ -n "$old" ] || continue
               echo "pruning old release $old"
-              gh release delete "$old" --repo "${REPO}" --yes --cleanup-tag
+              gh release delete "$old" --repo "$REPO" --yes --cleanup-tag
             done
