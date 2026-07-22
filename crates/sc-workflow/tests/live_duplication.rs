@@ -20,8 +20,11 @@ use sc_verify::Sandbox;
 
 /// How many attempts to make; live behaviour is stochastic, so we sample.
 const ATTEMPTS: usize = 5;
-/// Set false after the dedup/edit fix lands to turn this into a "must never duplicate" guard.
-const EXPECT_DUPLICATION: bool = true;
+/// The dedup guard (sc-tools: `duplicate_definition`) has landed — the coder can no longer land a
+/// duplicated top-level definition, so this is now a REGRESSION GUARD: every attempt must stay
+/// duplicate-free. (Was `true` while reproducing the bug; flipped false once the fix was verified —
+/// 5/5 attempts went duplicated=false compiles=true.)
+const EXPECT_DUPLICATION: bool = false;
 
 fn local_backend() -> OpenAiBackend {
     let base = std::env::var("SC_BASE_URL").unwrap_or_else(|_| "http://localhost:11435/v1".into());

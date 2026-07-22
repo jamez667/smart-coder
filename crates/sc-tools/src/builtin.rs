@@ -716,6 +716,13 @@ fn write_file(workspace: &Path, path: &str, content: &str) -> String {
                     );
                 }
             }
+            // Duplicate-definition guard: reject content that defines the same top-level item
+            // twice (comparing against an empty "before" surfaces any internal duplicate).
+            if is_code_path(path) {
+                if let Some(msg) = duplicate_definition("", content) {
+                    return format!("write_file {path} rejected: {msg}");
+                }
+            }
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -758,6 +765,18 @@ fn append_file(workspace: &Path, path: &str, content: &str) -> String {
         Ok(p) => {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
+            }
+            // Duplicate-definition guard: appending a block that re-defines an existing top-level
+            // item is the coder's biggest corruption (observed live: 227 lines re-appending modal
+            // primitives that already existed → E0428). Reject the append and steer to editing the
+            // existing definition. Only for code files that already exist; a brand-new file can't
+            // duplicate anything.
+            let existing = std::fs::read_to_string(&p).unwrap_or_default();
+            if is_code_path(path) && !existing.is_empty() {
+                let after = format!("{existing}{content}");
+                if let Some(msg) = duplicate_definition(&existing, &after) {
+                    return format!("append_file {path} rejected: {msg}");
+                }
             }
             match std::fs::OpenOptions::new()
                 .create(true)
@@ -917,6 +936,76 @@ fn delimiter_regression(before: &str, after: &str) -> Option<String> {
         .map(|d| format!("this edit unbalanced the file's delimiters: {d}"))
 }
 
+/// Top-level definition names in `src`, keyed by kind+name (e.g. `fn:draw_row`, `struct:Rect`),
+/// with a count. Scans line-leading `fn` / `pub fn` / `struct` / `enum` / `trait` / `const` /
+/// `static` declarations — a lightweight signal (no full parse) that's enough to catch a
+/// re-emitted definition. `impl` blocks are deliberately excluded (multiple `impl` of a type are
+/// legal). Visibility/`async`/`unsafe`/`pub(crate)` prefixes are skipped.
+fn top_level_defs(src: &str) -> std::collections::HashMap<String, usize> {
+    use std::collections::HashMap;
+    let mut out: HashMap<String, usize> = HashMap::new();
+    for line in src.lines() {
+        // Only TOP-LEVEL defs (no leading indentation) — a nested `fn` inside another fn/impl is a
+        // different scope and legitimately repeatable; we want file-level redefinitions.
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
+        // Strip leading visibility / modifiers so `pub async unsafe fn foo` still keys on `foo`.
+        let mut t = line.trim();
+        for kw in ["pub(crate)", "pub", "async", "unsafe", "default", "const", "extern \"C\""] {
+            if let Some(rest) = t.strip_prefix(kw) {
+                if rest.starts_with([' ', '\t']) || rest.is_empty() {
+                    t = rest.trim_start();
+                }
+            }
+        }
+        let kind = ["fn", "struct", "enum", "trait", "static"]
+            .into_iter()
+            .find(|kw| {
+                t.strip_prefix(kw)
+                    .is_some_and(|r| r.starts_with([' ', '\t']))
+            });
+        if let Some(kind) = kind {
+            let rest = t[kind.len()..].trim_start();
+            // The name is up to the first delimiter: `(` for fn, `<`/`{`/`:`/whitespace otherwise.
+            if let Some(name) = rest
+                .split(|c: char| c == '(' || c == '<' || c == '{' || c == ':' || c.is_whitespace())
+                .next()
+                .filter(|s| !s.is_empty())
+            {
+                *out.entry(format!("{kind}:{name}")).or_default() += 1;
+            }
+        }
+    }
+    out
+}
+
+/// If `after` introduces a DUPLICATE top-level definition — a `fn`/`struct`/`enum`/`trait` name
+/// that now appears more times than it did in `before` AND appears more than once — return a
+/// message naming it. This is the coder's block-duplication failure: asked to add a helper to a
+/// file that already has it, the model re-emits the existing definition (and often other nearby
+/// ones), producing an `E0428 "defined multiple times"` that breaks the build. Rejecting the write
+/// makes the model EDIT the existing definition instead of pasting a second copy. `None` when the
+/// edit adds no new duplication (a pre-existing duplicate isn't blamed on this edit).
+fn duplicate_definition(before: &str, after: &str) -> Option<String> {
+    let bd = top_level_defs(before);
+    let ad = top_level_defs(after);
+    // Find a name whose count went UP and is now >1 — i.e. this edit created (or worsened) a
+    // duplicate. Report the most-egregious (highest after-count) for a clear message.
+    ad.iter()
+        .filter(|(k, &n)| n > 1 && n > bd.get(*k).copied().unwrap_or(0))
+        .max_by_key(|(_, &n)| n)
+        .map(|(k, &n)| {
+            let (kind, name) = k.split_once(':').unwrap_or(("item", k));
+            format!(
+                "this edit would define `{name}` ({kind}) {n} times — it ALREADY EXISTS in the \
+                 file. Rust rejects a duplicate definition (E0428). Do NOT paste a second copy: \
+                 EDIT the existing `{name}` in place (change its body/signature) instead of adding \
+                 a new one. If you meant a different helper, give it a different name."
+            )
+        })
+}
+
 fn edit_lines(
     workspace: &Path,
     path: &str,
@@ -977,6 +1066,11 @@ fn edit_lines(
     // then thrashes for turns un-breaking a delimiter it can't see. If this edit takes a
     // BALANCED file to an UNBALANCED one, reject it and name the offending delimiter, so the model
     // fixes its new_text now instead of after a compiler round-trip it keeps guessing wrong on.
+    if is_code_path(path) {
+        if let Some(msg) = duplicate_definition(&content, &joined) {
+            return format!("edit_lines {path} rejected: {msg}");
+        }
+    }
     if is_code_path(path) && !insert {
         if let Some(msg) = delimiter_regression(&content, &joined) {
             // Replacing a range that straddles a brace forces the model to reproduce the exact
@@ -1049,6 +1143,16 @@ fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> Stri
             (old_str.clone(), new_str.clone())
         }
     };
+    // Duplicate-definition guard: if the exact anchor is present, we can compute the resulting file
+    // directly and reject a replacement that would define an existing top-level item a second time
+    // (the coder pasting a duplicate helper). Only when the anchor matches exactly once — the fuzzy
+    // / whole-line fallbacks in `edit_file_with` are already the "couldn't match" recovery path.
+    if is_code_path(path) && content.matches(&old_owned).count() == 1 {
+        let after = content.replacen(&old_owned, &new_owned, 1);
+        if let Some(msg) = duplicate_definition(&content, &after) {
+            return format!("edit_file {path} rejected: {msg}");
+        }
+    }
     edit_file_with(&p, path, &content, &old_owned, &new_owned)
 }
 
@@ -1314,6 +1418,65 @@ mod tests {
 
     fn call(v: serde_json::Value) -> ValidatedCall {
         default_registry().validate(&v).unwrap()
+    }
+
+    #[test]
+    fn duplicate_definition_flags_a_re_emitted_fn() {
+        let before = "pub fn a() {}\npub fn b() {}\n";
+        // Adding a NEW fn is fine.
+        assert!(duplicate_definition(before, &format!("{before}pub fn c() {{}}\n")).is_none());
+        // Re-emitting an existing fn is a duplicate.
+        let dup = duplicate_definition(before, &format!("{before}pub fn a() {{}}\n"));
+        assert!(dup.is_some(), "re-defined `a` must be flagged");
+        assert!(dup.unwrap().contains("`a`"));
+        // structs/enums/traits too.
+        assert!(duplicate_definition("struct S;", "struct S;\nstruct S;").is_some());
+        // A pre-existing duplicate isn't blamed on an edit that doesn't worsen it.
+        let pre_dup = "fn a() {}\nfn a() {}\n";
+        assert!(duplicate_definition(pre_dup, &format!("{pre_dup}fn z() {{}}\n")).is_none());
+    }
+
+    #[test]
+    fn top_level_defs_ignores_nested_and_impl() {
+        // Nested fns (indented) and impls are NOT top-level redefinitions.
+        let src = "\
+pub fn outer() {
+    fn inner() {}
+}
+impl Foo { fn m(&self) {} }
+impl Bar { fn m(&self) {} }
+";
+        let d = top_level_defs(src);
+        assert_eq!(d.get("fn:outer").copied(), Some(1));
+        assert!(!d.contains_key("fn:inner"), "nested fn ignored");
+        assert!(!d.keys().any(|k| k.starts_with("impl")), "impl not counted");
+    }
+
+    #[test]
+    fn append_file_rejects_a_duplicate_and_allows_a_new_def() {
+        let dir = temp_dir("append-dup");
+        let existing = "pub fn draw_row() {}\npub fn draw_button() {}\n";
+        std::fs::write(dir.join("w.rs"), existing).unwrap();
+        // Re-appending an existing fn is rejected — file unchanged.
+        let out = append_file(&dir, "w.rs", "\npub fn draw_row() {}\n");
+        assert!(out.contains("rejected"), "dup append rejected: {out}");
+        assert!(out.contains("draw_row"));
+        assert_eq!(std::fs::read_to_string(dir.join("w.rs")).unwrap(), existing);
+        // Appending a genuinely NEW fn is allowed.
+        let out = append_file(&dir, "w.rs", "\npub fn draw_slider() {}\n");
+        assert!(out.contains("ok"), "new append ok: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_lines_rejects_an_insert_that_duplicates_a_definition() {
+        let dir = temp_dir("editlines-dup");
+        std::fs::write(dir.join("w.rs"), "pub fn a() {}\npub fn b() {}\n").unwrap();
+        // Insert (end = start-1) a copy of `a` before line 2 → duplicate → rejected.
+        let out = edit_lines(&dir, "w.rs", Some(2), Some(1), "pub fn a() {}");
+        assert!(out.contains("rejected"), "dup insert rejected: {out}");
+        assert!(out.contains("`a`"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
