@@ -259,7 +259,11 @@ pub(crate) fn menu_item_style(_t: &Theme, status: button::Status) -> button::Sty
 ///  • `changed` → faint GREEN (differs from HEAD — a git change, PR-style),
 ///  • `working = Some(alpha)` → pulsing AMBER (the agent is working these lines right now),
 ///  • else transparent.
-pub(crate) fn code_line_container(selected: bool, changed: bool, working: Option<f32>) -> container::Style {
+pub(crate) fn code_line_container(
+    selected: bool,
+    changed: bool,
+    working: Option<f32>,
+) -> container::Style {
     let bg = if selected {
         Some(Background::Color(Color { a: 0.14, ..ACCENT }))
     } else if changed {
@@ -365,7 +369,10 @@ pub(crate) fn bar_container<'a>(
 
 /// A standalone revert bar: the shared bar chrome carrying ONLY the "↩ revert" button (no comment
 /// text). Rendered under a changed diff block that has no comment on it.
-pub(crate) fn view_revert_block_bar(cur_start: usize, bar_width: Option<f32>) -> Element<'static, Message> {
+pub(crate) fn view_revert_block_bar(
+    cur_start: usize,
+    bar_width: Option<f32>,
+) -> Element<'static, Message> {
     let head =
         row![Space::new().width(Fill), revert_button(cur_start)].align_y(iced::Alignment::Center);
     bar_container(head, bar_width, GOOD)
