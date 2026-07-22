@@ -644,6 +644,10 @@ struct RunResult {
     files: Vec<String>,
     /// The output folder, for the "open folder" button.
     dir: Option<std::path::PathBuf>,
+    /// True for a finished **Breakdown** (plan-only) run: the design is ready but nothing was
+    /// built yet. The result view then offers the follow-on **Build** + **Commit plan** actions,
+    /// so the next step is unmissable instead of a passive "plan ready" line.
+    plan_ready: bool,
 }
 
 struct App {
@@ -727,6 +731,10 @@ struct App {
     /// reviewable artifacts, not a build, so its outcome banner must NOT report "N files built"
     /// (a whole-repo scan counted every source file — the bogus "13730 files built").
     planning_only: bool,
+    /// The task string of the last Breakdown (plan-only) run, stashed so the result view's
+    /// **Build this plan** button can start a staged build against the SAME plan without the user
+    /// re-typing anything. `None` until a Breakdown has run this session.
+    last_plan_task: Option<String>,
     /// The files the agent actually *edited/wrote* this run (workspace-relative, de-duped),
     /// for the iterate outcome banner. Reset at each run start.
     edited_files: Vec<String>,
@@ -926,6 +934,9 @@ struct App {
     /// far the cursor actually travels — so it never jumps on grab (an absolute-Y mapping needs
     /// the explorer's exact top offset, which we don't track; a delta needs none).
     explorer_drag: Option<(f32, f32)>,
+    /// Persisted divider positions, keyed by id — the ONE place split positions are saved. Seeded
+    /// from `chat_frac`/`explorer_frac` at startup and re-saved when a drag settles.
+    splits: sc_win::splits::SplitStore,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -979,6 +990,11 @@ impl Default for App {
         // machine-local endpoint/model (config.json / env) over the neutral default,
         // so the specific backend this box uses never lives in the repo.
         let cfg = UiConfig::load();
+        // Restore saved divider positions (one id-keyed store), so each split comes back where the
+        // user left it. Defaults match the historical hardcoded fractions.
+        let splits = sc_win::splits::SplitStore::load();
+        let chat_frac = splits.get(sc_win::splits::id::CHAT_CODE, 0.5);
+        let explorer_frac = splits.get(sc_win::splits::id::EXPLORER_GIT_FILES, 0.25);
         // Re-open the last project the user worked in (if it still exists on disk), so the
         // app comes back to where they left off instead of the empty scratch base.
         let picked_workspace = sc_win::persist::load().last_project;
@@ -1031,6 +1047,7 @@ impl Default for App {
             picked_workspace,
             iterating: false,
             planning_only: false,
+            last_plan_task: None,
             edited_files: Vec::new(),
             collapsed_dirs,
             file_filter: String::new(),
@@ -1084,12 +1101,13 @@ impl Default for App {
             modifiers: iced::keyboard::Modifiers::empty(),
             git_selection: std::collections::BTreeSet::new(),
             git_select_anchor: None,
-            chat_frac: 0.5,
+            chat_frac,
             window_w: 1040.0,
             dragging_split: false,
-            explorer_frac: 0.25,
+            explorer_frac,
             window_h: 800.0,
             explorer_drag: None,
+            splits,
         }
     }
 }
@@ -1183,6 +1201,12 @@ pub(crate) enum Message {
     /// Run the FULL plan→build flow on the plan open in the code view: staged design then the
     /// compiler-driven executor builds it to green. Header "⚒ Build" button.
     BuildOpenPlan,
+    /// After a Breakdown finishes: build the plan just designed (the stashed `last_plan_task`),
+    /// starting a staged build with no retyping. The result view's "⚒ Build this plan" button.
+    BuildLastPlan,
+    /// After a Breakdown finishes: `git add` the plan artifacts + commit them, so the reviewed
+    /// design is saved to the repo before (or instead of) building. Result view's "✓ Commit plan".
+    CommitPlan,
     /// Toggle "think" mode for the next chat turn (reason vs. answer directly).
     ToggleThink(bool),
     /// Toggle debug mode: echo every prompt sent to the model into the chat.
@@ -1280,9 +1304,6 @@ pub(crate) enum Message {
     GateApprove,
     GateSendBack,
     GateAbort,
-    /// Open a plan phase's artifact file in the CODE view (master-list row click). The
-    /// artifact details live in the editor, not duplicated in the list.
-    OpenPhaseFile(String),
     // Topology canvas interaction.
     SelectCoder(String),
     ClearSelection,
@@ -2232,6 +2253,9 @@ impl App {
             return;
         }
         self.debug_prompt("plan", &task);
+        // Stash the task so the result view's "Build this plan" button can start a staged build
+        // against the same plan (the Breakdown → Build hand-off) with no retyping.
+        self.last_plan_task = Some(task.clone());
         self.intent = task;
         self.start(RunKind::Plan);
         self.intent.clear();
@@ -2323,7 +2347,11 @@ impl App {
             });
             return;
         }
-        self.start_plan_with(plan_task(&rel));
+        // Act on the feature's spec.md, whichever artifact of specs/<slug>/ is selected (spec /
+        // architecture / layout / breakdown / decomposition) — so the run targets specs/<slug>/,
+        // reusing its approved design, instead of treating e.g. decomposition.md as a plan to
+        // re-design from.
+        self.start_plan_with(plan_task(&feature_spec_of(&rel)));
     }
 
     /// Build the plan open in the code view: the full staged design → compiler-driven build to
@@ -2344,7 +2372,47 @@ impl App {
             });
             return;
         }
-        self.start_staged_build_with(plan_task(&rel));
+        // Build the feature (its spec.md), whichever specs/<slug>/ artifact is open — so selecting
+        // decomposition.md (or any phase file) and hitting Build targets specs/<slug>/ and reuses
+        // the already-approved design instead of re-designing from that one file.
+        self.start_staged_build_with(plan_task(&feature_spec_of(&rel)));
+    }
+
+    /// Build the plan from the last Breakdown — the Breakdown → Build hand-off. Reuses the exact
+    /// task the plan run designed against (`last_plan_task`), so approving a breakdown then hitting
+    /// "Build this plan" runs the staged build with no retyping. No-op if a run is in flight or no
+    /// Breakdown has run this session.
+    fn build_last_plan(&mut self) {
+        if self.session.is_some() {
+            return;
+        }
+        let Some(task) = self.last_plan_task.clone() else {
+            return;
+        };
+        self.start_staged_build_with(task);
+    }
+
+    /// Commit the plan artifacts from the last Breakdown to the repo: `git add` the artifact dir
+    /// (specs/<slug>/ or .smart-coder/plan/) + a commit. Lets a reviewed design be saved before —
+    /// or instead of — building. Reports the outcome in the chat and refreshes the git view.
+    fn commit_plan(&mut self) {
+        if self.picked_workspace.is_none() {
+            return;
+        }
+        // Stage everything the breakdown wrote (the plan/spec artifacts are the only new files a
+        // plan-only run produces), then commit. `run_git` is best-effort and returns success.
+        let staged = self.run_git(&["add", "-A"]);
+        let committed = staged && self.run_git(&["commit", "-m", "docs: add reviewed plan/breakdown"]);
+        let note = if committed {
+            "✓ committed the plan to the repo".to_string()
+        } else {
+            "⚠ couldn't commit the plan (nothing to commit, or not a git repo)".to_string()
+        };
+        self.chat_turns.push(sc_win::chat::Turn {
+            role: sc_win::chat::Speaker::Agent,
+            text: note,
+        });
+        self.refresh_git_view();
     }
 
     /// Write the Nth proposed plan-file to disk (README.md / TODO.md), then refresh the
@@ -2375,8 +2443,16 @@ impl App {
             // Show the file we just wrote.
             self.follow_agent = false;
             self.select_file(pf.name.clone());
-            // Drop it from the pending list (applied).
-            self.proposed_files.remove(i);
+            // A feature plan KEEPS its card (marked applied) so its Breakdown/Build actions stay
+            // available in the chat — a plan is written so you can then build it, so removing the
+            // card strands you. A plain README/TODO edit isn't buildable, so it's removed as before.
+            if is_feature_plan(&pf.name) {
+                if let Some(slot) = self.proposed_files.get_mut(i) {
+                    slot.applied = true;
+                }
+            } else {
+                self.proposed_files.remove(i);
+            }
             // Confirm the write in the chat thread, so applying is visible in the record.
             self.chat_turns.push(sc_win::chat::Turn {
                 role: sc_win::chat::Speaker::Agent,
@@ -2650,6 +2726,8 @@ impl App {
                 reason: summary.to_string(),
                 files: Vec::new(),
                 dir: None,
+                // A clean plan run → offer the Build + Commit follow-ons in the result view.
+                plan_ready: ok,
             });
             return;
         }
@@ -2689,6 +2767,7 @@ impl App {
             reason,
             files,
             dir,
+            plan_ready: false,
         });
     }
 
@@ -2795,6 +2874,7 @@ impl App {
             reason,
             files,
             dir: None, // no "open output folder" — you're iterating in your own repo
+            plan_ready: false,
         });
     }
 
@@ -3593,6 +3673,8 @@ impl App {
             Message::BreakdownPlan(i) => self.breakdown_plan(i),
             Message::ExecuteOpenPlan => self.execute_open_plan(),
             Message::BuildOpenPlan => self.build_open_plan(),
+            Message::BuildLastPlan => self.build_last_plan(),
+            Message::CommitPlan => self.commit_plan(),
             Message::ToggleThink(v) => self.think = v,
             Message::ToggleDebug(v) => self.debug = v,
             Message::UndoLastChange => self.undo_last_change(),
@@ -3697,6 +3779,13 @@ impl App {
             Message::SplitDragEnd => {
                 self.dragging_split = false;
                 self.explorer_drag = None;
+                // A drag settled — persist both dividers' current positions by id (one write, on
+                // release, not per mouse-move).
+                self.splits
+                    .set(sc_win::splits::id::CHAT_CODE, self.chat_frac);
+                self.splits
+                    .set(sc_win::splits::id::EXPLORER_GIT_FILES, self.explorer_frac);
+                self.splits.save();
             }
             Message::WindowSize(w, h) => {
                 self.window_w = w;
@@ -3885,12 +3974,6 @@ impl App {
                 }
             }
             Message::GateAbort => self.answer_gate(Decision::Abort),
-            Message::OpenPhaseFile(path) => {
-                // A master-list row click: show the phase's artifact in the CODE editor (the
-                // reader) and pin the view so a live run doesn't follow the agent away from it.
-                self.follow_agent = false;
-                self.select_file(path);
-            }
             Message::SelectCoder(id) => self.selected_coder = Some(id),
             Message::ClearSelection => self.selected_coder = None,
             Message::PickWorkspace => {
@@ -3947,17 +4030,12 @@ impl App {
         // The IDE body: three columns — EXPLORER (file tree) · CENTER (activity stream +
         // the intent composer beneath it) · CODE (the file being edited). VS-Code-style.
         let center: Element<'_, Message> = if self.plan.started() && self.is_swarm() {
-            // A swarm build in flight: the plan panel + live topology are the story.
-            row![self.view_plan(), v_divider(), self.view_topology()]
-                .spacing(GAP)
-                .into()
-        } else if self.plan.started() {
-            // A staged build (single agent): plan panel beside the activity stream.
-            row![self.view_plan(), v_divider(), self.view_center()]
-                .spacing(GAP)
-                .into()
+            // A swarm build in flight: the live topology is the story.
+            self.view_topology()
         } else {
-            // Iterate / idle: the activity stream + composer is the center column.
+            // Staged build / iterate / idle: the chat thread (with inline gate controls when a
+            // phase is waiting) is the center column. The old left PLAN panel is gone — the phase
+            // content streams into the chat and the gating file auto-opens in CODE.
             self.view_center()
         };
 
@@ -4920,35 +4998,31 @@ impl App {
                 .style(tree_button);
                 strip = strip.push(row![label, close].spacing(0).align_y(iced::Alignment::Center));
             }
-            // The strip scrolls horizontally so many open files don't blow out the panel width.
-            let scroller = scrollable(strip).direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(2).scroller_width(2),
-            ));
-            let mut bar = row![scroller, Space::new().width(Fill)]
-                .spacing(8)
-                .align_y(iced::Alignment::Center);
-            // If the file being viewed IS the phase currently at a gate, put its Approve / Send
-            // back / Abort controls right here in the editor header — so you review the artifact
-            // and act on it in the same place (Send back harvests the line-comments on this file
-            // as the revision notes). This mirrors the master-list gate row; whichever you click
-            // answers the same gate.
+            // Build the header ACTION buttons first (their own fixed-width row), so they can be
+            // PINNED to the right while the tab strip scrolls in the remaining space — VS Code
+            // style. Without this, the scroller expanded to fit every tab and pushed the buttons
+            // off the panel's right edge (the bug: Build/Breakdown vanished with many tabs open).
             let viewing_gated_phase = self.gating_phase().is_some_and(|p| {
                 self.plan.path_for(p).as_deref() == self.selected_file.as_deref()
             });
+            let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
             if viewing_gated_phase {
-                bar = bar.push(
+                // The file being viewed IS the phase at a gate: its Approve / Send back / Abort
+                // controls sit here so you review the artifact and act in the same place (Send back
+                // harvests this file's line-comments as the revision notes).
+                actions = actions.push(
                     button(text("✓ Approve").size(12))
                         .on_press(Message::GateApprove)
                         .padding([3, 10])
                         .style(primary_button),
                 );
-                bar = bar.push(
+                actions = actions.push(
                     button(text("↩ Send back").size(12))
                         .on_press(Message::GateSendBack)
                         .padding([3, 10])
                         .style(menu_item_style),
                 );
-                bar = bar.push(
+                actions = actions.push(
                     button(text("■ Abort").size(12))
                         .on_press(Message::GateAbort)
                         .padding([3, 10])
@@ -4958,22 +5032,50 @@ impl App {
                 // Two actions on an open plan: Breakdown runs the staged DESIGN pipeline and stops
                 // for review (no code written); Build runs the whole thing through to a green
                 // compile. Breakdown first — it's the review-then-build path.
-                bar = bar.push(
+                actions = actions.push(
                     button(text("☷ Breakdown").size(12))
                         .on_press(Message::ExecuteOpenPlan)
                         .padding([3, 10])
                         .style(menu_item_style),
                 );
-                bar = bar.push(
+                actions = actions.push(
                     button(text("⚒ Build").size(12))
                         .on_press(Message::BuildOpenPlan)
                         .padding([3, 10])
                         .style(primary_button),
                 );
             }
-            bar.into()
+            // The strip scrolls horizontally in the space LEFT OF the pinned actions: `width(Fill)`
+            // makes the scroller take the remaining width (not grow to fit every tab), so overflow
+            // scrolls inside it while the action buttons keep their natural width on the right.
+            // A visible horizontal scrollbar as the affordance that the strip scrolls when tabs
+            // overflow (the old 2px bar was invisible — it looked like the extra tabs were just
+            // gone). The bar is drawn along the BOTTOM edge of the scrollable's viewport, so it
+            // would overlap the tab text; reserve a lane for it with bottom padding on the strip
+            // content, and keep tabs top-aligned so they sit ABOVE the bar, not centered onto it.
+            // Mouse-wheel over the strip scrolls it horizontally too.
+            let strip = strip.align_y(iced::Alignment::Start);
+            let scroller = scrollable(
+                container(strip).padding(iced::Padding::ZERO.bottom(9)),
+            )
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(5).scroller_width(5),
+            ))
+            .width(Fill);
+            // The row MUST be `width(Fill)`: in a Shrink row, a `Fill` child resolves against the
+            // row's content width (unbounded), so the scroller grows to fit every tab and shoves
+            // the actions off-screen. A Fill row bounds the space, the Shrink `actions` take their
+            // natural width, and the Fill scroller gets what's left → tabs scroll, buttons pinned.
+            row![scroller, actions]
+                .spacing(8)
+                .width(Fill)
+                .align_y(iced::Alignment::Center)
+                .into()
         };
-        let body = column![header_bar, inner].spacing(6);
+        // The body column must be `Fill`-width so `header_bar`'s Fill row has a bounded width to
+        // fill — a Shrink column would collapse it to content width and the tab-scroll/pinned-
+        // buttons layout would break (the buttons get pushed off again).
+        let body = column![header_bar, inner].spacing(6).width(Fill);
         container(body)
             .width(Length::FillPortion(portion))
             .height(Fill)
@@ -5115,6 +5217,30 @@ impl App {
                     .on_press(Message::OpenOutputFolder)
                     .style(menu_item_style),
             );
+        }
+        // A finished Breakdown: make the next step unmissable. Breakdown is design-only, so offer
+        // the follow-ons right here — build the plan, or commit it to the repo — instead of leaving
+        // the user with a passive "plan ready" line and no obvious action.
+        if r.plan_ready {
+            col = col.push(Space::new().height(Length::Fixed(8.0)));
+            col = col.push(
+                text("Review the breakdown above, then:")
+                    .size(12)
+                    .color(FG_MUTED),
+            );
+            col = col.push(Space::new().height(Length::Fixed(4.0)));
+            let mut build = button(text("⚒  Build this plan").size(14).color(FG)).padding([6, 16]);
+            // Only enable Build when we still have the plan task and no run is in flight.
+            if self.last_plan_task.is_some() && self.session.is_none() {
+                build = build.on_press(Message::BuildLastPlan).style(primary_button);
+            } else {
+                build = build.style(stage_toggle_button);
+            }
+            let commit = button(text("✓  Commit the plan").size(14).color(FG))
+                .on_press(Message::CommitPlan)
+                .padding([6, 16])
+                .style(stage_toggle_button);
+            col = col.push(row![build, commit].spacing(8));
         }
         // "I don't like this change" — undo an in-place fix's edits (git-revert its files).
         // Only for iterate runs that changed files (from-scratch builds have no committed base).
@@ -5597,6 +5723,12 @@ impl App {
                 }
             }
         }
+        // A pending workflow gate: the Approve / Send-back / Abort controls live at the bottom of
+        // the chat, right under the phase content that just streamed in (they used to sit in a
+        // separate left PLAN panel). Only shown while a gate is actually waiting.
+        if let Some(controls) = self.view_gate_controls() {
+            thread = thread.push(controls);
+        }
         // The thread scrolls inside its own padding; the composer below spans the panel edge
         // to edge (its divider + input reach the left/right/bottom), so there's no gutter
         // around the input. Hence the panel container itself is unpadded.
@@ -5617,6 +5749,52 @@ impl App {
             .height(Fill)
             .style(card_style)
             .into()
+    }
+
+    /// The workflow-gate controls, rendered inline at the bottom of the chat when a phase is
+    /// waiting for a human decision. `None` when no gate is pending. Approve / Send back / Abort
+    /// emit the same messages the old left-panel copy did (the send-back note is the fallback when
+    /// no line comments were left on the phase's file in CODE — which auto-opens on the gate).
+    fn view_gate_controls(&self) -> Option<Element<'_, Message>> {
+        let phase = self.gating_phase()?;
+        let buttons = row![
+            button(text("Approve").size(13))
+                .on_press(Message::GateApprove)
+                .padding([4, 14])
+                .style(primary_button),
+            button(text("Send back").size(13))
+                .on_press(Message::GateSendBack)
+                .padding([4, 14])
+                .style(stage_toggle_button),
+            button(text("Abort").size(13))
+                .on_press(Message::GateAbort)
+                .padding([4, 14])
+                .style(stage_toggle_button),
+        ]
+        .spacing(6);
+        let notes = text_input("or a general send-back note…", &self.sendback_notes)
+            .on_input(Message::NotesChanged)
+            .padding(6)
+            .size(12)
+            .style(input_style);
+        let card = column![
+            text(format!("⛳ Review the {} above.", phase.title()))
+                .size(13)
+                .color(AMBER),
+            text("Comment lines in the CODE view to change, then Send back — or Approve to continue.")
+                .size(10)
+                .color(FG_MUTED),
+            buttons,
+            notes,
+        ]
+        .spacing(6);
+        Some(
+            container(card)
+                .width(Fill)
+                .padding(10)
+                .style(card_style)
+                .into(),
+        )
     }
 
     /// One chat bubble: a small role label + the text, coloured by speaker. A Debug turn (the
@@ -5731,13 +5909,23 @@ impl App {
             text(format!("{lines} lines")).size(11).color(FG_MUTED),
         ]
         .align_y(iced::Alignment::Center);
-        let apply = button(text("✓ Apply to disk").size(13))
-            .on_press(Message::ApplyFile(i))
-            .padding([5, 12])
-            .style(primary_button);
+        // The Apply button: once applied, it reads "✓ Applied" and is inert (no on_press), so the
+        // card records the write while its Breakdown/Build actions stay live.
+        let apply = if pf.applied {
+            button(text("✓ Applied").size(13).color(FG_MUTED))
+                .padding([5, 12])
+                .style(menu_item_style)
+        } else {
+            button(text("✓ Apply to disk").size(13))
+                .on_press(Message::ApplyFile(i))
+                .padding([5, 12])
+                .style(primary_button)
+        };
         // A feature plan (PLAN-<slug>.md) gets two one-click actions (both apply it to disk
         // first): Breakdown runs the staged DESIGN pipeline and stops for review; Build runs the
-        // whole thing through to a green compile. README/TODO edits aren't buildable → Apply only.
+        // whole thing through to a green compile. These STAY available after applying (the card is
+        // kept, marked applied), so you can review then act. README/TODO edits aren't buildable →
+        // Apply only, and their card is removed on apply.
         let actions: Element<'_, Message> = if is_feature_plan(&pf.name) {
             let breakdown = button(text("☷ Breakdown").size(13))
                 .on_press(Message::BreakdownPlan(i))
@@ -5925,109 +6113,6 @@ impl App {
         container(column![section("SWARM TOPOLOGY"), canvas].spacing(6))
             .width(Length::FillPortion(2))
             .height(Fill)
-            .padding(PAD)
-            .style(card_style)
-            .into()
-    }
-
-    /// The always-visible plan panel (TDD mode): the six workflow phases with status,
-    /// the frozen tests written, and the readable subtask list — so you can see what it
-    /// intends to do, before and while it does it.
-    /// The PLAN master list (Change A): a persistent index of the six workflow phases. Each row
-    /// is a status glyph + the phase title, colored by state (done/approved · gating · pending),
-    /// and is a BUTTON that opens the phase's artifact file in the CODE editor — the details live
-    /// there, not duplicated here. The row for the phase currently at a human gate additionally
-    /// carries the Approve / Send-back / Abort buttons inline (the gate approval used to be a
-    /// transient card at the bottom; it now lives beside the phase it's approving).
-    fn view_plan(&self) -> Element<'_, Message> {
-        let gating = self.gating_phase();
-        let mut col = column![section("PLAN  ·  TDD")].spacing(4);
-        for step in self.plan.steps() {
-            let is_gating = gating == Some(step.phase);
-            // Status glyph + color: gating (amber, awaiting you) · done/approved (green ✓) ·
-            // pending (muted ·).
-            let (mark, color) = if is_gating {
-                ("⛳", AMBER)
-            } else if step.done {
-                ("✓", GOOD)
-            } else {
-                ("·", FG_MUTED)
-            };
-            let label = text(format!("{mark} {}", step.title)).size(13).color(color);
-            // The row opens the phase's FILE in CODE — but only when its path is known (the
-            // StagedBuild specs/<slug>/ flow) and it has landed. Older numbered-plan runs have
-            // no OpenSpec file, so their rows stay as plain labels (not clickable).
-            let row_el: Element<'_, Message> = match self.plan.path_for(step.phase) {
-                Some(path) if step.done || is_gating => button(label)
-                    .width(Fill)
-                    .padding([2, 4])
-                    .on_press(Message::OpenPhaseFile(path))
-                    .style(tree_button)
-                    .into(),
-                _ => label.into(),
-            };
-            col = col.push(row_el);
-            // The gating row carries the approval controls inline. Send back harvests the line
-            // comments the user left on this phase's file in the code view (Change B).
-            if is_gating {
-                let buttons = row![
-                    button(text("Approve").size(12))
-                        .on_press(Message::GateApprove)
-                        .padding([2, 10])
-                        .style(primary_button),
-                    button(text("Send back").size(12))
-                        .on_press(Message::GateSendBack)
-                        .padding([2, 10])
-                        .style(stage_toggle_button),
-                    button(text("Abort").size(12))
-                        .on_press(Message::GateAbort)
-                        .padding([2, 10])
-                        .style(stage_toggle_button),
-                ]
-                .spacing(6);
-                // Optional free-text note: the fallback when no line comments were left. The
-                // line-comment harvest is the primary path; this catches a general remark.
-                let notes = text_input("or a general send-back note…", &self.sendback_notes)
-                    .on_input(Message::NotesChanged)
-                    .padding(4)
-                    .size(12)
-                    .style(input_style);
-                col = col.push(
-                    column![
-                        text("← open this file in CODE, comment the lines to change, then Send back")
-                            .size(10)
-                            .color(FG_MUTED),
-                        buttons,
-                        notes,
-                    ]
-                    .spacing(4)
-                    .padding(iced::Padding::ZERO.top(2).bottom(6).left(12)),
-                );
-            }
-        }
-
-        if !self.plan.frozen_tests.is_empty() {
-            col = col.push(Space::new().height(Length::Fixed(8.0)));
-            col = col.push(
-                text(format!("frozen tests ({})", self.plan.frozen_tests.len()))
-                    .size(13)
-                    .color(GOOD),
-            );
-            for t in &self.plan.frozen_tests {
-                col = col.push(text(format!("  🔒 {t}")).size(12).color(FG_MUTED));
-            }
-        }
-
-        if !self.plan.subtasks.is_empty() {
-            col = col.push(Space::new().height(Length::Fixed(8.0)));
-            col = col.push(section("SUBTASKS TO IMPLEMENT"));
-            for (i, g) in self.plan.subtasks.iter().enumerate() {
-                col = col.push(text(format!("  {}. {g}", i + 1)).size(12));
-            }
-        }
-
-        container(scrollable(col).height(Fill))
-            .width(Length::FillPortion(2))
             .padding(PAD)
             .style(card_style)
             .into()
@@ -6278,14 +6363,26 @@ fn fix_feed_line(e: &sc_core::AgentEvent) -> Option<String> {
         // The model's own account of what it's seeing / about to do — so the execute feed
         // reads as a running narration, not just a list of file touches.
         ModelTurn { raw, .. } => sc_win::view::narration(raw).map(|n| format!("💭 {n}")),
-        ToolCall { tool, arg } => match tool.as_str() {
-            "edit_file" | "write_file" | "append_file" | "create_file" => {
-                Some(format!("✎ editing {}", arg.trim()))
-            }
-            "read_file" => Some(format!("· reading {}", arg.trim())),
-            "run_verification" => Some("· checking it compiles…".to_string()),
-            _ => None,
-        },
+        // Surface EVERY tool action, not just edits — the coder model spends most turns
+        // searching/reading (and often emits a bare tool call with no prose), so without these
+        // the execute feed sat silent and the run "felt dead". A line per action makes the work
+        // visible turn by turn.
+        ToolCall { tool, arg } => {
+            let arg = arg.trim();
+            Some(match tool.as_str() {
+                "edit_file" | "edit_lines" | "edit_function" => format!("✎ editing {arg}"),
+                "write_file" | "create_file" => format!("✎ writing {arg}"),
+                "append_file" => format!("✎ appending to {arg}"),
+                "read_file" => format!("· reading {arg}"),
+                "search_code" => format!("🔍 searching for {arg}"),
+                "find_symbol" => format!("🔍 locating {arg}"),
+                "list_dir" => format!("· listing {arg}"),
+                "run_verification" | "run_command" => "· checking it compiles…".to_string(),
+                "finish" => "✓ done with this step".to_string(),
+                // An unknown tool still gets a line so nothing runs invisibly.
+                other => format!("· {other} {arg}").trim_end().to_string(),
+            })
+        }
         Verification { green, .. } => Some(if *green {
             "✓ compiles".to_string()
         } else {
@@ -6417,6 +6514,27 @@ fn is_feature_plan(name: &str) -> bool {
     sc_win::chat::is_spec_path(name.trim())
 }
 
+/// Normalize any artifact of a `specs/<slug>/` feature to that feature's canonical `spec.md`, so
+/// Breakdown/Build act on the FEATURE (targeting `specs/<slug>/`, reusing its approved design)
+/// regardless of which phase file — `architecture.md`, `breakdown.md`, `decomposition.md`, … — the
+/// user happens to have open. A `specs/<slug>.md` (flat) or legacy `PLAN-*.md` has no feature
+/// folder, so it's returned unchanged.
+fn feature_spec_of(rel: &str) -> String {
+    let p = rel.replace('\\', "/");
+    // A `specs/<slug>/<artifact>.md` → `specs/<slug>/spec.md`. Requires a path segment between
+    // `specs/` and the filename (i.e. a real feature folder).
+    let lower = p.to_ascii_lowercase();
+    if lower.starts_with("specs/") && lower.ends_with(".md") {
+        if let Some(dir) = p.rsplit_once('/').map(|(d, _)| d) {
+            // `dir` must be `specs/<slug>` (exactly one slug segment) — not bare `specs`.
+            if dir.to_ascii_lowercase() != "specs" && dir.matches('/').count() == 1 {
+                return format!("{dir}/spec.md");
+            }
+        }
+    }
+    p
+}
+
 /// The prefix to remember when a user clicks "Allow & remember": the command up to
 /// and including the first space (so `git push` remembers `git `), or the whole
 /// command if it has no space.
@@ -6479,6 +6597,20 @@ mod tests {
     }
 
     #[test]
+    fn feature_spec_of_normalizes_any_artifact_to_spec_md() {
+        // Any phase file of a feature folder → that feature's spec.md, so Build targets the
+        // feature (and reuses its approved design) whichever artifact is open.
+        assert_eq!(feature_spec_of("specs/seat-types/decomposition.md"), "specs/seat-types/spec.md");
+        assert_eq!(feature_spec_of("specs/seat-types/architecture.md"), "specs/seat-types/spec.md");
+        assert_eq!(feature_spec_of("specs/seat-types/spec.md"), "specs/seat-types/spec.md");
+        // Windows backslashes are normalized.
+        assert_eq!(feature_spec_of("specs\\seat-types\\breakdown.md"), "specs/seat-types/spec.md");
+        // A flat specs/<slug>.md (no feature folder) and a legacy PLAN-*.md are returned as-is.
+        assert_eq!(feature_spec_of("specs/lakes.md"), "specs/lakes.md");
+        assert_eq!(feature_spec_of("PLAN-lakes.md"), "PLAN-lakes.md");
+    }
+
+    #[test]
     fn plan_task_names_the_plan_and_frames_a_design_pass() {
         // The workflow pins the plan via its filename, so the task must name it; and plan-only
         // stops at the breakdown, so it must frame a design pass (not "write the code").
@@ -6500,5 +6632,31 @@ mod tests {
         let line = line.expect("narration surfaced");
         assert!(line.starts_with("💭"));
         assert!(line.contains("water module"));
+    }
+
+    #[test]
+    fn fix_feed_line_surfaces_every_tool_action() {
+        // The coder spends most turns searching/reading and often emits a BARE tool call with no
+        // prose — so every tool must produce a feed line, or the run "feels dead" (the reported bug).
+        let tc = |tool: &str, arg: &str| {
+            fix_feed_line(&sc_core::AgentEvent::ToolCall {
+                tool: tool.to_string(),
+                arg: arg.to_string(),
+            })
+        };
+        assert_eq!(tc("edit_file", "a.rs").as_deref(), Some("✎ editing a.rs"));
+        assert_eq!(tc("create_file", "b.rs").as_deref(), Some("✎ writing b.rs"));
+        assert_eq!(
+            tc("search_code", "SeatType").as_deref(),
+            Some("🔍 searching for SeatType")
+        );
+        assert_eq!(
+            tc("find_symbol", "ShipLayout").as_deref(),
+            Some("🔍 locating ShipLayout")
+        );
+        assert_eq!(tc("read_file", "c.rs").as_deref(), Some("· reading c.rs"));
+        assert_eq!(tc("finish", "").as_deref(), Some("✓ done with this step"));
+        // An unknown tool still produces a line (never runs invisibly).
+        assert!(tc("weird_tool", "x").is_some());
     }
 }

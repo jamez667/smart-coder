@@ -171,9 +171,18 @@ pub fn save_to(dir: &Path, state: &WorkflowState, openspec_names: bool) -> Resul
     Ok(())
 }
 
-/// Load a previously-saved workflow, if `state.json` exists.
+/// Load a previously-saved workflow from the default plan dir, if `state.json` exists.
 pub fn load(workspace: &Path) -> Result<Option<WorkflowState>> {
-    let path = plan_dir(workspace).join("state.json");
+    load_from(&plan_dir(workspace))
+}
+
+/// Load a previously-saved workflow from an explicit `dir` (the artifact dir a run wrote to —
+/// `.smart-coder/plan/` or `specs/<slug>/`), if its `state.json` exists. `None` when there's no
+/// saved state there. This is what lets a **Build** reuse the breakdown a prior **Breakdown** run
+/// approved: same task → same artifact dir → its approved `state.json` is adopted instead of
+/// regenerating the design phases.
+pub fn load_from(dir: &Path) -> Result<Option<WorkflowState>> {
+    let path = dir.join("state.json");
     match std::fs::read_to_string(&path) {
         Ok(s) => {
             let state =
@@ -271,6 +280,29 @@ mod tests {
 
         let loaded = load(&ws).unwrap().unwrap();
         assert_eq!(loaded, s);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn load_from_reads_state_from_a_custom_dir_for_build_resume() {
+        // The Build-resume path: a Breakdown saved its approved design into specs/<slug>/; a later
+        // Build must load THAT state.json (not the default plan dir) so the runner skips redesign.
+        let ws = temp("resume");
+        let dir = ws.join("specs").join("alt-seats");
+        let mut s = WorkflowState::new("build the seat picker");
+        for p in [Phase::Specs, Phase::Architecture, Phase::Layout, Phase::StageBreakdown] {
+            s.set(Artifact::draft(p, &format!("# {}", p.title())));
+            s.approve(p);
+        }
+        save_to(&dir, &s, true).unwrap();
+
+        // load_from finds it; the approved design phases come back, so next_phase() skips straight
+        // to WorkDecomposition (the only un-generated phase) instead of re-running Architecture.
+        let loaded = load_from(&dir).unwrap().unwrap();
+        assert_eq!(loaded.approved().len(), 4, "all four design phases reused");
+        assert_eq!(loaded.next_phase(), Some(Phase::WorkDecomposition));
+        // A missing dir is a clean None (fresh design), not an error.
+        assert!(load_from(&ws.join("nope")).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&ws);
     }
 

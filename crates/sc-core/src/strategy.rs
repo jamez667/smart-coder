@@ -34,6 +34,9 @@ pub enum RepairError {
     BadJson(String),
     /// Parsed fine but failed schema validation.
     Invalid(ValidationError),
+    /// Every call in the reply was corrupt/run-on (a string arg absorbed the next arg or call), so
+    /// applying any would splice raw JSON into a file. Rejected — the model is re-prompted.
+    Swallowed,
 }
 
 impl RepairError {
@@ -45,6 +48,11 @@ impl RepairError {
             RepairError::NoJson => "no JSON tool object found in your reply".to_string(),
             RepairError::BadJson(e) => format!("the JSON was malformed: {e}"),
             RepairError::Invalid(v) => v.to_string(),
+            RepairError::Swallowed => {
+                "your reply ran multiple tool calls together and a string argument absorbed the \
+                 next one — the edit content was corrupt"
+                    .to_string()
+            }
         };
         format!(
             "ERROR: {detail}.\n\
@@ -177,33 +185,57 @@ impl ToolCallStrategy for ParseRepair {
                     return Ok(call);
                 }
             }
+            // Recovery failed and every call is corrupt. REJECT rather than applying a swallowed
+            // call — writing its run-on `new_str`/`content` verbatim would splice raw JSON into the
+            // source file (the ship_render.rs corruption). An error re-prompts the model with the
+            // "one JSON object" reminder, which is the safe outcome.
+            return Err(RepairError::Swallowed);
         }
-        let pool: Vec<&ValidatedCall> = if clean.is_empty() {
-            valid.iter().collect()
-        } else {
-            clean
-        };
         // One action per turn (preserves observe→react). Among the clean calls, run the FIRST
         // that makes progress (edit/create/run/finish) — leading reads are re-confirmations —
         // else the first clean call.
-        let chosen = pool
+        let chosen = clean
             .iter()
             .find(|c| is_progress_tool(&c.name))
-            .or_else(|| pool.first())
+            .or_else(|| clean.first())
             .copied()
-            .expect("pool is non-empty (valid was non-empty)");
+            .expect("clean is non-empty (checked above)");
         Ok(chosen.clone())
     }
 }
 
-/// Whether a validated call has been SWALLOWED: one of its string arguments contains an
-/// embedded `"tool":` marker, meaning an unterminated narrated call absorbed a following real
-/// call into this arg's value. Such a call's content is corrupt and must not be applied.
+/// Whether a validated call has been SWALLOWED / RUN-ON: one of its string arguments contains an
+/// embedded tool-call OR edit-key marker, meaning the model's broken quoting let this arg's value
+/// absorb the NEXT argument or a following call. Such content is corrupt and must not be written to
+/// a file — otherwise raw JSON like `…};","old_str":"use …` lands in the source (observed live
+/// 2026-07-21: `ship_render.rs` got a `new_str` that ran on into a second `old_str`, corrupting the
+/// import block and breaking the build).
+///
+/// Detects two shapes:
+/// * an embedded `"tool":` — a following call swallowed into this arg (the original case), and
+/// * an embedded edit-key marker like `","old_str":` / `","new_str":` / `","content":` — the arg's
+///   value ran past its closing quote into the NEXT key. A legitimate code edit never contains a
+///   `"` immediately followed by one of these JSON keys and a `:`.
 fn looks_swallowed(call: &ValidatedCall) -> bool {
     ["old_str", "new_str", "new_text", "content", "command"]
         .iter()
         .filter_map(|k| call.str(k))
-        .any(|v| v.contains("\"tool\":") || v.contains("\"tool\" :"))
+        .any(value_is_runon)
+}
+
+
+/// Whether a single string argument value is corrupt: it embeds a following tool call (`"tool":`)
+/// or ran on into the NEXT JSON key (`","old_str":`, `","new_str":`, …). Shared by
+/// [`looks_swallowed`] and [`recover_swallowed_call`] so recovery can't resurrect a run-on value.
+fn value_is_runon(v: &str) -> bool {
+    const RUNON: [&str; 5] = [
+        "\",\"old_str\":",
+        "\",\"new_str\":",
+        "\",\"new_text\":",
+        "\",\"content\":",
+        "\",\"path\":",
+    ];
+    v.contains("\"tool\":") || v.contains("\"tool\" :") || RUNON.iter().any(|m| v.contains(m))
 }
 
 /// Recover the REAL tool call from a swallowed reply: the model narrated an illustration whose
@@ -222,12 +254,16 @@ fn recover_swallowed_call(raw: &str) -> Option<serde_json::Value> {
                 .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(obj)))
                 .ok();
             if let Some(v) = parsed {
-                // Skip a candidate that is itself swallowed (its own args embed another "tool":).
-                let self_swallowed = ["old_str", "new_str", "content", "command"].iter().any(|k| {
-                    v.get(k)
-                        .and_then(|x| x.as_str())
-                        .is_some_and(|s| s.contains("\"tool\":"))
-                });
+                // Skip a candidate that is itself corrupt — its args embed another call (`"tool":`)
+                // or run on into the next key (`","old_str":` …). Reuses the same detection as
+                // `looks_swallowed` so a run-on value can't be resurrected here.
+                let self_swallowed = ["old_str", "new_str", "new_text", "content", "command"]
+                    .iter()
+                    .any(|k| {
+                        v.get(k)
+                            .and_then(|x| x.as_str())
+                            .is_some_and(value_is_runon)
+                    });
                 if !self_swallowed {
                     best = Some(v);
                 }
@@ -635,6 +671,33 @@ mod tests {
         assert_eq!(call.name, "edit_file");
         assert_eq!(call.str("old_str"), Some("let x = 1;"), "picked the complete call");
         assert_eq!(call.str("new_str"), Some("let x = 2;"));
+    }
+
+    #[test]
+    fn rejects_a_run_on_edit_that_absorbed_the_next_argument() {
+        // The ship_render.rs corruption (observed live 2026-07-21): the model's `new_str` value ran
+        // past its closing quote and absorbed a following `,"old_str":"…` — the braces still
+        // balanced, so it parsed as ONE object with a `new_str` containing raw JSON. Applying it
+        // spliced `};","old_str":"use …` into the source. It MUST be rejected, not written.
+        let reg = default_registry();
+        // The `new_str` VALUE literally contains the run-on marker `","old_str":` — the model's
+        // broken quoting embedded the next key inside the string (an escaped inner quote), so it
+        // parses as one object with a corrupt `new_str`. This is what landed raw JSON in the file.
+        let raw = r#"{"tool":"edit_file","path":"ship_render.rs","old_str":"use foo::{Bar};","new_str":"use foo::{Bar};\n\nuse foo::SeatType;\",\"old_str\":\"use foo::{Bar};"}"#;
+        let err = ParseRepair.extract(raw, &reg).unwrap_err();
+        assert_eq!(err, RepairError::Swallowed, "run-on edit rejected, not applied");
+    }
+
+    #[test]
+    fn does_not_reject_a_legit_edit_whose_code_mentions_old_str_as_text() {
+        // Guard against a false positive: real code can contain the identifier `old_str` — only a
+        // value that RUNS ON into a JSON `","old_str":` framing is corrupt. A clean edit whose body
+        // merely mentions the word must still apply.
+        let reg = default_registry();
+        let raw = r#"{"tool":"edit_file","path":"a.rs","old_str":"let old_str = 1;","new_str":"let old_str = 2; // renamed later"}"#;
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        assert_eq!(call.name, "edit_file");
+        assert_eq!(call.str("new_str"), Some("let old_str = 2; // renamed later"));
     }
 
     #[test]

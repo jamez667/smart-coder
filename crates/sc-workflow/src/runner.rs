@@ -208,6 +208,26 @@ pub fn run_workflow_moded_to(
     let mut state = WorkflowState::new(grounded);
     let mut test_files = Vec::new();
     let mut aborted = false;
+
+    // Resume from an approved breakdown instead of regenerating it. A **Build** reuses the same
+    // task (and thus the same `art_dir`) a prior **Breakdown** ran, so its approved design phases
+    // are already on disk in `state.json`. Adopt those approved artifacts up front: `next_phase()`
+    // then skips straight past specs/architecture/layout/stage-breakdown to the build, instead of
+    // re-designing and re-gating them (the bug where clicking Build re-did the architecture).
+    //
+    // Only APPROVED phases are adopted — a draft/unapproved phase (e.g. an aborted breakdown)
+    // still regenerates and gates normally. We copy them onto the freshly-grounded `state` (rather
+    // than adopting the loaded state wholesale) so the current run's grounding/feedback apply to
+    // anything that does regenerate.
+    if let Ok(Some(prior)) = crate::state::load_from(&art_dir) {
+        for a in prior.approved() {
+            state.set(a.clone());
+            state.approve(a.phase);
+            // Surface the reused artifact to the UI so the chat shows the approved design, not a
+            // blank jump to the build.
+            on_phase(a.phase, &a.content);
+        }
+    }
     // Detect the project's language once, so every phase prompt speaks it (a Rust cargo repo
     // gets Rust rules, not the Python/Flask default). Derived from the workspace, not stored in
     // the serializable state.
@@ -371,6 +391,7 @@ fn ground_task(task: &str, workspace: &Path) -> String {
 
     out
 }
+
 
 /// If `task` names a feature spec that exists in `workspace` — `specs/<slug>.md` or a legacy
 /// `PLAN-<slug>.md` — return `(name, contents)`. Mirrors the agent loop's `referenced_plan` so

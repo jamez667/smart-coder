@@ -736,10 +736,18 @@ impl UiConfig {
         self.key = coder.key.clone();
 
         // Planner: only set orchestrator_* when it differs from the coder connection; otherwise
-        // leave None so the existing coder-fallback in `orchestrator()` applies.
+        // leave None so the existing coder-fallback in `orchestrator()` applies. Crucially, also
+        // clear `orchestrator_model` when the planner shares the coder's connection — otherwise a
+        // stale model name from a previous routing (e.g. `gemini-2.5-flash-lite` left over after
+        // switching the planner back to Local) is sent to the LOCAL endpoint, which serves whatever
+        // is loaded under that bogus name. Clearing it falls back to `self.model` (the local coder
+        // model), which is what "planner = same connection as coder" means. (Observed live
+        // 2026-07-21: planner routed Local still carried a Gemini model name, so the local model ran
+        // the planning phases mislabeled as Gemini.)
         if self.planner_provider == self.coder_provider {
             self.orchestrator_url = None;
             self.orchestrator_key = None;
+            self.orchestrator_model = None;
         } else {
             let plan = self.connection(self.planner_provider).clone();
             self.orchestrator_url = Some(plan.base_url);
@@ -1036,6 +1044,27 @@ mod tests {
         cfg.resolve_stages();
         assert_eq!(cfg.orchestrator_url, None);
         assert_eq!(cfg.orchestrator_key, None);
+    }
+
+    #[test]
+    fn resolve_stages_clears_a_stale_planner_model_when_routed_back_to_local() {
+        // The live bug (2026-07-21): the planner was routed to Local but `orchestrator_model` still
+        // held `gemini-2.5-flash-lite` from a previous Gemini routing. `orchestrator()` then asked
+        // the LOCAL endpoint for that model — the local server served whatever was loaded under the
+        // bogus name, so the LOCAL coder model ran the planning phases mislabeled as Gemini.
+        // Routing the planner to the coder's connection must clear the model so it falls back to the
+        // local coder model.
+        let mut cfg = UiConfig {
+            coder_provider: Provider::Local,
+            planner_provider: Provider::Local,
+            orchestrator_model: Some("gemini-2.5-flash-lite".into()), // stale
+            model: "qwen3-coder-30b".into(),
+            ..UiConfig::default()
+        };
+        cfg.resolve_stages();
+        assert_eq!(cfg.orchestrator_model, None, "stale Gemini planner model cleared");
+        // And orchestrator() then uses the local coder model, not the stale name.
+        // (orchestrator() falls back to self.model when orchestrator_model is None.)
     }
 
     #[test]

@@ -27,7 +27,9 @@ mod staged;
 mod state;
 mod testwriter;
 
-pub use compile_driven::{build_compiler_driven, BuildEvent, BuildOutcome};
+pub use compile_driven::{
+    build_all_subtasks, build_compiler_driven, BuildEvent, BuildOutcome, BuildTask,
+};
 pub use coverage::{group_by_file, parse_coverage, CoverageItem};
 pub use engine::{generate_phase, phase_messages};
 pub use gate::{AutoApprove, CeremonyGate, Decision, Gate};
@@ -40,5 +42,5 @@ pub use runner::{
 pub use stack::ProjectStack;
 pub use staged::{parse_stages, staged_build, Stage, StageResult, StagedReport};
 pub use sequential::{build_sequential, build_sequential_with_board, SequentialReport};
-pub use state::{load, plan_dir, save, Artifact, Status, WorkflowState};
+pub use state::{load, load_from, plan_dir, save, Artifact, Status, WorkflowState};
 pub use testwriter::{persist_tests, write_tests, WrittenTest};

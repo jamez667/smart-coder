@@ -114,6 +114,17 @@ pub fn generate_phase(
                     && !(phase == Phase::StageBreakdown && !matches!(stack, ProjectStack::Python));
                 let usable = !content.is_empty() && (!wants_json || contains_json_array(&content));
                 if usable {
+                    // Guardrail: the layout + (non-Python) breakdown are Markdown docs where a weak
+                    // planner degenerates into repeating the same file across dozens of near-duplicate
+                    // sections (observed live 2026-07-21: a 25-stage breakdown touching 24 files, many
+                    // dupes, for a small feature). Collapse repeated file sections and cap the count so
+                    // the artifact — and the decomposition derived from it — stays sane regardless of
+                    // model discipline. JSON phases are untouched (their shape is validated elsewhere).
+                    let content = if wants_json {
+                        content
+                    } else {
+                        dedup_file_sections(&content)
+                    };
                     return Artifact::draft(phase, content);
                 }
                 // Empty/unusable but the backend answered: retry now (no backoff).
@@ -144,6 +155,69 @@ fn contains_json_array(text: &str) -> bool {
         .ok()
         .and_then(|v| v.as_array().map(|a| !a.is_empty()))
         .unwrap_or(false)
+}
+
+/// Collapse a Markdown file-list document (layout / breakdown) so each source FILE appears at most
+/// once, and cap the number of sections. A weak planner repeats the same file across many
+/// near-duplicate `##` sections, ballooning the doc (and, downstream, the decomposition into
+/// duplicate subtasks → duplicated edits). We keep the FIRST section that references a given file
+/// and drop later ones; sections with no detectable file path are kept as-is (headers, intros).
+///
+/// Pure/host-testable. Preserves the leading preamble before the first `##` heading verbatim.
+fn dedup_file_sections(doc: &str) -> String {
+    /// Hard cap on `##` sections kept — a single feature's breakdown/layout well under this; the
+    /// cap only catches a runaway.
+    const MAX_SECTIONS: usize = 12;
+
+    let lines: Vec<&str> = doc.lines().collect();
+    // Find the section boundaries: indices of lines starting a `## ` heading.
+    let heads: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with("## "))
+        .map(|(i, _)| i)
+        .collect();
+    if heads.len() < 2 {
+        return doc.to_string(); // nothing to dedup
+    }
+
+    // Preamble = everything before the first heading.
+    let mut out: Vec<&str> = lines[..heads[0]].to_vec();
+    let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut kept = 0usize;
+    for (h, &start) in heads.iter().enumerate() {
+        let end = heads.get(h + 1).copied().unwrap_or(lines.len());
+        let section = &lines[start..end];
+        // The file this section is about: the first path-looking token in the heading or a
+        // `**File**:`/`File:` line within the section.
+        let file = section.iter().find_map(|l| extract_path_token(l));
+        // Keep a section with no file (intro/summary), and the first per file, up to the cap.
+        let keep = match &file {
+            Some(f) => kept < MAX_SECTIONS && seen_files.insert(f.clone()),
+            None => kept < MAX_SECTIONS,
+        };
+        if keep {
+            out.extend_from_slice(section);
+            kept += 1;
+        }
+    }
+    out.join("\n")
+}
+
+/// Pull the first source-file-looking path out of a line: a `foo/bar.ext` token (has a `/` and a
+/// file extension). `None` if the line has no such token. Tolerant of surrounding backticks,
+/// `**File**:` labels, and trailing punctuation.
+fn extract_path_token(line: &str) -> Option<String> {
+    line.split(|c: char| c.is_whitespace() || matches!(c, '`' | '*' | '(' | ')' | ',' | ':'))
+        .map(|t| t.trim_matches(|c| c == '`' || c == '.'))
+        .find(|t| {
+            t.contains('/')
+                && t.rsplit('/').next().is_some_and(|name| {
+                    name.rsplit_once('.')
+                        .is_some_and(|(stem, ext)| !stem.is_empty() && (1..=5).contains(&ext.len()))
+                })
+        })
+        .map(|t| t.to_string())
 }
 
 fn system_for(phase: Phase, stack: ProjectStack) -> String {
@@ -280,7 +354,18 @@ fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
                 };
                 let tail = "This is a DESIGN breakdown to review, NOT tests and NOT code — do not \
                      write test files or source code. Output a short Markdown document with a \
-                     numbered list of stages, each with its file(s) and its ordered steps.";
+                     numbered list of stages, each with its file(s) and its ordered steps.\n\n\
+                     SCOPE DISCIPLINE — this is critical:\n\
+                     • Touch the FEWEST files that actually deliver the change. A small feature is a \
+                     handful of files (the new type + where it's stored + one place it's used), NOT \
+                     every file that mentions a related word. Do NOT add a stage for a file just \
+                     because it renders/handles something nearby — only files the change genuinely \
+                     requires.\n\
+                     • List each file AT MOST ONCE across the whole breakdown. Never create two \
+                     stages that edit the same file with reworded steps, and never restate the \
+                     list. If you're about to name a file you already used, STOP — you are done.\n\
+                     • Prefer FEWER, well-scoped stages. If your breakdown exceeds ~8 stages for a \
+                     single feature, you are over-scoping — collapse or drop the speculative ones.";
                 return format!("{head}{core}{tail}");
             }
             // ONE test file per SOURCE file in the layout. This 1:1 alignment is what
@@ -368,7 +453,11 @@ fn phase_instruction(phase: Phase, stack: ProjectStack, task: &str) -> String {
              line on its responsibility. APPLY the architecture's patterns and reuse decisions — \
              reference them, don't re-explain the reasoning. This IS the per-file breakdown. \
              Output a short Markdown document — e.g. a list of files, each with its \
-             responsibility. Output only the document."
+             responsibility.\n\
+             CRITICAL: list each file EXACTLY ONCE. Do NOT repeat a file with reworded change \
+             descriptions, and do NOT restate the list. One `## <path>` heading per file, one line \
+             under it, then STOP. A small feature touches only a handful of files — if you find \
+             yourself writing the same path again, you are done. Output only the document."
                 .to_string()
         }
         _ => format!(
@@ -384,6 +473,65 @@ mod tests {
     use crate::stack::ProjectStack;
     use crate::state::Artifact;
     use sc_model::MockBackend;
+
+    #[test]
+    fn dedup_file_sections_collapses_repeated_files() {
+        // The live sprawl: the same file appears in multiple reworded sections. Dedup keeps the
+        // FIRST section per file and drops the rest; the preamble and no-file sections survive.
+        let doc = "# Implementation Plan\n\n\
+                   ## 1. Add enum in seat_types.rs\n\
+                   - File: crates/sim/src/seat_types.rs\n\
+                   - Add SeatType enum\n\n\
+                   ## 2. Field in character.rs\n\
+                   - File: crates/sim/src/character.rs\n\
+                   - Add seat_type field\n\n\
+                   ## 3. Rework seat_types.rs again\n\
+                   - File: crates/sim/src/seat_types.rs\n\
+                   - Add Display impl\n\n\
+                   ## 4. More character.rs\n\
+                   - File: crates/sim/src/character.rs\n\
+                   - Add Clone\n";
+        let out = dedup_file_sections(doc);
+        assert!(out.contains("# Implementation Plan"), "preamble kept");
+        // The FILE line for each path appears once (the first section's), not once per dup section.
+        assert_eq!(
+            out.matches("File: crates/sim/src/seat_types.rs").count(),
+            1,
+            "seat_types File line once"
+        );
+        assert_eq!(
+            out.matches("File: crates/sim/src/character.rs").count(),
+            1,
+            "character File line once"
+        );
+        assert!(out.contains("Add SeatType enum"), "first seat_types section kept");
+        assert!(!out.contains("Add Display impl"), "duplicate seat_types section dropped");
+        assert!(!out.contains("Add Clone"), "duplicate character section dropped");
+    }
+
+    #[test]
+    fn dedup_file_sections_caps_runaway_and_keeps_no_file_sections() {
+        // A no-file section (a summary) is kept; and a doc with more sections than the cap is
+        // truncated to the cap (a runaway can't produce a 25-stage artifact).
+        let mut doc = String::from("intro\n\n## Summary\n- overview, no file path\n\n");
+        for i in 0..30 {
+            doc.push_str(&format!("## Stage {i}\n- File: crates/x/f{i}.rs\n- do it\n\n"));
+        }
+        let out = dedup_file_sections(&doc);
+        assert!(out.contains("## Summary"), "no-file section survives");
+        let sections = out.matches("\n## ").count() + out.starts_with("## ") as usize;
+        assert!(sections <= 12, "capped at MAX_SECTIONS, got {sections}");
+    }
+
+    #[test]
+    fn extract_path_token_finds_real_paths_only() {
+        assert_eq!(
+            extract_path_token("- File: `crates/sim/src/seat_types.rs`"),
+            Some("crates/sim/src/seat_types.rs".to_string())
+        );
+        assert_eq!(extract_path_token("## 1. Add the enum"), None); // no path
+        assert_eq!(extract_path_token("just prose about seat_type"), None); // no slash+ext
+    }
 
     #[test]
     fn rust_stack_prompt_names_cargo_not_flask() {

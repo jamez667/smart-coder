@@ -152,4 +152,20 @@ mod tests {
         let got = iterate_verify_command(&Some(PYTEST_DEFAULT.into()), Path::new("/nope-xyz-2"));
         assert_eq!(got.as_deref(), Some(PYTEST_DEFAULT));
     }
+
+    #[test]
+    fn rust_project_overrides_the_stale_pytest_default_with_cargo_check() {
+        // The live bug (2026-07-21): a Rust project kept the default `python -m pytest -q`, so the
+        // build's compiler-driven fix loop ran pytest, found no rust errors, and never fixed the
+        // real compile errors. A Cargo.toml MUST override the pytest default with `cargo check`.
+        let dir = std::env::temp_dir().join(format!("dc-verify-rust-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let got = iterate_verify_command(&Some(PYTEST_DEFAULT.into()), &dir);
+        assert_eq!(got.as_deref(), Some("cargo check"), "Rust project → cargo check");
+        // An EXPLICIT non-default command is still honored (the user knows best).
+        let got = iterate_verify_command(&Some("cargo test -p void_sim".into()), &dir);
+        assert_eq!(got.as_deref(), Some("cargo test -p void_sim"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

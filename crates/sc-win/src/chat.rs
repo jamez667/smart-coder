@@ -104,6 +104,11 @@ pub struct ProposedFile {
     pub name: String,
     /// The full proposed contents.
     pub content: String,
+    /// Whether this file has been written to disk. A feature-plan card STAYS in the chat after
+    /// applying (so its Breakdown/Build actions remain available) — this flips its Apply button to
+    /// an "applied" state rather than removing the card. Non-plan files are removed on apply as
+    /// before, so this stays false for them.
+    pub applied: bool,
 }
 
 /// One turn shown in the chat thread.
@@ -607,6 +612,7 @@ pub fn parse_reply(reply: &str) -> (String, Vec<ProposedFile>) {
             files.push(ProposedFile {
                 name: name.to_string(),
                 content: body,
+                applied: false,
             });
         } else if is_command_fence(line) {
             // A ```command block: swallow it (its content is surfaced separately as a
@@ -706,6 +712,7 @@ pub fn wrap_plan_prose(prose: &str, fallback_slug: &str) -> ProposedFile {
     ProposedFile {
         name: spec_path(&slug),
         content: prose.trim().to_string(),
+        applied: false,
     }
 }
 

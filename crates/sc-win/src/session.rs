@@ -442,13 +442,66 @@ fn run_plan(
 /// directory so the design phases land beside the spec (OpenSpec layout). `None` otherwise (the
 /// workflow then uses its default `.smart-coder/plan/`).
 fn spec_artifact_dir(task: &str, workspace: &std::path::Path) -> Option<PathBuf> {
-    let token = task
+    // 1) If the task already names a `specs/<slug>/spec.md`, use that feature dir verbatim (a Build
+    //    of a plan the user already wrote / a prior Breakdown created).
+    let referenced = task
         .split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ','))
         .map(|t| t.trim_end_matches('.').replace('\\', "/"))
-        .find(|t| t.to_ascii_lowercase().starts_with("specs/") && t.to_ascii_lowercase().ends_with("/spec.md"))?;
-    // Strip the trailing `/spec.md` to get the feature directory.
-    let dir_rel = token.strip_suffix("/spec.md").or_else(|| token.strip_suffix("/SPEC.MD"))?;
-    Some(workspace.join(dir_rel))
+        .find(|t| {
+            t.to_ascii_lowercase().starts_with("specs/")
+                && t.to_ascii_lowercase().ends_with("/spec.md")
+        })
+        .and_then(|token| {
+            token
+                .strip_suffix("/spec.md")
+                .or_else(|| token.strip_suffix("/SPEC.MD"))
+                .map(|d| d.to_string())
+        });
+    if let Some(dir_rel) = referenced {
+        return Some(workspace.join(dir_rel));
+    }
+
+    // 2) Otherwise derive a `specs/<slug>/` folder from the task text, so EVERY run lands its
+    //    design in `specs/<name>/spec.md` (+ architecture.md, layout.md, …) — the OpenSpec layout
+    //    is now the default, not the old numbered `.smart-coder/plan/` fallback.
+    let slug = slugify(task);
+    if slug.is_empty() {
+        return None; // truly empty/garbage task ⇒ let the workflow use its plan-dir fallback.
+    }
+    Some(workspace.join("specs").join(slug))
+}
+
+/// Turn free task text into a short kebab-case folder name for `specs/<slug>/`. Lower-cases,
+/// keeps `[a-z0-9]`, collapses every other run into a single `-`, trims leading/trailing `-`, and
+/// caps the length + word count so a long prompt doesn't become an unwieldy directory name. Empty
+/// when the text has no alphanumerics.
+fn slugify(task: &str) -> String {
+    // Drop a leading spec-instruction boilerplate so the slug reflects the feature, not the verb.
+    // `plan_task` wraps a plan name as "Design how to implement the feature plan in <X>. …"; strip
+    // that lead-in so the slug is the feature, not "design-how-to-implement…". Best-effort — a
+    // plain prompt has no such prefix and slugifies as-is.
+    let text = task.trim();
+    let text = text
+        .strip_prefix("Design how to implement the feature plan in ")
+        .or_else(|| text.strip_prefix("Design how to implement the feature in "))
+        .unwrap_or(text);
+    // Only the first sentence carries the feature name; the rest is instruction boilerplate.
+    let text = text.split(['.', '\n']).next().unwrap_or(text).trim();
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    // Cap to the first few words (~40 chars) so the folder name stays readable.
+    let capped: String = slug.chars().take(40).collect();
+    capped.trim_matches('-').to_string()
 }
 
 fn run_staged_build(
@@ -461,6 +514,25 @@ fn run_staged_build(
 ) {
     let orchestrator = cfg.orchestrator();
     let worker = cfg.backend();
+
+    // Preflight: warn if the verify command can't run in the chosen sandbox (a Rust project with
+    // the default Python image), so the user fixes it BEFORE the build writes files and the verify
+    // silently no-ops. Best-effort, non-blocking — the build still proceeds.
+    if workspace.join("Cargo.toml").is_file() {
+        if let sc_verify::Sandbox::Docker { image } = cfg.sandbox() {
+            if image.contains("pyenv") {
+                let _ = ev_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatMessage {
+                    role: "system".into(),
+                    text: format!(
+                        "⚠ This looks like a Rust project, but the sandbox is the Python `{image}` \
+                         image — `cargo` won't run there, so the build's verify step will no-op. \
+                         Set SC_DOCKER_IMAGE=rust or SC_USE_DOCKER=0 (host) and rebuild."
+                    ),
+                }));
+            }
+        }
+    }
+
     // Human-in-the-loop: pause at each design phase (Specs → Architecture → Layout → Breakdown)
     // for Approve/Revise/Send-back via the gatebar, instead of AutoApprove barrelling through.
     let gate = ChannelGate::new(pending_tx);
@@ -554,28 +626,63 @@ fn run_staged_build(
         return;
     }
 
-    // 2) The foundational chunk: the first dep-free subtask (the one change the decomposition can
-    // name; the compiler discovers the rest). Fall back to the whole task if the board is empty.
+    // 2) Flatten the decomposition into the full build work-list — EVERY subtask, not just the
+    // foundational one. (Building only the first dep-free subtask and hoping the compiler surfaces
+    // the rest silently stopped after one file when that file compiled cleanly in isolation.)
     let board = outcome.board.subtasks();
-    let (found_goal, found_files) = board
+    let tasks: Vec<sc_workflow::BuildTask> = board
         .iter()
-        .find(|s| s.deps.is_empty())
-        .or_else(|| board.first())
-        .map(|s| (s.goal.clone(), s.files.clone()))
-        .unwrap_or_else(|| (task.clone(), Vec::new()));
+        .map(|s| sc_workflow::BuildTask {
+            id: s.id.clone(),
+            goal: s.goal.clone(),
+            files: s.files.clone(),
+            deps: s.deps.clone(),
+        })
+        .collect();
 
-    let verify = cfg
-        .verify_command
-        .clone()
-        .or_else(|| sc_iterate::iterate_verify_command(&cfg.verify_command, &workspace))
+    // Surface the decomposition in the chat as a readable plan, so the build's work-list is visible
+    // (not just a raw JSON blob buried in the phase stream).
+    if tasks.is_empty() {
+        let _ = ev_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatMessage {
+            role: "system".into(),
+            text: "⚠ decomposition produced no subtasks — building the task as one unit."
+                .to_string(),
+        }));
+    } else {
+        let mut summary = format!("🧩 decomposition — {} subtask(s) to build:", tasks.len());
+        for t in &tasks {
+            summary.push_str(&format!("\n  • {} — {}", t.id, t.goal));
+        }
+        let _ = ev_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatMessage {
+            role: "system".into(),
+            text: summary,
+        }));
+    }
+
+    // Pick the verify command the project ACTUALLY needs: `iterate_verify_command` detects the
+    // stack (Cargo.toml → `cargo check`, package.json → npm, Python → pytest) and overrides a stale
+    // pytest default. It MUST be called first — using `cfg.verify_command` directly meant a Rust
+    // project inherited the default `python -m pytest -q`, so the compiler-driven fix loop ran
+    // pytest (which finds no rust errors), saw "0 errors", declared green, and NEVER fixed the
+    // real compile errors the edits introduced (observed live 2026-07-21: a build left the tree
+    // uncompilable because the fix loop was checking with the wrong tool).
+    let verify = sc_iterate::iterate_verify_command(&cfg.verify_command, &workspace)
+        .or_else(|| cfg.verify_command.clone())
         .unwrap_or_else(|| "cargo check".to_string());
 
-    // 3) Compiler-driven build: apply the foundational chunk, then cargo-check→fix each diagnostic
-    // until green. Tee progress into the activity stream as chat notes.
+    // 3) Compiler-driven build: apply EVERY subtask in dependency order, then cargo-check→fix each
+    // diagnostic until green. Tee progress into the chat as system notes.
     let build_tx = ev_tx.clone();
+    let build_task = task.clone();
     let on_build = move |ev: sc_workflow::BuildEvent| {
         let note = match ev {
             sc_workflow::BuildEvent::Foundational { goal } => format!("▶ building: {goal}"),
+            sc_workflow::BuildEvent::Subtask {
+                id,
+                goal,
+                index,
+                total,
+            } => format!("▶ [{index}/{total}] {id}: {goal}"),
             sc_workflow::BuildEvent::Checked { errors } => {
                 format!("● cargo check → {errors} error(s)")
             }
@@ -594,28 +701,79 @@ fn run_staged_build(
         }));
     };
 
-    let result = sc_workflow::build_compiler_driven(
+    // Forward the scoped-edit agent's events into the UI stream, so the desktop counts touched
+    // files (the "N files built" banner) and shows each edit in the chat / code view live —
+    // previously these were swallowed, so a successful build reported "0 files touched".
+    let agent_tx = ev_tx.clone();
+    let on_agent = move |e: &sc_core::AgentEvent| {
+        let _ = agent_tx.send(UiEvent::Agent(e.clone()));
+    };
+
+    // A single fallback task when the board is empty, so an un-decomposed change still builds.
+    let fallback = [sc_workflow::BuildTask {
+        id: "t1".to_string(),
+        goal: build_task,
+        files: Vec::new(),
+        deps: Vec::new(),
+    }];
+    let build_tasks = if tasks.is_empty() { &fallback[..] } else { &tasks[..] };
+
+    let result = sc_workflow::build_all_subtasks(
         &worker,
         &workspace,
         &cfg.sandbox(),
         &verify,
-        &found_goal,
-        &found_files,
+        build_tasks,
         &on_build,
+        &on_agent,
     );
 
+    // Report the outcome. Distinguish "the verify command couldn't RUN" (non-zero exit but zero
+    // parseable compile errors — typically the wrong sandbox, e.g. `cargo` missing in the Python
+    // image) from a genuine compile failure. Otherwise a build that actually wrote its files reads
+    // as "incomplete, 0 errors", which is baffling.
+    let summary = if result.green {
+        format!("built ✓ — verify green in {} iteration(s)", result.iterations)
+    } else if result.remaining.is_empty() {
+        // Not green, yet nothing parseable failed ⇒ the verify command itself didn't run.
+        let hint = sandbox_verify_hint(&cfg, &verify, &workspace);
+        format!("files were written, but the verify step couldn't run — {hint}")
+    } else {
+        format!(
+            "stopped with {} compile error(s) after {} iteration(s)",
+            result.remaining.len(),
+            result.iterations
+        )
+    };
     let _ = ev_tx.send(UiEvent::Done {
-        ok: result.green,
-        summary: if result.green {
-            format!("built ✓ — cargo check green in {} iteration(s)", result.iterations)
-        } else {
-            format!(
-                "stopped with {} compile error(s) after {} iteration(s)",
-                result.remaining.len(),
-                result.iterations
-            )
-        },
+        // Treat "verify couldn't run" as ok=true for the banner: the files were written; the
+        // failure is environmental, not the build's fault. The message says what to fix.
+        ok: result.green || result.remaining.is_empty(),
+        summary,
     });
+}
+
+/// A human hint for why a verify command produced no parseable result — almost always the sandbox
+/// can't run it (a Rust `cargo` build in the default Python `smart-coder-pyenv` image). Names the
+/// command, the sandbox, and the concrete fix. Kept small + pure (takes what it needs) so it's
+/// testable without a live run.
+fn sandbox_verify_hint(cfg: &UiConfig, verify: &str, workspace: &std::path::Path) -> String {
+    let sandbox = match cfg.sandbox() {
+        sc_verify::Sandbox::Host => "the host".to_string(),
+        sc_verify::Sandbox::Docker { image } => format!("the `{image}` container"),
+        sc_verify::Sandbox::Session(c) => format!("the `{}` container", c.name()),
+    };
+    let is_rust = workspace.join("Cargo.toml").is_file()
+        || verify.trim_start().starts_with("cargo");
+    let uses_pyenv = matches!(cfg.sandbox(), sc_verify::Sandbox::Docker { image } if image.contains("pyenv"));
+    if is_rust && uses_pyenv {
+        format!(
+            "`{verify}` can't run in {sandbox} (a Python image has no cargo). Set a Rust image \
+             (SC_DOCKER_IMAGE=rust) or run on the host (SC_USE_DOCKER=0), then rebuild."
+        )
+    } else {
+        format!("`{verify}` exited non-zero with no diagnostics in {sandbox} — check it runs there.")
+    }
 }
 
 fn run_tdd(
@@ -891,13 +1049,81 @@ mod tests {
     use sc_core::AgentEvent;
 
     #[test]
-    fn spec_artifact_dir_resolves_the_openspec_folder() {
+    fn spec_artifact_dir_uses_a_referenced_spec_path_verbatim() {
         let ws = std::path::Path::new("/proj");
-        // A task naming specs/<slug>/spec.md → the artifact dir is specs/<slug>/.
+        // A task naming specs/<slug>/spec.md → the artifact dir is exactly that feature dir.
         let d = spec_artifact_dir("Design how to implement specs/alt-seats/spec.md.", ws);
         assert_eq!(d, Some(ws.join("specs").join("alt-seats")));
-        // No spec reference → None (falls back to the default plan dir).
-        assert_eq!(spec_artifact_dir("just build something", ws), None);
+    }
+
+    #[test]
+    fn spec_artifact_dir_derives_specs_slug_from_a_plain_prompt() {
+        let ws = std::path::Path::new("/proj");
+        // A plain prompt now ALSO lands in specs/<slug>/ (the OpenSpec layout is the default).
+        assert_eq!(
+            spec_artifact_dir("Add seat types for crew roles", ws),
+            Some(ws.join("specs").join("add-seat-types-for-crew-roles"))
+        );
+        // The plan_task boilerplate lead-in is stripped so the slug is the feature, not the verb.
+        assert_eq!(
+            spec_artifact_dir("Design how to implement the feature plan in seat types. Read the plan…", ws),
+            Some(ws.join("specs").join("seat-types"))
+        );
+        // A truly empty/garbage task ⇒ None ⇒ the workflow's plan-dir fallback.
+        assert_eq!(spec_artifact_dir("   ", ws), None);
+        assert_eq!(spec_artifact_dir("!!! ???", ws), None);
+    }
+
+    #[test]
+    fn slugify_is_kebab_case_and_capped() {
+        assert_eq!(slugify("Add Seat Types"), "add-seat-types");
+        assert_eq!(slugify("  spaces   and---dashes  "), "spaces-and-dashes");
+        assert_eq!(slugify("weird!!chars@@here"), "weird-chars-here");
+        assert_eq!(slugify(""), "");
+        // First sentence only (instruction boilerplate after a period is dropped).
+        assert_eq!(slugify("Seat types. Do not write code yet."), "seat-types");
+        // Length cap keeps the folder name reasonable.
+        let long = "a".repeat(80);
+        assert!(slugify(&long).len() <= 40);
+    }
+
+    #[test]
+    fn sandbox_verify_hint_flags_cargo_in_a_python_image() {
+        // A Rust project (Cargo.toml present) + the default pyenv image ⇒ the hint names cargo,
+        // the image, and the concrete fix. This is the "build incomplete, 0 errors" mystery.
+        let dir = std::env::temp_dir().join(format!("dc-hint-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let cfg = UiConfig {
+            use_docker: true,
+            docker_image: "smart-coder-pyenv".to_string(),
+            sandbox_override: None,
+            ..UiConfig::default()
+        };
+        let hint = sandbox_verify_hint(&cfg, "cargo check", &dir);
+        assert!(hint.contains("cargo check"), "names the command: {hint}");
+        assert!(hint.contains("smart-coder-pyenv"), "names the image: {hint}");
+        assert!(
+            hint.contains("SC_DOCKER_IMAGE=rust") || hint.contains("SC_USE_DOCKER=0"),
+            "gives the fix: {hint}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sandbox_verify_hint_generic_when_not_the_rust_pyenv_case() {
+        // Host sandbox (or a non-Rust project) ⇒ a generic "check it runs there" message, not the
+        // cargo/pyenv special-case.
+        let dir = std::env::temp_dir().join(format!("dc-hint2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir); // no Cargo.toml
+        let cfg = UiConfig {
+            use_docker: false, // host
+            ..UiConfig::default()
+        };
+        let hint = sandbox_verify_hint(&cfg, "python -m pytest -q", &dir);
+        assert!(hint.contains("the host"), "names host sandbox: {hint}");
+        assert!(!hint.contains("cargo"), "no cargo special-case: {hint}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Run a git command in `dir`, ignoring failures (test setup).

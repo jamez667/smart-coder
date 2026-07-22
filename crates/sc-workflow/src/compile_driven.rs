@@ -24,11 +24,30 @@ use sc_core::{
 use sc_model::ModelBackend;
 use sc_verify::{compile_errors, run_command_in, CompileError, Sandbox};
 
+/// A single planned unit of work handed to the builder: a scoped goal + the files it touches +
+/// the ids it depends on (so the builder applies them in dependency order). This is the shape the
+/// caller flattens its decomposition board into.
+#[derive(Debug, Clone)]
+pub struct BuildTask {
+    pub id: String,
+    pub goal: String,
+    pub files: Vec<String>,
+    pub deps: Vec<String>,
+}
+
 /// One diagnostic-driven fix attempt, for the caller's event stream.
 #[derive(Debug, Clone)]
 pub enum BuildEvent {
     /// Applying the foundational change (the chunk the decomposition named).
     Foundational { goal: String },
+    /// Applying a planned subtask (one of the decomposition's units), in dependency order.
+    /// `index`/`total` let the UI show progress (`building 2/7`).
+    Subtask {
+        id: String,
+        goal: String,
+        index: usize,
+        total: usize,
+    },
     /// A verify pass ran; `errors` is how many compile errors it found (0 = green).
     Checked { errors: usize },
     /// About to fix a specific located diagnostic.
@@ -68,6 +87,7 @@ pub fn build_compiler_driven(
     foundational_goal: &str,
     foundational_files: &[String],
     on_event: &dyn Fn(BuildEvent),
+    on_agent: &dyn Fn(&sc_core::AgentEvent),
 ) -> BuildOutcome {
     // 1) Foundational chunk — the change the decomposition could name.
     on_event(BuildEvent::Foundational {
@@ -79,10 +99,94 @@ pub fn build_compiler_driven(
         sandbox,
         foundational_files,
         foundational_goal,
+        on_agent,
     );
 
-    // 2) verify → fix loop, compiler-driven.
+    verify_fix_loop(backend, workspace, sandbox, verify_command, on_event, on_agent)
+}
+
+/// Build the WHOLE decomposition, not just the foundational chunk: apply every `tasks` unit as a
+/// scoped edit in dependency order, THEN run the compiler-driven verify→fix loop to integrate them.
+///
+/// This is the fix for a build stopping after one file: `build_compiler_driven` applies only the
+/// single foundational subtask and relies on the compiler surfacing the rest — but when that first
+/// change compiles cleanly in isolation (e.g. a standalone new enum file), nothing cascades and the
+/// other subtasks are never built. Applying every planned subtask first guarantees each named file
+/// is created/edited; the verify→fix loop then resolves the integration errors between them.
+pub fn build_all_subtasks(
+    backend: &dyn ModelBackend,
+    workspace: &Path,
+    sandbox: &Sandbox,
+    verify_command: &str,
+    tasks: &[BuildTask],
+    on_event: &dyn Fn(BuildEvent),
+    on_agent: &dyn Fn(&sc_core::AgentEvent),
+) -> BuildOutcome {
+    let ordered = order_by_deps(tasks);
+    let total = ordered.len();
+    for (i, t) in ordered.iter().enumerate() {
+        on_event(BuildEvent::Subtask {
+            id: t.id.clone(),
+            goal: t.goal.clone(),
+            index: i + 1,
+            total,
+        });
+        run_scoped_edit(backend, workspace, sandbox, &t.files, &t.goal, on_agent);
+    }
+    verify_fix_loop(backend, workspace, sandbox, verify_command, on_event, on_agent)
+}
+
+/// Order `tasks` so a task's `deps` come before it — a topological walk that falls back to the
+/// input order for a cycle/dangling dep (never strands a task). Mirrors the swarm board's walk so
+/// the build applies foundational units (the ones with no deps) first.
+fn order_by_deps(tasks: &[BuildTask]) -> Vec<BuildTask> {
+    let ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    let mut emitted: Vec<String> = Vec::new();
+    let mut out: Vec<BuildTask> = Vec::new();
+    while out.len() < tasks.len() {
+        let next = tasks
+            .iter()
+            .filter(|t| !emitted.contains(&t.id))
+            .find(|t| t.deps.iter().all(|d| emitted.contains(d)))
+            .or_else(|| {
+                // cycle / dep on a missing id: take the first remaining, don't strand it.
+                tasks.iter().find(|t| !emitted.contains(&t.id))
+            });
+        match next {
+            Some(t) => {
+                emitted.push(t.id.clone());
+                out.push(t.clone());
+            }
+            None => break,
+        }
+    }
+    // Defensive: if anything was missed (shouldn't happen), append the rest in input order.
+    for t in tasks {
+        if !emitted.contains(&t.id) {
+            out.push(t.clone());
+        }
+    }
+    let _ = ids;
+    out
+}
+
+/// The shared verify → fix-each-diagnostic loop: run the verify command, parse compile errors, fix
+/// each with a scoped single-shot pass, repeat until green or the iteration budget is spent.
+fn verify_fix_loop(
+    backend: &dyn ModelBackend,
+    workspace: &Path,
+    sandbox: &Sandbox,
+    verify_command: &str,
+    on_event: &dyn Fn(BuildEvent),
+    on_agent: &dyn Fn(&sc_core::AgentEvent),
+) -> BuildOutcome {
     let mut iterations = 0;
+    // Stall detection: if the error count doesn't IMPROVE for this many consecutive iterations, the
+    // loop isn't converging (e.g. a delimiter cascade where rustc reports the symptom line, not the
+    // cause — the model edits the wrong place forever). Bail instead of grinding the whole budget.
+    const STALL_LIMIT: usize = 2;
+    let mut prev_error_count = usize::MAX;
+    let mut stalls = 0;
     loop {
         let result = run_command_in(sandbox, workspace, verify_command);
         let errors = compile_errors(&result.output);
@@ -100,7 +204,14 @@ pub fn build_compiler_driven(
                 remaining: Vec::new(),
             };
         }
-        if iterations >= MAX_ITERATIONS {
+        // Not converging? Count a stall when the error total didn't drop since last iteration.
+        if errors.len() >= prev_error_count {
+            stalls += 1;
+        } else {
+            stalls = 0;
+        }
+        prev_error_count = errors.len();
+        if iterations >= MAX_ITERATIONS || stalls >= STALL_LIMIT {
             on_event(BuildEvent::Done {
                 green: false,
                 iterations,
@@ -113,36 +224,58 @@ pub fn build_compiler_driven(
         }
         iterations += 1;
 
-        // 3) Each diagnostic → a scoped single-shot fix.
+        // 3) Each diagnostic → a scoped single-shot fix. Delimiter/brace errors get extra guidance
+        // because rustc reports the SYMPTOM line, not the cause — a naive "fix exactly this line"
+        // makes the model edit the wrong place and loop (observed live 2026-07-21: widgets.rs looped
+        // on line 320 while the real unclosed `{` was at 539, from a duplicated block).
         for e in errors.iter().take(MAX_FIXES_PER_ITER) {
             on_event(BuildEvent::Fixing {
                 file: e.file.clone(),
                 line: e.line,
                 message: e.message.clone(),
             });
+            let is_delimiter = {
+                let m = e.message.to_ascii_lowercase();
+                m.contains("delimiter")
+                    || m.contains("unclosed")
+                    || m.contains("mismatched")
+                    || m.contains("expected `}`")
+                    || m.contains("expected `)`")
+            };
+            let hint = if is_delimiter {
+                "This is a DELIMITER/BRACE error — the reported line is where the compiler NOTICED \
+                 the imbalance, NOT necessarily the cause. Read the whole function/region around it \
+                 and find the ACTUAL unbalanced `{`/`}`/`(`/`)` — it is often EARLIER, and often a \
+                 DUPLICATED block (a function or struct pasted twice) or a missing/extra closing \
+                 brace. Remove the duplicate or balance the braces. "
+            } else {
+                "If it is a non-exhaustive match, add the missing arm(s); if a signature/type \
+                 mismatch, correct it minimally. "
+            };
             let goal = format!(
-                "There is a compile error in `{}` at line {}:\n  {}\n\nFix EXACTLY this error and \
-                 nothing else. The relevant code is in `{}` (pinned below). If it is a \
-                 non-exhaustive match, add the missing arm(s); if a signature/type mismatch, \
-                 correct it minimally. Make one small, idiomatic edit (use edit_function for a \
-                 match arm or body), then finish.",
-                e.file, e.line, e.message, e.file
+                "There is a compile error in `{}` at line {}:\n  {}\n\n{}Make one small, idiomatic \
+                 edit (use edit_function for a match arm or body), then finish. The relevant code is \
+                 in `{}` (pinned below).",
+                e.file, e.line, e.message, hint, e.file
             );
-            run_scoped_edit(backend, workspace, sandbox, &[e.file.clone()], &goal);
+            run_scoped_edit(backend, workspace, sandbox, &[e.file.clone()], &goal, on_agent);
         }
     }
 }
 
 /// Run one scoped, single-purpose agent pass: focused on `files` (their live contents are pinned
 /// each turn, so the model edits rather than hunts), a tight step budget, told to make one edit.
-/// Edits the real workspace. Errors/finishes are swallowed — the verify pass is the source of
-/// truth for whether the edit worked, so a failed pass just leaves the error for the next round.
+/// Edits the real workspace. Its `AgentEvent`s are forwarded to `on_agent` so the caller can
+/// surface them (count touched files, stream edits into the chat / code view) — previously they
+/// were swallowed, which made a genuinely-successful build report "0 files touched". The verify
+/// pass remains the source of truth for whether the edit worked.
 fn run_scoped_edit(
     backend: &dyn ModelBackend,
     workspace: &Path,
     sandbox: &Sandbox,
     files: &[String],
     goal: &str,
+    on_agent: &dyn Fn(&sc_core::AgentEvent),
 ) {
     let registry = default_registry();
     let strategy = select_strategy(&backend.capabilities());
@@ -153,7 +286,7 @@ fn run_scoped_edit(
     // pass has ONE located edit to make, so it shouldn't wander.
     cfg.verify_command = None;
     cfg.max_steps = 6;
-    let sink = FnSink(|_e: &sc_core::AgentEvent| {});
+    let sink = FnSink(on_agent);
     let sink: &dyn EventSink = &sink;
     let _ = run_agent_observed(
         backend, None, &registry, strategy.as_ref(), goal, workspace, &cfg, sink,
@@ -174,5 +307,46 @@ mod tests {
             remaining: Vec::new(),
         };
         assert!(o.green && o.remaining.is_empty());
+    }
+
+    fn task(id: &str, deps: &[&str]) -> BuildTask {
+        BuildTask {
+            id: id.to_string(),
+            goal: format!("do {id}"),
+            files: vec![format!("{id}.rs")],
+            deps: deps.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn order_by_deps_puts_dependencies_first() {
+        // t2,t3 depend on t1; t5 depends on t3. A valid order must place each after its deps.
+        let tasks = vec![
+            task("t3", &["t1"]),
+            task("t5", &["t3"]),
+            task("t1", &[]),
+            task("t2", &["t1"]),
+        ];
+        let ordered = order_by_deps(&tasks);
+        let ids: Vec<&str> = ordered.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ordered.len(), 4, "no task dropped");
+        let pos = |id: &str| ids.iter().position(|x| *x == id).unwrap();
+        assert!(pos("t1") < pos("t2"), "t1 before t2");
+        assert!(pos("t1") < pos("t3"), "t1 before t3");
+        assert!(pos("t3") < pos("t5"), "t3 before t5");
+    }
+
+    #[test]
+    fn order_by_deps_never_strands_a_cycle_or_dangling_dep() {
+        // A cycle (t1↔t2) and a dangling dep (t3→missing) must not drop tasks — every id appears.
+        let tasks = vec![
+            task("t1", &["t2"]),
+            task("t2", &["t1"]),
+            task("t3", &["nope"]),
+        ];
+        let ordered = order_by_deps(&tasks);
+        assert_eq!(ordered.len(), 3, "all tasks emitted despite cycle/dangling dep");
+        let ids: std::collections::HashSet<&str> = ordered.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains("t1") && ids.contains("t2") && ids.contains("t3"));
     }
 }
