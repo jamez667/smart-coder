@@ -2,10 +2,10 @@
 //! path is exercised end-to-end without a real terminal — folding a realistic
 //! event sequence into state and asserting the frame shows what it should.
 
-use sc_core::{AgentEvent, StopReason};
-use sc_tui::{draw, TuiState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use sc_core::{AgentEvent, StopReason};
+use sc_tui::{draw, TuiState};
 
 fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
     let buf = terminal.backend().buffer();

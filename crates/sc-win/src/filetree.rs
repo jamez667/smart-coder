@@ -133,8 +133,8 @@ pub fn filter_view(full: &[TreeRow], query: &str) -> Vec<TreeRow> {
     }
     let mut keep: HashSet<&str> = HashSet::new();
     for r in full {
-        let hit = r.name.to_ascii_lowercase().contains(&q)
-            || r.rel.to_ascii_lowercase().contains(&q);
+        let hit =
+            r.name.to_ascii_lowercase().contains(&q) || r.rel.to_ascii_lowercase().contains(&q);
         if hit {
             keep.insert(r.rel.as_str());
             let mut cur = r.rel.as_str();
@@ -144,7 +144,10 @@ pub fn filter_view(full: &[TreeRow], query: &str) -> Vec<TreeRow> {
             }
         }
     }
-    full.iter().filter(|r| keep.contains(r.rel.as_str())).cloned().collect()
+    full.iter()
+        .filter(|r| keep.contains(r.rel.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn walk(
@@ -272,14 +275,24 @@ mod tests {
         let rows = filter_rows(&dir, &collapsed, "sim");
         let rels: Vec<&str> = rows.iter().map(|r| r.rel.as_str()).collect();
         // The match plus its ancestor dirs are kept; unrelated files are dropped.
-        assert!(rels.contains(&"crates/city/src/sim.rs"), "match kept: {rels:?}");
+        assert!(
+            rels.contains(&"crates/city/src/sim.rs"),
+            "match kept: {rels:?}"
+        );
         assert!(rels.contains(&"crates"), "ancestor kept: {rels:?}");
         assert!(rels.contains(&"crates/city/src"), "ancestor kept: {rels:?}");
-        assert!(!rels.contains(&"crates/city/src/main.rs"), "non-match dropped: {rels:?}");
+        assert!(
+            !rels.contains(&"crates/city/src/main.rs"),
+            "non-match dropped: {rels:?}"
+        );
         assert!(!rels.contains(&"Cargo.toml"), "non-match dropped: {rels:?}");
         // An empty query falls back to the normal collapsed view.
         let normal = filter_rows(&dir, &collapsed, "  ");
-        assert_eq!(normal, build_rows(&dir, &collapsed), "blank query = normal tree");
+        assert_eq!(
+            normal,
+            build_rows(&dir, &collapsed),
+            "blank query = normal tree"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

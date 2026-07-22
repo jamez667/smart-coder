@@ -84,7 +84,8 @@ fn serialize(positions: &BTreeMap<String, f32>) -> String {
         .iter()
         .filter(|(_, f)| f.is_finite())
         .filter_map(|(k, f)| {
-            serde_json::Number::from_f64(*f as f64).map(|n| (k.clone(), serde_json::Value::Number(n)))
+            serde_json::Number::from_f64(*f as f64)
+                .map(|n| (k.clone(), serde_json::Value::Number(n)))
         })
         .collect();
     serde_json::Value::Object(obj).to_string()

@@ -15,8 +15,8 @@ mod orchestrator;
 mod worker;
 
 pub use board::{Status, Subtask, TaskBoard};
-pub use sc_verify::Sandbox;
 pub use decompose::{decompose, parse_subtasks, parse_subtasks_on_stack};
 pub use event::{FnSwarmSink, NullSwarmSink, SwarmEvent, SwarmSink};
 pub use orchestrator::{run_swarm, run_swarm_board, SwarmConfig, SwarmReport};
+pub use sc_verify::Sandbox;
 pub use worker::{run_worker, run_worker_with_feedback, ProposedChange, WorkerResult};

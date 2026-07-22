@@ -403,9 +403,15 @@ mod tests {
         let reply = r#"[{"id":"t1","goal":"add Gunner variant","files":["crates/void_sim/src/ship_template/schema.rs"],"deps":[]}]"#;
         let subs = parse_subtasks_on_stack(reply, &["rs"]);
         assert_eq!(subs.len(), 1, "the .rs subtask must survive: {subs:?}");
-        assert_eq!(subs[0].files, vec!["crates/void_sim/src/ship_template/schema.rs"]);
+        assert_eq!(
+            subs[0].files,
+            vec!["crates/void_sim/src/ship_template/schema.rs"]
+        );
         // Sanity: the OLD Python-default would have dropped it.
-        assert!(parse_subtasks(reply).is_empty(), "python default still drops .rs (drift)");
+        assert!(
+            parse_subtasks(reply).is_empty(),
+            "python default still drops .rs (drift)"
+        );
     }
 
     #[test]
@@ -428,10 +434,15 @@ mod tests {
     #[test]
     fn non_code_files_are_stack_neutral() {
         // A data/config/template file isn't a language, so it's kept on any stack.
-        let reply = r#"[{"id":"t1","goal":"config","files":["config.json","src/lib.rs"],"deps":[]}]"#;
+        let reply =
+            r#"[{"id":"t1","goal":"config","files":["config.json","src/lib.rs"],"deps":[]}]"#;
         let subs = parse_subtasks_on_stack(reply, &["rs"]);
         assert_eq!(subs.len(), 1);
-        assert!(subs[0].files.contains(&"config.json".to_string()), "{:?}", subs[0].files);
+        assert!(
+            subs[0].files.contains(&"config.json".to_string()),
+            "{:?}",
+            subs[0].files
+        );
     }
 
     #[test]

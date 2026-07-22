@@ -18,7 +18,11 @@ fn main() {
     let ws = PathBuf::from(std::env::temp_dir()).join("dc-prove-plan");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(ws.join("src")).unwrap();
-    std::fs::write(ws.join("Cargo.toml"), "[package]\nname = \"city\"\nversion = \"0.1.0\"").unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[package]\nname = \"city\"\nversion = \"0.1.0\"",
+    )
+    .unwrap();
     std::fs::write(
         ws.join("src/terrain.rs"),
         "//! Terrain mesh: heightmap → triangles.\npub struct Terrain { pub heights: Vec<f32> }\n",
@@ -60,8 +64,14 @@ fn main() {
 
     let phases = seen.into_inner();
     println!("\n=== VERDICT ===");
-    println!("phases run: {:?}", phases.iter().map(|p| p.title()).collect::<Vec<_>>());
-    println!("stopped at stage breakdown: {}", phases.last() == Some(&sc_workflow::Phase::StageBreakdown));
+    println!(
+        "phases run: {:?}",
+        phases.iter().map(|p| p.title()).collect::<Vec<_>>()
+    );
+    println!(
+        "stopped at stage breakdown: {}",
+        phases.last() == Some(&sc_workflow::Phase::StageBreakdown)
+    );
     println!("no frozen tests written: {}", outcome.test_files.is_empty());
     println!("no decomposition/board: {}", outcome.board.len() == 0);
 

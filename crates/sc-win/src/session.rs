@@ -259,7 +259,8 @@ fn run_iterate(
     // Accept-or-revert decision + closing line — shared with the remote server via `sc-iterate`.
     match result {
         Ok(report) => {
-            let outcome = sc_iterate::finish_summary(&report, &touched, &dirty_at_start, &workspace);
+            let outcome =
+                sc_iterate::finish_summary(&report, &touched, &dirty_at_start, &workspace);
             let _ = ev_tx.send(UiEvent::Done {
                 ok: outcome.ok,
                 summary: outcome.summary,
@@ -281,7 +282,6 @@ fn run_iterate(
         }
     }
 }
-
 
 /// Build the orchestrator/worker/advisor backends and drive a swarm run, forwarding
 /// every [`SwarmEvent`] to the UI — the mirror of `sc-cli::swarm_task_cli`.
@@ -692,7 +692,10 @@ fn run_staged_build(
                 message,
             } => format!("  ↳ fix {file}:{line} — {message}"),
             sc_workflow::BuildEvent::Done { green, iterations } => {
-                format!("build {} after {iterations} iteration(s)", if green { "GREEN ✓" } else { "incomplete" })
+                format!(
+                    "build {} after {iterations} iteration(s)",
+                    if green { "GREEN ✓" } else { "incomplete" }
+                )
             }
         };
         let _ = build_tx.send(UiEvent::Agent(sc_core::AgentEvent::ChatMessage {
@@ -716,7 +719,11 @@ fn run_staged_build(
         files: Vec::new(),
         deps: Vec::new(),
     }];
-    let build_tasks = if tasks.is_empty() { &fallback[..] } else { &tasks[..] };
+    let build_tasks = if tasks.is_empty() {
+        &fallback[..]
+    } else {
+        &tasks[..]
+    };
 
     let result = sc_workflow::build_all_subtasks(
         &worker,
@@ -733,7 +740,10 @@ fn run_staged_build(
     // image) from a genuine compile failure. Otherwise a build that actually wrote its files reads
     // as "incomplete, 0 errors", which is baffling.
     let summary = if result.green {
-        format!("built ✓ — verify green in {} iteration(s)", result.iterations)
+        format!(
+            "built ✓ — verify green in {} iteration(s)",
+            result.iterations
+        )
     } else if result.remaining.is_empty() {
         // Not green, yet nothing parseable failed ⇒ the verify command itself didn't run.
         let hint = sandbox_verify_hint(&cfg, &verify, &workspace);
@@ -763,16 +773,19 @@ fn sandbox_verify_hint(cfg: &UiConfig, verify: &str, workspace: &std::path::Path
         sc_verify::Sandbox::Docker { image } => format!("the `{image}` container"),
         sc_verify::Sandbox::Session(c) => format!("the `{}` container", c.name()),
     };
-    let is_rust = workspace.join("Cargo.toml").is_file()
-        || verify.trim_start().starts_with("cargo");
-    let uses_pyenv = matches!(cfg.sandbox(), sc_verify::Sandbox::Docker { image } if image.contains("pyenv"));
+    let is_rust =
+        workspace.join("Cargo.toml").is_file() || verify.trim_start().starts_with("cargo");
+    let uses_pyenv =
+        matches!(cfg.sandbox(), sc_verify::Sandbox::Docker { image } if image.contains("pyenv"));
     if is_rust && uses_pyenv {
         format!(
             "`{verify}` can't run in {sandbox} (a Python image has no cargo). Set a Rust image \
              (SC_DOCKER_IMAGE=rust) or run on the host (SC_USE_DOCKER=0), then rebuild."
         )
     } else {
-        format!("`{verify}` exited non-zero with no diagnostics in {sandbox} — check it runs there.")
+        format!(
+            "`{verify}` exited non-zero with no diagnostics in {sandbox} — check it runs there."
+        )
     }
 }
 
@@ -1066,7 +1079,10 @@ mod tests {
         );
         // The plan_task boilerplate lead-in is stripped so the slug is the feature, not the verb.
         assert_eq!(
-            spec_artifact_dir("Design how to implement the feature plan in seat types. Read the plan…", ws),
+            spec_artifact_dir(
+                "Design how to implement the feature plan in seat types. Read the plan…",
+                ws
+            ),
             Some(ws.join("specs").join("seat-types"))
         );
         // A truly empty/garbage task ⇒ None ⇒ the workflow's plan-dir fallback.
@@ -1102,7 +1118,10 @@ mod tests {
         };
         let hint = sandbox_verify_hint(&cfg, "cargo check", &dir);
         assert!(hint.contains("cargo check"), "names the command: {hint}");
-        assert!(hint.contains("smart-coder-pyenv"), "names the image: {hint}");
+        assert!(
+            hint.contains("smart-coder-pyenv"),
+            "names the image: {hint}"
+        );
         assert!(
             hint.contains("SC_DOCKER_IMAGE=rust") || hint.contains("SC_USE_DOCKER=0"),
             "gives the fix: {hint}"
@@ -1128,11 +1147,7 @@ mod tests {
 
     /// Run a git command in `dir`, ignoring failures (test setup).
     fn git(dir: &std::path::Path, args: &[&str]) {
-        let _ = crate::proc::git()
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output();
+        let _ = crate::proc::git().arg("-C").arg(dir).args(args).output();
     }
 
     #[test]
@@ -1150,7 +1165,10 @@ mod tests {
         git(&dir, &["commit", "-q", "-m", "init"]);
 
         // Tree is clean now.
-        assert!(sc_iterate::git_dirty_files(&dir).is_empty(), "clean after commit");
+        assert!(
+            sc_iterate::git_dirty_files(&dir).is_empty(),
+            "clean after commit"
+        );
 
         // User has uncommitted work in b.txt; a.txt is clean.
         std::fs::write(dir.join("b.txt"), "MY UNCOMMITTED WORK\n").unwrap();

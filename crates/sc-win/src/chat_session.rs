@@ -143,13 +143,8 @@ mod tests {
         let req = GenerateRequest::new(vec![Message::user("hi")]);
         let session = ChatSession::spawn(cfg, req);
 
-        // Block for the terminal event by polling to completion.
-        let ev = loop {
-            match session.events.recv() {
-                Ok(ev) => break Some(ev),
-                Err(_) => break None,
-            }
-        };
+        // Block for the terminal event (Err means the sender dropped).
+        let ev = session.events.recv().ok();
         assert!(
             matches!(ev, Some(ChatEvent::Failed(_)) | Some(ChatEvent::Reply(..))),
             "expected a terminal ChatEvent, got {ev:?}"

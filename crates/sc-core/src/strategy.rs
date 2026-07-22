@@ -223,7 +223,6 @@ fn looks_swallowed(call: &ValidatedCall) -> bool {
         .any(value_is_runon)
 }
 
-
 /// Whether a single string argument value is corrupt: it embeds a following tool call (`"tool":`)
 /// or ran on into the NEXT JSON key (`","old_str":`, `","new_str":`, …). Shared by
 /// [`looks_swallowed`] and [`recover_swallowed_call`] so recovery can't resurrect a run-on value.
@@ -669,7 +668,11 @@ mod tests {
                    \"new_str\":\"let x = 2;\"}";
         let call = ParseRepair.extract(raw, &reg).unwrap();
         assert_eq!(call.name, "edit_file");
-        assert_eq!(call.str("old_str"), Some("let x = 1;"), "picked the complete call");
+        assert_eq!(
+            call.str("old_str"),
+            Some("let x = 1;"),
+            "picked the complete call"
+        );
         assert_eq!(call.str("new_str"), Some("let x = 2;"));
     }
 
@@ -685,7 +688,11 @@ mod tests {
         // parses as one object with a corrupt `new_str`. This is what landed raw JSON in the file.
         let raw = r#"{"tool":"edit_file","path":"ship_render.rs","old_str":"use foo::{Bar};","new_str":"use foo::{Bar};\n\nuse foo::SeatType;\",\"old_str\":\"use foo::{Bar};"}"#;
         let err = ParseRepair.extract(raw, &reg).unwrap_err();
-        assert_eq!(err, RepairError::Swallowed, "run-on edit rejected, not applied");
+        assert_eq!(
+            err,
+            RepairError::Swallowed,
+            "run-on edit rejected, not applied"
+        );
     }
 
     #[test]
@@ -697,7 +704,10 @@ mod tests {
         let raw = r#"{"tool":"edit_file","path":"a.rs","old_str":"let old_str = 1;","new_str":"let old_str = 2; // renamed later"}"#;
         let call = ParseRepair.extract(raw, &reg).unwrap();
         assert_eq!(call.name, "edit_file");
-        assert_eq!(call.str("new_str"), Some("let old_str = 2; // renamed later"));
+        assert_eq!(
+            call.str("new_str"),
+            Some("let old_str = 2; // renamed later")
+        );
     }
 
     #[test]
@@ -708,7 +718,10 @@ mod tests {
         let raw = "{\"tool\":\"edit_file\",\"path\":\"a.rs\",\"old_str\":\"x {\\\"tool\\\":\\\"y\\\"}\",\"new_str\":\"z\"}\
                    <tool_call|>{\"tool\":\"read_file\",\"path\":\"a.rs\"}";
         let call = ParseRepair.extract(raw, &reg).unwrap();
-        assert_eq!(call.name, "read_file", "skipped the swallowed edit for the clean read");
+        assert_eq!(
+            call.name, "read_file",
+            "skipped the swallowed edit for the clean read"
+        );
     }
 
     #[test]

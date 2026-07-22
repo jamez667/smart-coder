@@ -261,9 +261,18 @@ mod tests {
         s.set(Artifact::draft(Phase::Architecture, "# the arch"));
         save_to(&dir, &s, true).unwrap();
         assert!(dir.join("spec.md").is_file(), "spec.md written");
-        assert!(dir.join("architecture.md").is_file(), "architecture.md written");
-        assert!(!dir.join("01-specs.md").exists(), "no numbered names in openspec mode");
-        assert_eq!(std::fs::read_to_string(dir.join("architecture.md")).unwrap(), "# the arch");
+        assert!(
+            dir.join("architecture.md").is_file(),
+            "architecture.md written"
+        );
+        assert!(
+            !dir.join("01-specs.md").exists(),
+            "no numbered names in openspec mode"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("architecture.md")).unwrap(),
+            "# the arch"
+        );
     }
 
     #[test]
@@ -290,7 +299,12 @@ mod tests {
         let ws = temp("resume");
         let dir = ws.join("specs").join("alt-seats");
         let mut s = WorkflowState::new("build the seat picker");
-        for p in [Phase::Specs, Phase::Architecture, Phase::Layout, Phase::StageBreakdown] {
+        for p in [
+            Phase::Specs,
+            Phase::Architecture,
+            Phase::Layout,
+            Phase::StageBreakdown,
+        ] {
             s.set(Artifact::draft(p, &format!("# {}", p.title())));
             s.approve(p);
         }

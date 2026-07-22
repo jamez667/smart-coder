@@ -949,7 +949,10 @@ mod tests {
             f.orchestrator_url.as_deref(),
             Some("https://generativelanguage.googleapis.com/v1beta/openai")
         );
-        assert_eq!(f.orchestrator_model.as_deref(), Some("gemini-2.5-flash-lite"));
+        assert_eq!(
+            f.orchestrator_model.as_deref(),
+            Some("gemini-2.5-flash-lite")
+        );
         assert_eq!(f.orchestrator_key.as_deref(), Some("AIzaSECRET"));
     }
 
@@ -991,7 +994,10 @@ mod tests {
         let json = serialize_config(&fields);
         assert_eq!(parse_config(&json), fields);
         // Unset fields are omitted entirely — no blank "key" lands in the file.
-        assert!(!json.contains("\"key\""), "unset key must be omitted: {json}");
+        assert!(
+            !json.contains("\"key\""),
+            "unset key must be omitted: {json}"
+        );
     }
 
     #[test]
@@ -1024,7 +1030,10 @@ mod tests {
         cfg.resolve_stages();
         assert_eq!(cfg.base_url, "http://localhost:11435/v1");
         assert_eq!(cfg.key, None, "local coder carries no key");
-        assert_eq!(cfg.orchestrator_url.as_deref(), Some(GEMINI_OPENAI_BASE_URL));
+        assert_eq!(
+            cfg.orchestrator_url.as_deref(),
+            Some(GEMINI_OPENAI_BASE_URL)
+        );
         assert_eq!(
             cfg.orchestrator_key.as_deref(),
             Some("gkey"),
@@ -1062,7 +1071,10 @@ mod tests {
             ..UiConfig::default()
         };
         cfg.resolve_stages();
-        assert_eq!(cfg.orchestrator_model, None, "stale Gemini planner model cleared");
+        assert_eq!(
+            cfg.orchestrator_model, None,
+            "stale Gemini planner model cleared"
+        );
         // And orchestrator() then uses the local coder model, not the stale name.
         // (orchestrator() falls back to self.model when orchestrator_model is None.)
     }
@@ -1089,10 +1101,18 @@ mod tests {
         cfg.key = f.key.clone();
         // Local from coder endpoint; Gemini from the orchestrator override.
         cfg.local_conn.base_url = f.base_url.clone().unwrap();
-        cfg.local_conn.key = if is_gemini_url(&cfg.base_url) { None } else { cfg.key.clone() };
+        cfg.local_conn.key = if is_gemini_url(&cfg.base_url) {
+            None
+        } else {
+            cfg.key.clone()
+        };
         cfg.gemini_conn.base_url = cfg.orchestrator_url.clone().unwrap();
         cfg.gemini_conn.key = cfg.orchestrator_key.clone();
-        cfg.coder_provider = if is_gemini_url(&cfg.base_url) { Provider::Gemini } else { Provider::Local };
+        cfg.coder_provider = if is_gemini_url(&cfg.base_url) {
+            Provider::Gemini
+        } else {
+            Provider::Local
+        };
         cfg.planner_provider = match &cfg.orchestrator_url {
             Some(u) if is_gemini_url(u) => Provider::Gemini,
             _ => Provider::Local,
@@ -1100,7 +1120,10 @@ mod tests {
         assert_eq!(cfg.coder_provider, Provider::Local);
         assert_eq!(cfg.planner_provider, Provider::Gemini);
         assert_eq!(cfg.gemini_conn.key.as_deref(), Some("AIzaOLD"));
-        assert_eq!(cfg.local_conn.key, None, "no key bled onto the local connection");
+        assert_eq!(
+            cfg.local_conn.key, None,
+            "no key bled onto the local connection"
+        );
     }
 
     #[test]
@@ -1123,7 +1146,9 @@ mod tests {
         };
         // `apply_key` decides key attachment purely from the Option; assert that seam directly
         // (constructing the backend and reading a private field isn't exposed).
-        assert!(apply_key_used(&cfg.orchestrator_key.clone().or(cfg.key.clone())));
+        assert!(apply_key_used(
+            &cfg.orchestrator_key.clone().or(cfg.key.clone())
+        ));
 
         // With no orchestrator key but a coder key set, the planner borrows the coder key.
         let cfg = UiConfig {
@@ -1140,7 +1165,10 @@ mod tests {
     /// Mirror of the `apply_key` decision (is a non-blank key present?) for the test above,
     /// since the attached token isn't readable off the built backend.
     fn apply_key_used(key: &Option<String>) -> bool {
-        key.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()).is_some()
+        key.as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .is_some()
     }
 
     #[test]

@@ -135,7 +135,8 @@ impl Terminal {
         }
 
         // Echo the command and remember it, regardless of whether the spawn succeeds.
-        self.lines.push(TermLine::new(Stream::Meta, format!("$ {trimmed}")));
+        self.lines
+            .push(TermLine::new(Stream::Meta, format!("$ {trimmed}")));
         if self.history.last().map(String::as_str) != Some(trimmed) {
             self.history.push(trimmed.to_string());
         }
@@ -150,8 +151,10 @@ impl Terminal {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                self.lines
-                    .push(TermLine::new(Stream::Stderr, format!("failed to start command: {e}")));
+                self.lines.push(TermLine::new(
+                    Stream::Stderr,
+                    format!("failed to start command: {e}"),
+                ));
                 self.lines.push(TermLine::new(Stream::Meta, "[exit -1]"));
                 self.trim();
                 return None;
@@ -280,7 +283,8 @@ impl Terminal {
     /// footer, and stores it in history + clears the input, exactly as a real run would (minus
     /// the execution). Keeps strict-containment refusals visible and re-runnable.
     pub fn blocked(&mut self, cmdline: &str, reason: &str) {
-        self.lines.push(TermLine::new(Stream::Meta, format!("$ {cmdline}")));
+        self.lines
+            .push(TermLine::new(Stream::Meta, format!("$ {cmdline}")));
         self.lines
             .push(TermLine::new(Stream::Stderr, format!("✗ {reason}")));
         self.lines.push(TermLine::new(Stream::Meta, "[blocked]"));
@@ -368,7 +372,10 @@ mod tests {
         let (prog, args) = parts(&ExecMode::Container(sc.clone()).build("cargo build"));
         assert_eq!(prog, "docker");
         assert_eq!(args[0], "exec");
-        assert!(args.contains(&sc.name().to_string()), "targets our container");
+        assert!(
+            args.contains(&sc.name().to_string()),
+            "targets our container"
+        );
         assert_eq!(args.last().unwrap(), "cargo build");
     }
 
@@ -380,7 +387,10 @@ mod tests {
         assert!(!t.running, "blocked never starts a process");
         assert_eq!(t.input, "", "input cleared");
         let texts: Vec<&str> = t.lines.iter().map(|l| l.text.as_str()).collect();
-        assert_eq!(texts, vec!["$ rm -rf build", "✗ no project open", "[blocked]"]);
+        assert_eq!(
+            texts,
+            vec!["$ rm -rf build", "✗ no project open", "[blocked]"]
+        );
         // Still recallable via history.
         t.history_prev();
         assert_eq!(t.input, "rm -rf build");

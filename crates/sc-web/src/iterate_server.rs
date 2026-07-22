@@ -83,7 +83,13 @@ where
     // operator can start another (a fresh run resets `started`). We serve until killed.
     for mut request in server.incoming_requests() {
         let response = route(
-            &hub, &confirmer, &cancel, &state, &spec, token, &mut request,
+            &hub,
+            &confirmer,
+            &cancel,
+            &state,
+            &spec,
+            token,
+            &mut request,
         );
         let _ = request.respond(response);
     }
@@ -237,7 +243,9 @@ where
 
         let result = run_agent_observed(
             spec.backend.as_ref(),
-            spec.advisor.as_ref().map(|a| a.as_ref() as &dyn ModelBackend),
+            spec.advisor
+                .as_ref()
+                .map(|a| a.as_ref() as &dyn ModelBackend),
             spec.registry.as_ref(),
             spec.strategy.as_ref(),
             &instruction,
@@ -262,7 +270,10 @@ where
                     .cloned()
                     .collect();
                 sc_iterate::git_revert_files(&spec.workspace, &safe);
-                format!("iterate failed: {e} (reverted {} clean file(s))", safe.len())
+                format!(
+                    "iterate failed: {e} (reverted {} clean file(s))",
+                    safe.len()
+                )
             }
         };
         hub_worker.push(AgentEvent::ToolResult {

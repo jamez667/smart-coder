@@ -470,10 +470,17 @@ mod tests {
         let bare_a = read_call("db.rs", None, None);
         let bare_b = read_call("db.rs", None, None);
         assert_eq!(key_arg(&bare_a), key_arg(&bare_b));
-        assert_eq!(key_arg(&bare_a), "db.rs", "unwindowed read keeps the plain path key");
+        assert_eq!(
+            key_arg(&bare_a),
+            "db.rs",
+            "unwindowed read keeps the plain path key"
+        );
 
         // The identical window twice still dedups (genuine re-read of the same page).
-        assert_eq!(key_arg(&page1), key_arg(&read_call("db.rs", Some(1), Some(50))));
+        assert_eq!(
+            key_arg(&page1),
+            key_arg(&read_call("db.rs", Some(1), Some(50)))
+        );
     }
 
     #[test]

@@ -8,7 +8,9 @@
 use std::path::PathBuf;
 
 use sc_model::OpenAiBackend;
-use sc_workflow::{run_workflow_moded, AutoApprove, Phase, ProjectStack, ThinkPolicy, WorkflowMode};
+use sc_workflow::{
+    run_workflow_moded, AutoApprove, Phase, ProjectStack, ThinkPolicy, WorkflowMode,
+};
 
 // Mirror of app.rs::is_feature_plan (private there) — the button's gate.
 fn is_feature_plan(name: &str) -> bool {
@@ -40,18 +42,27 @@ fn main() {
     println!("=== STEP 0: preconditions the UI checks ===");
     check("workspace exists (picked_workspace)", ws.is_dir());
     check("plan file exists on disk", ws.join(plan_name).is_file());
-    check("is_feature_plan gate (button shows)", is_feature_plan(plan_name));
+    check(
+        "is_feature_plan gate (button shows)",
+        is_feature_plan(plan_name),
+    );
     println!("  backend: {base}  model: {model}");
 
     println!("\n=== STEP 1: ProjectStack::detect (language-aware) ===");
     let stack = ProjectStack::detect(&ws);
     println!("  detected: {}", stack.label());
-    check("detected Rust (Cargo.toml present)", stack == ProjectStack::Rust);
+    check(
+        "detected Rust (Cargo.toml present)",
+        stack == ProjectStack::Rust,
+    );
 
     println!("\n=== STEP 2: the task the UI builds (plan_task) ===");
     let task = plan_task(plan_name);
     println!("  {task}");
-    check("names the plan (so referenced_plan pins it)", task.contains(plan_name));
+    check(
+        "names the plan (so referenced_plan pins it)",
+        task.contains(plan_name),
+    );
 
     println!("\n=== STEP 3: run the plan-only workflow (run_plan → run_workflow_moded) ===");
     println!("  (each phase below is what streams to the Plan panel)\n");
@@ -83,8 +94,16 @@ fn main() {
     let phases = seen.into_inner();
 
     // 4a. The exact four design phases ran, in order, then stopped.
-    let expected = vec![Phase::Specs, Phase::Architecture, Phase::Layout, Phase::StageBreakdown];
-    check("ran specs→architecture→layout→breakdown then STOPPED", phases == expected);
+    let expected = vec![
+        Phase::Specs,
+        Phase::Architecture,
+        Phase::Layout,
+        Phase::StageBreakdown,
+    ];
+    check(
+        "ran specs→architecture→layout→breakdown then STOPPED",
+        phases == expected,
+    );
 
     // 4b. Plan-only guarantees: no tests, no build.
     check("no frozen tests written", outcome.test_files.is_empty());
@@ -97,7 +116,10 @@ fn main() {
         let non_empty = art.map(|a| a.content.trim().len() > 40).unwrap_or(false);
         check(&format!("{} artifact is substantive", p.title()), non_empty);
         let file = sc_workflow::plan_dir(&ws).join(p.filename());
-        check(&format!("{} persisted to disk", p.filename()), file.is_file());
+        check(
+            &format!("{} persisted to disk", p.filename()),
+            file.is_file(),
+        );
     }
 
     // 4d. Language fidelity — the content must be Rust, never Flask/Python.
@@ -107,16 +129,23 @@ fn main() {
         .iter()
         .map(|a| a.content.to_lowercase())
         .collect();
-    check("mentions rust/cargo/.rs somewhere", all.contains("rust") || all.contains("cargo") || all.contains(".rs"));
+    check(
+        "mentions rust/cargo/.rs somewhere",
+        all.contains("rust") || all.contains("cargo") || all.contains(".rs"),
+    );
     check("NEVER mentions flask", !all.contains("flask"));
     check("NEVER mentions app.py", !all.contains("app.py"));
     check("NEVER mentions pytest", !all.contains("pytest"));
 
     // 4e. Plan fidelity — did it actually engage with THIS plan (lakes/terrain, the named files)?
-    check("engages the plan's subject (lake/terrain/water)",
-        all.contains("lake") || all.contains("terrain") || all.contains("water"));
-    check("references a plan-named file (terrain.rs or render.rs)",
-        all.contains("terrain.rs") || all.contains("render.rs"));
+    check(
+        "engages the plan's subject (lake/terrain/water)",
+        all.contains("lake") || all.contains("terrain") || all.contains("water"),
+    );
+    check(
+        "references a plan-named file (terrain.rs or render.rs)",
+        all.contains("terrain.rs") || all.contains("render.rs"),
+    );
 
     // 4f. The breakdown is an ORDERED design (not a pytest coverage JSON array).
     let breakdown = outcome
@@ -124,9 +153,14 @@ fn main() {
         .artifact(Phase::StageBreakdown)
         .map(|a| a.content.clone())
         .unwrap_or_default();
-    check("breakdown is prose/markdown, not a JSON coverage array",
-        !breakdown.trim_start().starts_with('[') && !breakdown.contains("\"covers\""));
+    check(
+        "breakdown is prose/markdown, not a JSON coverage array",
+        !breakdown.trim_start().starts_with('[') && !breakdown.contains("\"covers\""),
+    );
 
     println!("\n=== DONE ===");
-    println!("Artifacts on disk under: {}", sc_workflow::plan_dir(&ws).display());
+    println!(
+        "Artifacts on disk under: {}",
+        sc_workflow::plan_dir(&ws).display()
+    );
 }

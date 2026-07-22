@@ -289,7 +289,10 @@ mod tests {
         assert_eq!(rows.len(), 2, "turn header + narration");
         assert_eq!(rows[1].icon, "💭");
         assert!(rows[1].text.contains("add the water module"));
-        assert!(!rows[1].text.contains("write_file"), "tool JSON not in narration");
+        assert!(
+            !rows[1].text.contains("write_file"),
+            "tool JSON not in narration"
+        );
     }
 
     #[test]
@@ -303,7 +306,10 @@ mod tests {
         });
         assert_eq!(rows.len(), 2);
         assert!(rows[1].text.contains("water surface renderer"));
-        assert!(!rows[1].text.contains("which file first"), "reasoning hidden");
+        assert!(
+            !rows[1].text.contains("which file first"),
+            "reasoning hidden"
+        );
     }
 
     #[test]

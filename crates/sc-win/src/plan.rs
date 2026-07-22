@@ -60,7 +60,13 @@ impl Plan {
     /// workspace-relative artifact directory (e.g. `specs/alt-seats`); it's the same on
     /// every phase event of a run, so we latch it the first time it's non-empty — it lets
     /// each step resolve its FILE PATH (see [`PlanStep::path`]).
-    pub fn apply(&mut self, phase: Phase, content: &str, tests_written: &[String], dir: Option<&str>) {
+    pub fn apply(
+        &mut self,
+        phase: Phase,
+        content: &str,
+        tests_written: &[String],
+        dir: Option<&str>,
+    ) {
         // Latch the artifact dir the first time a phase event carries it (source of truth for
         // per-step file paths). Every event of a run carries the same dir, so once is enough.
         if self.dir.is_none() {
@@ -226,7 +232,10 @@ mod tests {
         p.apply(Phase::Specs, "spec", &[], Some("specs/alt-seats/"));
         assert_eq!(p.dir(), Some("specs/alt-seats"));
         // Each phase resolves to its OpenSpec filename beside the spec.
-        assert_eq!(p.path_for(Phase::Specs).as_deref(), Some("specs/alt-seats/spec.md"));
+        assert_eq!(
+            p.path_for(Phase::Specs).as_deref(),
+            Some("specs/alt-seats/spec.md")
+        );
         assert_eq!(
             p.path_for(Phase::Architecture).as_deref(),
             Some("specs/alt-seats/architecture.md")

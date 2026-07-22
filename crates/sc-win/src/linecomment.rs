@@ -430,7 +430,10 @@ mod tests {
         assert!(extract_replacement("").is_none());
         // A reply that is ONLY fence markers must NOT leak a bare ``` into the file.
         assert!(extract_replacement("```").is_none(), "lone fence → None");
-        assert!(extract_replacement("```rust\n```").is_none(), "empty fenced block → None");
+        assert!(
+            extract_replacement("```rust\n```").is_none(),
+            "empty fenced block → None"
+        );
         assert!(extract_replacement("```\n```").is_none());
         // Info string on the fence line is dropped; body kept.
         assert_eq!(
@@ -478,9 +481,17 @@ mod tests {
     fn locate_range_refuses_ambiguous_block() {
         // "x" appears twice → refuse rather than splice into the wrong one.
         let file = "x\ny\nx\nz\n";
-        assert_eq!(locate_range(file, 1, 1, "x"), Some((1, 1)), "hint 1 matches exactly");
+        assert_eq!(
+            locate_range(file, 1, 1, "x"),
+            Some((1, 1)),
+            "hint 1 matches exactly"
+        );
         // But if the hint doesn't match at 3 (say hint says 2), the search finds two "x" → None.
-        assert_eq!(locate_range(file, 2, 2, "x"), None, "two matches → ambiguous → None");
+        assert_eq!(
+            locate_range(file, 2, 2, "x"),
+            None,
+            "two matches → ambiguous → None"
+        );
     }
 
     #[test]

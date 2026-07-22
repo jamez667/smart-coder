@@ -133,7 +133,11 @@ fn truncate_middle(text: &str, target_tokens: usize, counter: &TokenCounter) -> 
     loop {
         // Alternate growing head and tail for a balanced keep.
         let grow_head = head <= tail;
-        let (nh, nt) = if grow_head { (head + 1, tail) } else { (head, tail + 1) };
+        let (nh, nt) = if grow_head {
+            (head + 1, tail)
+        } else {
+            (head, tail + 1)
+        };
         if nh + nt >= lines.len() {
             break;
         }
@@ -368,7 +372,10 @@ mod tests {
         assert!(Zone::FocusFile.is_sacred());
         let kept: String = built.messages.iter().map(|m| m.content.clone()).collect();
         assert!(kept.contains("the whole file"), "focus file survived");
-        assert!(built.dropped.contains(&Zone::Retrieved) || built.dropped.contains(&Zone::HistorySummary));
+        assert!(
+            built.dropped.contains(&Zone::Retrieved)
+                || built.dropped.contains(&Zone::HistorySummary)
+        );
     }
 
     #[test]
@@ -396,18 +403,27 @@ mod tests {
         let c = counter();
         let budget = 200;
         let b = ContextBuilder::new(&c, budget);
-        let huge: String = (0..500).map(|i| format!("line number {i} of the focus file\n")).collect();
+        let huge: String = (0..500)
+            .map(|i| format!("line number {i} of the focus file\n"))
+            .collect();
         let built = b.build(vec![
             Segment::system(Zone::System, "sys"),
             Segment::user(Zone::TaskAnchor, "task"),
             Segment::user(Zone::FocusFile, huge),
             Segment::user(Zone::RecentObservation, "obs"),
         ]);
-        assert!(built.tokens_used <= budget, "prompt fits the window: {} <= {budget}", built.tokens_used);
+        assert!(
+            built.tokens_used <= budget,
+            "prompt fits the window: {} <= {budget}",
+            built.tokens_used
+        );
         // All four zones are still present (nothing dropped), the focus file just got clipped.
         assert_eq!(built.messages.len(), 4);
         let focus = &built.messages[2].content;
-        assert!(focus.contains("truncated in the middle"), "focus file clipped: {focus}");
+        assert!(
+            focus.contains("truncated in the middle"),
+            "focus file clipped: {focus}"
+        );
         // Head and tail are both preserved.
         assert!(focus.contains("line number 0 "), "head kept");
         assert!(focus.contains("line number 499"), "tail kept");
@@ -427,9 +443,16 @@ mod tests {
             Segment::user(Zone::TaskAnchor, "task"),
             Segment::user(Zone::RecentObservation, huge_read),
         ]);
-        assert!(built.tokens_used <= budget, "fits: {} <= {budget}", built.tokens_used);
+        assert!(
+            built.tokens_used <= budget,
+            "fits: {} <= {budget}",
+            built.tokens_used
+        );
         assert_eq!(built.messages.len(), 3, "nothing dropped, just clipped");
-        assert!(built.messages[2].content.contains("truncated"), "recent obs clipped");
+        assert!(
+            built.messages[2].content.contains("truncated"),
+            "recent obs clipped"
+        );
     }
 
     #[test]

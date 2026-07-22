@@ -134,7 +134,14 @@ fn one_attempt(backend: &OpenAiBackend, i: usize) -> (bool, bool) {
     cfg.max_steps = 6;
     let sink = FnSink(|_e: &sc_core::AgentEvent| {});
     let _ = run_agent_observed(
-        backend, None, &registry, strategy.as_ref(), &goal, &dir, &cfg, &sink,
+        backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        &goal,
+        &dir,
+        &cfg,
+        &sink,
     );
 
     let after = std::fs::read_to_string(dir.join(&file)).unwrap_or_default();
@@ -151,11 +158,16 @@ fn one_attempt(backend: &OpenAiBackend, i: usize) -> (bool, bool) {
     let duplicated = dup_fn.is_some() || has_redefinition_error(&stderr);
     eprintln!(
         "attempt {i}: duplicated={duplicated} compiles={compiles}{}",
-        dup_fn.map(|d| format!("  (dup fn: {d})")).unwrap_or_default()
+        dup_fn
+            .map(|d| format!("  (dup fn: {d})"))
+            .unwrap_or_default()
     );
     if std::env::var("SC_DUP_DEBUG").is_ok() && duplicated {
-        let first_errs: Vec<&str> =
-            stderr.lines().filter(|l| l.contains("error")).take(3).collect();
+        let first_errs: Vec<&str> = stderr
+            .lines()
+            .filter(|l| l.contains("error"))
+            .take(3)
+            .collect();
         eprintln!("  errors: {}", first_errs.join(" | "));
     }
     let _ = std::fs::remove_dir_all(&dir);

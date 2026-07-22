@@ -605,7 +605,10 @@ fn serve_task(cli: &Cli, task: String) -> ExitCode {
     let result = sc_web::serve(spec, &addr, &token, |url| {
         println!("smart-coder dashboard live at {url}/?k={token}");
         println!("open it in your browser to watch and drive the run (Ctrl-C to stop)");
-        println!("to reach it from your phone: run `tailscale serve {}` and open the", cli.port);
+        println!(
+            "to reach it from your phone: run `tailscale serve {}` and open the",
+            cli.port
+        );
         println!("printed https URL with ?k={token} on the phone (same tailnet).");
     });
 

@@ -264,7 +264,6 @@ where
             generate,
         }
     }
-
 }
 
 impl<F> ModelBackend for CallbackBackend<F>

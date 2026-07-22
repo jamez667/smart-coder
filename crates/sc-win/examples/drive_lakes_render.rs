@@ -80,7 +80,11 @@ fn main() {
             }
         }
         AgentEvent::ToolCall { tool, arg } => println!("      ▸ {tool} {arg}"),
-        AgentEvent::ToolResult { is_error, summary, full } => {
+        AgentEvent::ToolResult {
+            is_error,
+            summary,
+            full,
+        } => {
             if *is_error || full.contains("not found") || full.contains("error") {
                 println!("      ⨯ {}", first_line(summary));
                 let extra: String = full.lines().take(3).collect::<Vec<_>>().join(" | ");
@@ -126,7 +130,9 @@ fn main() {
             }
             match r.oracle_passed {
                 Some(true) => println!("\n🌊 RENDER ORACLE PASSED — lakes are drawn as water."),
-                Some(false) => println!("\n❌ RENDER ORACLE FAILED — lakes still not routed through render_sample."),
+                Some(false) => println!(
+                    "\n❌ RENDER ORACLE FAILED — lakes still not routed through render_sample."
+                ),
                 None => println!("\n(no render oracle configured)"),
             }
             println!("final verified: {}", r.verified);

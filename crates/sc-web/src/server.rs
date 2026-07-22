@@ -278,7 +278,7 @@ mod tests {
         assert!(!query_token_ok("/?k=wrong", "secret"));
         assert!(!query_token_ok("/?k=secret", "secretx")); // length mismatch
         assert!(!query_token_ok("/events?from=0", "secret")); // no k at all
-        // The token stops at the next & and isn't confused by later params.
+                                                              // The token stops at the next & and isn't confused by later params.
         assert!(query_token_ok("/events?k=secret&from=3", "secret"));
     }
 

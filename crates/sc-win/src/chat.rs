@@ -668,13 +668,12 @@ pub fn spec_path(slug: &str) -> String {
 pub fn is_spec_path(path: &str) -> bool {
     let p = path.replace('\\', "/");
     let lower = p.to_ascii_lowercase();
-    (lower.starts_with("specs/") && lower.ends_with(".md"))
-        || {
-            // Legacy PLAN-<slug>.md anywhere (back-compat with existing projects).
-            let name = p.rsplit('/').next().unwrap_or(&p);
-            let un = name.to_ascii_uppercase();
-            un.starts_with("PLAN-") && un.ends_with(".MD")
-        }
+    (lower.starts_with("specs/") && lower.ends_with(".md")) || {
+        // Legacy PLAN-<slug>.md anywhere (back-compat with existing projects).
+        let name = p.rsplit('/').next().unwrap_or(&p);
+        let un = name.to_ascii_uppercase();
+        un.starts_with("PLAN-") && un.ends_with(".MD")
+    }
 }
 
 /// Prepend a `## Request` block quoting the user's verbatim `request` to a spec's `content`,
@@ -897,13 +896,22 @@ mod tests {
         // A feature-plan for an open `SolarPanelTracker.cs` → specs/solar-panel-tracker/spec.md,
         // NOT a TODO edit (the reported bug).
         let mut c = Conversation::open("# X", "- a");
-        c.set_open_file(Some(("Assets/Scripts/SolarPanelTracker.cs".into(), "class X {}".into())));
+        c.set_open_file(Some((
+            "Assets/Scripts/SolarPanelTracker.cs".into(),
+            "class X {}".into(),
+        )));
         c.user_turn("make a plan to investigate these");
         let sys = c.request(false, ChatIntent::FeaturePlan).messages[0]
             .content
             .clone();
-        assert!(sys.contains("specs/solar-panel-tracker/spec.md"), "slug from open file: {sys}");
-        assert!(sys.to_lowercase().contains("do not touch todo"), "TODO off-limits: {sys}");
+        assert!(
+            sys.contains("specs/solar-panel-tracker/spec.md"),
+            "slug from open file: {sys}"
+        );
+        assert!(
+            sys.to_lowercase().contains("do not touch todo"),
+            "TODO off-limits: {sys}"
+        );
     }
 
     #[test]
@@ -916,7 +924,12 @@ mod tests {
     #[test]
     fn fast_mode_budget_fits_a_feature_plan() {
         // A multi-section feature plan can't land in the old 700-token fast budget.
-        assert!(Conversation::open("", "").request(false, ChatIntent::FeaturePlan).max_tokens >= 1200);
+        assert!(
+            Conversation::open("", "")
+                .request(false, ChatIntent::FeaturePlan)
+                .max_tokens
+                >= 1200
+        );
     }
 
     #[test]
@@ -924,8 +937,13 @@ mod tests {
         let mut c = Conversation::open("# App", "- [ ] x");
         let body: String = (1..=500).map(|n| format!("line {n}\n")).collect();
         c.set_open_file(Some(("src/water.rs".to_string(), body)));
-        let sys = c.request(false, ChatIntent::Question).messages[0].content.clone();
-        assert!(sys.contains("file open in the code view: src/water.rs"), "name shown");
+        let sys = c.request(false, ChatIntent::Question).messages[0]
+            .content
+            .clone();
+        assert!(
+            sys.contains("file open in the code view: src/water.rs"),
+            "name shown"
+        );
         assert!(sys.contains("line 1\n"), "head of file present");
         assert!(!sys.contains("line 500"), "tail clipped past the cap");
         assert!(sys.contains("truncated"), "truncation noted");
@@ -1021,8 +1039,14 @@ mod tests {
         // emits <tool_call> turn markers. Neither is content — both must be gone from the bubble.
         let reply = "/no_think\nHere's the plan.\n<tool_call>";
         let (prose, _files) = parse_reply(reply);
-        assert!(!prose.contains("/no_think"), "directive stripped: {prose:?}");
-        assert!(!prose.contains("tool_call"), "tool marker stripped: {prose:?}");
+        assert!(
+            !prose.contains("/no_think"),
+            "directive stripped: {prose:?}"
+        );
+        assert!(
+            !prose.contains("tool_call"),
+            "tool marker stripped: {prose:?}"
+        );
         assert!(prose.contains("Here's the plan"), "answer kept: {prose:?}");
     }
 
@@ -1039,14 +1063,26 @@ mod tests {
         // "hello" (classified Chat) must NOT drag the README/TODO/open-file or planning
         // boilerplate along — the whole point of the generic/coding split.
         let mut c = Conversation::open("# void_engine\nMMO space game", "- [ ] add lakes");
-        c.set_open_file(Some(("main.rs".into(), "fn main() { huge_file(); }".into())));
+        c.set_open_file(Some((
+            "main.rs".into(),
+            "fn main() { huge_file(); }".into(),
+        )));
         c.user_turn("hello");
-        let sys = c.request(false, ChatIntent::Chat).messages[0].content.clone();
+        let sys = c.request(false, ChatIntent::Chat).messages[0]
+            .content
+            .clone();
         assert!(!sys.contains("void_engine"), "no README injected: {sys}");
         assert!(!sys.contains("add lakes"), "no TODO injected: {sys}");
         assert!(!sys.contains("main.rs"), "no open file injected: {sys}");
-        assert!(!sys.contains("file:<name>"), "no file-block boilerplate: {sys}");
-        assert!(sys.len() < 500, "generic prompt stays small ({} chars)", sys.len());
+        assert!(
+            !sys.contains("file:<name>"),
+            "no file-block boilerplate: {sys}"
+        );
+        assert!(
+            sys.len() < 500,
+            "generic prompt stays small ({} chars)",
+            sys.len()
+        );
     }
 
     #[test]
@@ -1056,10 +1092,21 @@ mod tests {
         let mut c = Conversation::open("# void_engine\nMMO", "- [ ] add lakes");
         c.set_open_file(Some(("main.rs".into(), "fn main() {}".into())));
         c.user_turn("what does this file do?");
-        let sys = c.request(false, ChatIntent::Question).messages[0].content.clone();
-        assert!(sys.contains("main.rs"), "open file injected for a question: {sys}");
-        assert!(!sys.contains("add lakes"), "no TODO for a plain question: {sys}");
-        assert!(!sys.contains("void_engine"), "no README for a plain question: {sys}");
+        let sys = c.request(false, ChatIntent::Question).messages[0]
+            .content
+            .clone();
+        assert!(
+            sys.contains("main.rs"),
+            "open file injected for a question: {sys}"
+        );
+        assert!(
+            !sys.contains("add lakes"),
+            "no TODO for a plain question: {sys}"
+        );
+        assert!(
+            !sys.contains("void_engine"),
+            "no README for a plain question: {sys}"
+        );
     }
 
     #[test]
@@ -1070,9 +1117,14 @@ mod tests {
         let mut c = Conversation::open("# void_engine", "- [ ] add lakes");
         c.set_open_file(Some(("main.rs".into(), "fn giant_file() {}".into())));
         c.user_turn("plan out adding lakes");
-        let sys = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
+        let sys = c.request(false, ChatIntent::FeaturePlan).messages[0]
+            .content
+            .clone();
         assert!(sys.contains("void_engine"), "README present: {sys}");
-        assert!(!sys.contains("giant_file"), "open file NOT dumped into a plan: {sys}");
+        assert!(
+            !sys.contains("giant_file"),
+            "open file NOT dumped into a plan: {sys}"
+        );
     }
 
     #[test]
@@ -1080,8 +1132,13 @@ mod tests {
         // A fresh feature spec must NOT drag the backlog into context just because it's open.
         let mut c = Conversation::open("# proj", "- [ ] add lakes\n- [ ] add rivers");
         c.user_turn("plan gunner and miner seats");
-        let sys = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
-        assert!(!sys.contains("add lakes"), "no TODO for a fresh feature spec: {sys}");
+        let sys = c.request(false, ChatIntent::FeaturePlan).messages[0]
+            .content
+            .clone();
+        assert!(
+            !sys.contains("add lakes"),
+            "no TODO for a fresh feature spec: {sys}"
+        );
         assert!(sys.contains("proj"), "but README stays for project context");
     }
 
@@ -1090,16 +1147,31 @@ mod tests {
         // A backlog-derived plan DOES get the TODO.
         let mut c = Conversation::open("# proj", "- [ ] add lakes\n- [ ] add rivers");
         c.user_turn("plan the next todo item");
-        let sys = c.request(false, ChatIntent::PlanFromTodo).messages[0].content.clone();
-        assert!(sys.contains("add lakes"), "PlanFromTodo gets the backlog: {sys}");
+        let sys = c.request(false, ChatIntent::PlanFromTodo).messages[0]
+            .content
+            .clone();
+        assert!(
+            sys.contains("add lakes"),
+            "PlanFromTodo gets the backlog: {sys}"
+        );
         // Same spec instruction as FeaturePlan.
-        assert!(sys.to_lowercase().contains("shall"), "still an OpenSpec spec");
+        assert!(
+            sys.to_lowercase().contains("shall"),
+            "still an OpenSpec spec"
+        );
     }
 
     #[test]
     fn classifier_offers_plan_from_todo() {
-        assert!(intent_grammar().contains("\"plan_from_todo\""), "{}", intent_grammar());
-        assert_eq!(ChatIntent::parse("plan_from_todo"), ChatIntent::PlanFromTodo);
+        assert!(
+            intent_grammar().contains("\"plan_from_todo\""),
+            "{}",
+            intent_grammar()
+        );
+        assert_eq!(
+            ChatIntent::parse("plan_from_todo"),
+            ChatIntent::PlanFromTodo
+        );
     }
 
     #[test]
@@ -1112,11 +1184,22 @@ mod tests {
             "crates/sc-win/src/app.rs".into(),
         ]);
         c.user_turn("plan out adding seats");
-        let plan = c.request(false, ChatIntent::FeaturePlan).messages[0].content.clone();
-        assert!(!plan.contains("crates/sc-core"), "spec must NOT get the file tree: {plan}");
+        let plan = c.request(false, ChatIntent::FeaturePlan).messages[0]
+            .content
+            .clone();
+        assert!(
+            !plan.contains("crates/sc-core"),
+            "spec must NOT get the file tree: {plan}"
+        );
         let low = plan.to_lowercase();
-        assert!(low.contains("openspec") || low.contains("shall"), "spec/openspec format: {plan}");
-        assert!(low.contains("do not name files"), "instructed not to name files: {plan}");
+        assert!(
+            low.contains("openspec") || low.contains("shall"),
+            "spec/openspec format: {plan}"
+        );
+        assert!(
+            low.contains("do not name files"),
+            "instructed not to name files: {plan}"
+        );
     }
 
     #[test]
@@ -1130,7 +1213,11 @@ mod tests {
     fn prepend_request_is_idempotent_and_skips_blank() {
         let with = prepend_request("# Spec", "do X");
         assert_eq!(prepend_request(&with, "do X"), with, "not double-prepended");
-        assert_eq!(prepend_request("# Spec", "   "), "# Spec", "blank request is a no-op");
+        assert_eq!(
+            prepend_request("# Spec", "   "),
+            "# Spec",
+            "blank request is a no-op"
+        );
     }
 
     #[test]
@@ -1168,7 +1255,11 @@ mod tests {
 
     #[test]
     fn classifier_offers_the_chat_token() {
-        assert!(intent_grammar().contains("\"chat\""), "{}", intent_grammar());
+        assert!(
+            intent_grammar().contains("\"chat\""),
+            "{}",
+            intent_grammar()
+        );
         assert_eq!(ChatIntent::parse("chat"), ChatIntent::Chat);
     }
 
@@ -1182,7 +1273,10 @@ mod tests {
             .content
             .to_lowercase();
         assert!(sys.contains("prose"), "question → prose: {sys}");
-        assert!(sys.contains("do not output any file"), "no file block: {sys}");
+        assert!(
+            sys.contains("do not output any file"),
+            "no file block: {sys}"
+        );
     }
 
     #[test]
@@ -1192,14 +1286,23 @@ mod tests {
             .messages[0]
             .content
             .clone();
-        assert!(todo.contains("file:TODO.md"), "todo edit → TODO block: {todo}");
+        assert!(
+            todo.contains("file:TODO.md"),
+            "todo edit → TODO block: {todo}"
+        );
         let code = Conversation::open("# X", "- a")
             .request(false, ChatIntent::CodeChange)
             .messages[0]
             .content
             .to_lowercase();
-        assert!(code.contains("cannot"), "code change refused in chat: {code}");
-        assert!(code.contains("comment"), "steers to code-view comment: {code}");
+        assert!(
+            code.contains("cannot"),
+            "code change refused in chat: {code}"
+        );
+        assert!(
+            code.contains("comment"),
+            "steers to code-view comment: {code}"
+        );
     }
 
     #[test]
@@ -1238,8 +1341,14 @@ mod tests {
             .messages[0]
             .content
             .to_lowercase();
-        assert!(sys.contains("```command"), "command intent → command block: {sys}");
-        assert!(sys.contains("integrated terminal"), "mentions the terminal: {sys}");
+        assert!(
+            sys.contains("```command"),
+            "command intent → command block: {sys}"
+        );
+        assert!(
+            sys.contains("integrated terminal"),
+            "mentions the terminal: {sys}"
+        );
         // The per-intent instruction explicitly forbids a file block for a command.
         assert!(
             sys.contains("do not output a file block"),
@@ -1249,13 +1358,20 @@ mod tests {
 
     #[test]
     fn extract_command_pulls_the_command_and_parse_reply_hides_it() {
-        let reply = "I'll start the client:\n```command\ncargo run -p sc-win\n```\nIt'll open a window.";
-        assert_eq!(extract_command(reply).as_deref(), Some("cargo run -p sc-win"));
+        let reply =
+            "I'll start the client:\n```command\ncargo run -p sc-win\n```\nIt'll open a window.";
+        assert_eq!(
+            extract_command(reply).as_deref(),
+            Some("cargo run -p sc-win")
+        );
         let (prose, files) = parse_reply(reply);
         assert!(files.is_empty(), "a command is not a file");
         assert!(prose.contains("start the client"), "lead-in kept");
         assert!(prose.contains("open a window"), "trailing prose kept");
-        assert!(!prose.contains("cargo run"), "command line not left in prose: {prose:?}");
+        assert!(
+            !prose.contains("cargo run"),
+            "command line not left in prose: {prose:?}"
+        );
     }
 
     #[test]
@@ -1268,7 +1384,11 @@ mod tests {
     #[test]
     fn classifier_offers_the_command_token() {
         // The grammar must include `command` so the model can pick it.
-        assert!(intent_grammar().contains("\"command\""), "{}", intent_grammar());
+        assert!(
+            intent_grammar().contains("\"command\""),
+            "{}",
+            intent_grammar()
+        );
         assert_eq!(ChatIntent::parse("command"), ChatIntent::Command);
     }
 

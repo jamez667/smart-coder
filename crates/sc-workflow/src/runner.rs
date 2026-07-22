@@ -392,7 +392,6 @@ fn ground_task(task: &str, workspace: &Path) -> String {
     out
 }
 
-
 /// If `task` names a feature spec that exists in `workspace` — `specs/<slug>.md` or a legacy
 /// `PLAN-<slug>.md` — return `(name, contents)`. Mirrors the agent loop's `referenced_plan` so
 /// the workflow pins the same spec.
@@ -403,11 +402,10 @@ fn referenced_plan(task: &str, workspace: &Path) -> Option<(String, String)> {
         .find(|t| {
             let norm = t.replace('\\', "/");
             let low = norm.to_ascii_lowercase();
-            (low.starts_with("specs/") && low.ends_with(".md"))
-                || {
-                    let up = norm.to_ascii_uppercase();
-                    up.starts_with("PLAN-") && up.ends_with(".MD")
-                }
+            (low.starts_with("specs/") && low.ends_with(".md")) || {
+                let up = norm.to_ascii_uppercase();
+                up.starts_with("PLAN-") && up.ends_with(".MD")
+            }
         })?;
     let body = std::fs::read_to_string(workspace.join(token)).ok()?;
     if body.trim().is_empty() {
@@ -425,7 +423,9 @@ fn plan_touched_files(plan_body: &str, workspace: &Path) -> Vec<String> {
     const EXTS: [&str; 8] = [".rs", ".py", ".js", ".ts", ".go", ".java", ".css", ".html"];
     let all = sc_core::source_files(workspace); // real files, workspace-relative
     let mut out: Vec<String> = Vec::new();
-    for tok in plan_body.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | ':')) {
+    for tok in plan_body
+        .split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | ':'))
+    {
         let t = tok.trim().trim_end_matches(&['.', ';'][..]);
         if t.is_empty() {
             continue;
@@ -463,12 +463,11 @@ fn clip_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    let end = s
-        .char_indices()
-        .nth(max)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    format!("{}\n… (file truncated — first {max} chars shown)", &s[..end])
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+    format!(
+        "{}\n… (file truncated — first {max} chars shown)",
+        &s[..end]
+    )
 }
 
 fn artifact_content(state: &WorkflowState, phase: Phase) -> String {
@@ -525,7 +524,10 @@ mod tests {
 
         let grounded = ground_task("Design how to implement PLAN-lakes.md.", &ws);
         // The plan body is present (not just its name).
-        assert!(grounded.contains("flood-fill basins"), "plan body injected: {grounded}");
+        assert!(
+            grounded.contains("flood-fill basins"),
+            "plan body injected: {grounded}"
+        );
         assert!(grounded.contains("follow it"), "framed to follow the plan");
         // The real files are surveyed, so the model edits them instead of inventing a layout.
         assert!(grounded.contains("gen/terrain.rs"), "real file surveyed");
@@ -554,8 +556,14 @@ mod tests {
         .unwrap();
 
         let g = ground_task("Design PLAN-lakes.md.", &ws);
-        assert!(g.contains("EXISTING contents of gen/terrain.rs"), "real file injected");
-        assert!(g.contains("pub struct Terrain"), "real type shown so the design uses it");
+        assert!(
+            g.contains("EXISTING contents of gen/terrain.rs"),
+            "real file injected"
+        );
+        assert!(
+            g.contains("pub struct Terrain"),
+            "real type shown so the design uses it"
+        );
         assert!(g.contains("fn elevation"), "real method shown");
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -703,7 +711,10 @@ mod tests {
                 ("file-change list", "# Layout\nfiles"),
                 // Rust stack → the stage-breakdown system prompt says "ordered set of small
                 // implementation stages", so key off that instead of "plan the TESTS".
-                ("ordered set of small implementation stages", "# Breakdown\n1. detect basins"),
+                (
+                    "ordered set of small implementation stages",
+                    "# Breakdown\n1. detect basins",
+                ),
             ]),
         };
         let ws = temp("plan-only");
@@ -733,8 +744,15 @@ mod tests {
             ]
         );
         // No tests written, no decomposition board.
-        assert!(outcome.test_files.is_empty(), "plan-only writes no frozen tests");
-        assert_eq!(outcome.board.len(), 0, "no decomposition/build in plan-only");
+        assert!(
+            outcome.test_files.is_empty(),
+            "plan-only writes no frozen tests"
+        );
+        assert_eq!(
+            outcome.board.len(),
+            0,
+            "no decomposition/build in plan-only"
+        );
         assert!(!outcome.aborted);
         // The design artifacts are on disk for review.
         let breakdown =
@@ -934,7 +952,10 @@ mod tests {
             Some(&Phase::Architecture),
             "first gated phase is Architecture, not Specs; got {seen:?}"
         );
-        assert!(!seen.contains(&Phase::Specs), "Specs gate never fires: {seen:?}");
+        assert!(
+            !seen.contains(&Phase::Specs),
+            "Specs gate never fires: {seen:?}"
+        );
         // The run still completes the full chain (Specs approved makes is_complete satisfiable).
         assert!(outcome.state.is_complete());
         let _ = std::fs::remove_dir_all(&ws);

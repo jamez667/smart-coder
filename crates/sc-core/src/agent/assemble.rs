@@ -160,15 +160,22 @@ fn referenced_plan(workspace: &Path, instruction: &str) -> Option<(String, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_util::temp_dir;
+    use super::*;
 
     #[test]
     fn referenced_plan_pins_a_named_plan_that_exists() {
         let ws = temp_dir("refplan");
-        std::fs::write(ws.join("PLAN-lakes.md"), "## Plan: lakes\nflood-fill basins").unwrap();
+        std::fs::write(
+            ws.join("PLAN-lakes.md"),
+            "## Plan: lakes\nflood-fill basins",
+        )
+        .unwrap();
         // Referenced with a trailing period, as the iterate instruction phrases it.
-        let got = referenced_plan(&ws, "Implement the feature plan in PLAN-lakes.md. Follow it.");
+        let got = referenced_plan(
+            &ws,
+            "Implement the feature plan in PLAN-lakes.md. Follow it.",
+        );
         let (name, body) = got.expect("plan found");
         assert_eq!(name, "PLAN-lakes.md");
         assert!(body.contains("flood-fill"));
@@ -201,10 +208,19 @@ mod tests {
             &[],
             &[],
         );
-        assert!(pinned.contains(&"PLAN-lakes.md".to_string()), "plan is pinned so re-reads short-circuit");
+        assert!(
+            pinned.contains(&"PLAN-lakes.md".to_string()),
+            "plan is pinned so re-reads short-circuit"
+        );
         let joined: String = segments.iter().map(|s| s.text.clone()).collect();
-        assert!(joined.contains("## Plan: lakes"), "plan body is in the prompt");
-        assert!(joined.contains("do NOT re-read this"), "steered away from re-reading");
+        assert!(
+            joined.contains("## Plan: lakes"),
+            "plan body is in the prompt"
+        );
+        assert!(
+            joined.contains("do NOT re-read this"),
+            "steered away from re-reading"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

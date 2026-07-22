@@ -97,7 +97,11 @@ fn compiler_driven_fix_recovers_or_bails_on_a_delimiter_cascade() {
     let fixes = AtomicUsize::new(0);
     let checks = AtomicUsize::new(0);
     let on_event = |e: BuildEvent| match e {
-        BuildEvent::Fixing { file, line, message } => {
+        BuildEvent::Fixing {
+            file,
+            line,
+            message,
+        } => {
             fixes.fetch_add(1, Ordering::Relaxed);
             eprintln!("[fix] {file}:{line} — {message}");
         }
@@ -160,7 +164,10 @@ fn compiler_driven_fix_recovers_or_bails_on_a_delimiter_cascade() {
             .current_dir(&dir)
             .output()
             .expect("run cargo check");
-        assert!(post.status.success(), "reported green but cargo check fails");
+        assert!(
+            post.status.success(),
+            "reported green but cargo check fails"
+        );
         eprintln!("✓ model fixed the delimiter cascade");
     } else {
         assert!(

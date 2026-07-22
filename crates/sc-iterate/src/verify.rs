@@ -106,7 +106,13 @@ fn find_unity_editor() -> Option<std::path::PathBuf> {
 /// Whether the workspace looks like a Python project: a pytest/setup config, or any
 /// `.py` file at the root (bounded scan — we don't recurse).
 fn is_python_project(workspace: &Path) -> bool {
-    for marker in ["pytest.ini", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini"] {
+    for marker in [
+        "pytest.ini",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "tox.ini",
+    ] {
         if workspace.join(marker).is_file() {
             return true;
         }
@@ -162,7 +168,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
         let got = iterate_verify_command(&Some(PYTEST_DEFAULT.into()), &dir);
-        assert_eq!(got.as_deref(), Some("cargo check"), "Rust project → cargo check");
+        assert_eq!(
+            got.as_deref(),
+            Some("cargo check"),
+            "Rust project → cargo check"
+        );
         // An EXPLICIT non-default command is still honored (the user knows best).
         let got = iterate_verify_command(&Some("cargo test -p void_sim".into()), &dir);
         assert_eq!(got.as_deref(), Some("cargo test -p void_sim"));

@@ -188,7 +188,11 @@ fn route(
                 .iter()
                 .map(|path| {
                     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-                    format!("{{\"name\":{},\"path\":{}}}", json_str(name), json_str(path))
+                    format!(
+                        "{{\"name\":{},\"path\":{}}}",
+                        json_str(name),
+                        json_str(path)
+                    )
                 })
                 .collect();
             json(&format!(
@@ -303,7 +307,10 @@ mod tests {
         m.push_inbound(InboundCmd::Chat("hello".into()));
         m.push_inbound(InboundCmd::Cancel);
         let got = m.drain_inbound();
-        assert_eq!(got, vec![InboundCmd::Chat("hello".into()), InboundCmd::Cancel]);
+        assert_eq!(
+            got,
+            vec![InboundCmd::Chat("hello".into()), InboundCmd::Cancel]
+        );
         // Draining again yields nothing.
         assert!(m.drain_inbound().is_empty());
     }

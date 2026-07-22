@@ -149,7 +149,9 @@ fn looks_like_file(bullet: &str) -> Option<String> {
     if t.is_empty() || t.contains(char::is_whitespace) {
         return None;
     }
-    const EXTS: [&str; 9] = [".rs", ".py", ".js", ".ts", ".go", ".java", ".css", ".html", ".cs"];
+    const EXTS: [&str; 9] = [
+        ".rs", ".py", ".js", ".ts", ".go", ".java", ".css", ".html", ".cs",
+    ];
     if EXTS.iter().any(|e| t.to_ascii_lowercase().ends_with(e)) {
         Some(t.to_string())
     } else {
@@ -494,7 +496,10 @@ mod tests {
     #[test]
     fn looks_like_file_accepts_paths_rejects_prose() {
         assert_eq!(looks_like_file("`src/a.rs`"), Some("src/a.rs".to_string()));
-        assert_eq!(looks_like_file("crates/city/src/render.rs"), Some("crates/city/src/render.rs".to_string()));
+        assert_eq!(
+            looks_like_file("crates/city/src/render.rs"),
+            Some("crates/city/src/render.rs".to_string())
+        );
         assert_eq!(looks_like_file("Add a lake arm to draw_land."), None);
         assert_eq!(looks_like_file("just some prose"), None);
     }
@@ -519,10 +524,15 @@ mod tests {
         assert!(i.contains("stage 1 of 3"));
         assert!(i.contains("Add Lake struct"));
         assert!(i.contains("terrain.rs"));
-        assert!(i.to_lowercase().contains("do not rewrite whole large files"));
+        assert!(i
+            .to_lowercase()
+            .contains("do not rewrite whole large files"));
         assert!(i.to_lowercase().contains("only this stage"));
         // The adapt-to-real-code guard (use what earlier stages actually built).
-        assert!(i.contains("EARLIER STAGES ACTUALLY BUILT"), "steers to the real API: {i}");
+        assert!(
+            i.contains("EARLIER STAGES ACTUALLY BUILT"),
+            "steers to the real API: {i}"
+        );
     }
 
     #[test]
@@ -540,14 +550,24 @@ mod tests {
 
     #[test]
     fn stage_instruction_is_size_aware() {
-        let s = Stage { title: "t".into(), files: vec!["big.rs".into()], instruction: "x".into() };
+        let s = Stage {
+            title: "t".into(),
+            files: vec!["big.rs".into()],
+            instruction: "x".into(),
+        };
         // Large existing file → tiny-hook guidance.
         let big = stage_instruction(&s, 0, 1, false, true, false);
-        assert!(big.contains("LARGE existing file"), "steers to a small hook: {big}");
+        assert!(
+            big.contains("LARGE existing file"),
+            "steers to a small hook: {big}"
+        );
         assert!(big.to_lowercase().contains("small, surgical change"));
         // New/small file → write-it-whole guidance.
         let small = stage_instruction(&s, 0, 1, false, false, true);
-        assert!(small.contains("NEW or small"), "steers to write-whole: {small}");
+        assert!(
+            small.contains("NEW or small"),
+            "steers to write-whole: {small}"
+        );
     }
 
     #[test]
@@ -557,7 +577,11 @@ mod tests {
         std::fs::write(ws.join("a.rs"), "fn a() {}").unwrap();
         let files = vec!["a.rs".to_string()];
         let before = snapshot(&ws, &files);
-        assert_eq!(snapshot(&ws, &files), before, "same content → same snapshot");
+        assert_eq!(
+            snapshot(&ws, &files),
+            before,
+            "same content → same snapshot"
+        );
         std::fs::write(ws.join("a.rs"), "fn a() { let x = 1; }").unwrap();
         assert_ne!(snapshot(&ws, &files), before, "edit → different snapshot");
         let _ = std::fs::remove_dir_all(&ws);
@@ -576,7 +600,11 @@ mod tests {
         std::fs::write(ws.join("a.rs"), "fn a() { broken(\n").unwrap();
         assert_ne!(snapshot(&ws, &files), green);
         restore(&ws, &green);
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "fn a() {}\n", "reverted");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "fn a() {}\n",
+            "reverted"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

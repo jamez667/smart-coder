@@ -113,7 +113,8 @@ impl RemoteConfirmer {
             ids
         };
         for id in drained {
-            self.hub.push(AgentEvent::ConfirmResolved { id, allowed: false });
+            self.hub
+                .push(AgentEvent::ConfirmResolved { id, allowed: false });
         }
     }
 }
@@ -184,10 +185,13 @@ mod tests {
 
         // A ConfirmResolved(allowed=true) was announced, and a replayed resolve is a no-op.
         let (events, _, _) = hub.since(0);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ConfirmResolved { id: rid, allowed: true } if *rid == id)));
-        assert!(!confirmer.resolve(id, Confirmation::AllowOnce), "replayed resolve is a no-op");
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::ConfirmResolved { id: rid, allowed: true } if *rid == id)
+        ));
+        assert!(
+            !confirmer.resolve(id, Confirmation::AllowOnce),
+            "replayed resolve is a no-op"
+        );
     }
 
     #[test]
@@ -215,7 +219,10 @@ mod tests {
 
         wait_for_pending(&hub);
         confirmer.deny_all("run cancelled");
-        assert_eq!(worker.join().unwrap(), Confirmation::Deny("run cancelled".into()));
+        assert_eq!(
+            worker.join().unwrap(),
+            Confirmation::Deny("run cancelled".into())
+        );
     }
 
     #[test]

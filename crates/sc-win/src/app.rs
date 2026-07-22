@@ -237,9 +237,16 @@ fn stage_toggle_button(_t: &Theme, status: button::Status) -> button::Style {
             a,
             ..Color::from_rgb(0.6, 0.64, 0.78)
         })),
-        text_color: if hovered { FG } else { Color::from_rgb(0.85, 0.87, 0.94) },
+        text_color: if hovered {
+            FG
+        } else {
+            Color::from_rgb(0.85, 0.87, 0.94)
+        },
         border: Border {
-            color: Color { a: 0.35, ..CARD_BORDER },
+            color: Color {
+                a: 0.35,
+                ..CARD_BORDER
+            },
             width: 1.0,
             radius: RADIUS.into(),
         },
@@ -376,7 +383,8 @@ fn bar_container<'a>(
 /// A standalone revert bar: the shared bar chrome carrying ONLY the "↩ revert" button (no comment
 /// text). Rendered under a changed diff block that has no comment on it.
 fn view_revert_block_bar(cur_start: usize, bar_width: Option<f32>) -> Element<'static, Message> {
-    let head = row![Space::new().width(Fill), revert_button(cur_start)].align_y(iced::Alignment::Center);
+    let head =
+        row![Space::new().width(Fill), revert_button(cur_start)].align_y(iced::Alignment::Center);
     bar_container(head, bar_width, GOOD)
 }
 
@@ -463,7 +471,9 @@ fn start_mirror() -> sc_web::RemoteMirror {
         let _ = sc_web::serve_mirror(server_mirror, &addr, &tok, move |_url| {
             println!("smart-coder remote mirror live — phone URL:");
             println!("  {printed_url}");
-            println!("(if you haven't yet: run `tailscale serve {port}` once so the https URL works)");
+            println!(
+                "(if you haven't yet: run `tailscale serve {port}` once so the https URL works)"
+            );
         });
     });
     mirror
@@ -521,11 +531,7 @@ fn fmt_unix(secs: u64) -> String {
 /// `target` (found by position in `order`), regardless of which comes first. If either isn't in
 /// `order`, falls back to selecting just `target` — the sane result for a stale anchor. Pure and
 /// index-based so the shift-range math is unit-testable without any GUI scaffolding.
-fn git_range(
-    order: &[String],
-    anchor: &str,
-    target: &str,
-) -> std::collections::BTreeSet<String> {
+fn git_range(order: &[String], anchor: &str, target: &str) -> std::collections::BTreeSet<String> {
     let (a, b) = match (
         order.iter().position(|p| p == anchor),
         order.iter().position(|p| p == target),
@@ -676,9 +682,9 @@ struct App {
     /// Two groups now: the **connection** inputs (endpoint + key for Local and Gemini) live on
     /// the Connections tab; the **model** inputs (one per stage) live on the Routing tab alongside
     /// the per-stage provider toggle (which is edited straight on `cfg`, like yolo/dry-run).
-    model_input: String,   // coder model
+    model_input: String, // coder model
     orch_model_input: String, // planner model
-    advisor_input: String, // advisor model (optional)
+    advisor_input: String,    // advisor model (optional)
     // Connection endpoints + keys.
     local_url_input: String,
     local_key_input: String,
@@ -1385,9 +1391,9 @@ impl App {
             // A button-release anywhere ends a divider drag (even if the cursor left the handle).
             // `SplitDragEnd` ends BOTH the chat|code and git|files drags — they're mutually
             // exclusive in practice, so one release message clears whichever is active.
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                iced::mouse::Button::Left,
-            )) => Some(Message::SplitDragEnd),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Message::SplitDragEnd)
+            }
             // Track the window size so a divider drag can map cursor X→width fraction and
             // cursor Y→height fraction. `Opened` seeds it at startup; `Resized` keeps it current.
             iced::Event::Window(iced::window::Event::Resized(size)) => {
@@ -1465,8 +1471,10 @@ impl App {
         // Preflight: don't launch a run against a known-bad backend — surface the reason in the
         // activity stream instead of failing several turns in.
         if let Some(reason) = self.backend_unready_reason() {
-            self.rows
-                .push(Row::ok("⚠", format!("{reason} — check the backend badge (top bar)")));
+            self.rows.push(Row::ok(
+                "⚠",
+                format!("{reason} — check the backend badge (top bar)"),
+            ));
             return;
         }
 
@@ -2174,7 +2182,10 @@ impl App {
             self.refresh_git_view();
             self.chat_turns.push(sc_win::chat::Turn {
                 role: sc_win::chat::Speaker::Agent,
-                text: format!("↩ Reverted the change on {} and removed the comment.", c.file),
+                text: format!(
+                    "↩ Reverted the change on {} and removed the comment.",
+                    c.file
+                ),
             });
         }
     }
@@ -2367,8 +2378,7 @@ impl App {
         if self.picked_workspace.is_none() {
             self.chat_turns.push(sc_win::chat::Turn {
                 role: sc_win::chat::Speaker::Agent,
-                text: "⚠ Open a project folder first — building a plan builds into it."
-                    .to_string(),
+                text: "⚠ Open a project folder first — building a plan builds into it.".to_string(),
             });
             return;
         }
@@ -2402,7 +2412,8 @@ impl App {
         // Stage everything the breakdown wrote (the plan/spec artifacts are the only new files a
         // plan-only run produces), then commit. `run_git` is best-effort and returns success.
         let staged = self.run_git(&["add", "-A"]);
-        let committed = staged && self.run_git(&["commit", "-m", "docs: add reviewed plan/breakdown"]);
+        let committed =
+            staged && self.run_git(&["commit", "-m", "docs: add reviewed plan/breakdown"]);
         let note = if committed {
             "✓ committed the plan to the repo".to_string()
         } else {
@@ -2659,11 +2670,7 @@ impl App {
     /// `label` names the op for the report. Runs synchronously (briefly blocks the UI).
     fn run_git_net(&mut self, label: &str, args: &[&str]) {
         let root = self.workspace_root();
-        let out = sc_win::proc::git()
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output();
+        let out = sc_win::proc::git().arg("-C").arg(&root).args(args).output();
         let (ok, detail) = match out {
             Ok(o) => {
                 // git writes progress/results to stderr; prefer it, fall back to stdout.
@@ -2678,9 +2685,16 @@ impl App {
             Err(e) => (false, e.to_string()),
         };
         // Keep the report short — the last non-empty line usually carries the gist.
-        let gist = detail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let gist = detail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         let text = if ok {
-            format!("✓ git {label} — {}", if gist.is_empty() { "done" } else { gist })
+            format!(
+                "✓ git {label} — {}",
+                if gist.is_empty() { "done" } else { gist }
+            )
         } else {
             format!("⚠ git {label} failed — {gist}")
         };
@@ -3360,7 +3374,8 @@ impl App {
                     // note it in the activity stream. `dir` (workspace-relative artifact dir)
                     // teaches the plan each phase's file path — the master list opens it in
                     // the code view and harvests line-comments on it for send-back.
-                    self.plan.apply(phase, &content, &tests_written, dir.as_deref());
+                    self.plan
+                        .apply(phase, &content, &tests_written, dir.as_deref());
                     if tests_written.is_empty() {
                         self.rows
                             .push(Row::ok("◆", format!("plan · {}", phase.title())));
@@ -3470,7 +3485,9 @@ impl App {
                     Decision::Approve => format!("✓ {} approved", phase.title()),
                     Decision::Revise => format!("✎ {} revised", phase.title()),
                     Decision::SendBack { target, notes } => match notes {
-                        Some(n) => format!("↩ sent {} back to {} — {n}", phase.title(), target.title()),
+                        Some(n) => {
+                            format!("↩ sent {} back to {} — {n}", phase.title(), target.title())
+                        }
                         None => format!("↩ sent {} back to {}", phase.title(), target.title()),
                     },
                     Decision::Abort => format!("■ aborted at {}", phase.title()),
@@ -3598,7 +3615,10 @@ impl App {
                     // no anchor yet) and this row in the CURRENT DISPLAYED ORDER, replacing the
                     // set. The anchor is kept, so successive shift-clicks re-anchor from it.
                     let order = self.git_display_order();
-                    let anchor = self.git_select_anchor.clone().unwrap_or_else(|| rel.clone());
+                    let anchor = self
+                        .git_select_anchor
+                        .clone()
+                        .unwrap_or_else(|| rel.clone());
                     self.git_selection = git_range(&order, &anchor, &rel);
                     if self.git_select_anchor.is_none() {
                         self.git_select_anchor = Some(anchor);
@@ -3826,9 +3846,10 @@ impl App {
                 // tracked-ness — untracked files need `clean -f` (a `checkout --` is a no-op on
                 // them), tracked files need `checkout --` to restore the committed content.
                 let targets = self.git_action_targets(&path);
-                let (untracked, tracked): (Vec<&String>, Vec<&String>) = targets.iter().partition(
-                    |p| self.file_status.get(*p) == Some(&sc_win::gitdiff::FileStatus::Added),
-                );
+                let (untracked, tracked): (Vec<&String>, Vec<&String>) =
+                    targets.iter().partition(|p| {
+                        self.file_status.get(*p) == Some(&sc_win::gitdiff::FileStatus::Added)
+                    });
                 if !untracked.is_empty() {
                     let mut args = vec!["clean", "-f", "--"];
                     args.extend(untracked.iter().map(|p| p.as_str()));
@@ -4145,11 +4166,9 @@ impl App {
         // Top section (25%): everything git — the branch line, push/pull/fetch, and the changed
         // files. Bottom section (75%): the Files tree with its quick filter. Stacked rather than
         // tabbed so both are visible at once.
-        let mut git_col = column![
-            text(branch_line)
-                .size(11)
-                .color(iced::Color::from_rgb(0.55, 0.58, 0.70)),
-        ]
+        let mut git_col = column![text(branch_line)
+            .size(11)
+            .color(iced::Color::from_rgb(0.55, 0.58, 0.70)),]
         .spacing(6);
         // Push / Pull / Fetch — only when the repo is on a branch (has a name). Labels show the
         // ahead/behind counts so you know what each will move.
@@ -4325,7 +4344,12 @@ impl App {
         let unstaged = self
             .file_status
             .keys()
-            .filter(|p| self.stage_states.get(*p).map(|s| s.unstaged).unwrap_or(true))
+            .filter(|p| {
+                self.stage_states
+                    .get(*p)
+                    .map(|s| s.unstaged)
+                    .unwrap_or(true)
+            })
             .cloned();
         staged.chain(unstaged).collect()
     }
@@ -4348,10 +4372,7 @@ impl App {
     fn view_git_tab(&self) -> Element<'_, Message> {
         use sc_win::gitdiff::FileStatus;
         if self.branch.is_none() {
-            return text("not a git repository")
-                .size(11)
-                .color(FG_MUTED)
-                .into();
+            return text("not a git repository").size(11).color(FG_MUTED).into();
         }
 
         // The commit box: a message input + a Commit button, enabled only when something is
@@ -4367,7 +4388,9 @@ impl App {
             .width(Fill);
         let mut commit_btn = button(text("✓ Commit").size(12));
         if can_commit {
-            commit_btn = commit_btn.on_press(Message::GitCommit).style(primary_button);
+            commit_btn = commit_btn
+                .on_press(Message::GitCommit)
+                .style(primary_button);
         } else {
             commit_btn = commit_btn.style(menu_item_style);
         }
@@ -4387,7 +4410,10 @@ impl App {
             .iter()
             .filter(|(p, _)| {
                 // Unstaged, or untracked. If we have no stage info for it, treat it as unstaged.
-                self.stage_states.get(*p).map(|s| s.unstaged).unwrap_or(true)
+                self.stage_states
+                    .get(*p)
+                    .map(|s| s.unstaged)
+                    .unwrap_or(true)
             })
             .map(|(p, s)| (p, *s))
             .collect();
@@ -4402,7 +4428,11 @@ impl App {
                 Some(("− All", Message::GitUnstageAll)),
             ));
             for path in &staged {
-                let status = self.file_status.get(*path).copied().unwrap_or(FileStatus::Modified);
+                let status = self
+                    .file_status
+                    .get(*path)
+                    .copied()
+                    .unwrap_or(FileStatus::Modified);
                 col = col.push(self.git_file_row(path, status, true));
             }
         }
@@ -4597,12 +4627,10 @@ impl App {
         if has_unstaged {
             items.push((discard_label, Message::GitDiscard(path.clone())));
         }
-        let mut col = column![
-            text(path.clone())
-                .size(11)
-                .color(FG_MUTED)
-                .wrapping(iced::widget::text::Wrapping::None),
-        ]
+        let mut col = column![text(path.clone())
+            .size(11)
+            .color(FG_MUTED)
+            .wrapping(iced::widget::text::Wrapping::None),]
         .spacing(0);
         for (label, msg) in items {
             col = col.push(
@@ -4839,8 +4867,8 @@ impl App {
                         for (i, c) in here {
                             // If the comment sits on a changed block, offer to revert that block
                             // from the comment row (look up by any line the comment covers).
-                            let block = (c.start..=c.end)
-                                .find_map(|l| line_to_block.get(&l).copied());
+                            let block =
+                                (c.start..=c.end).find_map(|l| line_to_block.get(&l).copied());
                             col = col.push(view_inline_comment(i, c, bar_width, block));
                         }
                     }
@@ -4963,10 +4991,7 @@ impl App {
         // When the active file is a feature plan (PLAN-<slug>.md) and no session is running, the
         // strip's right end carries an "⚒ Execute plan" button — the same one-click build the
         // proposal card offers, acting on the active file.
-        let is_open_plan = self
-            .selected_file
-            .as_deref()
-            .is_some_and(is_feature_plan);
+        let is_open_plan = self.selected_file.as_deref().is_some_and(is_feature_plan);
         let header_bar: Element<'_, Message> = if self.open_tabs.is_empty() {
             // No files open → the old "CODE" placeholder (matches the former (None, _) header).
             text("CODE").size(12).color(FG_MUTED).into()
@@ -4980,31 +5005,36 @@ impl App {
                 // Show the basename (full path is too long for a tab); duplicate basenames across
                 // open files are acceptable for v1.
                 let base = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str());
-                let label = button(
-                    text(base.to_string())
-                        .size(12)
-                        .color(if active { ACCENT } else { FG_MUTED }),
-                )
+                let label = button(text(base.to_string()).size(12).color(if active {
+                    ACCENT
+                } else {
+                    FG_MUTED
+                }))
                 .on_press(Message::SelectTab(path.clone()))
                 .padding([2, 6])
                 .style(if active { menu_item_style } else { tree_button });
-                let close = button(
-                    text("✕")
-                        .size(11)
-                        .color(if active { ACCENT } else { FG_MUTED }),
-                )
-                .on_press(Message::CloseTab(path.clone()))
-                .padding([2, 4])
-                .style(tree_button);
-                strip = strip.push(row![label, close].spacing(0).align_y(iced::Alignment::Center));
+                let close =
+                    button(
+                        text("✕")
+                            .size(11)
+                            .color(if active { ACCENT } else { FG_MUTED }),
+                    )
+                    .on_press(Message::CloseTab(path.clone()))
+                    .padding([2, 4])
+                    .style(tree_button);
+                strip = strip.push(
+                    row![label, close]
+                        .spacing(0)
+                        .align_y(iced::Alignment::Center),
+                );
             }
             // Build the header ACTION buttons first (their own fixed-width row), so they can be
             // PINNED to the right while the tab strip scrolls in the remaining space — VS Code
             // style. Without this, the scroller expanded to fit every tab and pushed the buttons
             // off the panel's right edge (the bug: Build/Breakdown vanished with many tabs open).
-            let viewing_gated_phase = self.gating_phase().is_some_and(|p| {
-                self.plan.path_for(p).as_deref() == self.selected_file.as_deref()
-            });
+            let viewing_gated_phase = self
+                .gating_phase()
+                .is_some_and(|p| self.plan.path_for(p).as_deref() == self.selected_file.as_deref());
             let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
             if viewing_gated_phase {
                 // The file being viewed IS the phase at a gate: its Approve / Send back / Abort
@@ -5055,13 +5085,11 @@ impl App {
             // content, and keep tabs top-aligned so they sit ABOVE the bar, not centered onto it.
             // Mouse-wheel over the strip scrolls it horizontally too.
             let strip = strip.align_y(iced::Alignment::Start);
-            let scroller = scrollable(
-                container(strip).padding(iced::Padding::ZERO.bottom(9)),
-            )
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(5).scroller_width(5),
-            ))
-            .width(Fill);
+            let scroller = scrollable(container(strip).padding(iced::Padding::ZERO.bottom(9)))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new().width(5).scroller_width(5),
+                ))
+                .width(Fill);
             // The row MUST be `width(Fill)`: in a Shrink row, a `Fill` child resolves against the
             // row's content width (unbounded), so the scroller grows to fit every tab and shoves
             // the actions off-screen. A Fill row bounds the space, the Shrink `actions` take their
@@ -5333,10 +5361,7 @@ impl App {
                     .color(color),
             );
         }
-        let scrollback = scrollable(col)
-            .height(Fill)
-            .anchor_bottom()
-            .width(Fill);
+        let scrollback = scrollable(col).height(Fill).anchor_bottom().width(Fill);
 
         // Input row: prompt glyph · input box · Run/Kill · Clear.
         let running = self.terminal.running;
@@ -5818,7 +5843,11 @@ impl App {
             .collect();
     }
 
-    fn view_chat_turn<'a>(&'a self, i: usize, turn: &'a sc_win::chat::Turn) -> Element<'a, Message> {
+    fn view_chat_turn<'a>(
+        &'a self,
+        i: usize,
+        turn: &'a sc_win::chat::Turn,
+    ) -> Element<'a, Message> {
         if turn.role == sc_win::chat::Speaker::Debug {
             return container(
                 column![
@@ -6232,22 +6261,22 @@ impl App {
             SettingsTab::Routing => self.view_routing_tab(),
         };
 
-        column![
-            tabs,
-            scrollable(body).height(Length::Fixed(400.0))
-        ]
-        .spacing(12)
-        .into()
+        column![tabs, scrollable(body).height(Length::Fixed(400.0))]
+            .spacing(12)
+            .into()
     }
 
     /// The CONNECTIONS tab: the two endpoints (Local + Gemini), each an url + secure key. This is
     /// where the Gemini key lives — on the Gemini connection ONLY, so it never bleeds onto the
     /// local coder endpoint.
     fn view_connections_tab(&self) -> Element<'_, Message> {
-        let local_url = text_input("local url (e.g. http://localhost:11435/v1)", &self.local_url_input)
-            .on_input(Message::LocalUrlChanged)
-            .padding(6)
-            .style(input_style);
+        let local_url = text_input(
+            "local url (e.g. http://localhost:11435/v1)",
+            &self.local_url_input,
+        )
+        .on_input(Message::LocalUrlChanged)
+        .padding(6)
+        .style(input_style);
         let local_key = text_input("local api key (usually blank)", &self.local_key_input)
             .on_input(Message::LocalKeyChanged)
             .secure(true)
@@ -6289,10 +6318,13 @@ impl App {
             .on_input(Message::ModelChanged)
             .padding(6)
             .style(input_style);
-        let orch_model = text_input("planner model (e.g. gemini-2.5-flash-lite)", &self.orch_model_input)
-            .on_input(Message::OrchModelChanged)
-            .padding(6)
-            .style(input_style);
+        let orch_model = text_input(
+            "planner model (e.g. gemini-2.5-flash-lite)",
+            &self.orch_model_input,
+        )
+        .on_input(Message::OrchModelChanged)
+        .padding(6)
+        .style(input_style);
         let advisor = text_input("advisor model (optional)", &self.advisor_input)
             .on_input(Message::AdvisorChanged)
             .padding(6)
@@ -6315,13 +6347,19 @@ impl App {
             .style(checkbox_style);
 
         column![
-            text("CODER  (does the file writing)").size(11).color(FG_MUTED),
+            text("CODER  (does the file writing)")
+                .size(11)
+                .color(FG_MUTED),
             provider_toggle(self.cfg.coder_provider, Message::CoderProviderChanged),
             model,
-            text("PLANNER  (does the breakdown)").size(11).color(FG_MUTED),
+            text("PLANNER  (does the breakdown)")
+                .size(11)
+                .color(FG_MUTED),
             provider_toggle(self.cfg.planner_provider, Message::PlannerProviderChanged),
             orch_model,
-            text("ADVISOR  (junior asks senior on a stall)").size(11).color(FG_MUTED),
+            text("ADVISOR  (junior asks senior on a stall)")
+                .size(11)
+                .color(FG_MUTED),
             provider_toggle(self.cfg.advisor_provider, Message::AdvisorProviderChanged),
             advisor,
             text("VERIFY & BEHAVIOUR").size(11).color(FG_MUTED),
@@ -6344,10 +6382,18 @@ fn provider_toggle(
     use sc_win::config::Provider;
     let seg = |p: Provider| {
         let active = selected == p;
-        button(text(p.label().to_string()).size(12).color(if active { FG } else { FG_MUTED }))
-            .on_press(on_pick(p))
-            .padding([4, 12])
-            .style(if active { primary_button } else { stage_toggle_button })
+        button(
+            text(p.label().to_string())
+                .size(12)
+                .color(if active { FG } else { FG_MUTED }),
+        )
+        .on_press(on_pick(p))
+        .padding([4, 12])
+        .style(if active {
+            primary_button
+        } else {
+            stage_toggle_button
+        })
     };
     row![seg(Provider::Local), seg(Provider::Gemini)]
         .spacing(6)
@@ -6556,7 +6602,10 @@ mod tests {
 
     #[test]
     fn git_range_selects_inclusive_span_in_display_order() {
-        let order: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
+        let order: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         // Forward range a..=c.
         let r = git_range(&order, "a", "c");
         assert_eq!(r, ["a", "b", "c"].iter().map(|s| s.to_string()).collect());
@@ -6600,11 +6649,23 @@ mod tests {
     fn feature_spec_of_normalizes_any_artifact_to_spec_md() {
         // Any phase file of a feature folder → that feature's spec.md, so Build targets the
         // feature (and reuses its approved design) whichever artifact is open.
-        assert_eq!(feature_spec_of("specs/seat-types/decomposition.md"), "specs/seat-types/spec.md");
-        assert_eq!(feature_spec_of("specs/seat-types/architecture.md"), "specs/seat-types/spec.md");
-        assert_eq!(feature_spec_of("specs/seat-types/spec.md"), "specs/seat-types/spec.md");
+        assert_eq!(
+            feature_spec_of("specs/seat-types/decomposition.md"),
+            "specs/seat-types/spec.md"
+        );
+        assert_eq!(
+            feature_spec_of("specs/seat-types/architecture.md"),
+            "specs/seat-types/spec.md"
+        );
+        assert_eq!(
+            feature_spec_of("specs/seat-types/spec.md"),
+            "specs/seat-types/spec.md"
+        );
         // Windows backslashes are normalized.
-        assert_eq!(feature_spec_of("specs\\seat-types\\breakdown.md"), "specs/seat-types/spec.md");
+        assert_eq!(
+            feature_spec_of("specs\\seat-types\\breakdown.md"),
+            "specs/seat-types/spec.md"
+        );
         // A flat specs/<slug>.md (no feature folder) and a legacy PLAN-*.md are returned as-is.
         assert_eq!(feature_spec_of("specs/lakes.md"), "specs/lakes.md");
         assert_eq!(feature_spec_of("PLAN-lakes.md"), "PLAN-lakes.md");
@@ -6615,7 +6676,10 @@ mod tests {
         // The workflow pins the plan via its filename, so the task must name it; and plan-only
         // stops at the breakdown, so it must frame a design pass (not "write the code").
         let t = plan_task("PLAN-lakes.md");
-        assert!(t.contains("PLAN-lakes.md"), "names the plan so referenced_plan pins it");
+        assert!(
+            t.contains("PLAN-lakes.md"),
+            "names the plan so referenced_plan pins it"
+        );
         assert!(t.to_lowercase().contains("design"));
         assert!(t.contains("do not write source code yet"));
     }

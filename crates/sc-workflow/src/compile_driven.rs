@@ -51,7 +51,11 @@ pub enum BuildEvent {
     /// A verify pass ran; `errors` is how many compile errors it found (0 = green).
     Checked { errors: usize },
     /// About to fix a specific located diagnostic.
-    Fixing { file: String, line: u32, message: String },
+    Fixing {
+        file: String,
+        line: u32,
+        message: String,
+    },
     /// The build finished. `green` = the final check passed.
     Done { green: bool, iterations: usize },
 }
@@ -161,7 +165,14 @@ pub fn build_compiler_driven(
         on_agent,
     );
 
-    verify_fix_loop(backend, workspace, sandbox, verify_command, on_event, on_agent)
+    verify_fix_loop(
+        backend,
+        workspace,
+        sandbox,
+        verify_command,
+        on_event,
+        on_agent,
+    )
 }
 
 /// Build the WHOLE decomposition, not just the foundational chunk: apply every `tasks` unit as a
@@ -192,7 +203,14 @@ pub fn build_all_subtasks(
         });
         run_scoped_edit(backend, workspace, sandbox, &t.files, &t.goal, on_agent);
     }
-    verify_fix_loop(backend, workspace, sandbox, verify_command, on_event, on_agent)
+    verify_fix_loop(
+        backend,
+        workspace,
+        sandbox,
+        verify_command,
+        on_event,
+        on_agent,
+    )
 }
 
 /// Order `tasks` so a task's `deps` come before it — a topological walk that falls back to the
@@ -306,7 +324,14 @@ fn verify_fix_loop(
                  in `{}` (pinned below).",
                 e.file, e.line, e.message, hint, e.file
             );
-            run_scoped_edit(backend, workspace, sandbox, &[e.file.clone()], &goal, on_agent);
+            run_scoped_edit(
+                backend,
+                workspace,
+                sandbox,
+                &[e.file.clone()],
+                &goal,
+                on_agent,
+            );
         }
     }
 }
@@ -337,7 +362,14 @@ fn run_scoped_edit(
     let sink = FnSink(on_agent);
     let sink: &dyn EventSink = &sink;
     let _ = run_agent_observed(
-        backend, None, &registry, strategy.as_ref(), goal, workspace, &cfg, sink,
+        backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        goal,
+        workspace,
+        &cfg,
+        sink,
     );
 }
 
@@ -387,7 +419,10 @@ mod tests {
         // loop). Must GiveUp well within the iteration cap.
         let (steps, end) = run_sequence(&[5, 3, 5, 3, 5, 3, 5, 3, 5, 3]);
         assert_eq!(end, LoopStep::GiveUp);
-        assert!(steps <= MAX_ITERATIONS + 2, "oscillation bounded, took {steps}");
+        assert!(
+            steps <= MAX_ITERATIONS + 2,
+            "oscillation bounded, took {steps}"
+        );
     }
 
     #[test]
@@ -492,7 +527,11 @@ mod tests {
             task("t3", &["nope"]),
         ];
         let ordered = order_by_deps(&tasks);
-        assert_eq!(ordered.len(), 3, "all tasks emitted despite cycle/dangling dep");
+        assert_eq!(
+            ordered.len(),
+            3,
+            "all tasks emitted despite cycle/dangling dep"
+        );
         let ids: std::collections::HashSet<&str> = ordered.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains("t1") && ids.contains("t2") && ids.contains("t3"));
     }

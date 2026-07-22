@@ -285,7 +285,10 @@ mod tests {
             .collect();
         assert_eq!(prog, "docker");
         assert_eq!(args[0], "exec", "exec into the container, not a fresh run");
-        assert!(args.contains(&container.name().to_string()), "targets our container");
+        assert!(
+            args.contains(&container.name().to_string()),
+            "targets our container"
+        );
         assert_eq!(args.last().unwrap(), "cargo test");
     }
 
@@ -332,7 +335,10 @@ mod tests {
         );
         assert!(args.contains(&"smart-coder-pyenv".to_string()), "the image");
         // Idles alive so exec's can attach.
-        assert!(args.contains(&"sleep infinity".to_string()), "kept alive: {args:?}");
+        assert!(
+            args.contains(&"sleep infinity".to_string()),
+            "kept alive: {args:?}"
+        );
     }
 
     #[test]

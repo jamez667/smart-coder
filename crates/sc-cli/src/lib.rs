@@ -419,7 +419,9 @@ impl Cli {
         // Fall back to the conventional GEMINI_API_KEY env var when no key flag was given, so a
         // Gemini planner/coder lights up from the environment without repeating the token on the
         // command line.
-        let env_key = std::env::var("GEMINI_API_KEY").ok().filter(|s| !s.trim().is_empty());
+        let env_key = std::env::var("GEMINI_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
         let api_key = api_key.or_else(|| env_key.clone());
         let orchestrator_key = orchestrator_key.or_else(|| api_key.clone()).or(env_key);
 
@@ -506,7 +508,10 @@ impl Cli {
             .clone()
             .unwrap_or_else(|| self.model.clone());
         // The planner key (Gemini's, when the planner is Gemini) — its own key, else the coder's.
-        let key = self.orchestrator_key.clone().or_else(|| self.api_key.clone());
+        let key = self
+            .orchestrator_key
+            .clone()
+            .or_else(|| self.api_key.clone());
         apply_key(OpenAiBackend::new(url, model), &key)
     }
 
@@ -518,7 +523,10 @@ impl Cli {
             .advisor_url
             .clone()
             .unwrap_or_else(|| self.base_url.clone());
-        let key = self.orchestrator_key.clone().or_else(|| self.api_key.clone());
+        let key = self
+            .orchestrator_key
+            .clone()
+            .or_else(|| self.api_key.clone());
         self.advisor_model
             .as_ref()
             .map(|m| apply_key(OpenAiBackend::new(url.clone(), m.clone()), &key))
@@ -1188,7 +1196,10 @@ mod tests {
             "AIzaSECRET",
         ])
         .unwrap();
-        assert_eq!(cli.orchestrator_model.as_deref(), Some("gemini-2.5-flash-lite"));
+        assert_eq!(
+            cli.orchestrator_model.as_deref(),
+            Some("gemini-2.5-flash-lite")
+        );
         assert_eq!(
             cli.orchestrator_url.as_deref(),
             Some("https://generativelanguage.googleapis.com/v1beta/openai")
@@ -1261,7 +1272,8 @@ mod tests {
     fn staged_subcommand_parses_task_and_verify() {
         // `staged` is the headless entry; the task must peel cleanly and
         // `--verify` (the per-stage gate override) must survive the peel.
-        let cli = Cli::parse(["staged", "wire the invite list", "--verify", "cargo check"]).unwrap();
+        let cli =
+            Cli::parse(["staged", "wire the invite list", "--verify", "cargo check"]).unwrap();
         match &cli.command {
             Command::Staged { task } => assert_eq!(task, "wire the invite list"),
             other => panic!("expected Staged, got {other:?}"),

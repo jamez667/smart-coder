@@ -22,7 +22,7 @@ use std::sync::Mutex;
 
 use sc_core::{run_agent_observed, AgentConfig, AgentEvent, FnSink};
 use sc_model::{
-    Capabilities, CallbackBackend, GenerateRequest, GenerateResponse, Message, ModelBackend, Role,
+    CallbackBackend, Capabilities, GenerateRequest, GenerateResponse, Message, ModelBackend, Role,
     ToolCalling,
 };
 use sc_proto::{DcError, Result};
@@ -140,10 +140,7 @@ pub extern "system" fn Java_com_smartcoder_remote_NativeBridge_runTask<'local>(
         );
         result.map(|report| {
             let t = transcript.into_inner().unwrap();
-            format!(
-                "finished={} steps={}\n{}",
-                report.finished, report.steps, t
-            )
+            format!("finished={} steps={}\n{}", report.finished, report.steps, t)
         })
     };
 
@@ -166,7 +163,9 @@ fn append_event(out: &mut String, e: &AgentEvent) {
         AgentEvent::ToolCall { tool, arg } => {
             let _ = writeln!(out, "    call {tool} {arg}");
         }
-        AgentEvent::ToolResult { summary, is_error, .. } => {
+        AgentEvent::ToolResult {
+            summary, is_error, ..
+        } => {
             let mark = if *is_error { "ERR" } else { "ok" };
             let _ = writeln!(out, "    {mark}: {summary}");
         }

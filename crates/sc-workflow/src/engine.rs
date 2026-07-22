@@ -46,7 +46,10 @@ pub fn phase_messages(
             "\n=== Reviewer feedback (address this) ===\n{notes}\n"
         ));
     }
-    user.push_str(&format!("\n{}", phase_instruction(phase, stack, &state.task)));
+    user.push_str(&format!(
+        "\n{}",
+        phase_instruction(phase, stack, &state.task)
+    ));
 
     let mut system = system_for(phase, stack);
     if think.suppress(phase) {
@@ -504,9 +507,18 @@ mod tests {
             1,
             "character File line once"
         );
-        assert!(out.contains("Add SeatType enum"), "first seat_types section kept");
-        assert!(!out.contains("Add Display impl"), "duplicate seat_types section dropped");
-        assert!(!out.contains("Add Clone"), "duplicate character section dropped");
+        assert!(
+            out.contains("Add SeatType enum"),
+            "first seat_types section kept"
+        );
+        assert!(
+            !out.contains("Add Display impl"),
+            "duplicate seat_types section dropped"
+        );
+        assert!(
+            !out.contains("Add Clone"),
+            "duplicate character section dropped"
+        );
     }
 
     #[test]
@@ -515,7 +527,9 @@ mod tests {
         // truncated to the cap (a runaway can't produce a 25-stage artifact).
         let mut doc = String::from("intro\n\n## Summary\n- overview, no file path\n\n");
         for i in 0..30 {
-            doc.push_str(&format!("## Stage {i}\n- File: crates/x/f{i}.rs\n- do it\n\n"));
+            doc.push_str(&format!(
+                "## Stage {i}\n- File: crates/x/f{i}.rs\n- do it\n\n"
+            ));
         }
         let out = dedup_file_sections(&doc);
         assert!(out.contains("## Summary"), "no-file section survives");
@@ -538,13 +552,20 @@ mod tests {
         // The language-aware fix: a Rust project's phase prompts must speak Rust/cargo, never
         // the Python/Flask default — else the orchestrator designs a Flask app.py for a Rust repo.
         let s = WorkflowState::new("add lakes to the terrain");
-        let sys = phase_messages(Phase::Architecture, &s, ThinkPolicy::default(), ProjectStack::Rust)
-            [0]
+        let sys = phase_messages(
+            Phase::Architecture,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Rust,
+        )[0]
         .content
         .clone();
         assert!(sys.contains("cargo"), "Rust prompt names cargo: {sys}");
         assert!(sys.to_lowercase().contains("rust"));
-        assert!(!sys.to_lowercase().contains("flask"), "no Flask in a Rust prompt: {sys}");
+        assert!(
+            !sys.to_lowercase().contains("flask"),
+            "no Flask in a Rust prompt: {sys}"
+        );
         assert!(!sys.contains("app.py"), "no app.py in a Rust prompt");
     }
 
@@ -560,9 +581,18 @@ mod tests {
             ProjectStack::Rust,
         );
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
-        assert!(joined.to_lowercase().contains("ordered"), "ordered stages: {joined}");
-        assert!(!joined.contains("test_app.py"), "no pytest file for a Rust breakdown");
-        assert!(!joined.contains("JSON array"), "not the coverage JSON: {joined}");
+        assert!(
+            joined.to_lowercase().contains("ordered"),
+            "ordered stages: {joined}"
+        );
+        assert!(
+            !joined.contains("test_app.py"),
+            "no pytest file for a Rust breakdown"
+        );
+        assert!(
+            !joined.contains("JSON array"),
+            "not the coverage JSON: {joined}"
+        );
     }
 
     #[test]
@@ -572,11 +602,19 @@ mod tests {
         let s = WorkflowState::new(
             "Add `invited_slots: &[u32]` to the tile_collide signature and pass &[] at every call site.",
         );
-        let joined: String = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default(), ProjectStack::Rust)
-            .iter()
-            .map(|m| m.content.clone())
-            .collect();
-        assert!(joined.contains("IN-PLACE EDIT"), "in-place directive present: {joined}");
+        let joined: String = phase_messages(
+            Phase::StageBreakdown,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Rust,
+        )
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+        assert!(
+            joined.contains("IN-PLACE EDIT"),
+            "in-place directive present: {joined}"
+        );
         assert!(
             !joined.contains("NEW, small module file"),
             "must NOT tell an in-place edit to extract a module"
@@ -587,21 +625,33 @@ mod tests {
     fn new_feature_task_keeps_the_module_extraction_guidance() {
         // A genuine new subsystem still gets the module-extraction directive (the lakes pattern).
         let s = WorkflowState::new("Add lakes to the terrain generator.");
-        let joined: String = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default(), ProjectStack::Rust)
-            .iter()
-            .map(|m| m.content.clone())
-            .collect();
-        assert!(joined.contains("NEW, small module file"), "new feature keeps module guidance");
+        let joined: String = phase_messages(
+            Phase::StageBreakdown,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Rust,
+        )
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+        assert!(
+            joined.contains("NEW, small module file"),
+            "new feature keeps module guidance"
+        );
         assert!(!joined.contains("IN-PLACE EDIT"));
     }
 
     #[test]
     fn is_in_place_edit_heuristic() {
         assert!(is_in_place_edit("update every caller to pass &[]"));
-        assert!(is_in_place_edit("add a parameter to the integrate signature"));
+        assert!(is_in_place_edit(
+            "add a parameter to the integrate signature"
+        ));
         assert!(!is_in_place_edit("add lakes to the terrain")); // new feature
-        // A "new module" ask vetoes even if it mentions call sites.
-        assert!(!is_in_place_edit("implement a new module and update its call sites"));
+                                                                // A "new module" ask vetoes even if it mentions call sites.
+        assert!(!is_in_place_edit(
+            "implement a new module and update its call sites"
+        ));
     }
 
     #[test]
@@ -614,17 +664,24 @@ mod tests {
             ProjectStack::Python,
         );
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
-        assert!(joined.contains("JSON array"), "Python ladder keeps coverage JSON");
+        assert!(
+            joined.contains("JSON array"),
+            "Python ladder keeps coverage JSON"
+        );
         assert!(joined.contains("test_app.py"));
     }
 
     #[test]
     fn python_stack_keeps_the_original_flask_constraint() {
         let s = WorkflowState::new("build an API");
-        let sys =
-            phase_messages(Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python)[0]
-                .content
-                .clone();
+        let sys = phase_messages(
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        )[0]
+        .content
+        .clone();
         assert!(sys.contains("Flask"), "Python default preserved");
     }
 
@@ -633,7 +690,12 @@ mod tests {
         let mut s = WorkflowState::new("build a CLI");
         s.set(Artifact::draft(Phase::Specs, "the spec text"));
         s.approve(Phase::Specs);
-        let msgs = phase_messages(Phase::Architecture, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let msgs = phase_messages(
+            Phase::Architecture,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        );
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("build a CLI"));
         assert!(joined.contains("the spec text"));
@@ -646,7 +708,12 @@ mod tests {
         // A later-phase artifact and an unapproved one must not leak into an
         // earlier phase's context.
         s.set(Artifact::draft(Phase::Architecture, "ARCH_DRAFT")); // unapproved
-        let msgs = phase_messages(Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let msgs = phase_messages(
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        );
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(!joined.contains("ARCH_DRAFT"));
     }
@@ -666,7 +733,12 @@ mod tests {
             s.set(Artifact::draft(p, body));
             s.approve(p);
         }
-        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let msgs = phase_messages(
+            Phase::WorkDecomposition,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        );
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("LAYOUT_FILES"), "needs the layout");
         assert!(joined.contains("STAGE_TESTS"), "needs the stage breakdown");
@@ -680,7 +752,12 @@ mod tests {
     #[test]
     fn decomposition_phase_asks_for_json() {
         let s = WorkflowState::new("t");
-        let msgs = phase_messages(Phase::WorkDecomposition, &s, ThinkPolicy::default(), ProjectStack::Python);
+        let msgs = phase_messages(
+            Phase::WorkDecomposition,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        );
         let joined: String = msgs.iter().map(|m| m.content.clone()).collect();
         assert!(joined.contains("JSON array"));
         assert!(joined.contains("\"files\""));
@@ -690,13 +767,23 @@ mod tests {
     fn think_policy_appends_no_think_per_phase() {
         let s = WorkflowState::new("t");
         // Default: a doc phase gets /no_think; a JSON reasoning phase doesn't.
-        let spec_sys = phase_messages(Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python)[0]
-            .content
-            .clone();
+        let spec_sys = phase_messages(
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        )[0]
+        .content
+        .clone();
         assert!(spec_sys.contains("/no_think"), "{spec_sys}");
-        let cov_sys = phase_messages(Phase::StageBreakdown, &s, ThinkPolicy::default(), ProjectStack::Python)[0]
-            .content
-            .clone();
+        let cov_sys = phase_messages(
+            Phase::StageBreakdown,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+        )[0]
+        .content
+        .clone();
         assert!(!cov_sys.contains("/no_think"), "{cov_sys}");
         // A per-step override flips just that phase.
         let forced = ThinkPolicy::always_think().with(Phase::Specs, true);
@@ -710,7 +797,14 @@ mod tests {
     fn generate_phase_returns_a_draft() {
         let backend = MockBackend::new(["# Specs\nGoals: ship it"]);
         let s = WorkflowState::new("ship it");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
+        let a = generate_phase(
+            &backend,
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+            &mut |_d| {},
+        );
         assert_eq!(a.phase, Phase::Specs);
         assert!(a.content.contains("Goals"));
         assert!(!a.is_approved());
@@ -722,7 +816,14 @@ mod tests {
         // reasoning); the engine retries and recovers.
         let backend = MockBackend::new(["", "  ", "# Specs\nrecovered"]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
+        let a = generate_phase(
+            &backend,
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+            &mut |_d| {},
+        );
         assert!(a.content.contains("recovered"), "got: {:?}", a.content);
     }
 
@@ -732,7 +833,14 @@ mod tests {
         // that into a loud error.
         let backend = MockBackend::new(["", "", "", ""]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
+        let a = generate_phase(
+            &backend,
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+            &mut |_d| {},
+        );
         assert!(a.content.is_empty());
     }
 
@@ -776,7 +884,14 @@ mod tests {
             calls: Cell::new(0),
         };
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
+        let a = generate_phase(
+            &backend,
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+            &mut |_d| {},
+        );
         assert!(
             a.content.contains("recovered after the blip"),
             "must recover from a transient error, got: {:?}",
@@ -815,7 +930,14 @@ mod tests {
         // A non-JSON phase (specs) is happy with prose — the JSON gate must not apply.
         let backend = MockBackend::new(["## Goals\nship a great thing"]);
         let s = WorkflowState::new("t");
-        let a = generate_phase(&backend, Phase::Specs, &s, ThinkPolicy::default(), ProjectStack::Python, &mut |_d| {});
+        let a = generate_phase(
+            &backend,
+            Phase::Specs,
+            &s,
+            ThinkPolicy::default(),
+            ProjectStack::Python,
+            &mut |_d| {},
+        );
         assert!(a.content.contains("Goals"));
     }
 

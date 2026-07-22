@@ -292,8 +292,16 @@ pub fn minimal_worker_registry() -> ToolRegistry {
                           NUMBER, no snippet to copy. Best for a large file. end=start-1 inserts.",
             params: vec![
                 ParamSpec::new("path", ParamType::String, "the file to edit"),
-                ParamSpec::new("start", ParamType::Integer, "first line to replace (1-based)"),
-                ParamSpec::new("end", ParamType::Integer, "last line (inclusive); start-1 to insert"),
+                ParamSpec::new(
+                    "start",
+                    ParamType::Integer,
+                    "first line to replace (1-based)",
+                ),
+                ParamSpec::new(
+                    "end",
+                    ParamType::Integer,
+                    "last line (inclusive); start-1 to insert",
+                ),
                 ParamSpec::new("new_text", ParamType::String, "the replacement text"),
             ],
             side_effect: SideEffect::Mutating,
@@ -340,9 +348,11 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
         )),
         "list_dir" => ToolOutcome::Observation(list_dir(workspace, arg(call, "path"))),
         "search_code" => ToolOutcome::Observation(search_code(workspace, arg(call, "query"))),
-        "read_function" => {
-            ToolOutcome::Observation(read_function(workspace, arg(call, "path"), arg(call, "name")))
-        }
+        "read_function" => ToolOutcome::Observation(read_function(
+            workspace,
+            arg(call, "path"),
+            arg(call, "name"),
+        )),
         "edit_function" => {
             let path = arg(call, "path");
             let body = arg(call, "new_body");
@@ -434,7 +444,9 @@ fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option<i64
     // 1-based start; clamp to the file. `start=0`/absent → 1.
     let start_1 = start.filter(|&s| s > 0).map(|s| s as usize).unwrap_or(1);
     if start_1 > total {
-        return format!("read_file {path}: start line {start_1} is past end of file ({total} lines)");
+        return format!(
+            "read_file {path}: start line {start_1} is past end of file ({total} lines)"
+        );
     }
     let count = limit
         .filter(|&l| l > 0)
@@ -886,9 +898,11 @@ fn looks_like_tool_call_json(body: &str) -> bool {
 /// blocks, so a balance count is noise.
 fn is_code_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    [".rs", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".c", ".h", ".cpp", ".css"]
-        .iter()
-        .any(|e| p.ends_with(e))
+    [
+        ".rs", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".c", ".h", ".cpp", ".css",
+    ]
+    .iter()
+    .any(|e| p.ends_with(e))
 }
 
 /// Net delimiter balance of a source string: (curly, paren, square). A naive char count that
@@ -952,7 +966,15 @@ fn top_level_defs(src: &str) -> std::collections::HashMap<String, usize> {
         }
         // Strip leading visibility / modifiers so `pub async unsafe fn foo` still keys on `foo`.
         let mut t = line.trim();
-        for kw in ["pub(crate)", "pub", "async", "unsafe", "default", "const", "extern \"C\""] {
+        for kw in [
+            "pub(crate)",
+            "pub",
+            "async",
+            "unsafe",
+            "default",
+            "const",
+            "extern \"C\"",
+        ] {
             if let Some(rest) = t.strip_prefix(kw) {
                 if rest.starts_with([' ', '\t']) || rest.is_empty() {
                     t = rest.trim_start();
@@ -1579,7 +1601,9 @@ fn pick(r: Role) -> u32 {
         let ws = temp_dir("efn2");
         std::fs::write(ws.join("m.rs"), "fn a() {}\n").unwrap();
         let out = obs(execute(
-            &call(json!({"tool":"edit_function","path":"m.rs","name":"nope","new_body":"fn nope(){}"})),
+            &call(
+                json!({"tool":"edit_function","path":"m.rs","name":"nope","new_body":"fn nope(){}"}),
+            ),
             &ws,
         ));
         assert!(out.contains("no function named `nope`"), "got: {out}");
@@ -1595,8 +1619,14 @@ fn pick(r: Role) -> u32 {
         let r = call(json!({"tool":"read_file","path":"big.txt","start":10,"limit":3}));
         let o = obs(execute(&r, &ws));
         assert!(o.contains("lines 10-12 of 50"), "labels the window: {o}");
-        assert!(o.contains("line 10") && o.contains("line 12"), "window content: {o}");
-        assert!(!o.contains("line 9\n") && !o.contains("line 13"), "outside window excluded: {o}");
+        assert!(
+            o.contains("line 10") && o.contains("line 12"),
+            "window content: {o}"
+        );
+        assert!(
+            !o.contains("line 9\n") && !o.contains("line 13"),
+            "outside window excluded: {o}"
+        );
         // The continuation hint tells the model how to read the next chunk.
         assert!(o.contains("\"start\":13"), "next-chunk hint: {o}");
         let _ = std::fs::remove_dir_all(&ws);
@@ -1610,7 +1640,10 @@ fn pick(r: Role) -> u32 {
         let r = call(json!({"tool":"read_file","path":"huge.txt"}));
         let o = obs(execute(&r, &ws));
         // Only the first READ_FILE_DEFAULT_LINES are returned, with a continuation hint.
-        assert!(o.contains(&format!("lines 1-{READ_FILE_DEFAULT_LINES} of 1000")), "capped: {o}");
+        assert!(
+            o.contains(&format!("lines 1-{READ_FILE_DEFAULT_LINES} of 1000")),
+            "capped: {o}"
+        );
         assert!(o.contains("more line(s)"), "truncation noted: {o}");
         assert!(!o.contains("L1000"), "tail not included: {o}");
         let _ = std::fs::remove_dir_all(&ws);
@@ -1621,12 +1654,19 @@ fn pick(r: Role) -> u32 {
         let ws = temp_dir("rsearch");
         std::fs::create_dir_all(ws.join(".smart-coder/sessions")).unwrap();
         // The needle appears in BOTH a session log and a real source file.
-        std::fs::write(ws.join(".smart-coder/sessions/x.jsonl"), "stringify_reason in a log").unwrap();
+        std::fs::write(
+            ws.join(".smart-coder/sessions/x.jsonl"),
+            "stringify_reason in a log",
+        )
+        .unwrap();
         std::fs::write(ws.join("real.rs"), "fn stringify_reason() {}").unwrap();
         let s = call(json!({"tool":"search_code","query":"stringify_reason"}));
         let o = obs(execute(&s, &ws));
         assert!(o.contains("real.rs"), "finds the source: {o}");
-        assert!(!o.contains(".smart-coder"), "does not match its own log: {o}");
+        assert!(
+            !o.contains(".smart-coder"),
+            "does not match its own log: {o}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1651,7 +1691,10 @@ fn pick(r: Role) -> u32 {
         std::fs::write(ws.join("big.rs"), &big).unwrap();
         let w = call(json!({"tool":"write_file","path":"big.rs","content":"fn only() {}"}));
         let o = obs(execute(&w, &ws));
-        assert!(o.contains("rejected") && o.contains("too large"), "got: {o}");
+        assert!(
+            o.contains("rejected") && o.contains("too large"),
+            "got: {o}"
+        );
         // Untouched — the big file is preserved.
         assert_eq!(std::fs::read_to_string(ws.join("big.rs")).unwrap(), big);
         let _ = std::fs::remove_dir_all(&ws);
@@ -1666,7 +1709,10 @@ fn pick(r: Role) -> u32 {
         // Overwriting a SMALL existing file (≤150 lines): fine.
         let s = call(json!({"tool":"write_file","path":"new.rs","content":"fn b() {}"}));
         assert!(obs(execute(&s, &ws)).contains("ok"));
-        assert_eq!(std::fs::read_to_string(ws.join("new.rs")).unwrap(), "fn b() {}");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("new.rs")).unwrap(),
+            "fn b() {}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1747,8 +1793,14 @@ fn pick(r: Role) -> u32 {
             "tool":"edit_lines","path":"a.rs","start":2,"end":3,"new_text":"TWO\nTHREE"
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("ok") && o.contains("replaced lines 2..=3"), "got: {o}");
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\nTWO\nTHREE\nfour\n");
+        assert!(
+            o.contains("ok") && o.contains("replaced lines 2..=3"),
+            "got: {o}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "one\nTWO\nTHREE\nfour\n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1758,12 +1810,19 @@ fn pick(r: Role) -> u32 {
         // Writing it would fill the .rs file with `{"tool":"edit_file",...}`. Guard rejects it.
         let ws = temp_dir("write-tooljson");
         std::fs::write(ws.join("a.rs"), "fn f() {}\n").unwrap();
-        let nested = "{\n  \"tool\": \"edit_file\",\n  \"path\": \"b.rs\",\n  \"old_str\": \"x\"\n}";
+        let nested =
+            "{\n  \"tool\": \"edit_file\",\n  \"path\": \"b.rs\",\n  \"old_str\": \"x\"\n}";
         let e = call(json!({ "tool":"write_file","path":"a.rs","content": nested }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("rejected") && o.contains("tool-call JSON"), "got: {o}");
+        assert!(
+            o.contains("rejected") && o.contains("tool-call JSON"),
+            "got: {o}"
+        );
         // File untouched — guard fires before the write.
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "fn f() {}\n");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "fn f() {}\n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1773,13 +1832,20 @@ fn pick(r: Role) -> u32 {
         // shape that slipped past the prefix-only guard and corrupted mod.rs at line 49).
         let ws = temp_dir("edit-embed-json");
         std::fs::write(ws.join("a.rs"), "fn f() {\n    old();\n}\n").unwrap();
-        let embedded = "fn f() {\n    new();\n}\n{\n  \"tool\": \"edit_file\",\n  \"path\": \"b.rs\"\n}";
+        let embedded =
+            "fn f() {\n    new();\n}\n{\n  \"tool\": \"edit_file\",\n  \"path\": \"b.rs\"\n}";
         let e = call(json!({
             "tool":"edit_file","path":"a.rs","old_str":"fn f() {\n    old();\n}","new_str": embedded
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("rejected") && o.contains("tool-call JSON"), "got: {o}");
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "fn f() {\n    old();\n}\n");
+        assert!(
+            o.contains("rejected") && o.contains("tool-call JSON"),
+            "got: {o}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "fn f() {\n    old();\n}\n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1801,13 +1867,20 @@ fn pick(r: Role) -> u32 {
         // The balance tripwire must reject it (file was balanced, edit unbalances it) instead of
         // writing broken code the model then thrashes on.
         let ws = temp_dir("edit-lines-brace");
-        std::fs::write(ws.join("a.rs"), "fn f() {\n    if x {\n        g();\n    }\n}\n").unwrap();
+        std::fs::write(
+            ws.join("a.rs"),
+            "fn f() {\n    if x {\n        g();\n    }\n}\n",
+        )
+        .unwrap();
         // Replace the inner block but "forget" the closing `}` of the if — net one unclosed `{`.
         let e = call(json!({
             "tool":"edit_lines","path":"a.rs","start":2,"end":4,"new_text":"    if x {\n        g();"
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("rejected") && o.contains("unclosed '{'"), "got: {o}");
+        assert!(
+            o.contains("rejected") && o.contains("unclosed '{'"),
+            "got: {o}"
+        );
         // Steers to the INSERT form (the reliable fix for a brace-straddling replace).
         assert!(o.contains("INSERT"), "got: {o}");
         // File is untouched — the balance guard fires BEFORE the write.
@@ -1840,8 +1913,14 @@ fn pick(r: Role) -> u32 {
             "tool":"edit_lines","path":"a.rs","start":2,"end":1,"new_text":"INSERTED"
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("ok") && o.contains("inserted before line 2"), "got: {o}");
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\nINSERTED\ntwo\n");
+        assert!(
+            o.contains("ok") && o.contains("inserted before line 2"),
+            "got: {o}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "one\nINSERTED\ntwo\n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1855,7 +1934,10 @@ fn pick(r: Role) -> u32 {
         }));
         let o = obs(execute(&e, &ws));
         assert!(o.contains("ok"), "got: {o}");
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\ntwo\nthree\n");
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1867,8 +1949,15 @@ fn pick(r: Role) -> u32 {
             "tool":"edit_lines","path":"a.rs","start":10,"end":12,"new_text":"x"
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("out of range") && o.contains("2 lines"), "got: {o}");
-        assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), "one\ntwo\n", "untouched");
+        assert!(
+            o.contains("out of range") && o.contains("2 lines"),
+            "got: {o}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+            "one\ntwo\n",
+            "untouched"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1884,8 +1973,13 @@ fn pick(r: Role) -> u32 {
             "old_str":"    let x = 1;\r\n","new_str":"    let x = 2;\n"
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("ok") || o.contains("replacement"), "CRLF anchor landed: {o}");
-        assert!(std::fs::read_to_string(ws.join("a.rs")).unwrap().contains("let x = 2;"));
+        assert!(
+            o.contains("ok") || o.contains("replacement"),
+            "CRLF anchor landed: {o}"
+        );
+        assert!(std::fs::read_to_string(ws.join("a.rs"))
+            .unwrap()
+            .contains("let x = 2;"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1912,9 +2006,15 @@ fn pick(r: Role) -> u32 {
         assert!(got.contains("self.build_lakes();"), "edit landed: {got}");
         // The new statement is indented to at least the matched block's level (4 spaces), not
         // left at column 0 (the model's flat new_str gets the block indent prefixed).
-        assert!(got.contains("    self.build_lakes();"), "re-indented to block: {got}");
+        assert!(
+            got.contains("    self.build_lakes();"),
+            "re-indented to block: {got}"
+        );
         // The surrounding real lines are preserved.
-        assert!(got.contains("let x = 1;") && got.contains("impl T {"), "kept context: {got}");
+        assert!(
+            got.contains("let x = 1;") && got.contains("impl T {"),
+            "kept context: {got}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -1923,14 +2023,23 @@ fn pick(r: Role) -> u32 {
         // Two identical blocks → the fuzzy match is ambiguous → it does NOT fire (falls to the
         // error path), so we never edit the wrong one.
         let ws = temp_dir("edit-fuzzy-amb");
-        std::fs::write(ws.join("a.rs"), "fn a() {\n  x;\n  y;\n}\nfn b() {\n  x;\n  y;\n}\n").unwrap();
+        std::fs::write(
+            ws.join("a.rs"),
+            "fn a() {\n  x;\n  y;\n}\nfn b() {\n  x;\n  y;\n}\n",
+        )
+        .unwrap();
         let e = call(json!({
             "tool":"edit_file","path":"a.rs","old_str":"x;\ny;","new_str":"z;\ny;"
         }));
         let o = obs(execute(&e, &ws));
-        assert!(o.contains("not found") || o.contains("ambiguous"), "must not silently pick one: {o}");
+        assert!(
+            o.contains("not found") || o.contains("ambiguous"),
+            "must not silently pick one: {o}"
+        );
         // Untouched.
-        assert!(std::fs::read_to_string(ws.join("a.rs")).unwrap().contains("  x;\n  y;\n}\nfn b"));
+        assert!(std::fs::read_to_string(ws.join("a.rs"))
+            .unwrap()
+            .contains("  x;\n  y;\n}\nfn b"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -2016,8 +2125,14 @@ fn pick(r: Role) -> u32 {
         )
         .unwrap();
         // `fn \w+` matches both function lines via regex (would be literal-nomatch before).
-        let o = obs(execute(&call(json!({"tool":"search_code","query":r"fn \w+"})), &ws));
-        assert!(o.contains("a.rs:1") && o.contains("a.rs:2"), "regex fn: {o}");
+        let o = obs(execute(
+            &call(json!({"tool":"search_code","query":r"fn \w+"})),
+            &ws,
+        ));
+        assert!(
+            o.contains("a.rs:1") && o.contains("a.rs:2"),
+            "regex fn: {o}"
+        );
         // `ShipRole::\w+` finds the enum use.
         let o2 = obs(execute(
             &call(json!({"tool":"search_code","query":r"ShipRole::\w+"})),
@@ -2032,8 +2147,14 @@ fn pick(r: Role) -> u32 {
         let ws = temp_dir("searchlit");
         // `[` alone is invalid regex — must fall back to a literal substring search, not error.
         std::fs::write(ws.join("a.rs"), "let v = arr[0];\nno bracket here\n").unwrap();
-        let o = obs(execute(&call(json!({"tool":"search_code","query":"arr["})), &ws));
-        assert!(o.contains("a.rs:1"), "literal fallback for invalid regex: {o}");
+        let o = obs(execute(
+            &call(json!({"tool":"search_code","query":"arr["})),
+            &ws,
+        ));
+        assert!(
+            o.contains("a.rs:1"),
+            "literal fallback for invalid regex: {o}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

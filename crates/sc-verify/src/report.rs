@@ -86,8 +86,7 @@ impl TestReport {
             // otherwise dominate the tail, so the model fixes the wrong thing — observed live: it
             // chased a dead-code warning while the real "unexpected closing brace" error scrolled
             // past). Fall back to the tail when no error lines are recognized.
-            let mut out =
-                String::from("run_verification: command exited non-zero (failed).");
+            let mut out = String::from("run_verification: command exited non-zero (failed).");
             if let Some(raw) = &self.raw {
                 let raw = raw.trim();
                 if !raw.is_empty() {
@@ -400,7 +399,8 @@ error: aborting due to 2 previous errors
     fn generic_failure_surfaces_the_raw_output_so_the_model_can_fix_it() {
         // The blind-flying bug: a failing `cargo check` used to say only "exited non-zero".
         // Now the observation carries the real compiler errors.
-        let errs = "error[E0433]: cannot find value `lakes` in this scope\n  --> src/gen/terrain.rs:42";
+        let errs =
+            "error[E0433]: cannot find value `lakes` in this scope\n  --> src/gen/terrain.rs:42";
         let r = TestReport::generic_with_output(false, errs);
         let o = r.observation();
         assert!(o.contains("E0433"), "compiler error surfaced: {o}");

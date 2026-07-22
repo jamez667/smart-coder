@@ -4,7 +4,7 @@
 //! for the extracted helpers live beside those helpers (see `dispatch`, `prompt`, `window`).
 
 use super::*;
-use sc_model::{Capabilities, CallbackBackend, GenerateResponse, MockBackend, ToolCalling};
+use sc_model::{CallbackBackend, Capabilities, GenerateResponse, MockBackend, ToolCalling};
 use serde_json::json;
 
 use super::escalation::{DIAGNOSIS_LIMIT, SELF_RECOVERY_LIMIT};
@@ -209,7 +209,10 @@ fn a_referenced_plan_is_pinned_so_the_model_never_re_reads_it() {
         matches!(e, AgentEvent::PromptAssembled { messages, .. }
             if messages.iter().any(|m| m.content.contains("flood-fill basins")))
     });
-    assert!(plan_pinned, "the plan body must be pinned into the prompt every turn");
+    assert!(
+        plan_pinned,
+        "the plan body must be pinned into the prompt every turn"
+    );
 
     // (b) A read of the pinned plan is short-circuited to the ALREADY-SHOWN note, so the model
     //     can't spin on it — the observation the harness fed back says so.
@@ -217,12 +220,21 @@ fn a_referenced_plan_is_pinned_so_the_model_never_re_reads_it() {
         matches!(e, AgentEvent::ToolResult { full, .. } if full.contains("ALREADY SHOWN")
             && full.contains("PLAN-lakes.md"))
     });
-    assert!(short_circuited, "a read of the pinned plan must be short-circuited, not re-run");
+    assert!(
+        short_circuited,
+        "a read of the pinned plan must be short-circuited, not re-run"
+    );
 
     // (c) The run made real progress and finished (it wrote the file once unblocked), rather
     //     than looping on the plan read until the step budget ran out.
-    assert!(report.finished, "the run should finish once the plan-read loop is broken");
-    assert!(ws.join("water.rs").is_file(), "the model wrote the planned file");
+    assert!(
+        report.finished,
+        "the run should finish once the plan-read loop is broken"
+    );
+    assert!(
+        ws.join("water.rs").is_file(),
+        "the model wrote the planned file"
+    );
 
     let _ = std::fs::remove_dir_all(&ws);
 }

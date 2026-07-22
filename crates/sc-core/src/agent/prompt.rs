@@ -162,7 +162,9 @@ pub(super) fn render_focus_files(workspace: &Path, files: &[String]) -> String {
                 .map(|(i, l)| format!("{}| {}", i + 1, l))
                 .collect::<Vec<_>>()
                 .join("\n");
-            s.push_str(&format!("\n=== {f} (line-numbered) ===\n{numbered}\n=== end {f} ===\n"));
+            s.push_str(&format!(
+                "\n=== {f} (line-numbered) ===\n{numbered}\n=== end {f} ===\n"
+            ));
         }
     }
     if any {

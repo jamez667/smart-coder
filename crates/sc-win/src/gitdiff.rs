@@ -372,9 +372,7 @@ pub fn stage_states(workspace: &Path) -> std::collections::BTreeMap<String, Stag
         .args(["status", "--porcelain", "-uall"])
         .output();
     match out {
-        Ok(o) if o.status.success() => {
-            parse_stage_states(&String::from_utf8_lossy(&o.stdout))
-        }
+        Ok(o) if o.status.success() => parse_stage_states(&String::from_utf8_lossy(&o.stdout)),
         _ => std::collections::BTreeMap::new(),
     }
 }
@@ -420,7 +418,10 @@ pub fn parse_numstat(numstat: &str) -> std::collections::BTreeMap<String, LineDe
         };
         // A rename shows as "old => new" (possibly with `{}` braces); take the resulting path.
         let path = path.rsplit(" => ").next().unwrap_or(path);
-        let path = path.trim_end_matches('}').trim_matches('"').replace('\\', "/");
+        let path = path
+            .trim_end_matches('}')
+            .trim_matches('"')
+            .replace('\\', "/");
         if path.is_empty() {
             continue;
         }
@@ -649,7 +650,10 @@ diff --git a/x b/x
         let hunks = parse_file_diff(diff).hunks();
         assert_eq!(hunks.len(), 1);
         // Empty current range (cur_end < cur_start) → revert re-inserts before cur_start.
-        assert!(hunks[0].cur_end < hunks[0].cur_start, "empty range: {hunks:?}");
+        assert!(
+            hunks[0].cur_end < hunks[0].cur_start,
+            "empty range: {hunks:?}"
+        );
         assert_eq!(hunks[0].head_text, "gone a\ngone b");
     }
 
@@ -752,13 +756,37 @@ D  removed_staged.rs
 ";
         let m = parse_stage_states(porcelain);
         // `M ` — staged, nothing further in the worktree.
-        assert_eq!(m["staged_only.rs"], StageState { staged: true, unstaged: false });
+        assert_eq!(
+            m["staged_only.rs"],
+            StageState {
+                staged: true,
+                unstaged: false
+            }
+        );
         // ` M` — unstaged working-tree change only.
-        assert_eq!(m["unstaged_only.rs"], StageState { staged: false, unstaged: true });
+        assert_eq!(
+            m["unstaged_only.rs"],
+            StageState {
+                staged: false,
+                unstaged: true
+            }
+        );
         // `MM` — staged AND further unstaged edits → shows in both sections.
-        assert_eq!(m["staged_and_more.rs"], StageState { staged: true, unstaged: true });
+        assert_eq!(
+            m["staged_and_more.rs"],
+            StageState {
+                staged: true,
+                unstaged: true
+            }
+        );
         // `??` — untracked → fully unstaged.
-        assert_eq!(m["untracked.rs"], StageState { staged: false, unstaged: true });
+        assert_eq!(
+            m["untracked.rs"],
+            StageState {
+                staged: false,
+                unstaged: true
+            }
+        );
         // `A ` / `D ` — staged add / delete.
         assert!(m["added_staged.rs"].staged && !m["added_staged.rs"].unstaged);
         assert!(m["removed_staged.rs"].staged);
@@ -773,8 +801,20 @@ D  removed_staged.rs
 5\t2\tsrc/dir/{a => b}/x.rs
 ";
         let m = parse_numstat(numstat);
-        assert_eq!(m["src/main.rs"], LineDelta { added: 12, removed: 3 });
-        assert_eq!(m["src/gone.rs"], LineDelta { added: 0, removed: 7 });
+        assert_eq!(
+            m["src/main.rs"],
+            LineDelta {
+                added: 12,
+                removed: 3
+            }
+        );
+        assert_eq!(
+            m["src/gone.rs"],
+            LineDelta {
+                added: 0,
+                removed: 7
+            }
+        );
         assert!(!m.contains_key("assets/logo.png"), "binary file skipped");
         // Rename maps to the resulting path.
         assert!(

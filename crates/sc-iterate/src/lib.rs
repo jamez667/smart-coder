@@ -74,10 +74,7 @@ pub fn apply_iterate_overrides(
 /// isn't a git repo. Captured at run start so we know which files we must NOT
 /// auto-revert (reverting a file that was already dirty would destroy the user's work).
 pub fn git_dirty_files(workspace: &Path) -> BTreeSet<String> {
-    let out = git(workspace)
-        .arg("status")
-        .arg("--porcelain")
-        .output();
+    let out = git(workspace).arg("status").arg("--porcelain").output();
     let mut set = BTreeSet::new();
     if let Ok(o) = out {
         if o.status.success() {
@@ -204,7 +201,10 @@ pub fn finish_summary(
     let reverted = git_revert_files(workspace, &safe);
     let base = match (report.finished, report.verified) {
         (true, Some(false)) => "stopped — the change didn't compile".to_string(),
-        _ => format!("stopped after {} steps without a clean result", report.steps),
+        _ => format!(
+            "stopped after {} steps without a clean result",
+            report.steps
+        ),
     };
     let revert_note = if !reverted && !safe.is_empty() {
         format!(

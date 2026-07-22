@@ -167,7 +167,10 @@ mod tests {
         std::fs::write(ws.join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
         assert_eq!(ProjectStack::detect(&ws), ProjectStack::Rust);
         assert!(ProjectStack::Rust.constraint().contains("cargo"));
-        assert!(!ProjectStack::Rust.constraint().to_lowercase().contains("flask"));
+        assert!(!ProjectStack::Rust
+            .constraint()
+            .to_lowercase()
+            .contains("flask"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -197,8 +200,15 @@ mod tests {
         assert_eq!(ProjectStack::detect(&ws), ProjectStack::Unknown);
         let c = ProjectStack::Unknown.constraint();
         // It's the generic edit-in-place framing, NOT the Python/Flask eval constraint.
-        assert_ne!(c, ProjectStack::Python.constraint(), "unknown != python constraint");
-        assert!(c.contains("SAME language"), "generic infers the language: {c}");
+        assert_ne!(
+            c,
+            ProjectStack::Python.constraint(),
+            "unknown != python constraint"
+        );
+        assert!(
+            c.contains("SAME language"),
+            "generic infers the language: {c}"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

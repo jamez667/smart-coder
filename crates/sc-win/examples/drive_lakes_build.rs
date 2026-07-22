@@ -29,7 +29,10 @@ fn main() {
     let breakdown = std::fs::read_to_string(ws.join(".smart-coder/plan/04-stage-breakdown.md"))
         .expect("run the plan-only workflow first (04-stage-breakdown.md)");
     let stages = parse_stages(&breakdown);
-    println!("=== {} STAGES (from the plan-only breakdown) ===", stages.len());
+    println!(
+        "=== {} STAGES (from the plan-only breakdown) ===",
+        stages.len()
+    );
     for (i, s) in stages.iter().enumerate() {
         println!("  {}. {}  [{}]", i + 1, s.title, s.files.join(", "));
     }
@@ -55,7 +58,11 @@ fn main() {
         AgentEvent::ToolCall { tool, arg } => println!("      ▸ {tool} {arg}"),
         // Print edit/tool REJECTIONS (and their first line) so we can see WHY an edit fails to
         // anchor — the key diagnostic for the edit-precision stalls.
-        AgentEvent::ToolResult { is_error, summary, full } => {
+        AgentEvent::ToolResult {
+            is_error,
+            summary,
+            full,
+        } => {
             if *is_error || full.contains("not found") || full.contains("error") {
                 println!("      ⨯ {}", first_line(summary));
                 // A bit more of the anchor error to see the old_str mismatch.
@@ -102,8 +109,12 @@ fn main() {
                 );
             }
             match r.oracle_passed {
-                Some(true) => println!("\n🌊 ORACLE PASSED — lakes actually work (behavioral test green)."),
-                Some(false) => println!("\n❌ ORACLE FAILED — code compiles but lakes don't behave (stub)."),
+                Some(true) => {
+                    println!("\n🌊 ORACLE PASSED — lakes actually work (behavioral test green).")
+                }
+                Some(false) => {
+                    println!("\n❌ ORACLE FAILED — code compiles but lakes don't behave (stub).")
+                }
                 None => println!("\n(no behavioral oracle configured)"),
             }
             println!("final verified: {}", r.verified);

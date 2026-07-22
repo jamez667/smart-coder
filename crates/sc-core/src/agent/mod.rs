@@ -949,8 +949,10 @@ pub fn run_agent_observed(
         const READ_THRASH_LIMIT: usize = 5;
         if changed {
             reads_since_change = 0;
-        } else if matches!(tool.as_str(), "read_file" | "read_function" | "search_code" | "list_dir")
-        {
+        } else if matches!(
+            tool.as_str(),
+            "read_file" | "read_function" | "search_code" | "list_dir"
+        ) {
             reads_since_change += 1;
         }
         let obs = if reads_since_change >= READ_THRASH_LIMIT {

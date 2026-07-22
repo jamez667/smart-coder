@@ -168,9 +168,30 @@ fn looks_like_reasoning_prose(s: &str) -> bool {
     // Reasoning openers a thinking model uses (case-insensitive, checked on the first ~40 chars).
     let head = t.chars().take(40).collect::<String>().to_ascii_lowercase();
     const OPENERS: &[&str] = &[
-        "okay,", "okay ", "ok,", "ok ", "let's", "let me", "i think", "i need to", "i'll",
-        "i will", "first,", "looking at", "sure,", "sure ", "alright", "well,", "so,", "to fix",
-        "the task", "we need", "here's", "here is the plan", "let's see", "step ",
+        "okay,",
+        "okay ",
+        "ok,",
+        "ok ",
+        "let's",
+        "let me",
+        "i think",
+        "i need to",
+        "i'll",
+        "i will",
+        "first,",
+        "looking at",
+        "sure,",
+        "sure ",
+        "alright",
+        "well,",
+        "so,",
+        "to fix",
+        "the task",
+        "we need",
+        "here's",
+        "here is the plan",
+        "let's see",
+        "step ",
     ];
     let opens_with_prose = OPENERS.iter().any(|o| head.starts_with(o));
     if !opens_with_prose {
@@ -283,10 +304,14 @@ mod tests {
         assert!(looks_like_reasoning_prose(
             "I need to change the return value so the test passes."
         ));
-        assert!(looks_like_reasoning_prose("First, I will read the file, then fix it."));
+        assert!(looks_like_reasoning_prose(
+            "First, I will read the file, then fix it."
+        ));
 
         // Real code is NEVER dropped — even when it opens with a doc comment or a prose-y string.
-        assert!(!looks_like_reasoning_prose("def double(n):\n    return n * 2"));
+        assert!(!looks_like_reasoning_prose(
+            "def double(n):\n    return n * 2"
+        ));
         assert!(!looks_like_reasoning_prose(
             "// I need to keep this comment\nfn main() {}"
         ));
