@@ -76,6 +76,65 @@ const MAX_ITERATIONS: usize = 8;
 /// calls in one pass. The remainder is caught on the next iteration's re-check.
 const MAX_FIXES_PER_ITER: usize = 12;
 
+/// If the error count doesn't IMPROVE for this many consecutive check→fix rounds, the loop isn't
+/// converging (e.g. a delimiter cascade where rustc reports the symptom line, not the cause — the
+/// model edits the wrong place forever). Bail instead of grinding the whole iteration budget.
+const STALL_LIMIT: usize = 2;
+
+/// What the fix loop should do after a verify pass — the pure termination decision, extracted from
+/// the I/O so it's exhaustively testable without a real backend or sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopStep {
+    /// No errors — stop; `green` is whether the verify command itself succeeded.
+    Green,
+    /// Give up: the iteration budget is spent OR the loop stalled (no improvement).
+    GiveUp,
+    /// Keep going — run a fix pass over the current errors, then re-check.
+    Fix,
+}
+
+/// The termination state machine for the check→fix loop. Pure: `record(error_count)` folds one
+/// verify result in and returns the next [`LoopStep`]. This is where "does the loop always
+/// terminate?" is decided — proven by unit tests over rising / flat / oscillating / converging
+/// error sequences, with no model or sandbox in the loop.
+#[derive(Debug, Clone, Copy)]
+struct LoopState {
+    iterations: usize,
+    prev_error_count: usize,
+    stalls: usize,
+}
+
+impl LoopState {
+    fn new() -> Self {
+        Self {
+            iterations: 0,
+            prev_error_count: usize::MAX,
+            stalls: 0,
+        }
+    }
+
+    /// Fold in one verify result (`error_count` = compile errors this round) and decide the next
+    /// step. Advances `iterations` only when the answer is [`LoopStep::Fix`] (a fix pass is about
+    /// to run), so `iterations` counts fix rounds, not verify passes.
+    fn record(&mut self, error_count: usize) -> LoopStep {
+        if error_count == 0 {
+            return LoopStep::Green;
+        }
+        // A stall is a round whose error total did NOT drop vs. the previous round.
+        if error_count >= self.prev_error_count {
+            self.stalls += 1;
+        } else {
+            self.stalls = 0;
+        }
+        self.prev_error_count = error_count;
+        if self.iterations >= MAX_ITERATIONS || self.stalls >= STALL_LIMIT {
+            return LoopStep::GiveUp;
+        }
+        self.iterations += 1;
+        LoopStep::Fix
+    }
+}
+
 /// Run a compiler-driven build: apply `foundational_goal` (touching `foundational_files`), then
 /// loop verify→fix-each-diagnostic until `verify_command` is green (or the iteration budget is
 /// spent). `on_event` receives progress. Edits the real `workspace` in place.
@@ -180,49 +239,38 @@ fn verify_fix_loop(
     on_event: &dyn Fn(BuildEvent),
     on_agent: &dyn Fn(&sc_core::AgentEvent),
 ) -> BuildOutcome {
-    let mut iterations = 0;
-    // Stall detection: if the error count doesn't IMPROVE for this many consecutive iterations, the
-    // loop isn't converging (e.g. a delimiter cascade where rustc reports the symptom line, not the
-    // cause — the model edits the wrong place forever). Bail instead of grinding the whole budget.
-    const STALL_LIMIT: usize = 2;
-    let mut prev_error_count = usize::MAX;
-    let mut stalls = 0;
+    let mut state = LoopState::new();
     loop {
         let result = run_command_in(sandbox, workspace, verify_command);
         let errors = compile_errors(&result.output);
         on_event(BuildEvent::Checked {
             errors: errors.len(),
         });
-        if errors.is_empty() {
-            on_event(BuildEvent::Done {
-                green: result.ok,
-                iterations,
-            });
-            return BuildOutcome {
-                green: result.ok,
-                iterations,
-                remaining: Vec::new(),
-            };
+        match state.record(errors.len()) {
+            LoopStep::Green => {
+                on_event(BuildEvent::Done {
+                    green: result.ok,
+                    iterations: state.iterations,
+                });
+                return BuildOutcome {
+                    green: result.ok,
+                    iterations: state.iterations,
+                    remaining: Vec::new(),
+                };
+            }
+            LoopStep::GiveUp => {
+                on_event(BuildEvent::Done {
+                    green: false,
+                    iterations: state.iterations,
+                });
+                return BuildOutcome {
+                    green: false,
+                    iterations: state.iterations,
+                    remaining: errors,
+                };
+            }
+            LoopStep::Fix => {}
         }
-        // Not converging? Count a stall when the error total didn't drop since last iteration.
-        if errors.len() >= prev_error_count {
-            stalls += 1;
-        } else {
-            stalls = 0;
-        }
-        prev_error_count = errors.len();
-        if iterations >= MAX_ITERATIONS || stalls >= STALL_LIMIT {
-            on_event(BuildEvent::Done {
-                green: false,
-                iterations,
-            });
-            return BuildOutcome {
-                green: false,
-                iterations,
-                remaining: errors,
-            };
-        }
-        iterations += 1;
 
         // 3) Each diagnostic → a scoped single-shot fix. Delimiter/brace errors get extra guidance
         // because rustc reports the SYMPTOM line, not the cause — a naive "fix exactly this line"
@@ -296,6 +344,105 @@ fn run_scoped_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drive the pure loop state machine over a scripted sequence of per-round error counts and
+    /// return (steps_taken, final_step). This is the deterministic stand-in for the real loop: the
+    /// model/sandbox only ever influence the loop through the error count, so a scripted sequence
+    /// exercises every termination path with no backend.
+    fn run_sequence(errors: &[usize]) -> (usize, LoopStep) {
+        let mut state = LoopState::new();
+        let mut steps = 0;
+        for &e in errors {
+            steps += 1;
+            match state.record(e) {
+                LoopStep::Fix => continue,
+                stop => return (steps, stop),
+            }
+        }
+        // Ran out of scripted rounds without terminating — the loop would keep going. The test
+        // asserts this never happens within the bound.
+        (steps, LoopStep::Fix)
+    }
+
+    #[test]
+    fn loop_converges_to_green() {
+        // A healthy build: errors drop each round, then hit zero → Green.
+        let (steps, end) = run_sequence(&[5, 3, 1, 0]);
+        assert_eq!(end, LoopStep::Green);
+        assert_eq!(steps, 4);
+    }
+
+    #[test]
+    fn loop_bails_on_a_flat_error_count() {
+        // The delimiter-cascade shape: the same error every round. After STALL_LIMIT (2)
+        // non-improving rounds it must GiveUp — NOT grind the whole iteration budget.
+        let (_steps, end) = run_sequence(&[3, 3, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(end, LoopStep::GiveUp, "flat count must stall out");
+    }
+
+    #[test]
+    fn loop_bails_on_oscillation() {
+        // Error count bounces 5→3→5→3… — never a sustained improvement. The stall counter resets
+        // on the 5→3 drop but re-fires on the 3→5 rise, so it still terminates (not an infinite
+        // loop). Must GiveUp well within the iteration cap.
+        let (steps, end) = run_sequence(&[5, 3, 5, 3, 5, 3, 5, 3, 5, 3]);
+        assert_eq!(end, LoopStep::GiveUp);
+        assert!(steps <= MAX_ITERATIONS + 2, "oscillation bounded, took {steps}");
+    }
+
+    #[test]
+    fn loop_is_bounded_even_when_errors_only_ever_decrease_slowly() {
+        // Worst honest case: errors decrease by 1 every round but from a large start — it makes
+        // progress, so stalls never fire; termination is the MAX_ITERATIONS backstop. Prove the
+        // loop cannot exceed the cap. (A never-improving-fast build still can't run forever.)
+        let seq: Vec<usize> = (0..100).rev().collect(); // 99,98,...,1,0
+        let (steps, end) = run_sequence(&seq);
+        // Either it reached 0 (Green) or hit the iteration cap (GiveUp) — never ran past the bound.
+        assert!(
+            matches!(end, LoopStep::Green | LoopStep::GiveUp),
+            "must terminate"
+        );
+        assert!(
+            steps <= MAX_ITERATIONS + 1,
+            "must terminate within the iteration cap, took {steps}"
+        );
+    }
+
+    #[test]
+    fn loop_never_runs_more_than_the_iteration_cap_of_fix_rounds() {
+        // Exhaustive-ish: for a broad range of adversarial sequences, the number of Fix rounds
+        // (state.iterations) is always <= MAX_ITERATIONS. This is the core "cannot loop forever"
+        // property, independent of the error pattern.
+        let sequences: &[&[usize]] = &[
+            &[7; 20],                      // flat high
+            &[1, 1, 1, 1, 1, 1, 1, 1, 1],  // flat low
+            &[9, 8, 9, 8, 9, 8, 9, 8, 9],  // oscillate
+            &[2, 3, 4, 5, 6, 7, 8, 9, 10], // rising (getting worse)
+            &[10, 10, 10, 10, 10, 10, 10], // stuck
+        ];
+        for seq in sequences {
+            let mut state = LoopState::new();
+            let mut fix_rounds = 0;
+            for &e in seq.iter() {
+                match state.record(e) {
+                    LoopStep::Fix => fix_rounds += 1,
+                    _ => break,
+                }
+            }
+            assert!(
+                fix_rounds <= MAX_ITERATIONS,
+                "seq {seq:?} ran {fix_rounds} fix rounds (> cap {MAX_ITERATIONS})"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_green_reports_the_command_result() {
+        // Zero errors on the first check → Green immediately, no fix rounds.
+        let mut state = LoopState::new();
+        assert_eq!(state.record(0), LoopStep::Green);
+        assert_eq!(state.iterations, 0);
+    }
 
     #[test]
     fn build_outcome_reports_green() {

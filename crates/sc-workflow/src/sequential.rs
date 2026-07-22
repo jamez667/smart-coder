@@ -962,6 +962,54 @@ mod tests {
     }
 
     #[test]
+    fn incremental_integration_is_bounded_when_no_slice_ever_converges() {
+        // The convergence-oscillation guard: even if EVERY slice stays red (the model never makes
+        // it green — the "flat at 9-failed for 80 cycles" shape), the integration loop must run at
+        // most ONE pass per slice and terminate — it's a bounded `for`, not a `while green`. This
+        // proves it can't spin regardless of model behaviour, with no live backend.
+        let dir = ws("incr-bound");
+        // Two feature slices worth of files, so `derive_slices` yields 2 slices.
+        std::fs::write(dir.join("routes_authors.py"), "# authors\n").unwrap();
+        std::fs::write(dir.join("routes_books.py"), "# books\n").unwrap();
+        let slices = vec![
+            FeatureSlice {
+                keyword: "author".into(),
+                file: "routes_authors.py".into(),
+            },
+            FeatureSlice {
+                keyword: "book".into(),
+                file: "routes_books.py".into(),
+            },
+        ];
+
+        // A verify command that ALWAYS fails on the host, so no slice ever goes green (the pre-check
+        // never short-circuits and the agent pass never satisfies the gate). `exit 1` needs no
+        // interpreter — portable across `cmd /C` (Windows) and `sh -c` (Unix).
+        let mut cfg = base_cfg();
+        cfg.sandbox = sc_verify::Sandbox::Host;
+        cfg.verify_command = Some("exit 1".to_string());
+
+        let backend = SpyBackend::new();
+        let sink = FnSink(|_e: &sc_core::AgentEvent| {});
+
+        let steps =
+            run_incremental_integration(&backend, "build it", &dir, &cfg, &slices, &sink).unwrap();
+
+        // Exactly one agent step per slice — bounded, terminated. Never more (no spinning), and it
+        // returned Ok rather than hanging.
+        assert_eq!(
+            steps.len(),
+            slices.len(),
+            "one bounded pass per slice, got {}",
+            steps.len()
+        );
+        // Each step is labelled for its slice (author, then author+book) — dependency order kept.
+        assert!(steps[0].0.contains("author"));
+        assert!(steps[1].0.contains("book"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn cumulative_k_and_slice_command_build_growing_filters() {
         let slices = vec![
             FeatureSlice {
