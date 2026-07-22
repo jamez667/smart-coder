@@ -21,3 +21,6 @@ sc-win-launch-*.log
 .env
 .env.*
 !.env.example
+
+# Personal Claude Code tooling — local to a contributor's machine, not project source.
+.claude/

@@ -107,7 +107,7 @@ fn main() {
 
     // 4b. Plan-only guarantees: no tests, no build.
     check("no frozen tests written", outcome.test_files.is_empty());
-    check("no decomposition/build board", outcome.board.len() == 0);
+    check("no decomposition/build board", outcome.board.is_empty());
     check("not aborted", !outcome.aborted);
 
     // 4c. Each artifact is non-empty and persisted to .smart-coder/plan/ (what the panel reads).

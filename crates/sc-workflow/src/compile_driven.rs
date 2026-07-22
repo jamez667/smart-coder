@@ -142,6 +142,8 @@ impl LoopState {
 /// Run a compiler-driven build: apply `foundational_goal` (touching `foundational_files`), then
 /// loop verify→fix-each-diagnostic until `verify_command` is green (or the iteration budget is
 /// spent). `on_event` receives progress. Edits the real `workspace` in place.
+// Refactoring this signature (8 args) is out of scope; the params are all distinct inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn build_compiler_driven(
     backend: &dyn ModelBackend,
     workspace: &Path,
@@ -328,7 +330,7 @@ fn verify_fix_loop(
                 backend,
                 workspace,
                 sandbox,
-                &[e.file.clone()],
+                std::slice::from_ref(&e.file),
                 &goal,
                 on_agent,
             );
@@ -352,13 +354,15 @@ fn run_scoped_edit(
 ) {
     let registry = default_registry();
     let strategy = select_strategy(&backend.capabilities());
-    let mut cfg = AgentConfig::default();
-    cfg.focus_files = files.to_vec();
-    cfg.sandbox = sandbox.clone();
-    // No verify inside a per-site pass — the outer loop owns verification. A tight budget: the
-    // pass has ONE located edit to make, so it shouldn't wander.
-    cfg.verify_command = None;
-    cfg.max_steps = 6;
+    let cfg = AgentConfig {
+        focus_files: files.to_vec(),
+        sandbox: sandbox.clone(),
+        // No verify inside a per-site pass — the outer loop owns verification. A tight budget: the
+        // pass has ONE located edit to make, so it shouldn't wander.
+        verify_command: None,
+        max_steps: 6,
+        ..Default::default()
+    };
     let sink = FnSink(on_agent);
     let sink: &dyn EventSink = &sink;
     let _ = run_agent_observed(

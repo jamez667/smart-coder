@@ -245,7 +245,7 @@ def a():
         // First definition in source order wins.
         assert_eq!(function_span(Language::Python, src, "a"), Some((1, 2)));
         assert_eq!(count_functions_named(Language::Python, src, "a"), 2);
-        assert_eq!(count_functions_named(Language::Python, src, "a").max(0), 2);
+        assert_eq!(count_functions_named(Language::Python, src, "a"), 2);
     }
 
     #[test]

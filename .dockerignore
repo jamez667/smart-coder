@@ -4,4 +4,3 @@ target/
 .git/
 .smart-coder/
 **/*.log
-grouped-query-attention.md

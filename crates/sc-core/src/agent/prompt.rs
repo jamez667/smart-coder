@@ -19,7 +19,7 @@ pub(super) fn gather_sources(workspace: &Path) -> Vec<crate::diagnose::SourceFil
         .into_iter()
         .filter_map(|rel| {
             let contents = std::fs::read_to_string(workspace.join(&rel)).ok()?;
-            (contents.len() <= MAX_BYTES).then(|| crate::diagnose::SourceFile {
+            (contents.len() <= MAX_BYTES).then_some(crate::diagnose::SourceFile {
                 path: rel,
                 contents,
             })

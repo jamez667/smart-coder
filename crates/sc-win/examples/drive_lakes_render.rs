@@ -62,9 +62,11 @@ fn main() {
     }
     println!();
 
-    let mut cfg = AgentConfig::default();
-    cfg.plan_first = false;
-    cfg.sandbox = sc_verify::Sandbox::Host;
+    let mut cfg = AgentConfig {
+        plan_first: false,
+        sandbox: sc_verify::Sandbox::Host,
+        ..Default::default()
+    };
     cfg.permission.allow_shell = true;
     // Freeze BOTH oracles and main.rs so the model can't game either gate.
     cfg.permission.frozen_paths = vec![
@@ -84,12 +86,10 @@ fn main() {
             is_error,
             summary,
             full,
-        } => {
-            if *is_error || full.contains("not found") || full.contains("error") {
-                println!("      ⨯ {}", first_line(summary));
-                let extra: String = full.lines().take(3).collect::<Vec<_>>().join(" | ");
-                println!("        {}", &extra.chars().take(200).collect::<String>());
-            }
+        } if (*is_error || full.contains("not found") || full.contains("error")) => {
+            println!("      ⨯ {}", first_line(summary));
+            let extra: String = full.lines().take(3).collect::<Vec<_>>().join(" | ");
+            println!("        {}", &extra.chars().take(200).collect::<String>());
         }
         AgentEvent::Verification { green, summary, .. } => {
             println!("      {} verify: {summary}", if *green { "✓" } else { "✗" })

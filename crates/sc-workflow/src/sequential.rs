@@ -1083,7 +1083,7 @@ mod tests {
             .filter(|(_, i)| i.contains("GROWING SLICE"))
             .map(|(n, _)| n)
             .collect();
-        assert_eq!(slice_positions.len() >= 3, true, "ran the slice loops");
+        assert!(slice_positions.len() >= 3, "ran the slice loops");
         let last = seen.last().unwrap();
         assert!(
             last.contains("Make the FULL frozen test suite pass"),

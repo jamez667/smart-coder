@@ -381,8 +381,10 @@ mod tests {
 
     #[test]
     fn blocked_records_refusal_without_running() {
-        let mut t = Terminal::default();
-        t.input = "rm -rf build".into();
+        let mut t = Terminal {
+            input: "rm -rf build".into(),
+            ..Default::default()
+        };
         t.blocked("rm -rf build", "no project open");
         assert!(!t.running, "blocked never starts a process");
         assert_eq!(t.input, "", "input cleared");
@@ -439,7 +441,7 @@ mod tests {
         let mut t = Terminal::default();
         assert!(!t.apply(TermMsg::Line(Stream::Stdout, "hello".into())));
         assert!(!t.apply(TermMsg::Line(Stream::Stderr, "oops".into())));
-        assert!(t.running == false); // never set true by apply alone
+        assert!(!t.running); // never set true by apply alone
         let finished = t.apply(TermMsg::Exited(Some(0)));
         assert!(finished);
         assert_eq!(
@@ -454,8 +456,10 @@ mod tests {
 
     #[test]
     fn apply_exit_clears_running_and_reports_nonzero() {
-        let mut t = Terminal::default();
-        t.running = true;
+        let mut t = Terminal {
+            running: true,
+            ..Default::default()
+        };
         t.apply(TermMsg::Exited(Some(101)));
         assert!(!t.running);
         assert_eq!(t.lines.last().unwrap().text, "[exit 101]");
@@ -470,8 +474,10 @@ mod tests {
 
     #[test]
     fn history_nav_walks_back_and_forth() {
-        let mut t = Terminal::default();
-        t.history = vec!["one".into(), "two".into(), "three".into()];
+        let mut t = Terminal {
+            history: vec!["one".into(), "two".into(), "three".into()],
+            ..Default::default()
+        };
         t.history_prev(); // newest
         assert_eq!(t.input, "three");
         t.history_prev();
@@ -491,8 +497,10 @@ mod tests {
 
     #[test]
     fn history_next_without_recall_is_noop() {
-        let mut t = Terminal::default();
-        t.input = "typing".into();
+        let mut t = Terminal {
+            input: "typing".into(),
+            ..Default::default()
+        };
         t.history_next();
         assert_eq!(t.input, "typing");
     }

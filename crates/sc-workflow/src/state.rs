@@ -305,7 +305,7 @@ mod tests {
             Phase::Layout,
             Phase::StageBreakdown,
         ] {
-            s.set(Artifact::draft(p, &format!("# {}", p.title())));
+            s.set(Artifact::draft(p, format!("# {}", p.title())));
             s.approve(p);
         }
         save_to(&dir, &s, true).unwrap();

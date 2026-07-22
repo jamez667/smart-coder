@@ -235,6 +235,6 @@ more reasoning, and `gemini-2.5-pro` is rarely worth the cost/latency for breakd
 - [07 — Roadmap & milestones](docs/specs/07-roadmap.md)
 - [08 — Orchestration & the worker swarm](docs/specs/08-orchestration-and-swarm.md)
 - [09 — Workflow & human checkpoints](docs/specs/09-workflow-and-checkpoints.md)
+- [10 — Prior art & references](docs/specs/10-prior-art.md)
 - [11 — Testing & TDD](docs/specs/11-testing-and-tdd.md)
 - [12 — Platform clients (Windows)](docs/specs/12-platform-clients.md)
-- [10 — Prior art & references](docs/specs/10-prior-art.md)

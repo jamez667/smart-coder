@@ -127,11 +127,13 @@ fn one_attempt(backend: &OpenAiBackend, i: usize) -> (bool, bool) {
 
     let registry = default_registry();
     let strategy = select_strategy(&backend.capabilities());
-    let mut cfg = AgentConfig::default();
-    cfg.focus_files = vec![file.clone()];
-    cfg.sandbox = Sandbox::Host;
-    cfg.verify_command = None;
-    cfg.max_steps = 6;
+    let cfg = AgentConfig {
+        focus_files: vec![file.clone()],
+        sandbox: Sandbox::Host,
+        verify_command: None,
+        max_steps: 6,
+        ..Default::default()
+    };
     let sink = FnSink(|_e: &sc_core::AgentEvent| {});
     let _ = run_agent_observed(
         backend,

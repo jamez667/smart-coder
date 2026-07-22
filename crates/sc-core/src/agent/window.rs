@@ -75,7 +75,7 @@ mod tests {
         // newer turn arrived. The loop tags the ENTIRE recent window RecentObservation
         // (sacred), so an earlier read survives a tight budget. We verify the zoning rule
         // directly: every message in a multi-message recent window maps to the sacred zone.
-        let recent = vec![
+        let recent = [
             Message::assistant(r#"{"tool":"read_file","path":"app.py"}"#.to_string()),
             Message::user("read_file app.py:\n<the whole file body>".to_string()),
             Message::assistant(r#"{"tool":"read_file","path":"db.py"}"#.to_string()),

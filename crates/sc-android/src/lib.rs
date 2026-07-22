@@ -50,20 +50,21 @@ fn android_caps() -> Capabilities {
 /// it forgets what it already read and re-reads the same files in a loop (observed
 /// live). This trims the budget to what Nano can actually use and fails faster.
 fn nano_config() -> AgentConfig {
-    let mut cfg = AgentConfig::default();
-    // Keep MORE recent turns verbatim so Nano can see it already read a file (its tiny
-    // context can't hold a rolling summary usefully — verbatim recent turns are the
-    // only reliable memory). The read-loop is the #1 failure mode.
-    cfg.keep_recent_turns = 6;
-    // Use nearly the whole nominal window — Nano's 4K is already small; don't shave 25%.
-    cfg.effective_context_fraction = 0.9;
-    // Fail fast: 25 steps of re-reads is just a long way to lose. If Nano can't make
-    // progress in ~12 turns it won't in 25.
-    cfg.max_steps = 12;
-    // Break an idempotent-repeat sooner (a tiny model loops harder).
-    cfg.repeat_limit = 2;
-    cfg.no_progress_limit = 2;
-    cfg
+    AgentConfig {
+        // Keep MORE recent turns verbatim so Nano can see it already read a file (its tiny
+        // context can't hold a rolling summary usefully — verbatim recent turns are the
+        // only reliable memory). The read-loop is the #1 failure mode.
+        keep_recent_turns: 6,
+        // Use nearly the whole nominal window — Nano's 4K is already small; don't shave 25%.
+        effective_context_fraction: 0.9,
+        // Fail fast: 25 steps of re-reads is just a long way to lose. If Nano can't make
+        // progress in ~12 turns it won't in 25.
+        max_steps: 12,
+        // Break an idempotent-repeat sooner (a tiny model loops harder).
+        repeat_limit: 2,
+        no_progress_limit: 2,
+        ..Default::default()
+    }
 }
 
 /// Flatten a chat transcript into a single prompt string for the AICore Prompt API

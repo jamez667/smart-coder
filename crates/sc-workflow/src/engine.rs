@@ -114,7 +114,7 @@ pub fn generate_phase(
                 // The non-Python stage breakdown intentionally emits a Markdown design doc, not
                 // a JSON coverage array, so the JSON gate must not apply to it.
                 let wants_json = phase.produces_json()
-                    && !(phase == Phase::StageBreakdown && !matches!(stack, ProjectStack::Python));
+                    && (phase != Phase::StageBreakdown || matches!(stack, ProjectStack::Python));
                 let usable = !content.is_empty() && (!wants_json || contains_json_array(&content));
                 if usable {
                     // Guardrail: the layout + (non-Python) breakdown are Markdown docs where a weak

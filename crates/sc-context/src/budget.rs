@@ -272,7 +272,7 @@ impl<'a> ContextBuilder<'a> {
             let over = running - self.budget;
             let before = cost(&segments[idx]);
             let target = before.saturating_sub(over + 64);
-            segments[idx].text = truncate_middle(&segments[idx].text, target, &self.counter);
+            segments[idx].text = truncate_middle(&segments[idx].text, target, self.counter);
             let after = cost(&segments[idx]);
             if after >= before {
                 break; // couldn't shrink further — avoid an infinite loop

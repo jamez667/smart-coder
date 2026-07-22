@@ -1094,11 +1094,13 @@ mod tests {
         );
         let f = parse_config(&json);
         // Reproduce the relevant slice of load()'s migration (pure, no file/env).
-        let mut cfg = UiConfig::default();
-        cfg.base_url = f.base_url.clone().unwrap();
-        cfg.orchestrator_url = f.orchestrator_url.clone();
-        cfg.orchestrator_key = f.orchestrator_key.clone();
-        cfg.key = f.key.clone();
+        let mut cfg = UiConfig {
+            base_url: f.base_url.clone().unwrap(),
+            orchestrator_url: f.orchestrator_url.clone(),
+            orchestrator_key: f.orchestrator_key.clone(),
+            key: f.key.clone(),
+            ..Default::default()
+        };
         // Local from coder endpoint; Gemini from the orchestrator override.
         cfg.local_conn.base_url = f.base_url.clone().unwrap();
         cfg.local_conn.key = if is_gemini_url(&cfg.base_url) {

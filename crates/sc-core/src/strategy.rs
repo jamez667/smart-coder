@@ -314,9 +314,11 @@ fn validated_calls(
 /// observe→react between them, so we can apply them all. The batch is strictly gated — it
 /// stops at the FIRST call that is anything other than a `create_file`/`write_file` to a
 /// **new** path:
+///
 ///   - `edit_file` (anchored — needs the file's current state),
 ///   - a second write to a path already in the batch (the model is revising — react first),
 ///   - `run_verification`/`run_command`/`finish`/`read_file`/anything else (needs the result).
+///
 /// Returns the ordered batch (length ≥ 0). The caller still dispatches the FIRST call through
 /// the normal single-action path; this only says which *additional* leading writes are safe to
 /// pre-apply. An empty/length-1 result means "no batching — behave exactly as before".

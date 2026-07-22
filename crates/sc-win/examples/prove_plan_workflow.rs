@@ -3,8 +3,6 @@
 //! re-read), and the run stops at the stage breakdown. Run with the 30B up:
 //!   cargo run -p sc-win --example prove_plan_workflow
 
-use std::path::PathBuf;
-
 use sc_model::OpenAiBackend;
 use sc_workflow::{run_workflow_moded, AutoApprove, ThinkPolicy, WorkflowMode};
 
@@ -15,7 +13,7 @@ fn main() {
     println!("backend: {base}  model: {model}\n");
 
     // A tiny Rust "project" so ProjectStack::detect → Rust, with a real feature plan on disk.
-    let ws = PathBuf::from(std::env::temp_dir()).join("dc-prove-plan");
+    let ws = std::env::temp_dir().join("dc-prove-plan");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(ws.join("src")).unwrap();
     std::fs::write(
@@ -73,7 +71,7 @@ fn main() {
         phases.last() == Some(&sc_workflow::Phase::StageBreakdown)
     );
     println!("no frozen tests written: {}", outcome.test_files.is_empty());
-    println!("no decomposition/board: {}", outcome.board.len() == 0);
+    println!("no decomposition/board: {}", outcome.board.is_empty());
 
     // Language check: the architecture must talk Rust, not Flask.
     let arch = outcome

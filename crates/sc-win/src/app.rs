@@ -257,7 +257,7 @@ fn stage_toggle_button(_t: &Theme, status: button::Status) -> button::Style {
 fn menu_item_style(_t: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
-        background: hovered.then(|| Background::Color(ACCENT)),
+        background: hovered.then_some(Background::Color(ACCENT)),
         text_color: if hovered {
             Color::from_rgb(0.06, 0.07, 0.11)
         } else {
@@ -559,7 +559,7 @@ fn tab_after_close(closed_idx: usize, len_after: usize) -> Option<usize> {
     }
 }
 
-/// The Tailscale MagicDNS hostname of this machine (e.g. `jcnash-pc4.tail146ad2.ts.net`),
+/// The Tailscale MagicDNS hostname of this machine (e.g. `my-pc.tailXXXXXX.ts.net`),
 /// via the `tailscale` CLI. `None` if Tailscale isn't installed/logged in.
 fn tailnet_host() -> Option<String> {
     let out = sc_win::proc::command("tailscale")
@@ -621,6 +621,9 @@ enum Gatebar {
     Confirm {
         /// Remote-correlation id, set when the mirror is active so a phone `/approve id`
         /// can find this entry (0 when there's no remote mirror). Local buttons ignore it.
+        // Retained: constructing it drives `register_confirm`'s remote-side registration, and it
+        // documents the entry's mirror identity; nothing reads it back on the local path yet.
+        #[allow(dead_code)]
         id: u64,
         command: String,
         reason: String,
@@ -2138,7 +2141,7 @@ impl App {
         self.refresh_git_view();
 
         // Verify — unless the change is comment-only (git says all changed lines are comments).
-        let diff = sc_win::gitdiff::files_diff(&root, &[c.file.clone()]);
+        let diff = sc_win::gitdiff::files_diff(&root, std::slice::from_ref(&c.file));
         let comment_only = sc_win::gitdiff::is_comment_only_change(&diff);
         if comment_only {
             self.chat_turns.push(sc_win::chat::Turn {
@@ -6573,7 +6576,7 @@ fn feature_spec_of(rel: &str) -> String {
     if lower.starts_with("specs/") && lower.ends_with(".md") {
         if let Some(dir) = p.rsplit_once('/').map(|(d, _)| d) {
             // `dir` must be `specs/<slug>` (exactly one slug segment) — not bare `specs`.
-            if dir.to_ascii_lowercase() != "specs" && dir.matches('/').count() == 1 {
+            if !dir.eq_ignore_ascii_case("specs") && dir.matches('/').count() == 1 {
                 return format!("{dir}/spec.md");
             }
         }

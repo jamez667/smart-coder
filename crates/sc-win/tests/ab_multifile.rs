@@ -8,6 +8,9 @@
 use sc_model::{GenerateRequest, Message, ModelBackend};
 use sc_win::config::UiConfig;
 
+/// One A/B result row: (task name, pipeline green, raw green, pipeline steps, pipeline files, raw files).
+type AbRow = (String, bool, bool, usize, Vec<String>, Vec<String>);
+
 /// A multi-file task: the prompt names ≥2 source files with a contract across them.
 /// `oracle` is the frozen test; it exercises the behavior that depends on BOTH files.
 struct Task {
@@ -113,7 +116,7 @@ def test_root_renders_template():
 #[ignore = "live: needs dc-qwen8b backend + docker sandbox"]
 fn ab_multifile_across_tasks() {
     let cfg = UiConfig::default();
-    let mut rows: Vec<(String, bool, bool, usize, Vec<String>, Vec<String>)> = Vec::new();
+    let mut rows: Vec<AbRow> = Vec::new();
 
     for task in tasks() {
         eprintln!("\n############ TASK: {} ############", task.name);
