@@ -53,25 +53,28 @@ steps:
 
       # Package + publish + prune in ONE shell entry (each `commands:` entry is a
       # fresh shell, so the vars must all live together). CI_COMMIT_TAG, CI_REPO
-      # and GITHUB_TOKEN are real ENV VARS in the shell (built-ins + the mapped
-      # secret above). IMPORTANT: Woodpecker pre-processes `$`/`${...}` in
-      # commands, so every dollar meant for the SHELL is doubled `$$` — Woodpecker
-      # collapses `$$` -> `$` before /bin/sh runs it. (A single `$` here makes
-      # Woodpecker try to parse a variable name and fail: "unable to parse
-      # variable name".)
+      # and GITHUB_TOKEN are real ENV VARS in the shell.
+      #
+      # Woodpecker runs commands through its envsubst preprocessor, which scans
+      # dollar/brace expressions and does NOT understand shell parameter
+      # expansion (the colon-question default/error form) — that yields "unable
+      # to parse variable name" and the pipeline won't even start. So this block
+      # uses ONLY bare doubled refs like  $$VAR  (no braces), and does the
+      # empty-checks with a plain `if`. Woodpecker collapses each  $$  to one
+      # dollar before handing the script to /bin/sh.
       - |
         set -eu
         TAG="$$CI_COMMIT_TAG"
         REPO="$$CI_REPO"
-        : "$${TAG:?CI_COMMIT_TAG is empty - is this a tag build?}"
-        : "$${GITHUB_TOKEN:?github_token secret is not set in Woodpecker}"
-        PKG="sc-win-$${TAG}-linux-x86_64"
+        if [ -z "$$TAG" ]; then echo "CI_COMMIT_TAG is empty - not a tag build?" >&2; exit 1; fi
+        if [ -z "$$GITHUB_TOKEN" ]; then echo "github_token secret is not set in Woodpecker" >&2; exit 1; fi
+        PKG="sc-win-$$TAG-linux-x86_64"
         export GH_TOKEN="$$GITHUB_TOKEN"
 
         # Assemble the package dir: binary + LICENSE + a runtime-deps note.
-        mkdir -p "dist/$${PKG}"
-        cp target/release/sc-win "dist/$${PKG}/"
-        cp LICENSE "dist/$${PKG}/"
+        mkdir -p "dist/$$PKG"
+        cp target/release/sc-win "dist/$$PKG/"
+        cp LICENSE "dist/$$PKG/"
         printf '%s\n' \
           'smart-coder desktop client (sc-win), Linux x86_64.' \
           'Run: ./sc-win' \
@@ -79,21 +82,21 @@ steps:
           '  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0' \
           '  libwayland-client0 libwayland-cursor0 libwayland-egl1' \
           '  libfontconfig1 libfreetype6' \
-          > "dist/$${PKG}/README.txt"
-        tar -czf "dist/$${PKG}.tar.gz" -C dist "$${PKG}"
+          > "dist/$$PKG/README.txt"
+        tar -czf "dist/$$PKG.tar.gz" -C dist "$$PKG"
 
         # Publish to GitHub Releases (create, or upload the asset if it exists).
-        gh release create "$${TAG}" "dist/$${PKG}.tar.gz" \
-          --repo "$${REPO}" --title "$${TAG}" --generate-notes \
-          || gh release upload "$${TAG}" "dist/$${PKG}.tar.gz" --repo "$${REPO}" --clobber
+        gh release create "$$TAG" "dist/$$PKG.tar.gz" \
+          --repo "$$REPO" --title "$$TAG" --generate-notes \
+          || gh release upload "$$TAG" "dist/$$PKG.tar.gz" --repo "$$REPO" --clobber
 
         # Retention: keep only the 3 newest releases; delete older releases AND
         # their tags (--cleanup-tag) so old assets don't accumulate and eat disk.
-        gh release list --repo "$${REPO}" --limit 100 \
+        gh release list --repo "$$REPO" --limit 100 \
           --json tagName,createdAt \
           --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
           | while read -r old; do
-              [ -n "$${old}" ] || continue
-              echo "pruning old release $${old}"
-              gh release delete "$${old}" --repo "$${REPO}" --yes --cleanup-tag
+              [ -n "$$old" ] || continue
+              echo "pruning old release $$old"
+              gh release delete "$$old" --repo "$$REPO" --yes --cleanup-tag
             done
