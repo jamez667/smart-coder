@@ -1,0 +1,9 @@
+# Pin the toolchain so a contributor's local `cargo clippy` and CI use the exact
+# same compiler and lint set — "passes locally" then means "passes CI". rustup
+# auto-installs this version and the listed components on first cargo invocation.
+#
+# Bump deliberately (and re-run scripts/check.sh) rather than floating, so a new
+# clippy release can't silently break the build.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

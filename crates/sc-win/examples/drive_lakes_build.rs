@@ -68,7 +68,7 @@ fn main() {
             println!("      ⨯ {}", first_line(summary));
             // A bit more of the anchor error to see the old_str mismatch.
             let extra: String = full.lines().take(3).collect::<Vec<_>>().join(" | ");
-            println!("        {}", &extra.chars().take(200).collect::<String>());
+            println!("        {}", extra.chars().take(200).collect::<String>());
         }
         AgentEvent::Verification { green, summary, .. } => {
             println!("      {} verify: {summary}", if *green { "✓" } else { "✗" })

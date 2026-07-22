@@ -45,6 +45,12 @@ Please keep all four passing. If a clippy lint is genuinely wrong for a case,
 prefer a narrowly-scoped `#[allow(...)]` **with a comment explaining why** over a
 blanket allow.
 
+The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), so your
+local `cargo clippy` uses the exact same compiler and lint set as CI — "passes
+locally" means "passes CI". CI runs the same four gates via
+[`.woodpecker.yml`](.woodpecker.yml) (self-hosted Woodpecker) on every push and
+PR to `main`.
+
 ## Guidelines
 
 - **Tests are the control system.** This project is TDD-first — see

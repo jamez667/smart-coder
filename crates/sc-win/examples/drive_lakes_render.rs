@@ -89,7 +89,7 @@ fn main() {
         } if (*is_error || full.contains("not found") || full.contains("error")) => {
             println!("      ⨯ {}", first_line(summary));
             let extra: String = full.lines().take(3).collect::<Vec<_>>().join(" | ");
-            println!("        {}", &extra.chars().take(200).collect::<String>());
+            println!("        {}", extra.chars().take(200).collect::<String>());
         }
         AgentEvent::Verification { green, summary, .. } => {
             println!("      {} verify: {summary}", if *green { "✓" } else { "✗" })

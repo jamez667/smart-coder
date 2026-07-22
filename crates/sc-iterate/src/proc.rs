@@ -11,6 +11,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// A [`Command`] for `program` that won't spawn a visible console window.
 pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
+    // `mut` is used only on the Windows branch below; on other targets `c` is
+    // returned untouched, so the binding is intentionally-mutable there.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = Command::new(program);
     #[cfg(windows)]
     {

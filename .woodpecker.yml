@@ -1,0 +1,44 @@
+# Woodpecker CI — runs the same gates as scripts/check.sh.
+# Self-hosted (no GitHub Actions). See CONTRIBUTING.md.
+#
+# One step: Woodpecker gives each step a fresh container sharing only the cloned
+# workspace volume, so system packages installed in one step don't persist to
+# the next. Installing deps and running all four gates in a single step keeps it
+# correct and lets the gates share one `target/` build.
+#
+# The workspace includes `sc-win`, an iced (winit/wgpu) GUI crate, so even a
+# `cargo check` of the whole workspace on Linux needs the X11/Wayland/font dev
+# libraries below. The rest of the stack is pure-Rust (ureq + rustls) — no
+# OpenSSL/libssl required.
+
+when:
+  - event: [push, pull_request]
+    branch: main
+
+steps:
+  - name: check
+    # Pinned to match rust-toolchain.toml. rustup reads that file and installs the
+    # pinned channel + rustfmt/clippy on the first cargo call, so local and CI run
+    # the identical compiler and lint set. Bump both together, deliberately.
+    image: rust:1.97.1-bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+    commands:
+      # System libraries the iced/winit/wgpu GUI crate links against on Linux.
+      - apt-get update
+      - >-
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+        pkg-config
+        libx11-dev libxcb1-dev libxrandr-dev libxi-dev
+        libxkbcommon-dev libwayland-dev
+        libfontconfig1-dev libfreetype6-dev
+      # rust-toolchain.toml pins the channel; ensure its components are present
+      # (no-op if rustup already auto-installed them).
+      - rustup component add rustfmt clippy
+      # The gates, in the same order as scripts/check.sh.
+      - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo check --workspace
+      # Live-model integration tests are #[ignore]d and need a backend, so the
+      # default `cargo test` run stays deterministic and backend-free.
+      - cargo test --workspace
