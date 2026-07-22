@@ -24,10 +24,12 @@ steps:
     environment:
       CARGO_TERM_COLOR: always
       # Woodpecker v3: secrets are consumed via `from_secret` (the old top-level
-      # `secrets:` list is gone). This maps the `github_token` repo secret to the
-      # $GITHUB_TOKEN env var the publish step below reads.
+      # `secrets:` list is gone). `from_secret` must match the secret's name in
+      # Woodpecker EXACTLY (case-sensitive). The repo secret here is named
+      # `jcnash-woodpecker`; it holds a GitHub token with contents:write and is
+      # exposed to the publish step below as the GITHUB_TOKEN env var.
       GITHUB_TOKEN:
-        from_secret: github_token
+        from_secret: jcnash-woodpecker
     commands:
       # Build deps for the GUI crate, plus git/gh for publishing.
       - apt-get update
