@@ -294,6 +294,75 @@ pub fn framework_page(pack: &EvidencePack, back_link: Option<&str>) -> String {
     )
 }
 
+/// One entry in the docs landing page's spec list.
+pub struct SpecLink {
+    /// Displayed title, e.g. `"13 — Compliance evidence"`.
+    pub title: String,
+    /// Target URL. Specs point at github.com, which renders Markdown natively —
+    /// this site has Jekyll disabled, so a relative `.md` link would download
+    /// raw text rather than render.
+    pub href: String,
+    /// One line on what the spec covers.
+    pub summary: String,
+}
+
+/// Render the documentation landing page — the site root.
+///
+/// GitHub Pages serving from `/docs` looks for `docs/index.html`; without one a
+/// visitor to the site root gets a 404 or a bare directory listing.
+pub fn landing_page(repo_url: &str, specs: &[SpecLink]) -> String {
+    let mut b = String::with_capacity(8 * 1024);
+
+    let _ = write!(b, "<h1>smart-coder</h1>");
+    b.push_str(
+        "<p class=\"sub\">An agentic coding tool built for small models — and a \
+         deterministic compliance evidence engine built on the same core.</p>",
+    );
+
+    b.push_str(
+        "<h2>Compliance evidence</h2>\
+         <p>This repository audits <em>itself</em> against ten compliance frameworks and \
+         publishes the result. It is a live demonstration rather than a claim: most of any \
+         framework is organizational and cannot be assessed from source, and the report says \
+         so control by control.</p>\
+         <p><a href=\"compliance/index.html\"><strong>Read the evidence packs \u{2192}</strong></a> \
+         \u{2014} SOC 2, ISO 27001, NIST SSDF, SLSA, CIS v8, PCI DSS, NIST 800-53, HIPAA, GDPR, \
+         and the EU NIS2/DORA/AI Act cluster.</p>",
+    );
+    b.push_str(
+        "<div class=\"note\"><strong>File paths, line numbers and evidence excerpts are \
+         withheld</strong> from the published packs. They show what was assessed and what the \
+         verdict was, not where to look.</div>",
+    );
+
+    if !specs.is_empty() {
+        b.push_str(
+            "<h2>Design specs</h2>\
+             <p class=\"scope\">Rendered on GitHub, where Markdown displays natively.</p>\
+             <table><thead><tr><th>Spec</th><th>Covers</th></tr></thead><tbody>",
+        );
+        for s in specs {
+            let _ = write!(
+                b,
+                "<tr><td><a href=\"{}\">{}</a></td><td class=\"scope\">{}</td></tr>",
+                esc(&s.href),
+                esc(&s.title),
+                esc(&s.summary)
+            );
+        }
+        b.push_str("</tbody></table>");
+    }
+
+    let _ = write!(
+        b,
+        "<h2>Source</h2><p><a href=\"{}\">{}</a></p>",
+        esc(repo_url),
+        esc(repo_url)
+    );
+
+    page_shell("smart-coder — documentation", &b)
+}
+
 /// One framework's row on the index.
 pub struct IndexEntry {
     /// Link target, e.g. `"soc2.html"`.
@@ -478,6 +547,51 @@ mod tests {
         assert!(html.contains("iso.html"));
         assert!(html.contains("Determinacy"));
         assert!(html.contains("not a compliance attestation"));
+    }
+
+    #[test]
+    fn the_landing_page_links_the_compliance_site_and_specs() {
+        let specs = vec![SpecLink {
+            title: "13 — Compliance evidence".into(),
+            href: "https://github.com/x/y/blob/main/docs/specs/13-compliance-evidence.md".into(),
+            summary: "An evidence pack is an argument, not a verdict.".into(),
+        }];
+        let html = landing_page("https://github.com/x/y", &specs);
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(
+            html.contains("compliance/index.html"),
+            "must link the report"
+        );
+        assert!(
+            html.contains("13-compliance-evidence.md"),
+            "must link the specs"
+        );
+        assert!(html.contains("github.com/x/y"));
+    }
+
+    #[test]
+    fn the_landing_page_states_the_redaction() {
+        // A reader arriving at the site root should learn the packs are redacted
+        // before they open one.
+        let html = landing_page("https://github.com/x/y", &[]);
+        assert!(html.contains("withheld"), "{html}");
+    }
+
+    #[test]
+    fn the_landing_page_omits_the_spec_table_when_empty() {
+        let html = landing_page("https://github.com/x/y", &[]);
+        assert!(!html.contains("Design specs"));
+    }
+
+    #[test]
+    fn the_landing_page_carries_no_script_and_inlines_its_css() {
+        // Unlike the framework pages it DOES contain https:// links (to GitHub,
+        // which renders Markdown natively — this site has Jekyll disabled). It
+        // must still ship no script and no external stylesheet.
+        let html = landing_page("https://github.com/x/y", &[]);
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("rel=\"stylesheet\""));
+        assert!(html.contains("<style>"));
     }
 
     #[test]

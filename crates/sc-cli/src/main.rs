@@ -818,21 +818,103 @@ fn comply_export(out_arg: Option<String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // GitHub Pages runs Jekyll by default, which ignores files and directories
-    // beginning with an underscore and can rewrite others. .nojekyll turns that
-    // off so the site is served exactly as written.
-    if let Err(e) = std::fs::write(out_dir.join(".nojekyll"), "") {
-        eprintln!("warning: could not write .nojekyll: {e}");
+    let mut written = entries.len() + 1;
+
+    // GitHub Pages serves from a directory ROOT, so when the output lands under
+    // `docs/` that root needs its own landing page — without one a visitor gets
+    // a 404 or a bare directory listing. Only written when the parent actually
+    // looks like the docs tree, so `--out somewhere-else` does not scatter files.
+    if let Some(site_root) = out_dir.parent() {
+        if site_root.join("specs").is_dir() {
+            let landing = sc_comply::report::site::landing_page(REPO_URL, &spec_links(site_root));
+            match std::fs::write(site_root.join("index.html"), landing) {
+                Ok(()) => {
+                    written += 1;
+                    println!("wrote landing page to {}", site_root.display());
+                }
+                Err(e) => eprintln!("warning: could not write the docs landing page: {e}"),
+            }
+            // Jekyll is disabled site-wide, so .nojekyll belongs at the SITE
+            // root; a nested one has no effect. Move it if an older run left one.
+            if let Err(e) = std::fs::write(site_root.join(".nojekyll"), "") {
+                eprintln!("warning: could not write .nojekyll: {e}");
+            }
+            let _ = std::fs::remove_file(out_dir.join(".nojekyll"));
+        } else if let Err(e) = std::fs::write(out_dir.join(".nojekyll"), "") {
+            eprintln!("warning: could not write .nojekyll: {e}");
+        }
     }
 
-    println!(
-        "\nwrote {} pages to {}",
-        entries.len() + 1,
-        out_dir.display()
-    );
+    println!("\nwrote {written} page(s) to {}", out_dir.display());
     println!("citations, file paths and excerpts are REDACTED from every page.");
-    println!("review the output before committing, then enable GitHub Pages on this directory.");
+    println!("review the output before committing, then enable GitHub Pages on docs/.");
     ExitCode::SUCCESS
+}
+
+/// The canonical repository URL, for links out of the published site.
+const REPO_URL: &str = "https://github.com/jamez667/smart-coder";
+
+/// Build the spec list for the landing page by reading `docs/specs/`.
+///
+/// Links point at GitHub rather than at relative `.md` paths: Jekyll is disabled
+/// on this site, so a relative link would serve raw Markdown as a download.
+///
+/// Titles and summaries come from each file's own H1 and first prose line, so a
+/// new spec appears on the site without anyone remembering to register it here.
+fn spec_links(site_root: &std::path::Path) -> Vec<sc_comply::report::site::SpecLink> {
+    let Ok(entries) = std::fs::read_dir(site_root.join("specs")) else {
+        return Vec::new();
+    };
+
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    files.sort();
+
+    files
+        .iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(path).ok()?;
+
+            let title = text
+                .lines()
+                .find(|l| l.starts_with("# "))
+                .map(|l| l.trim_start_matches("# ").trim().to_string())
+                .unwrap_or_else(|| name.clone());
+
+            // The first prose PARAGRAPH after the opening section heading — the
+            // spec's own summary of itself. Joined across lines first, because
+            // specs are hard-wrapped at ~80 columns and taking a single line
+            // would cut most summaries mid-sentence.
+            let para: String = text
+                .lines()
+                .skip_while(|l| !l.starts_with("## "))
+                .skip(1)
+                .skip_while(|l| l.trim().is_empty())
+                .take_while(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                .map(|l| l.trim_start_matches('>').trim())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let summary = first_sentence(para.trim());
+
+            Some(sc_comply::report::site::SpecLink {
+                title,
+                href: format!("{REPO_URL}/blob/main/docs/specs/{name}"),
+                summary,
+            })
+        })
+        .collect()
+}
+
+/// The first sentence of a line, with Markdown emphasis stripped.
+fn first_sentence(line: &str) -> String {
+    let plain = line.replace("**", "").replace('`', "");
+    match plain.find(". ") {
+        Some(i) => plain[..=i].to_string(),
+        None => plain,
+    }
 }
 
 /// Build the framework list the dashboard offers.
