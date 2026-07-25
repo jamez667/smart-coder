@@ -1,0 +1,474 @@
+# NIST Secure Software Development Framework (SP 800-218 v1.1) — evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# SSDF is the most mechanically checkable framework in this collection: it is
+# about how software is BUILT, and a repository is where building happens. The
+# PS (Protect Software) and PW (Produce Well-Secured Software) practice groups
+# yield real evidence; PO (Prepare the Organization) and RV (Respond to
+# Vulnerabilities) are largely process and are declared undeterminable.
+#
+# This pack matters commercially: SSDF underpins the US federal secure-software
+# attestation (EO 14028 / CISA form), so "can we evidence this" is a question
+# with a contract attached.
+
+[framework]
+id        = "nist-ssdf-800-218"
+name      = "NIST Secure Software Development Framework (SP 800-218 v1.1)"
+version   = "1.0.0"
+authority = "NIST"
+scope_note = """
+This pack inspects source-controlled artifacts only. It cannot observe build
+infrastructure, signing key custody, developer training records, or vulnerability
+disclosure handling.
+
+SSDF is unusually amenable to source inspection because it governs the software
+production process itself. Even so, roughly half of its practices are
+organizational and are declared undeterminable here rather than omitted.
+
+A passing result is evidence toward a practice, never a completed attestation.
+The CISA secure software development attestation form requires an authorised
+signatory, not a scanner.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PS — Protect the Software
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "PS.1"
+title     = "Protect all forms of code from unauthorized access and tampering"
+clause    = "SSDF PS.1.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Store all forms of code — source, executables, configuration-as-code — based on
+the principle of least privilege, so only authorized personnel can change it.
+"""
+remediation = """
+Enforce branch protection with required review, define code owners, and keep the
+protection configuration as code where the provider allows it.
+"""
+
+  [[controls.checks]]
+  id          = "code-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", ".gitlab/CODEOWNERS", "docs/CODEOWNERS"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named owners per area. Enforcement lives in the VCS provider."
+
+  [[controls.checks]]
+  id          = "branch-protection-as-code"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = """
+Branch protection requiring review before merge. Usually configured server-side
+and invisible to source inspection; the auditor must obtain an API export.
+"""
+
+  [[controls.checks]]
+  id          = "no-committed-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  weight      = 2.0
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Credentials in source defeat access controls on the code itself."
+
+[[controls]]
+id        = "PS.2"
+title     = "Provide a mechanism for verifying software release integrity"
+clause    = "SSDF PS.2.1"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Make verification information available to software acquirers so they can
+confirm that the software they received is authentic and unmodified.
+"""
+remediation = """
+Sign releases (Sigstore/cosign, GPG) or publish checksums, and document how a
+consumer verifies them.
+"""
+
+  [[controls.checks]]
+  id          = "release-signing-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cosign|sigstore|slsa-framework|gpg --detach-sign|gpg --sign|minisign|notary|in-toto)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Artifact signing in the release pipeline is the strongest form of this evidence."
+
+  [[controls.checks]]
+  id          = "checksum-publication"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(sha256sum|shasum -a 256|checksums?\\.txt|Get-FileHash)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Published checksums are weaker than signatures but still verification information."
+
+[[controls]]
+id        = "PS.3"
+title     = "Archive and protect each software release"
+clause    = "SSDF PS.3.1, PS.3.2"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Preserve release artifacts and their provenance, and collect, maintain and share
+provenance data for all components of each release — including an SBOM.
+"""
+remediation = """
+Generate an SBOM in CI and attach it to each release; retain build provenance
+attestations.
+"""
+
+  [[controls.checks]]
+  id          = "sbom-generated-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(syft|cyclonedx|spdx-sbom|sbom-tool|cargo[- ]sbom|anchore/sbom-action|bom generate)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "SBOM generation in the pipeline. Increasingly contractual, not merely federal."
+
+  [[controls.checks]]
+  id          = "sbom-artifact-committed"
+  kind        = "file-exists"
+  paths       = ["sbom.json", "sbom.xml", "bom.json", "bom.xml", "sbom.spdx.json", "sbom.cdx.json"]
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  # A committed SBOM is unusual and often stale; generated-in-CI is the better
+  # signal, so absence here is not a gap.
+  rationale   = "A checked-in SBOM. Generation in CI is preferable — a committed SBOM drifts."
+
+  [[controls.checks]]
+  id          = "dependency-lockfile-present"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock", "requirements.txt"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A lockfile pins component versions — the minimum provenance record for dependencies."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PW — Produce Well-Secured Software
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "PW.4"
+title     = "Reuse existing, well-secured software rather than duplicating functionality"
+clause    = "SSDF PW.4.1, PW.4.4"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Acquire and maintain well-secured software components from third-party
+developers, and verify that each component remains secure over time — including
+checking for known vulnerabilities.
+"""
+remediation = """
+Add a dependency vulnerability audit to CI and adopt an automated update policy.
+"""
+
+  [[controls.checks]]
+  id          = "dependency-audit-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|yarn audit|safety check|snyk|trivy|grype|osv-scanner|dependency-check)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated vulnerability scanning of acquired components."
+
+  [[controls.checks]]
+  id          = "automated-update-policy"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", ".renovaterc", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A policy for keeping components current, or for denying disallowed ones."
+
+  [[controls.checks]]
+  id          = "lockfile-pins-versions"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "Reproducible dependency resolution — the precondition for knowing what you shipped."
+
+[[controls]]
+id        = "PW.5"
+title     = "Create source code by adhering to secure coding practices"
+clause    = "SSDF PW.5.1"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Follow all secure coding practices appropriate to the development languages and
+environment, including avoiding unsafe functions and known vulnerable patterns.
+"""
+remediation = """
+Remove disabled certificate verification and broken cryptographic primitives;
+adopt a linter configuration that forbids them.
+"""
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification is an unsafe practice in every language."
+
+  [[controls.checks]]
+  id          = "no-shell-injection-sinks"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php}"
+  # Deliberately narrow: `shell=True` and `eval` on a constructed string are the
+  # classic injection sinks. A hit is a prompt to review, not proof of a flaw.
+  pattern     = "(?i)(subprocess\\.(run|call|Popen|check_output)\\([^)]*shell\\s*=\\s*True|os\\.system\\s*\\(|child_process\\.exec\\s*\\(|\\beval\\s*\\(\\s*(req|request|params|input|argv))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Classic command/code injection sinks. A hit warrants review rather than proving
+a vulnerability — the input may be fully trusted.
+"""
+
+[[controls]]
+id        = "PW.7"
+title     = "Review and/or analyze human-readable code"
+clause    = "SSDF PW.7.1, PW.7.2"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Determine whether code meets secure coding standards through peer review and/or
+automated static analysis, and document the results.
+"""
+remediation = "Add static analysis to CI and require peer review before merge."
+
+  [[controls.checks]]
+  id          = "static-analysis-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|checkmarx|fortify|coverity)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated static analysis, the machine half of this practice."
+
+  [[controls.checks]]
+  id          = "peer-review-configured"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", ".github/settings.yml", "CONTRIBUTING.md"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Evidence of a review process. Enforcement usually lives server-side."
+
+[[controls]]
+id        = "PW.8"
+title     = "Test executable code to identify vulnerabilities and verify compliance"
+clause    = "SSDF PW.8.2"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Design and perform testing of executable code — functional, fuzz, integration
+and penetration testing — to identify vulnerabilities and verify security
+requirements.
+"""
+remediation = "Run the test suite in CI; add fuzzing or DAST for input-handling code."
+
+  [[controls.checks]]
+  id          = "tests-run-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "Automated testing on every change."
+
+  [[controls.checks]]
+  id          = "fuzz-or-dast-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},**/fuzz/**/*}"
+  pattern     = "(?i)(cargo[- ]fuzz|libfuzzer|afl|oss-fuzz|atheris|jazzer|zap-baseline|nuclei)"
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Fuzzing or dynamic testing. Absent for most projects; not a gap on its own."
+
+[[controls]]
+id        = "PW.9"
+title     = "Configure software to have secure settings by default"
+clause    = "SSDF PW.9.1, PW.9.2"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Define a secure baseline configuration and implement default settings that are
+secure, so the software is safe when deployed without customization.
+"""
+remediation = "Remove debug defaults and permissive CORS from production configuration."
+
+  [[controls.checks]]
+  id          = "no-debug-enabled-by-default"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,rb,js,ts,yml,yaml,json,toml,conf}"
+  pattern     = "(?i)(DEBUG\\s*[:=]\\s*True\\b|debug\\s*[:=]\\s*true\\b.*prod|FLASK_DEBUG\\s*[:=]\\s*1)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*", "**/test/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Debug mode leaks stack traces and disables protections. Test fixtures are excluded."
+
+  [[controls.checks]]
+  id          = "no-wildcard-cors"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,yml,yaml,conf}"
+  pattern     = "(?i)(Access-Control-Allow-Origin[\"']?\\s*[:,=]\\s*[\"']\\*|allow_origins\\s*=\\s*\\[\\s*[\"']\\*|cors\\s*\\(\\s*origin\\s*:\\s*[\"']\\*)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A wildcard CORS origin is an insecure default for any authenticated endpoint."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PO / RV — organizational and response practices, declared not omitted.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "PO.2"
+title     = "Implement roles and responsibilities"
+clause    = "SSDF PO.2.1, PO.2.2"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Create new roles and alter responsibilities for personnel to encompass all parts
+of the SSDF, and provide role-based training so personnel can perform them.
+"""
+remediation = "Provide the role definitions, assignment records, and training completion evidence."
+
+  [[controls.checks]]
+  id          = "roles-documented"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", "docs/roles.md", "CONTRIBUTING.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+CODEOWNERS assigns review routing, not SSDF roles, and cannot evidence training.
+Reported Unknown unconditionally; the auditor must obtain role assignments and
+training records.
+"""
+
+[[controls]]
+id        = "PO.3"
+title     = "Implement supporting toolchains"
+clause    = "SSDF PO.3.1, PO.3.2, PO.3.3"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Specify which tools must be included in each toolchain, deploy and maintain them
+with security in mind, and configure them to generate artifacts supporting
+secure development practices.
+"""
+remediation = "Provide the toolchain specification and evidence the build system itself is hardened."
+
+  [[controls.checks]]
+  id          = "toolchain-pinned"
+  kind        = "file-exists"
+  paths       = ["rust-toolchain.toml", "rust-toolchain", ".nvmrc", ".python-version", ".tool-versions", "Dockerfile"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  # A pinned toolchain is real evidence of PO.3.2 in part — but the practice is
+  # mostly about the security of the BUILD SYSTEM, which is infrastructure.
+  rationale   = """
+A pinned toolchain evidences reproducibility but not that the build system is
+deployed and maintained securely, which is where this practice lives. Reported
+Unknown; the auditor must examine the build infrastructure.
+"""
+
+[[controls]]
+id        = "RV.1"
+title     = "Identify and confirm vulnerabilities on an ongoing basis"
+clause    = "SSDF RV.1.1, RV.1.2, RV.1.3"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Gather information from acquirers, users and public sources on potential
+vulnerabilities, review and confirm them, and have a policy for receiving
+vulnerability reports.
+"""
+remediation = "Provide the vulnerability disclosure policy and evidence that reports are triaged."
+
+  [[controls.checks]]
+  id          = "disclosure-policy-published"
+  kind        = "file-exists"
+  paths       = ["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md", "security.txt", ".well-known/security.txt"]
+  on_match    = "unknown"
+  on_no_match = "gap"
+  # Asymmetric deliberately: a published policy does not evidence triage, but
+  # having NO disclosure channel at all is a genuine, source-visible gap.
+  rationale   = """
+A published security contact is necessary but not sufficient — it does not
+evidence that reports are received, triaged or acted on. A hit is Unknown; total
+absence is a real gap in this practice.
+"""
+
+[[controls]]
+id        = "RV.2"
+title     = "Assess, prioritize and remediate vulnerabilities"
+clause    = "SSDF RV.2.1, RV.2.2"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Analyze each vulnerability to gather sufficient information to plan its
+remediation, and develop and implement a remediation plan.
+"""
+remediation = "Provide the vulnerability register and remediation SLA evidence."
+
+  [[controls.checks]]
+  id          = "remediation-tracking"
+  kind        = "file-exists"
+  paths       = ["docs/security-advisories.md", "SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Vulnerability triage and remediation are tracked in an issue tracker or
+vulnerability management system, not in source. Reported Unknown unconditionally.
+"""

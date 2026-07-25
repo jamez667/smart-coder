@@ -15,41 +15,85 @@ use sc_comply::status::{Outcome, Severity};
 
 use super::{LintCtx, LintFinding};
 
-/// Words in a control's intent/title that mark it as organizational — settled by
-/// interview, contract or record review rather than by reading code.
+/// Phrases marking a control as organizational — settled by interview, contract
+/// or record review rather than by reading code.
+///
+/// These are deliberately **phrases, not bare words**. An earlier version listed
+/// `"personnel"`, `"integrity"`, `"contract"` and `"training"` on their own and
+/// fired on NIST SSDF PS.1 ("only authorized personnel can change it") and PS.2
+/// ("software acquirers can verify integrity") — both squarely technical
+/// controls about branch protection and release signing. A lint that cries wolf
+/// on real controls gets switched off, which costs more than the misses.
 const ORG_MARKERS: &[&str] = &[
-    "board",
-    "oversight",
-    "ethical",
-    "integrity",
+    "board of directors",
+    "board oversight",
+    "management approval",
+    "approved by management",
+    "management review",
+    "ethical values",
     "code of conduct",
     "vendor",
+    "supplier relationship",
     "third-party risk",
     "business partner",
-    "contract",
-    "personnel",
+    "due diligence",
+    "personnel shall receive",
+    "acknowledged by relevant personnel",
     "onboarding",
     "offboarding",
     "background check",
-    "training",
-    "awareness",
-    "incident response",
+    "awareness, education and training",
+    "security awareness",
+    "training completion",
+    "incident response programme",
+    "incident response plan",
     "post-incident",
     "risk assessment",
-    "management review",
     "internal audit",
     "physical access",
+    "physical security",
     "data center",
-    "disposal",
+    "secure disposal",
     "insurance",
     "business continuity",
     "disaster recovery",
     "restore test",
+    "acknowledgement record",
+];
+
+/// Topics that make a control technical even if an org phrase also appears.
+///
+/// A control can legitimately mention people while being about a mechanism —
+/// "only authorized personnel can change the code" is enforced by branch
+/// protection, which a repository absolutely can evidence.
+const TECHNICAL_OVERRIDES: &[&str] = &[
+    "branch protection",
+    "least privilege",
+    "signing",
+    "signature",
+    "checksum",
+    "encryption",
+    "cryptograph",
+    "sbom",
+    "provenance",
+    "dependency",
+    "vulnerability scan",
+    "static analysis",
+    "secure coding",
+    "logging",
+    "pipeline",
+    "unauthorized access and tampering",
+    "release integrity",
 ];
 
 /// Does this control describe something no repository can evidence?
+///
+/// Returns the matching phrase, or `None` when a technical topic overrides it.
 fn looks_organizational(control: &Control) -> Option<&'static str> {
     let haystack = format!("{} {}", control.title, control.intent).to_lowercase();
+    if TECHNICAL_OVERRIDES.iter().any(|t| haystack.contains(t)) {
+        return None;
+    }
     ORG_MARKERS.iter().copied().find(|m| haystack.contains(m))
 }
 
@@ -260,6 +304,75 @@ severity = "medium""#,
             UNKNOWN_CHECK,
         );
         assert!(findings(&src, "org-control-claims-determinism").is_empty());
+    }
+
+    #[test]
+    fn a_technical_control_mentioning_people_is_not_flagged() {
+        // Regression: NIST SSDF PS.1 says "only authorized personnel can change
+        // it", which is branch protection — squarely source-evidenceable. An
+        // earlier marker list contained the bare word "personnel" and fired on
+        // it, which is exactly how a linter earns being ignored.
+        let src = control_pack(
+            r#"id = "PS.1"
+title = "Protect all forms of code from unauthorized access and tampering"
+intent = "Store all forms of code based on least privilege so only authorized personnel can change it."
+severity = "high"
+remediation = "Enforce branch protection." "#,
+            PASSING_CHECK,
+        );
+        assert!(
+            findings(&src, "org-control-claims-determinism").is_empty(),
+            "PS.1 is a technical control about branch protection"
+        );
+    }
+
+    #[test]
+    fn a_release_integrity_control_is_not_flagged() {
+        // Regression: SSDF PS.2 mentions "acquirers" and "integrity" but is
+        // about release signing.
+        let src = control_pack(
+            r#"id = "PS.2"
+title = "Provide a mechanism for verifying software release integrity"
+intent = "Make verification information available so acquirers can confirm the software is authentic and unmodified."
+severity = "high"
+remediation = "Sign releases with cosign." "#,
+            PASSING_CHECK,
+        );
+        assert!(findings(&src, "org-control-claims-determinism").is_empty());
+    }
+
+    #[test]
+    fn a_genuinely_organizational_control_is_still_flagged() {
+        // The narrowing must not blunt the lint on real cases.
+        for (id, title, intent) in [
+            (
+                "A.6.3",
+                "Information security awareness, education and training",
+                "Personnel shall receive appropriate security awareness, education and training.",
+            ),
+            (
+                "CC9.2",
+                "Vendor risk management",
+                "The entity performs due diligence on each vendor before engagement.",
+            ),
+            (
+                "A.7.1",
+                "Physical security perimeters",
+                "Physical security perimeters shall protect areas containing information assets.",
+            ),
+        ] {
+            let src = control_pack(
+                &format!(
+                    "id = \"{id}\"\ntitle = \"{title}\"\nintent = \"{intent}\"\nseverity = \"medium\""
+                ),
+                PASSING_CHECK,
+            );
+            assert_eq!(
+                findings(&src, "org-control-claims-determinism").len(),
+                1,
+                "{id} should still be flagged"
+            );
+        }
     }
 
     #[test]

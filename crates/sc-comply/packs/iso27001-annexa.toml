@@ -1,0 +1,655 @@
+# ISO/IEC 27001:2022 Annex A — source-controlled evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE, not this file's location.
+# See docs/specs/13-compliance-evidence.md and 14-pack-authoring.md.
+#
+# SCOPING: Annex A has 93 controls. Roughly twenty yield real evidence from a
+# repository; the rest are organizational (people, physical, governance) and are
+# declared here as explicit `unknown` rather than omitted — a pack that drops
+# them lets a reader believe the framework was fully examined.
+
+[framework]
+id        = "iso27001-2022-annexa"
+name      = "ISO/IEC 27001:2022 Annex A"
+version   = "1.0.0"
+authority = "ISO/IEC"
+scope_note = """
+This pack inspects source-controlled artifacts only. It cannot observe running
+infrastructure, identity provider configuration, physical security, HR records,
+supplier contracts, or management review minutes.
+
+Annex A defines 93 controls across four themes (organizational, people,
+physical, technological). This pack evidences roughly twenty — almost entirely
+from the technological theme. The people and physical themes yield nothing from
+a repository and are declared undeterminable, not omitted.
+
+A passing result is evidence toward a control, never an attestation of
+conformity. Certification requires an accredited auditor.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TECHNOLOGICAL — where a repository actually carries evidence.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "A.8.28"
+title     = "Secure coding"
+clause    = "ISO 27001 A.8.28"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.25
+intent    = """
+Secure coding principles shall be applied to software development, including
+secure coding standards, review of code before use, protection against known
+vulnerabilities, and secure configuration of development tooling.
+"""
+remediation = """
+Adopt a documented secure-coding standard, enforce review before merge, and run
+dependency and static analysis in CI.
+"""
+
+  [[controls.checks]]
+  id          = "dependency-scanning-configured"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated dependency update/denial policy. May instead run in an external pipeline."
+
+  [[controls.checks]]
+  id          = "static-analysis-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|trivy|snyk|checkmarx)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Static analysis in the pipeline. CI may be hosted where source cannot see it."
+
+  [[controls.checks]]
+  id          = "contribution-standard-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", ".github/CONTRIBUTING.md", "docs/coding-standards.md"]
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented contribution/coding standard. Presence does not evidence adherence."
+
+  [[controls.checks]]
+  id          = "review-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named reviewers per area. Review enforcement usually lives in the VCS provider."
+
+[[controls]]
+id        = "A.8.24"
+title     = "Use of cryptography"
+clause    = "ISO 27001 A.8.24"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Rules for the effective use of cryptography, including key management, shall be
+defined and implemented. Weak or deprecated algorithms shall not be used.
+"""
+remediation = """
+Replace deprecated primitives with SHA-256+/AES-GCM, and remove any code path
+that disables certificate verification. Rotate any key found in source.
+"""
+
+  [[controls.checks]]
+  id          = "no-broken-hash-primitives"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  # Deliberately narrow: matches CONSTRUCTION of a weak digest, not the words
+  # "md5"/"sha1" in a comment, a filename, or a dependency-integrity field where
+  # the algorithm is not the application's choice.
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|createHash\\s*\\(\\s*[\"'](md5|sha1)[\"']|MessageDigest\\.getInstance\\s*\\(\\s*\"(MD5|SHA-?1)\")"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Construction of a broken digest for security purposes. Non-security uses (checksums, cache keys) are false positives worth reviewing."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification voids transport encryption entirely."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Key management begins with keys not being in version control."
+
+[[controls]]
+id        = "A.8.12"
+title     = "Data leakage prevention"
+clause    = "ISO 27001 A.8.12"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Data leakage prevention measures shall be applied to systems, networks and
+devices that process, store or transmit sensitive information.
+"""
+remediation = """
+Rotate any exposed credential — deletion is insufficient, the value remains in
+git history. Add a secret scanner as a pre-commit hook and to CI.
+"""
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|ghp_[0-9A-Za-z]{36}|-----BEGIN OPENSSH)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Long-lived static credentials embedded in tracked files."
+
+  [[controls.checks]]
+  id          = "env-file-not-tracked"
+  kind        = "file-absent"
+  path        = ".env"
+  on_match    = "gap"
+  on_no_match = "pass"
+  rationale   = "A tracked .env commonly carries live credentials."
+
+  [[controls.checks]]
+  id          = "secret-exclusions-configured"
+  kind        = "regex-match-in-glob"
+  glob        = ".gitignore"
+  pattern     = "(?m)^\\s*[/*]*\\.?(env|\\*\\.pem|\\*\\.key|secrets?)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Preventive: secrets excluded from version control."
+
+[[controls]]
+id        = "A.8.8"
+title     = "Management of technical vulnerabilities"
+clause    = "ISO 27001 A.8.8"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Information about technical vulnerabilities of information systems in use shall
+be obtained, exposure evaluated, and appropriate measures taken.
+"""
+remediation = "Add a dependency audit step (cargo audit, pip-audit, npm audit, Dependabot) to CI."
+
+  [[controls.checks]]
+  id          = "vulnerability-scanning-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|safety check|snyk|trivy|grype|dependency-check|osv-scanner)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An automated vulnerability scan runs in the pipeline."
+
+  [[controls.checks]]
+  id          = "automated-update-policy"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated dependency update or denial policy."
+
+[[controls]]
+id        = "A.8.31"
+title     = "Separation of development, test and production environments"
+clause    = "ISO 27001 A.8.31"
+severity  = "medium"
+# One check, so `all` — `any` with a single check differs only in its Unknown
+# handling and reads as accidental.
+aggregate = "all"
+intent    = """
+Development, testing and production environments shall be separated and secured.
+"""
+remediation = "Provide the deployment topology; environment separation is largely an infrastructure fact."
+
+  [[controls.checks]]
+  id          = "environment-separation-declared"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,tfvars,json}"
+  pattern     = "(?i)(environment\\s*[:=]\\s*[\"']?(prod|production|staging|dev|development)|workspace\\s*[:=]\\s*[\"']?(prod|staging)|env\\s*[:=]\\s*[\"']?(prod|staging))"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Environment-aware configuration suggests separation. Real separation is an infrastructure property this cannot confirm."
+
+[[controls]]
+id        = "A.8.15"
+title     = "Logging"
+clause    = "ISO 27001 A.8.15"
+severity  = "medium"
+aggregate = "any"
+intent    = """
+Logs recording activities, exceptions, faults and other relevant events shall be
+produced, stored, protected and analysed.
+"""
+remediation = "Adopt structured logging with correlation ids and ship logs to protected retention."
+
+  [[controls.checks]]
+  id          = "structured-logging-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.|logrus)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "The application emits logs. Storage, protection and analysis are not source-visible."
+
+  [[controls.checks]]
+  id          = "log-shipping-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,conf}"
+  pattern     = "(?i)(fluentd|fluent-bit|logstash|vector\\.dev|cloudwatch_log|loki|datadog|splunk)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Log shipping to protected retention. Usually infrastructure, not repository."
+
+[[controls]]
+id        = "A.8.16"
+title     = "Monitoring activities"
+clause    = "ISO 27001 A.8.16"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Networks, systems and applications shall be monitored for anomalous behaviour
+and appropriate actions taken to evaluate potential security incidents.
+"""
+remediation = "Route alerts to an on-call destination; provide the alerting configuration."
+
+  [[controls.checks]]
+  id          = "alerting-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,json}"
+  pattern     = "(?i)(alertmanager|pagerduty|opsgenie|sentry|cloudwatch_metric_alarm|prometheusrule|datadog_monitor)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Alert routing is frequently external; absence is not evidence of absence."
+
+[[controls]]
+id        = "A.8.32"
+title     = "Change management"
+clause    = "ISO 27001 A.8.32"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.7
+gap_below = 0.35
+intent    = """
+Changes to information processing facilities and information systems shall be
+subject to change management procedures.
+"""
+remediation = """
+Require review and a green automated test run before merge; retain the branch
+protection configuration as code where the provider allows it.
+"""
+
+  [[controls.checks]]
+  id          = "ci-pipeline-defined"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml"]
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated pipeline runs on change."
+
+  [[controls.checks]]
+  id          = "ci-runs-tests"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "A testing gate is evidenced in the pipeline definition."
+
+  [[controls.checks]]
+  id          = "review-required"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  # Branch protection normally lives in the provider's API. Absence here is NOT
+  # evidence that review is unenforced.
+  on_no_files = "unknown"
+  rationale   = """
+Branch protection requiring review. Usually configured server-side; the auditor
+must obtain an API export or screenshot from the VCS provider.
+"""
+
+[[controls]]
+id        = "A.8.9"
+title     = "Configuration management"
+clause    = "ISO 27001 A.8.9"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Configurations, including security configurations, of hardware, software,
+services and networks shall be established, documented, implemented, monitored
+and reviewed.
+"""
+remediation = "Define configuration as code and scan it for drift from secure baselines."
+
+  [[controls.checks]]
+  id          = "infrastructure-as-code"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml}"
+  pattern     = "(?m)^\\s*(resource|module|provider)\\s+\"|(?i)(apiVersion:\\s*apps/|kind:\\s*(Deployment|StatefulSet|DaemonSet))"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Configuration established as code. Hardware and network config is out of scope for a repository."
+
+  [[controls.checks]]
+  id          = "config-scanning-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(checkov|tfsec|tflint|terrascan|kics|cfn-lint|kube-score|kubesec|conftest)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Automated detection of deviation from secure configuration templates."
+
+[[controls]]
+id        = "A.8.25"
+title     = "Secure development life cycle"
+clause    = "ISO 27001 A.8.25"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Rules for the secure development of software and systems shall be established
+and applied.
+"""
+remediation = "Document the SDLC and evidence its gates in the pipeline."
+
+  [[controls.checks]]
+  id          = "sdlc-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", "docs/development.md", "docs/sdlc.md", "docs/specs"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Documented development process. Presence evidences documentation, not adherence."
+
+  [[controls.checks]]
+  id          = "automated-quality-gate"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},scripts/check.*}"
+  pattern     = "(?i)(fmt --check|clippy|lint|test)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An enforced quality gate in the development lifecycle."
+
+[[controls]]
+id        = "A.5.14"
+title     = "Information transfer"
+clause    = "ISO 27001 A.5.14"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Transfer rules, procedures and agreements shall be in place for all types of
+transfer facilities within the organization and between the organization and
+other parties.
+"""
+remediation = "Enforce TLS on all external endpoints; remove plaintext HTTP to public hosts."
+
+  [[controls.checks]]
+  id          = "no-plaintext-http-endpoints"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  # Written WITHOUT look-around (the regex crate rejects it): match a public TLD
+  # rather than "not localhost". Known false positives on documentation URLs and
+  # example.com, accepted as noise over missing a real plaintext endpoint.
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Outbound plaintext transfer to a public host."
+
+  [[controls.checks]]
+  id          = "tls-floor-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{conf,yml,yaml,tf,toml,json}"
+  pattern     = "(?i)(ssl_protocols\\s+TLSv1\\.[23]|minimum_protocol_version|min_tls_version|MinimumTlsVersion|ssl_min_version)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An explicit TLS floor. Absence may only mean the platform sets it."
+
+[[controls]]
+id        = "A.8.13"
+title     = "Information backup"
+clause    = "ISO 27001 A.8.13"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Backup copies of information, software and systems shall be maintained and
+regularly tested in accordance with the agreed topic-specific policy on backup.
+"""
+remediation = "Provide backup configuration and, critically, evidence of restore testing."
+
+  [[controls.checks]]
+  id          = "backup-configured-as-code"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml}"
+  pattern     = "(?i)(backup_retention_period|backup_policy|velero|snapshot_schedule|point_in_time_recovery|aws_backup_plan)"
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  # Deliberately unconditional: finding backup CONFIG says nothing about whether
+  # a restore was ever tested, which is what the control actually requires.
+  rationale   = """
+Backup configuration may be visible, but this control requires evidence that
+restores are regularly TESTED. No repository can show that. Reported Unknown
+unconditionally; the auditor must obtain restore test records.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ORGANIZATIONAL / PEOPLE / PHYSICAL — declared, not omitted.
+#
+# Every check below maps unconditionally to `unknown`. Finding a document
+# evidences that a control is DOCUMENTED, never that it OPERATES, and these
+# controls are settled by interview, records review and observation.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "A.5.1"
+title     = "Policies for information security"
+clause    = "ISO 27001 A.5.1"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Information security policy and topic-specific policies shall be defined,
+approved by management, published, communicated to and acknowledged by relevant
+personnel, and reviewed at planned intervals.
+"""
+remediation = "Provide the approved policy set, communication records, and acknowledgement evidence."
+
+  [[controls.checks]]
+  id          = "policy-document-present"
+  kind        = "file-exists"
+  paths       = ["SECURITY.md", "docs/SECURITY.md", ".github/SECURITY.md", "docs/policies"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A repository may hold policy text, but cannot evidence management approval,
+communication, personnel acknowledgement, or periodic review. The auditor must
+obtain the approved policy set and its acknowledgement records.
+"""
+
+[[controls]]
+id        = "A.5.15"
+title     = "Access control"
+clause    = "ISO 27001 A.5.15"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Rules to control physical and logical access to information and other associated
+assets shall be established and implemented based on business and information
+security requirements.
+"""
+remediation = "Provide the identity provider configuration and access review records."
+
+  [[controls.checks]]
+  id          = "repository-access-rules"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", ".github/settings.yml"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  # Repository ownership is a sliver of access control; the identity provider is
+  # where the control actually lives.
+  rationale   = """
+CODEOWNERS covers review routing, not access provisioning, review or revocation.
+Those live in the identity provider. Reported Unknown; the auditor must obtain
+IdP configuration and access review records.
+"""
+
+[[controls]]
+id        = "A.5.19"
+title     = "Information security in supplier relationships"
+clause    = "ISO 27001 A.5.19"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Processes and procedures shall be defined and implemented to manage the
+information security risks associated with the use of supplier products or
+services.
+"""
+remediation = "Provide the supplier register, due-diligence records, and contractual security terms."
+
+  [[controls.checks]]
+  id          = "dependency-inventory-present"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "poetry.lock", "go.sum", "sbom.json", "sbom.xml"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A lockfile inventories software dependencies, not supplier relationships. Due
+diligence, contracts and supplier risk assessments are not source-controlled.
+Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "A.6.3"
+title     = "Information security awareness, education and training"
+clause    = "ISO 27001 A.6.3"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Personnel and relevant interested parties shall receive appropriate information
+security awareness, education and training, and regular updates of policies and
+procedures relevant to their job function.
+"""
+remediation = "Provide training completion records from the LMS or HR system."
+
+  [[controls.checks]]
+  id          = "training-material-present"
+  kind        = "file-exists"
+  paths       = ["docs/security-training.md", "docs/onboarding.md", "CONTRIBUTING.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Training completion is recorded in an LMS or HR system, never in a repository.
+Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "A.5.24"
+title     = "Information security incident management planning and preparation"
+clause    = "ISO 27001 A.5.24"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The organization shall plan and prepare for managing information security
+incidents by defining, establishing and communicating incident management
+processes, roles and responsibilities.
+"""
+remediation = "Provide the incident response plan, on-call rota, and post-incident reviews."
+
+  [[controls.checks]]
+  id          = "incident-runbook-present"
+  kind        = "file-exists"
+  paths       = ["docs/incident-response.md", "docs/runbook.md", "SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A runbook evidences a document. Incident tickets, on-call rotas and post-incident
+reviews evidence the process, and they live outside version control. Reported
+Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "A.7.1"
+title     = "Physical security perimeters"
+clause    = "ISO 27001 A.7.1"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Security perimeters shall be defined and used to protect areas that contain
+information and other associated assets.
+"""
+remediation = "Provide facility documentation, access logs, and (for cloud) the provider's audited reports."
+
+  [[controls.checks]]
+  id          = "physical-security-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/physical-security.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  # Present so the report shows the control exists and was consciously excluded.
+  rationale   = """
+Physical security is not observable from a repository under any circumstances.
+Declared here so the evidence pack does not imply the Annex A physical theme was
+examined. For cloud-hosted systems this inherits from the provider's own audit.
+"""
+
+[[controls]]
+id        = "A.5.30"
+title     = "ICT readiness for business continuity"
+clause    = "ISO 27001 A.5.30"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+ICT readiness shall be planned, implemented, maintained and tested based on
+business continuity objectives and ICT continuity requirements.
+"""
+remediation = "Provide the continuity plan and evidence of continuity/DR testing."
+
+  [[controls.checks]]
+  id          = "continuity-plan-present"
+  kind        = "file-exists"
+  paths       = ["docs/business-continuity.md", "docs/disaster-recovery.md", "docs/dr.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A plan document cannot evidence that continuity was TESTED, which is what this
+control requires. Reported Unknown unconditionally; the auditor must obtain DR
+test results.
+"""
