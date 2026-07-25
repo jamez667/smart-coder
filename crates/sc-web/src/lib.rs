@@ -15,7 +15,7 @@ mod remote_confirm;
 mod server;
 mod swarm_server;
 
-pub use comply_server::{serve_comply, ComplyRun};
+pub use comply_server::{serve_comply, ComplyRun, FrameworkEntry};
 pub use hub::{sse_frame, FnHubSink, Hub, HubSink};
 pub use iterate_server::{serve_iterate, IterateServer};
 pub use mirror_server::{serve_mirror, InboundCmd, RemoteMirror};

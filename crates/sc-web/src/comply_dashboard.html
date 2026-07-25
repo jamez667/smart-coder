@@ -25,6 +25,9 @@
     border-radius:5px; padding:3px 10px; font:inherit; cursor:pointer; }
   header button:hover { background:var(--accent); color:#08111a; }
   header button:disabled { opacity:.45; cursor:default; }
+  header select { background:var(--panel2); color:var(--fg); border:1px solid var(--border);
+    border-radius:5px; padding:3px 8px; font:inherit; cursor:pointer; max-width:22em; }
+  header select:focus { outline:1px solid var(--accent); }
   main { padding:14px; display:flex; flex-direction:column; gap:14px; }
   .box { background:var(--panel); border:1px solid var(--border); border-radius:8px;
     display:flex; flex-direction:column; overflow:hidden; }
@@ -113,10 +116,11 @@
 <body>
 <header>
   <span class="badge">sc-comply</span>
+  <select id="framework" title="Switch framework"></select>
   <span class="fw" id="fw">loading…</span>
   <span class="meta" id="meta"></span>
   <span class="status" id="status">●</span>
-  <button id="rerun" title="Re-run the audit against the workspace">re-run audit</button>
+  <button id="rerun" title="Re-run this framework's audit against the workspace">re-run audit</button>
 </header>
 <main>
   <section class="box" id="scope">
@@ -171,6 +175,14 @@ const STATUSES = ['all','gap','unknown','error','pass','not-applicable'];
 
 let PACK = null;
 let FILTER = 'all';
+// The framework currently displayed. Null until /frameworks answers; the server
+// falls back to its default when the param is absent or unknown.
+let FRAMEWORK = new URLSearchParams(location.search).get('framework') || null;
+
+// Append ?framework= to a path, preserving whichever framework is selected.
+const withFw = path => FRAMEWORK
+  ? path + (path.includes('?') ? '&' : '?') + 'framework=' + encodeURIComponent(FRAMEWORK)
+  : path;
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -335,10 +347,46 @@ function render(p) {
   renderControls(p);
 }
 
+// Populate the framework selector. Hidden when only one framework is served,
+// so a single-pack run looks exactly as it did before.
+async function loadFrameworks() {
+  const sel = $('framework');
+  try {
+    const r = await fetch(withK('/frameworks'));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const { frameworks } = await r.json();
+    if (!frameworks || frameworks.length <= 1) {
+      sel.style.display = 'none';
+      return;
+    }
+    sel.textContent = '';
+    frameworks.forEach(f => {
+      const o = el('option', null, f.title + '  (' + f.controls + ' controls)');
+      o.value = f.name;
+      sel.appendChild(o);
+    });
+    // Honour ?framework= from the URL; otherwise the server's default is first.
+    if (FRAMEWORK && frameworks.some(f => f.name === FRAMEWORK)) sel.value = FRAMEWORK;
+    else FRAMEWORK = frameworks[0].name;
+
+    sel.onchange = () => {
+      FRAMEWORK = sel.value;
+      // Keep the URL shareable and the back button meaningful.
+      const u = new URLSearchParams(location.search);
+      u.set('framework', FRAMEWORK);
+      history.replaceState(null, '', location.pathname + '?' + u.toString());
+      FILTER = 'all';
+      load();
+    };
+  } catch (e) {
+    sel.style.display = 'none';
+  }
+}
+
 async function load() {
   setStatus('● loading', 'var(--yellow)');
   try {
-    const r = await fetch(withK('/report'));
+    const r = await fetch(withK(withFw('/report')));
     if (!r.ok) throw new Error('HTTP ' + r.status);
     render(await r.json());
     setStatus('● ready', 'var(--green)');
@@ -354,7 +402,7 @@ $('rerun').onclick = async () => {
   b.disabled = true;
   setStatus('● auditing', 'var(--yellow)');
   try {
-    const r = await fetch('/audit', {
+    const r = await fetch(withFw('/audit'), {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + TOKEN },
     });
@@ -368,7 +416,8 @@ $('rerun').onclick = async () => {
   }
 };
 
-load();
+// Frameworks first, so the selector reflects the pack we then load.
+loadFrameworks().then(load);
 </script>
 </body>
 </html>

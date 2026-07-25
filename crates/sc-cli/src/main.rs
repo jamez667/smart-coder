@@ -535,28 +535,40 @@ fn comply_task(cli: &Cli, pack_arg: Option<String>) -> ExitCode {
         }
     };
 
+    // With --pack, show that one framework. Without, offer ALL shipped packs:
+    // the interesting question is usually not "how do we score against SOC 2"
+    // but "where do our frameworks overlap, and what is genuinely missing".
+    //
     // Parse and validate before binding a port: a malformed pack must fail here,
     // not halfway through an audit whose output someone will sign.
-    let pack = match resolve_pack(pack_arg) {
-        Ok(p) => p,
+    let frameworks = match build_frameworks(pack_arg) {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
     };
 
-    let framework = pack.framework.name.clone();
-    let controls = pack.controls.len();
+    let framework = frameworks
+        .first()
+        .map(|f| f.pack.framework.name.clone())
+        .unwrap_or_default();
+    let controls: usize = frameworks.iter().map(|f| f.pack.controls.len()).sum();
+    let count = frameworks.len();
     let spec = sc_web::ComplyRun {
         workspace: workspace.clone(),
-        pack,
+        frameworks,
         options: sc_comply::collector::ComplyOptions::default(),
     };
 
     let token = sc_web::mint_token();
     let addr = format!("127.0.0.1:{}", cli.port);
     let result = sc_web::serve_comply(spec, &addr, &token, |url| {
-        println!("sc-comply — {framework} ({controls} controls)");
+        if count > 1 {
+            println!("sc-comply — {count} frameworks, {controls} controls total");
+        } else {
+            println!("sc-comply — {framework} ({controls} controls)");
+        }
         println!("workspace: {}", workspace.display());
         println!("evidence pack live at {url}/?k={token}");
         println!("command checks are DISABLED by default; review the pack before enabling them.");
@@ -713,6 +725,37 @@ fn comply_eval(cli: &Cli, model_specs: Vec<String>) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Build the framework list the dashboard offers.
+///
+/// With an explicit `--pack`, just that one. Without, every shipped pack — a
+/// user who has not named a framework usually wants to see the landscape.
+fn build_frameworks(pack_arg: Option<String>) -> Result<Vec<sc_web::FrameworkEntry>, String> {
+    if let Some(spec) = pack_arg {
+        let name = sc_comply::registry::find(&spec)
+            .map(|p| p.name.to_string())
+            .unwrap_or_else(|| {
+                // A user-authored path: name it after the file so the selector
+                // and the ?framework= query still have something to key on.
+                std::path::Path::new(&spec)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "custom".to_string())
+            });
+        let pack = resolve_pack(Some(spec))?;
+        return Ok(vec![sc_web::FrameworkEntry { name, pack }]);
+    }
+
+    let mut out = Vec::with_capacity(sc_comply::registry::SHIPPED.len());
+    for entry in sc_comply::registry::SHIPPED {
+        let pack = sc_comply::registry::load_shipped(entry.name).map_err(|e| e.to_string())?;
+        out.push(sc_web::FrameworkEntry {
+            name: entry.name.to_string(),
+            pack,
+        });
+    }
+    Ok(out)
 }
 
 /// Resolve `--pack` to a loaded pack.
