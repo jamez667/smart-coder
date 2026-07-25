@@ -76,6 +76,59 @@ mod self_critique {
         );
     }
 
+    /// Every pack shipped in `crates/sc-comply/packs/` must load and lint clean.
+    ///
+    /// This is the collection-wide version of the SOC 2 self-critique: as packs
+    /// multiply, the risk is that quality quietly degrades with volume. Adding a
+    /// pack automatically enrolls it here — there is no list to forget to update.
+    #[test]
+    fn every_shipped_pack_loads_and_has_no_blocking_findings() {
+        let dir = repo_root().join("crates/sc-comply/packs");
+        let sample = Sample::load(&repo_root());
+
+        let mut packs: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("packs directory")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .collect();
+        packs.sort();
+
+        assert!(
+            packs.len() >= 5,
+            "expected the shipped pack collection, found {}",
+            packs.len()
+        );
+
+        let mut failures = Vec::new();
+        for path in &packs {
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+            let pack = match sc_comply::Pack::load(path) {
+                Ok(p) => p,
+                Err(e) => {
+                    failures.push(format!("{name}: failed to load: {e}"));
+                    continue;
+                }
+            };
+            let report = lint_pack(&pack, Some(&sample));
+            for f in report.blocking() {
+                failures.push(format!(
+                    "{name} [{}] {} — {}",
+                    f.severity.label(),
+                    f.locus,
+                    f.summary
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} blocking finding(s) across {} shipped pack(s):\n{}",
+            failures.len(),
+            packs.len(),
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn linting_the_shipped_pack_needs_no_model_and_does_not_panic() {
         // Also the smoke test that every lint survives a real 4k-file tree.

@@ -1,0 +1,275 @@
+# GDPR (Regulation (EU) 2016/679) — thin evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# DELIBERATELY THIN, and the reason matters: GDPR is a law about the LAWFULNESS
+# and GOVERNANCE of personal data processing. Almost nothing it requires is
+# visible in source code. Lawful basis, consent records, DPIAs, records of
+# processing (Art. 30), transfer mechanisms, data subject request handling and
+# breach notification are all documentary and organizational.
+#
+# Article 32 (security of processing) is the only article with a genuine
+# technical surface, and even there the regulation asks for measures
+# "appropriate to the risk" — a judgment about the data, not a checklist.
+#
+# Anyone reading this pack expecting a GDPR readiness score should stop. It
+# evidences engineering hygiene that supports Article 32 and declares the rest.
+
+[framework]
+id        = "gdpr-2016-679"
+name      = "GDPR (Regulation (EU) 2016/679)"
+version   = "1.0.0"
+authority = "European Union"
+scope_note = """
+DELIBERATELY NARROW — and GDPR is the framework where that matters most.
+
+GDPR governs the lawfulness of personal data processing. This pack can evidence
+a small part of Article 32 (security of processing) as it appears in code. It
+cannot evidence anything about:
+
+  * lawful basis and consent (Art. 6, 7)
+  * data subject rights: access, rectification, erasure, portability (Art. 12-23)
+  * records of processing activities (Art. 30)
+  * data protection impact assessments (Art. 35)
+  * the Data Protection Officer (Art. 37-39)
+  * international transfers and their safeguards (Ch. V)
+  * breach notification within 72 hours (Art. 33, 34)
+  * processor contracts (Art. 28)
+
+Those are the substance of GDPR. A repository holds none of them.
+
+Article 32 itself requires measures "appropriate to the risk", which depends on
+what personal data is processed and how sensitive it is — questions this tool
+cannot answer. A passing result is engineering hygiene, not GDPR compliance, and
+must never be presented as the latter. Consult a data protection specialist.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Article 32 — Security of processing (the only technical surface)
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "Art32-1a"
+title     = "Pseudonymisation and encryption of personal data"
+clause    = "GDPR Art. 32(1)(a)"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Taking into account the state of the art and the risks, the controller and
+processor shall implement appropriate technical measures including, as
+appropriate, the pseudonymisation and encryption of personal data.
+"""
+remediation = """
+Enforce TLS on endpoints carrying personal data, enable storage encryption, and
+replace deprecated cryptographic primitives.
+"""
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification is not an appropriate measure under any risk assessment."
+
+  [[controls.checks]]
+  id          = "no-broken-cryptography"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"(DES|RC4))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "\"State of the art\" in Art. 32 excludes primitives broken for two decades."
+
+[[controls]]
+id        = "Art32-1b"
+title     = "Ongoing confidentiality, integrity, availability and resilience"
+clause    = "GDPR Art. 32(1)(b)"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The ability to ensure the ongoing confidentiality, integrity, availability and
+resilience of processing systems and services.
+"""
+remediation = "Rotate any exposed credential and move secrets to a managed store."
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A credential in source is a confidentiality failure of the processing system itself."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A committed private key compromises confidentiality of everything it protects."
+
+[[controls]]
+id        = "Art32-1d"
+title     = "Regular testing and evaluation of security measures"
+clause    = "GDPR Art. 32(1)(d)"
+severity  = "high"
+aggregate = "all"
+intent    = """
+A process for regularly testing, assessing and evaluating the effectiveness of
+technical and organisational measures for ensuring the security of processing.
+"""
+remediation = "Add automated security testing to CI; evidence periodic assessment separately."
+
+  [[controls.checks]]
+  id          = "automated-security-testing"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(codeql|semgrep|bandit|gosec|clippy|snyk|trivy|cargo[- ]audit|pip-audit|npm audit|osv-scanner)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = """
+Automated security testing is part of "regularly testing". The organisational
+evaluation Art. 32(1)(d) also requires is not source-visible.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Data subject rights, lawfulness, governance — declared, not omitted.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "Art5-6"
+title     = "Principles and lawfulness of processing"
+clause    = "GDPR Art. 5, 6, 7"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Personal data shall be processed lawfully, fairly and transparently; collected
+for specified purposes; adequate, relevant and limited to what is necessary;
+accurate; kept no longer than necessary; and processed securely. Processing
+requires a lawful basis, and where that basis is consent it must be freely
+given, specific, informed and demonstrable.
+"""
+remediation = "Provide the lawful basis analysis and, where relied on, consent records."
+
+  [[controls.checks]]
+  id          = "lawfulness-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/privacy-policy.md", "PRIVACY.md", "docs/data-protection.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Lawful basis is a legal determination per processing activity, and consent must
+be demonstrable per data subject. Neither is source-controlled. A privacy policy
+in the repository evidences a published document, not lawfulness.
+"""
+
+[[controls]]
+id        = "Art12-23"
+title     = "Data subject rights"
+clause    = "GDPR Art. 12-23"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+The rights of access, rectification, erasure, restriction, portability and
+objection, exercisable by data subjects and answerable by the controller within
+one month.
+"""
+remediation = "Provide the DSAR procedure and evidence of requests handled within statutory deadlines."
+
+  [[controls.checks]]
+  id          = "dsar-handling-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/dsar.md", "docs/data-subject-requests.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Code may implement an erasure endpoint, but the right to erasure is satisfied by
+a PROCESS that finds personal data across every system, including backups. That
+is not determinable from source. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "Art30-35"
+title     = "Records of processing and data protection impact assessments"
+clause    = "GDPR Art. 30, 35"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Maintain a record of processing activities, and carry out a data protection
+impact assessment where processing is likely to result in a high risk to the
+rights and freedoms of natural persons.
+"""
+remediation = "Provide the Art. 30 record and any DPIAs, with the DPO's advice where obtained."
+
+  [[controls.checks]]
+  id          = "ropa-and-dpia-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/ropa.md", "docs/dpia.md", "docs/records-of-processing.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Records of processing and DPIAs are documentary artifacts maintained by the
+controller. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "Art33-34"
+title     = "Personal data breach notification"
+clause    = "GDPR Art. 33, 34"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Notify the supervisory authority of a personal data breach without undue delay
+and, where feasible, within 72 hours of becoming aware of it; communicate to
+data subjects where the breach is likely to result in high risk.
+"""
+remediation = "Provide the breach response procedure and the breach register."
+
+  [[controls.checks]]
+  id          = "breach-notification-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/incident-response.md", "docs/breach-procedure.md", "SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+The 72-hour notification obligation is a process with a legal deadline. A runbook
+in the repository evidences a document; the breach register and notification
+records evidence compliance. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "Ch-V"
+title     = "International transfers"
+clause    = "GDPR Chapter V (Art. 44-50)"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Transfers of personal data to a third country or international organisation may
+take place only subject to an adequacy decision, appropriate safeguards such as
+standard contractual clauses, or a derogation.
+"""
+remediation = "Provide the transfer mapping, SCCs and any transfer impact assessments."
+
+  [[controls.checks]]
+  id          = "transfers-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/transfers.md", "docs/sccs.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A cloud region in Terraform hints at data location but does not establish the
+transfer mechanism, which is contractual. Reported Unknown unconditionally.
+"""
