@@ -43,6 +43,10 @@ pub enum Command {
     ComplyLint { pack: Option<String> },
     /// List the compliance framework packs shipped with the tool.
     ListPacks,
+    /// Audit every shipped framework and write a static, REDACTED HTML site
+    /// (spec 13). Suitable for GitHub Pages: file paths, line numbers and
+    /// evidence excerpts are withheld. `--out <dir>` selects the destination.
+    ComplyExport { out: Option<String> },
     /// Run the compliance drafting eval (spec 15): draft a suite of real
     /// framework controls and grade each against a hand-labelled expectation.
     /// Measures whether a model stays honest when the easy answer is to invent
@@ -162,6 +166,12 @@ pub struct Cli {
     /// Fixed (not OS-assigned) so a Tailscale `serve` tunnel can point at a stable
     /// port. Always bound on `127.0.0.1` — never `0.0.0.0`.
     pub port: u16,
+    /// Serve the compliance dashboard without a URL token (`--no-token`).
+    ///
+    /// The server is bound to `127.0.0.1` regardless; this only removes the
+    /// per-run secret from the URL, which is friction for a local read-only
+    /// audit. Never defaulted on — a caller has to ask.
+    pub no_token: bool,
 }
 
 impl Cli {
@@ -203,6 +213,7 @@ impl Cli {
         let mut verbose = false;
         let mut cli_render = false;
         let mut port: u16 = 8177;
+        let mut no_token = false;
 
         let mut it = args.into_iter().map(Into::into);
         while let Some(arg) = it.next() {
@@ -212,11 +223,32 @@ impl Cli {
                 "remote" if command.is_none() => command = Some(Command::Remote),
                 "comply" if command.is_none() => command = Some(Command::Comply { pack: None }),
                 "--list-packs" if command.is_none() => command = Some(Command::ListPacks),
+                // Loopback-only, read-only dashboard: the 64-char token in the
+                // URL is friction for a local run. Opt-in only, never a default.
+                "--no-token" => no_token = true,
                 "comply-lint" if command.is_none() => {
                     command = Some(Command::ComplyLint { pack: None })
                 }
                 "comply-eval" if command.is_none() => {
                     command = Some(Command::ComplyEval { models: Vec::new() })
+                }
+                "comply-export" if command.is_none() => {
+                    command = Some(Command::ComplyExport { out: None })
+                }
+                "--out" => {
+                    let dir = it.next().ok_or_else(|| {
+                        DcError::Eval(
+                            "--out requires a directory, e.g. `--out docs/compliance`".to_string(),
+                        )
+                    })?;
+                    match &mut command {
+                        Some(Command::ComplyExport { out }) => *out = Some(dir),
+                        _ => {
+                            return Err(DcError::Eval(
+                                "--out only applies to `comply-export`".to_string(),
+                            ))
+                        }
+                    }
                 }
                 // Repeatable, so two models can be compared in one run. Accepts
                 // `model` or `model@base_url` — the local server and Gemini live
@@ -523,6 +555,7 @@ impl Cli {
             verbose,
             cli: cli_render,
             port,
+            no_token,
         })
     }
 
@@ -968,6 +1001,9 @@ COMMANDS:
     comply-lint     Critique a compliance pack's own authoring (spec 14): unsafe
                     on_no_files, unreachable patterns, over-claiming controls.
                     Deterministic — no model involved. See --pack.
+    comply-export   Audit every framework and write a static REDACTED HTML site
+                    for publishing (GitHub Pages). File paths, line numbers and
+                    excerpts are withheld. See --out.
     comply-eval     Grade models on compliance drafting honesty (spec 15).
                     Repeat --author-model to compare, e.g.
                     --author-model gemini-pro-latest@https://…/v1beta/openai
@@ -994,6 +1030,9 @@ OPTIONS:
                           pci, nist-800-53, hipaa, gdpr, eu-regulatory) or a
                           path to your own. Defaults to soc2.
     --list-packs          List the shipped compliance packs and exit.
+    --no-token            Serve `comply` without a URL token — a plain
+                          http://127.0.0.1:PORT/ link. Still loopback-only.
+                          Do not combine with `tailscale serve`.
     --plan                Decompose the task into a plan before running (`run`)
   run output, logging & safety (spec 06):
     --json                Emit the event stream as JSON lines on stdout (no TUI)
@@ -1757,6 +1796,23 @@ mod tests {
         assert!(usage().contains("comply-eval"));
         assert!(usage().contains("--pack"));
         assert!(usage().contains("--list-packs"));
+    }
+
+    #[test]
+    fn no_token_is_off_by_default_and_opt_in() {
+        // The security-relevant default. Auth must never disable itself.
+        assert!(!Cli::parse(["comply"]).unwrap().no_token);
+        assert!(Cli::parse(["comply", "--no-token"]).unwrap().no_token);
+    }
+
+    #[test]
+    fn usage_warns_against_tunnelling_a_tokenless_run() {
+        let u = usage();
+        assert!(u.contains("--no-token"));
+        assert!(
+            u.contains("tailscale serve"),
+            "the tunnel warning must be visible"
+        );
     }
 
     #[test]

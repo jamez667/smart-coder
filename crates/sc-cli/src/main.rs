@@ -42,6 +42,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::ComplyEval { models } => comply_eval(&cli, models.clone()),
+        Command::ComplyExport { out } => comply_export(out.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
         Command::Staged { task } => staged_task_json(&cli, task.clone()),
@@ -561,7 +562,13 @@ fn comply_task(cli: &Cli, pack_arg: Option<String>) -> ExitCode {
         options: sc_comply::collector::ComplyOptions::default(),
     };
 
-    let token = sc_web::mint_token();
+    // An empty token tells the server auth is off. mint_token() never returns
+    // empty, so this can only happen via the explicit flag.
+    let token = if cli.no_token {
+        String::new()
+    } else {
+        sc_web::mint_token()
+    };
     let addr = format!("127.0.0.1:{}", cli.port);
     let result = sc_web::serve_comply(spec, &addr, &token, |url| {
         if count > 1 {
@@ -570,13 +577,23 @@ fn comply_task(cli: &Cli, pack_arg: Option<String>) -> ExitCode {
             println!("sc-comply — {framework} ({controls} controls)");
         }
         println!("workspace: {}", workspace.display());
-        println!("evidence pack live at {url}/?k={token}");
+        if token.is_empty() {
+            println!("evidence pack live at {url}/");
+            println!("(--no-token: no URL secret. Bound to 127.0.0.1 only.)");
+        } else {
+            println!("evidence pack live at {url}/?k={token}");
+        }
         println!("command checks are DISABLED by default; review the pack before enabling them.");
-        println!(
-            "to reach it from your phone: run `tailscale serve {}` and open the",
-            cli.port
-        );
-        println!("printed https URL with ?k={token} on the phone (same tailnet).");
+        if token.is_empty() {
+            // Tailscale would expose an unauthenticated page to the tailnet.
+            println!("do NOT `tailscale serve` this run — it has no token; restart without --no-token first.");
+        } else {
+            println!(
+                "to reach it from your phone: run `tailscale serve {}` and open the",
+                cli.port
+            );
+            println!("printed https URL with ?k={token} on the phone (same tailnet).");
+        }
     });
 
     match result {
@@ -724,6 +741,97 @@ fn comply_eval(cli: &Cli, model_specs: Vec<String>) -> ExitCode {
         eprintln!("\n{dishonest} dishonest draft(s) across all models.");
         return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
+}
+
+/// Audit every shipped framework and write a static, redacted HTML site.
+///
+/// Redaction happens once, here, immediately after each audit — the pack that
+/// reaches the renderer has already had its citations removed, and the renderer
+/// asserts that independently. Nothing downstream has to remember.
+fn comply_export(out_arg: Option<String>) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let out_dir = workspace.join(out_arg.unwrap_or_else(|| "docs/compliance".to_string()));
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("error: cannot create {}: {e}", out_dir.display());
+        return ExitCode::FAILURE;
+    }
+
+    let options = sc_comply::collector::ComplyOptions::default();
+    let generated_at = sc_comply::evidence::now_rfc3339();
+    let mut entries: Vec<sc_comply::report::site::IndexEntry> = Vec::new();
+
+    eprintln!(
+        "auditing {} frameworks -> {}",
+        sc_comply::registry::SHIPPED.len(),
+        out_dir.display()
+    );
+
+    for shipped in sc_comply::registry::SHIPPED {
+        let pack = match sc_comply::registry::load_shipped(shipped.name) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let audited = match sc_comply::engine::audit_with(
+            &workspace,
+            &pack,
+            &options,
+            &sc_comply::collector::Registry::builtin(),
+            generated_at.clone(),
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("error: {} failed: {e}", shipped.name);
+                return ExitCode::FAILURE;
+            }
+        };
+
+        // Redact HERE, once. Everything downstream sees only the public pack.
+        let public = audited.redacted();
+        eprintln!(
+            "  {:14} {} pass · {} gap · {} unknown",
+            shipped.name, public.score.passed, public.score.gaps, public.score.unknown
+        );
+
+        let href = format!("{}.html", shipped.name);
+        let html = sc_comply::report::site::framework_page(&public, Some("index.html"));
+        if let Err(e) = std::fs::write(out_dir.join(&href), html) {
+            eprintln!("error: writing {href}: {e}");
+            return ExitCode::FAILURE;
+        }
+        entries.push(sc_comply::report::site::IndexEntry { href, pack: public });
+    }
+
+    let index = sc_comply::report::site::index_page(&entries, "the smart-coder repository");
+    if let Err(e) = std::fs::write(out_dir.join("index.html"), index) {
+        eprintln!("error: writing index.html: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // GitHub Pages runs Jekyll by default, which ignores files and directories
+    // beginning with an underscore and can rewrite others. .nojekyll turns that
+    // off so the site is served exactly as written.
+    if let Err(e) = std::fs::write(out_dir.join(".nojekyll"), "") {
+        eprintln!("warning: could not write .nojekyll: {e}");
+    }
+
+    println!(
+        "\nwrote {} pages to {}",
+        entries.len() + 1,
+        out_dir.display()
+    );
+    println!("citations, file paths and excerpts are REDACTED from every page.");
+    println!("review the output before committing, then enable GitHub Pages on this directory.");
     ExitCode::SUCCESS
 }
 

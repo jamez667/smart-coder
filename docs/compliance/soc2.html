@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>SOC 2 Trust Services Criteria (2017, rev. 2022) — compliance evidence</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
+--line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
+--error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+*{box-sizing:border-box}
+body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
+padding-bottom:.3rem;border-bottom:1px solid var(--line)}
+h3{font-size:1rem;margin:1.4rem 0 .4rem}
+a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--panel);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 1.5rem}
+.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
+border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+.note strong{color:var(--unknown)}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
+th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
+tr:hover td{background:var(--panel)}
+.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
+white-space:nowrap}
+.pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
+.gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
+.unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
+.error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
+.na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
+.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
+.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+padding:.55rem .9rem;min-width:5.5rem}
+.count b{display:block;font-size:1.45rem;line-height:1.2}
+.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.bar>div{height:100%;background:var(--link)}
+.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
+.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
+.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
+.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+</style>
+</head>
+<body>
+<p><a href="index.html">&larr; All frameworks</a></p><h1>SOC 2 Trust Services Criteria (2017, rev. 2022)</h1><p class="sub">AICPA &middot; version 1.0.0 &middot; generated 2026-07-25T23:42:33Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">This pack inspects source-controlled artifacts only. It cannot observe running
+infrastructure, cloud provider configuration, identity provider settings, HR
+processes, vendor agreements, or incident records. Controls depending on those
+are reported Unknown by design and appear in the manual-evidence worklist.
+
+Roughly five of the thirty-three common-criteria points yield deterministic
+source evidence. A passing result here is evidence toward a control, never an
+attestation of compliance.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">3</b><span>pass</span></div><div class="count"><b class="gap">1</b><span>gap</span></div><div class="count"><b class="unknown">4</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 38%</strong><br><span class="scope">3 of 8 in-scope passed</span><div class="bar"><div style="width:38%"></div></div></div><div><strong>Determinacy 50%</strong><br><span class="scope">4 of 8 could be determined</span><div class="bar"><div style="width:50%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><table><thead><tr><th>Control</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>CC6.1</strong><br><span class="scope">Logical access — credentials are not committed to source</span></td><td><span class="pill gap">gap</span></td><td>critical</td><td class="scope">all-of: worst of 5 check(s) is gap</td></tr><tr><td><strong>CC7.1</strong><br><span class="scope">Vulnerability detection in dependencies</span></td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">any-of: no mechanism evidenced, and 2 of 2 check(s) were indeterminate</td></tr><tr><td><strong>CC1.1</strong><br><span class="scope">Control environment — commitment to integrity and ethical values</span></td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC2.3</strong><br><span class="scope">Communication with external parties</span></td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC9.2</strong><br><span class="scope">Vendor and business partner risk management</span></td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC6.6</strong><br><span class="scope">Encryption of data in transit</span></td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">any-of: 3 of 3 mechanism(s) evidenced</td></tr><tr><td><strong>CC8.1</strong><br><span class="scope">Change management</span></td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 7.0/7.0 observable = 100% (pass&gt;=75%, gap&lt;40%)</td></tr><tr><td><strong>CC7.2</strong><br><span class="scope">System monitoring for anomalies</span></td><td><span class="pill pass">pass</span></td><td>medium</td><td class="scope">majority: 2 pass / 0 gap of 3 check(s)</td></tr></tbody></table><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">CC6.1</span><span class="pill gap">gap</span><span class="scope">Logical access — credentials are not committed to source</span></div><p class="intent">The entity implements logical access security software, infrastructure, and
+architectures over protected information assets to protect them from security
+events. Credentials committed to version control defeat every downstream access
+control, because the repository history retains them after deletion.</p><p class="why">all-of: worst of 5 check(s) is gap</p><p class="rem"><strong>Remediation:</strong> Rotate any exposed credential immediately — deleting the file is not sufficient,
+as the value remains in git history. Then add the path to .gitignore and adopt a
+secret scanner as a pre-commit hook.</p></div><div class="ctl"><div class="hd"><span class="id">CC7.1</span><span class="pill unknown">unknown</span><span class="scope">Vulnerability detection in dependencies</span></div><p class="intent">The entity uses detection and monitoring procedures to identify changes to
+configurations that introduce new vulnerabilities, and susceptibilities to
+newly discovered vulnerabilities.</p><p class="why">any-of: no mechanism evidenced, and 2 of 2 check(s) were indeterminate</p><p class="rem"><strong>Obtain:</strong> Add a dependency audit step (cargo audit, pip-audit, npm audit, Dependabot) to CI.</p></div><div class="ctl"><div class="hd"><span class="id">CC1.1</span><span class="pill unknown">unknown</span><span class="scope">Control environment — commitment to integrity and ethical values</span></div><p class="intent">The entity demonstrates a commitment to integrity and ethical values. This is an
+organizational control: board oversight, tone at the top, and a code of conduct
+whose operation is tested through interview and observation, not code review.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><p class="rem"><strong>Obtain:</strong> Provide the code of conduct, its acknowledgement records, and evidence of board oversight.</p></div><div class="ctl"><div class="hd"><span class="id">CC2.3</span><span class="pill unknown">unknown</span><span class="scope">Communication with external parties</span></div><p class="intent">The entity communicates with external parties regarding matters affecting the
+functioning of internal control, including a channel for reporting security
+issues.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><p class="rem"><strong>Obtain:</strong> Provide the vulnerability disclosure policy and evidence of its use.</p></div><div class="ctl"><div class="hd"><span class="id">CC9.2</span><span class="pill unknown">unknown</span><span class="scope">Vendor and business partner risk management</span></div><p class="intent">The entity assesses and manages risks associated with vendors and business
+partners. Contracts, due-diligence records and subservice-organization reports
+are the evidence, none of which is source-controlled.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><p class="rem"><strong>Obtain:</strong> Provide the vendor register, risk assessments, and subservice SOC 2 reports.</p></div>
+<footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
+</body>
+</html>

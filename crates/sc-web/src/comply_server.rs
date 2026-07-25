@@ -113,9 +113,18 @@ fn route(
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or("/");
 
+    // An EMPTY token means auth is deliberately off (`--no-token`). The server
+    // is bound to 127.0.0.1 either way, and this dashboard is read-only over a
+    // local audit of the user's own workspace — so for a local run the 64-char
+    // token in the URL is friction that buys little. It must be opted into
+    // explicitly; `mint_token()` never returns empty, so this cannot happen by
+    // accident.
+    let open = token.is_empty();
+    let get_ok = |u: &str| open || query_token_ok(u, token);
+
     match (&method, path) {
         (Method::Get, "/") | (Method::Get, "/index.html") => {
-            if !query_token_ok(&url, token) {
+            if !get_ok(&url) {
                 return unauthorized();
             }
             html(COMPLY_DASHBOARD_HTML)
@@ -123,7 +132,7 @@ fn route(
 
         // The frameworks on offer, so the page can build its selector.
         (Method::Get, "/frameworks") => {
-            if !query_token_ok(&url, token) {
+            if !get_ok(&url) {
                 return unauthorized();
             }
             let items: Vec<String> = spec
@@ -143,7 +152,7 @@ fn route(
 
         // One framework's evidence pack, audited on first request and memoized.
         (Method::Get, "/report") => {
-            if !query_token_ok(&url, token) {
+            if !get_ok(&url) {
                 return unauthorized();
             }
             let name = match framework_param(&url, spec) {
@@ -158,7 +167,10 @@ fn route(
 
         // Re-audit one framework, replacing its cached result.
         (Method::Post, "/audit") => {
-            if !bearer_ok(request, token) {
+            // The bearer header is the CSRF defense, so it is checked even
+            // harder than the GETs — but with auth explicitly off there is no
+            // token to present.
+            if !open && !bearer_ok(request, token) {
                 return unauthorized();
             }
             let name = match framework_param(&url, spec) {
@@ -349,6 +361,15 @@ mod tests {
         let spec = multi_spec(&root);
         assert!(spec.run_one("nope").is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_token_means_auth_is_off_but_only_when_empty() {
+        // The whole safety argument for --no-token rests on mint_token() never
+        // returning empty, so a real token can never accidentally open the
+        // server. Pin that here rather than trusting the reader to check.
+        assert!(!crate::mint_token().is_empty());
+        assert_eq!(crate::mint_token().len(), 64);
     }
 
     #[test]

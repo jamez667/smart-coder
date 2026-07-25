@@ -16,6 +16,7 @@ pub mod engine;
 pub mod evidence;
 pub mod glob;
 pub mod pack;
+pub mod redact;
 pub mod registry;
 pub mod report;
 pub mod scan;
