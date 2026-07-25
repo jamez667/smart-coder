@@ -1,0 +1,372 @@
+# SLSA v1.0 build track + SBOM practice — supply-chain evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# This is the most deterministic pack in the collection. SLSA is about *how an
+# artifact was built*, and the build definition lives in the repository — so
+# unlike ISO or SOC 2, most of what SLSA asks can be answered from source.
+#
+# The honest limit: SLSA levels are properties of the BUILD PLATFORM, not of the
+# build definition. A workflow can request provenance and still run on a builder
+# that permits tampering. Every level check below therefore evidences INTENT and
+# is explicit that platform verification is the auditor's job.
+
+[framework]
+id        = "slsa-v1-build"
+name      = "SLSA v1.0 Build Track + SBOM practice"
+version   = "1.0.0"
+authority = "OpenSSF"
+scope_note = """
+This pack inspects source-controlled build definitions. It cannot observe the
+build platform itself, signing key custody, or the runtime integrity of the
+builder — and SLSA levels are ultimately properties of that platform.
+
+What this pack CAN evidence: that a build requests provenance, that artifacts
+are signed, that dependencies are pinned and inventoried, and that the build is
+reproducible in intent. What it CANNOT evidence: that the builder is isolated,
+that provenance is unforgeable, or that keys are held securely.
+
+Treat a passing result as "the repository asks for the right things". Level
+attestation requires verifying the platform.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD L1 — provenance exists
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "SLSA-B-L1"
+title     = "Build L1 — provenance exists and the build is scripted"
+clause    = "SLSA v1.0 Build L1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+The build process is fully scripted and automated, and generates provenance
+describing how the artifact was built. Provenance at L1 need not be tamper-proof;
+it must merely exist and be available to consumers.
+"""
+remediation = """
+Define the build in a CI workflow and emit a provenance attestation
+(slsa-github-generator, or in-toto/cosign attest in another platform).
+"""
+
+  [[controls.checks]]
+  id          = "build-is-scripted"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml", "Makefile", "justfile"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A scripted, repeatable build is the L1 precondition. A manual build cannot be L1."
+
+  [[controls.checks]]
+  id          = "provenance-generated"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(slsa-framework/slsa-github-generator|slsa-provenance|in-toto|attest-build-provenance|cosign attest|provenance:\\s*true)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = """
+Provenance generation in the pipeline. Evidences intent — whether the resulting
+provenance is complete and accurate is a platform property.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD L2 — hosted build, signed provenance
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "SLSA-B-L2"
+title     = "Build L2 — hosted build platform with signed provenance"
+clause    = "SLSA v1.0 Build L2"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The build runs on a hosted platform that generates and signs provenance. This
+prevents a developer from forging provenance on their own machine, though it
+does not yet protect against a compromised build itself.
+"""
+remediation = """
+Move builds to a hosted CI platform and sign the provenance (keyless signing via
+Sigstore is the usual route).
+"""
+
+  [[controls.checks]]
+  id          = "hosted-build-platform"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".gitlab-ci.yml", ".woodpecker", "azure-pipelines.yml", ".circleci/config.yml"]
+  on_match    = "pass"
+  on_no_match = "gap"
+  # A local Makefile is not a hosted platform, which is why this list is
+  # narrower than the L1 one.
+  rationale   = "A hosted CI platform. A local Makefile satisfies L1 but never L2."
+
+  [[controls.checks]]
+  id          = "provenance-signed"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cosign sign|cosign attest|sigstore|fulcio|rekor|id-token:\\s*write|slsa-github-generator)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = """
+Signing infrastructure in the pipeline. Key custody and the signing identity are
+platform facts the auditor must verify separately.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD L3 — hardened builds
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "SLSA-B-L3"
+title     = "Build L3 — hardened builds, non-falsifiable provenance"
+clause    = "SLSA v1.0 Build L3"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The build platform runs each build in an isolated environment and prevents
+secret material used to sign provenance from being accessible to user-defined
+build steps, making provenance non-falsifiable.
+"""
+remediation = """
+Use a reusable trusted builder (e.g. slsa-github-generator) rather than signing
+inside your own job, and pin all actions to immutable digests.
+"""
+
+  [[controls.checks]]
+  id          = "trusted-builder-used"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(slsa-framework/slsa-github-generator/\\.github/workflows/|generator_generic_slsa3|builder_go_slsa3)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  # Isolation is a platform property; the repo can only show which builder was
+  # asked for. Absence is Unknown rather than a gap because other platforms have
+  # equivalent trusted builders this pattern does not know about.
+  rationale   = """
+A reusable trusted builder keeps signing material out of user-controlled steps.
+Build isolation itself is a platform property — the auditor must confirm it with
+the CI provider.
+"""
+
+  [[controls.checks]]
+  id          = "actions-pinned-to-digest"
+  kind        = "regex-match-in-glob"
+  glob        = ".github/workflows/*.{yml,yaml}"
+  # A 40-hex SHA after `uses:` is an immutable pin; a tag is mutable and can be
+  # repointed by the action owner at any time.
+  pattern     = "uses:\\s*[^@\\n]+@[0-9a-f]{40}"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = """
+Actions pinned to a commit digest rather than a mutable tag. An unpinned action
+lets its owner change what runs in your build after review.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SBOM & dependency integrity
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "SBOM-1"
+title     = "A software bill of materials is produced for each release"
+clause    = "CISA SBOM minimum elements / NTIA"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Produce a machine-readable inventory of components for each release, in a
+standard format (SPDX or CycloneDX), so consumers can assess exposure to a newly
+disclosed vulnerability.
+"""
+remediation = "Generate an SBOM in CI (syft, cyclonedx-*, sbom-tool) and attach it to the release."
+
+  [[controls.checks]]
+  id          = "sbom-generated-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(syft|cyclonedx|spdx-sbom|sbom-tool|anchore/sbom-action|bom generate|cargo[- ]sbom|trivy.*--format\\s+cyclonedx)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "SBOM generation in the release pipeline — the durable form."
+
+  [[controls.checks]]
+  id          = "sbom-artifact-present"
+  kind        = "file-exists"
+  paths       = ["sbom.json", "sbom.xml", "bom.json", "bom.xml", "sbom.spdx.json", "sbom.cdx.json"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "A committed SBOM. Weaker than CI generation because it drifts from the code."
+
+[[controls]]
+id        = "SBOM-2"
+title     = "Dependencies are pinned and their integrity verified"
+clause    = "SLSA dependency track / SSDF PW.4"
+severity  = "critical"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Dependency resolution is reproducible and component integrity is verified, so a
+compromised or substituted upstream artifact is detected rather than silently
+consumed.
+"""
+remediation = """
+Commit lockfiles, enable a vulnerability audit in CI, and prefer registries that
+support integrity hashes.
+"""
+
+  [[controls.checks]]
+  id          = "lockfile-committed"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock", "Pipfile.lock"]
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A lockfile makes resolution reproducible — the precondition for knowing what shipped."
+
+  [[controls.checks]]
+  id          = "integrity-hashes-present"
+  kind        = "regex-match-in-glob"
+  glob        = "{package-lock.json,yarn.lock,pnpm-lock.yaml,Cargo.lock,go.sum,poetry.lock}"
+  pattern     = "(?i)(\"integrity\"\\s*:\\s*\"sha(256|512)-|checksum\\s*=\\s*\"|h1:|sha256:)"
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Per-component integrity hashes in the lockfile detect substitution upstream."
+
+  [[controls.checks]]
+  id          = "vulnerability-audit-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check)"
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Continuous checking that pinned components have not since been found vulnerable."
+
+[[controls]]
+id        = "SBOM-3"
+title     = "Builds are reproducible in intent"
+clause    = "SLSA build reproducibility"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+The build environment is pinned so the same source produces the same artifact,
+allowing an independent rebuild to detect tampering.
+"""
+remediation = "Pin the toolchain and base images to explicit versions or digests."
+
+  [[controls.checks]]
+  id          = "toolchain-pinned"
+  kind        = "file-exists"
+  paths       = ["rust-toolchain.toml", "rust-toolchain", ".nvmrc", ".python-version", ".tool-versions", ".ruby-version", "go.mod"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "An explicitly pinned toolchain. Some ecosystems pin elsewhere, so absence is Unknown."
+
+  [[controls.checks]]
+  id          = "no-floating-base-images"
+  kind        = "regex-must-not-match"
+  glob        = "**/{Dockerfile,Dockerfile.*,*.dockerfile}"
+  # `FROM x:latest` or a bare `FROM x` — both float, so the same source can
+  # produce different artifacts on different days.
+  pattern     = "(?im)^\\s*FROM\\s+[^\\s@]+:latest\\b|^\\s*FROM\\s+[a-z0-9._/-]+\\s*$"
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+A floating base image breaks reproducibility: the same commit builds differently
+tomorrow. Pin to a tag with a digest.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SOURCE track — partially observable
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "SLSA-S-1"
+title     = "Source track — version controlled and change-reviewed"
+clause    = "SLSA v1.0 Source track"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.5
+gap_below = 0.25
+intent    = """
+Every change to the source is tracked in version control and reviewed by a
+second person before it is incorporated, so a single compromised account cannot
+introduce a change unilaterally.
+"""
+remediation = """
+Require pull-request review with at least one approver and forbid direct pushes
+to the default branch. Retain the configuration as code where possible.
+"""
+
+  [[controls.checks]]
+  id          = "review-required-as-code"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = """
+Two-person review enforced as code. Normally configured in the provider's API,
+so absence here is not evidence that review is unenforced.
+"""
+
+  [[controls.checks]]
+  id          = "code-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", ".gitlab/CODEOWNERS"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named reviewers per area. Routing, not enforcement."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Platform properties — declared, not omitted.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "SLSA-P-1"
+title     = "Build platform isolation and key custody"
+clause    = "SLSA v1.0 build platform requirements"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The build platform isolates builds from one another, prevents user-defined steps
+from accessing provenance signing material, and protects the signing keys.
+"""
+remediation = """
+Obtain the CI provider's isolation documentation and evidence of signing key
+custody (KMS/HSM policy, or Sigstore keyless configuration).
+"""
+
+  [[controls.checks]]
+  id          = "platform-isolation-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/build-platform.md", "docs/ci-security.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  # Present so the report shows this requirement exists and was consciously
+  # excluded rather than overlooked — it is what separates real L3 from
+  # "the workflow says slsa3".
+  rationale   = """
+Build isolation and signing key custody are properties of the build PLATFORM and
+cannot be observed from a repository under any circumstances. This is the
+requirement that separates a genuine L3 from a workflow that merely names a
+level. Reported Unknown unconditionally; the auditor must verify with the CI
+provider.
+"""
