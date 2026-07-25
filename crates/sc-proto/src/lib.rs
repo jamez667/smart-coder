@@ -15,6 +15,11 @@ pub enum DcError {
     Backend(String),
     /// Something went wrong setting up or scoring an eval.
     Eval(String),
+    /// A compliance pack was malformed, or an evidence run could not proceed.
+    ///
+    /// Distinct from `Eval` because this surfaces to an *auditor*: reporting a
+    /// malformed SOC 2 pack as "eval error" would be actively misleading.
+    Comply(String),
     /// An underlying I/O failure.
     Io(std::io::Error),
 }
@@ -24,6 +29,7 @@ impl fmt::Display for DcError {
         match self {
             DcError::Backend(m) => write!(f, "backend error: {m}"),
             DcError::Eval(m) => write!(f, "eval error: {m}"),
+            DcError::Comply(m) => write!(f, "compliance error: {m}"),
             DcError::Io(e) => write!(f, "io error: {e}"),
         }
     }

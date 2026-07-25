@@ -7,6 +7,7 @@ members = [
     "crates/sc-context",
     "crates/sc-index",
     "crates/sc-verify",
+    "crates/sc-comply",
     "crates/sc-android",
     "crates/sc-core",
     "crates/sc-iterate",

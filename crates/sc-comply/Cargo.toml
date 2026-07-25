@@ -1,0 +1,19 @@
+[package]
+name = "sc-comply"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Auditor-facing compliance evidence engine: framework packs -> control-by-control evidence with citations."
+
+[lib]
+name = "sc_comply"
+path = "src/lib.rs"
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-index = { path = "../sc-index" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+regex = { workspace = true }
