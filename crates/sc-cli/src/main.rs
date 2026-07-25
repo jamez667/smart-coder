@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         Command::Run { task } => run_task(&cli, task.clone()),
         Command::Serve { task } => serve_task(&cli, task.clone()),
         Command::Remote => remote_task(&cli),
+        Command::Comply { pack } => comply_task(&cli, pack.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
         Command::Staged { task } => staged_task_json(&cli, task.clone()),
@@ -512,6 +513,89 @@ fn print_swarm_event(ev: &sc_swarm::SwarmEvent) {
             println!("{mark} swarm done — {done} integrated, {failed} failed");
         }
     }
+}
+
+/// Audit the current directory against a compliance framework pack and serve the
+/// evidence pack as a local dashboard (spec 13).
+///
+/// No model backend is involved: the built-in collectors are deterministic, which
+/// is the point — an evidence pack has to be reproducible and citable.
+fn comply_task(cli: &Cli, pack_arg: Option<String>) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let pack_path = match pack_arg {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match default_pack_path(&workspace) {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "error: no pack given and the bundled SOC 2 pack was not found.\n\
+                     pass one explicitly, e.g. \
+                     `smart-coder comply --pack crates/sc-comply/packs/soc2-tsc.toml`"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    // Parse and validate before binding a port: a malformed pack must fail here,
+    // not halfway through an audit whose output someone will sign.
+    let pack = match sc_comply::pack::Pack::load(&pack_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let framework = pack.framework.name.clone();
+    let controls = pack.controls.len();
+    let spec = sc_web::ComplyRun {
+        workspace: workspace.clone(),
+        pack,
+        options: sc_comply::collector::ComplyOptions::default(),
+    };
+
+    let token = sc_web::mint_token();
+    let addr = format!("127.0.0.1:{}", cli.port);
+    let result = sc_web::serve_comply(spec, &addr, &token, |url| {
+        println!("sc-comply — {framework} ({controls} controls)");
+        println!("workspace: {}", workspace.display());
+        println!("evidence pack live at {url}/?k={token}");
+        println!("command checks are DISABLED by default; review the pack before enabling them.");
+        println!(
+            "to reach it from your phone: run `tailscale serve {}` and open the",
+            cli.port
+        );
+        println!("printed https URL with ?k={token} on the phone (same tailnet).");
+    });
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: compliance server failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Locate the bundled SOC 2 pack relative to the workspace being audited.
+///
+/// Only finds it when auditing the smart-coder repo itself (or a checkout that
+/// vendors the crate); any other project must pass `--pack`. Returning `None`
+/// rather than guessing keeps the failure explicit.
+fn default_pack_path(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidates = [
+        workspace.join("crates/sc-comply/packs/soc2-tsc.toml"),
+        workspace.join("packs/soc2-tsc.toml"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Serve the remote iterate server for the Android client: idle until a phone POSTs a

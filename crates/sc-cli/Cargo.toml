@@ -19,4 +19,5 @@ sc-swarm = { path = "../sc-swarm" }
 sc-workflow = { path = "../sc-workflow" }
 sc-tui = { path = "../sc-tui" }
 sc-web = { path = "../sc-web" }
+sc-comply = { path = "../sc-comply" }
 serde_json = { workspace = true }

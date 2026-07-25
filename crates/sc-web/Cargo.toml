@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Local web dashboard: stream a live agent run to the browser over SSE (spec 01/06)."
 
 [dependencies]
+sc-comply = { path = "../sc-comply" }
 sc-core = { path = "../sc-core" }
 sc-iterate = { path = "../sc-iterate" }
 sc-model = { path = "../sc-model" }

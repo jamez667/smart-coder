@@ -32,6 +32,10 @@ pub enum Command {
     /// POSTs a task to `/run`, then drives an in-place Iterate run over the open
     /// workspace. No task on the command line — the phone supplies it.
     Remote,
+    /// Audit the workspace against a compliance framework pack and serve the
+    /// evidence pack as a local dashboard (spec 13). No task — the pack decides
+    /// what is evaluated. `--pack <path>` selects the framework.
+    Comply { pack: Option<String> },
     /// Run a task with the worker swarm (orchestrator + parallel workers) and
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
@@ -191,6 +195,27 @@ impl Cli {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
                 "chat" if command.is_none() => command = Some(Command::Chat),
                 "remote" if command.is_none() => command = Some(Command::Remote),
+                "comply" if command.is_none() => command = Some(Command::Comply { pack: None }),
+                // `--pack` only means anything to `comply`; accepted after the
+                // subcommand so `smart-coder comply --pack soc2.toml` reads
+                // naturally.
+                "--pack" => {
+                    let path = it.next().ok_or_else(|| {
+                        DcError::Eval(
+                            "--pack requires a path to a framework pack, e.g. \
+                             `--pack crates/sc-comply/packs/soc2-tsc.toml`"
+                                .to_string(),
+                        )
+                    })?;
+                    match &mut command {
+                        Some(Command::Comply { pack }) => *pack = Some(path),
+                        _ => {
+                            return Err(DcError::Eval(
+                                "--pack only applies to `comply`".to_string(),
+                            ))
+                        }
+                    }
+                }
                 "replay" if command.is_none() => {
                     let session = it.next().ok_or_else(|| {
                         DcError::Eval(
@@ -894,6 +919,8 @@ COMMANDS:
     plan <task>     Staged planning workflow → .smart-coder/plan/ (spec 09)
     staged <task>   Plan + BUILD via the staged decomposition engine (JSON stream)
     replay <id>     Re-render a recorded session from its log (spec 06)
+    comply          Audit this dir against a compliance pack; serve the evidence
+                    pack as a dashboard (spec 13). See --pack.
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -911,6 +938,8 @@ OPTIONS:
                           for a hosted provider). Also read from GEMINI_API_KEY.
     --no-think            Append /no_think to the prompt (needed for Qwen3 models;
                           auto-applied when the model name contains 'qwen3').
+    --pack PATH           Compliance framework pack for `comply`. Defaults to the
+                          bundled SOC 2 pack when auditing this repo.
     --plan                Decompose the task into a plan before running (`run`)
   run output, logging & safety (spec 06):
     --json                Emit the event stream as JSON lines on stdout (no TUI)
@@ -1607,6 +1636,49 @@ mod tests {
     fn flag_without_value_errors() {
         assert!(Cli::parse(["--model"]).is_err());
         assert!(Cli::parse(["--base-url"]).is_err());
+    }
+
+    #[test]
+    fn parses_comply_with_and_without_a_pack() {
+        let bare = Cli::parse(["comply"]).unwrap();
+        assert_eq!(bare.command, Command::Comply { pack: None });
+
+        let with_pack = Cli::parse(["comply", "--pack", "packs/iso27001.toml"]).unwrap();
+        assert_eq!(
+            with_pack.command,
+            Command::Comply {
+                pack: Some("packs/iso27001.toml".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn comply_honours_the_port_flag() {
+        let cli = Cli::parse(["comply", "--port", "9001"]).unwrap();
+        assert_eq!(cli.command, Command::Comply { pack: None });
+        assert_eq!(cli.port, 9001);
+    }
+
+    #[test]
+    fn pack_without_a_value_errors() {
+        assert!(Cli::parse(["comply", "--pack"]).is_err());
+    }
+
+    #[test]
+    fn pack_outside_comply_is_rejected() {
+        // Silently ignoring it would let `smart-coder run --pack x` look like it
+        // did something.
+        let err = Cli::parse(["doctor", "--pack", "x.toml"]).unwrap_err();
+        assert!(
+            format!("{err}").contains("only applies to `comply`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn usage_lists_comply() {
+        assert!(usage().contains("comply"));
+        assert!(usage().contains("--pack"));
     }
 
     #[test]

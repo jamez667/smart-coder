@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>smart-coder — compliance evidence</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#30363d; --fg:#c9d1d9;
+    --dim:#8b949e; --cyan:#39c5cf; --green:#3fb950; --red:#f85149; --magenta:#d2a8ff;
+    --yellow:#d29922; --accent:#58a6ff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { padding:10px 16px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    background:linear-gradient(90deg,#1f6feb22,transparent); }
+  header .badge { background:var(--cyan); color:#08111a; font-weight:700;
+    padding:3px 10px; border-radius:5px; }
+  header .fw { color:var(--fg); font-weight:700; }
+  header .meta { color:var(--dim); }
+  header .status { margin-left:auto; font-weight:700; }
+  header button { background:transparent; color:var(--accent); border:1px solid var(--accent);
+    border-radius:5px; padding:3px 10px; font:inherit; cursor:pointer; }
+  header button:hover { background:var(--accent); color:#08111a; }
+  header button:disabled { opacity:.45; cursor:default; }
+  main { padding:14px; display:flex; flex-direction:column; gap:14px; }
+  .box { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    display:flex; flex-direction:column; overflow:hidden; }
+  .box > h2 { margin:0; padding:8px 12px; font-size:12px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--dim); border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:8px; }
+  .box > h2 .who { color:var(--fg); text-transform:none; letter-spacing:0; font-weight:700; }
+  .box .body { padding:10px 12px; overflow-y:auto; }
+
+  /* Scope box sits ABOVE the score, deliberately: a reader who sees the numbers
+     first and the caveats last has been misled by layout. */
+  #scope h2 .dot { color:var(--yellow); }
+  #scope .lead { color:var(--yellow); font-weight:700; margin-bottom:6px; }
+  #scope .note { color:var(--dim); white-space:pre-wrap; }
+  #scope .caps { margin-top:8px; color:var(--dim); }
+  #scope .caps code { color:var(--yellow); }
+
+  /* Score */
+  .counts { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:10px; }
+  .count { background:var(--panel2); border:1px solid var(--border); border-radius:6px;
+    padding:6px 12px; min-width:86px; }
+  .count .n { font-size:19px; font-weight:700; display:block; }
+  .count .l { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .count.pass .n { color:var(--green); } .count.gap .n { color:var(--red); }
+  .count.unknown .n { color:var(--yellow); } .count.error .n { color:var(--magenta); }
+  .count.na .n { color:var(--dim); }
+  .ratios { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:6px; }
+  .ratio b { color:var(--fg); }
+  .bar { height:6px; background:#21262d; border-radius:3px; width:120px; overflow:hidden;
+    display:inline-block; vertical-align:middle; }
+  .bar > div { height:100%; background:var(--accent); width:0; transition:width .2s; }
+  .caveat { color:var(--dim); border-left:3px solid var(--border); padding-left:10px;
+    margin-top:8px; }
+
+  /* Controls */
+  .filters { display:flex; gap:8px; flex-wrap:wrap; padding:8px 12px;
+    border-bottom:1px solid var(--border); }
+  .filters button { background:var(--panel2); color:var(--dim); border:1px solid var(--border);
+    border-radius:5px; padding:3px 10px; font:inherit; cursor:pointer; }
+  .filters button.on { color:#08111a; font-weight:700; }
+  .filters button.on[data-f=all] { background:var(--fg); }
+  .filters button.on[data-f=gap] { background:var(--red); }
+  .filters button.on[data-f=unknown] { background:var(--yellow); }
+  .filters button.on[data-f=error] { background:var(--magenta); }
+  .filters button.on[data-f=pass] { background:var(--green); }
+  .filters button.on[data-f=not-applicable] { background:var(--dim); }
+
+  .ctrl { border-top:1px dashed #2a3140; padding:9px 0; }
+  .ctrl:first-child { border-top:0; }
+  .ctrl .head { display:flex; align-items:baseline; gap:10px; cursor:pointer; flex-wrap:wrap; }
+  .ctrl .head:hover .title { color:var(--accent); }
+  .ctrl .id { font-weight:700; min-width:56px; }
+  .ctrl .title { flex:1; }
+  .pill { padding:1px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+  .pill.pass { background:#12351f; color:var(--green); }
+  .pill.gap { background:#3d1417; color:var(--red); }
+  .pill.unknown { background:#3a2d0c; color:var(--yellow); }
+  .pill.error { background:#2f2340; color:var(--magenta); }
+  .pill.not-applicable { background:#21262d; color:var(--dim); }
+  .sev { color:var(--dim); font-size:11px; }
+  .sev.critical, .sev.high { color:var(--red); }
+  .ctrl .detail { padding:8px 0 2px 14px; display:none; }
+  .ctrl.open .detail { display:block; }
+  .ctrl .why { color:var(--dim); margin-bottom:6px; }
+  .ctrl .intent { color:#9fb0c3; margin-bottom:8px; }
+  .check { border-left:3px solid var(--border); padding:2px 0 6px 10px; margin:8px 0; }
+  .check.gap { border-left-color:var(--red); }
+  .check.unknown { border-left-color:var(--yellow); }
+  .check.pass { border-left-color:var(--green); }
+  .check.error { border-left-color:var(--magenta); }
+  .check .cid { color:var(--cyan); }
+  .check .kind { color:var(--dim); }
+  .check .rationale { color:var(--dim); }
+  .check .note { color:var(--yellow); }
+  .cite { margin:4px 0 0 0; }
+  .cite .loc { color:var(--accent); }
+  .cite .tag { color:var(--yellow); font-size:11px; }
+  .cite pre { margin:2px 0 0 0; color:#9fb0c3; white-space:pre-wrap; word-break:break-all;
+    background:var(--panel2); border-radius:5px; padding:5px 8px; max-height:12em; overflow:auto; }
+  .remediation { color:var(--fg); background:#0f2a1a; border:1px solid #1f5b33;
+    border-radius:6px; padding:6px 9px; margin-top:8px; }
+  .empty { color:var(--dim); }
+  .legend { color:var(--dim); margin-top:6px; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="badge">sc-comply</span>
+  <span class="fw" id="fw">loading…</span>
+  <span class="meta" id="meta"></span>
+  <span class="status" id="status">●</span>
+  <button id="rerun" title="Re-run the audit against the workspace">re-run audit</button>
+</header>
+<main>
+  <section class="box" id="scope">
+    <h2><span class="dot">●</span> scope &amp; limitations <span class="who">(read before the numbers)</span></h2>
+    <div class="body">
+      <div class="lead">This is an argument, not a verdict.</div>
+      <div class="note" id="scope-note"></div>
+      <div class="caps" id="scope-caps"></div>
+    </div>
+  </section>
+
+  <section class="box" id="score">
+    <h2><span class="dot" style="color:var(--accent)">●</span> summary</h2>
+    <div class="body">
+      <div class="counts" id="counts"></div>
+      <div class="ratios">
+        <span class="ratio">coverage <b id="cov">—</b>
+          <span class="bar"><div id="covbar"></div></span></span>
+        <span class="ratio">determinacy <b id="det">—</b>
+          <span class="bar"><div id="detbar"></div></span></span>
+      </div>
+      <div class="caveat">
+        Coverage without determinacy is meaningless: a high coverage figure at low
+        determinacy means almost nothing was verified and everything verified happened
+        to pass. Not-applicable controls are excluded from both denominators; Unknown
+        controls are included, because an unverified control is not a passing one.
+      </div>
+    </div>
+  </section>
+
+  <section class="box" id="controls">
+    <h2><span class="dot" style="color:var(--cyan)">●</span> controls
+      <span class="who" id="ctrl-count"></span></h2>
+    <div class="filters" id="filters"></div>
+    <div class="body" id="ctrl-body"><div class="empty">loading…</div></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+// The per-run token from our own URL (?k=...). Held in memory only; sent as a query
+// param on GET and as a bearer header on the state-changing POST, matching the
+// other dashboards in this crate.
+const TOKEN = new URLSearchParams(location.search).get('k') || '';
+const withK = path => path + (path.includes('?') ? '&' : '?') + 'k=' + encodeURIComponent(TOKEN);
+
+// Status order for display: problems first, then the worklist, then the good news.
+// Never sort a compliance table by control id — the reader wants the gaps.
+const ORDER = { 'gap':0, 'error':1, 'unknown':2, 'pass':3, 'not-applicable':4 };
+const SEV_ORDER = { 'critical':0, 'high':1, 'medium':2, 'low':3 };
+const STATUSES = ['all','gap','unknown','error','pass','not-applicable'];
+
+let PACK = null;
+let FILTER = 'all';
+
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  // textContent throughout: evidence excerpts are arbitrary file contents and must
+  // never be parsed as HTML.
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+function setStatus(text, color) {
+  const s = $('status');
+  s.textContent = text;
+  s.style.color = color;
+}
+
+function renderHeader(p) {
+  $('fw').textContent = p.framework.name + ' ' + p.framework.version;
+  $('meta').textContent = '· ' + p.framework.authority + ' · ' + p.workspace
+    + ' · ' + p.generated_at;
+}
+
+function renderScope(p) {
+  $('scope-note').textContent = p.scope_note || '';
+  const caps = $('scope-caps');
+  caps.textContent = '';
+  if (p.disabled_capabilities && p.disabled_capabilities.length) {
+    const d = el('div', null, 'Capabilities disabled for this run: ');
+    p.disabled_capabilities.forEach((c, i) => {
+      if (i) d.appendChild(document.createTextNode(', '));
+      d.appendChild(el('code', null, c));
+    });
+    d.appendChild(document.createTextNode(
+      ' — checks of these kinds were not executed and are reported Unknown.'));
+    caps.appendChild(d);
+  }
+  const unknown = p.score.unknown || 0;
+  if (unknown > 0) {
+    caps.appendChild(el('div', null,
+      unknown + ' control(s) could not be determined from source and require manual '
+      + 'evidence. Filter by "unknown" below for the worklist.'));
+  }
+}
+
+function renderScore(p) {
+  const s = p.score;
+  const counts = $('counts');
+  counts.textContent = '';
+  [['pass', s.passed], ['gap', s.gaps], ['unknown', s.unknown],
+   ['error', s.errors], ['na', s.not_applicable]].forEach(([k, n]) => {
+    const c = el('div', 'count ' + k);
+    c.appendChild(el('span', 'n', String(n)));
+    c.appendChild(el('span', 'l', k === 'na' ? 'n/a' : k));
+    counts.appendChild(c);
+  });
+
+  const inScope = s.total - s.not_applicable;
+  const cov = inScope ? s.passed / inScope : 0;
+  const det = inScope ? (s.passed + s.gaps) / inScope : 0;
+  const pct = v => Math.round(v * 100) + '%';
+  $('cov').textContent = pct(cov) + ' (' + s.passed + '/' + inScope + ')';
+  $('det').textContent = pct(det) + ' (' + (s.passed + s.gaps) + '/' + inScope + ')';
+  $('covbar').style.width = pct(cov);
+  $('detbar').style.width = pct(det);
+}
+
+function renderFilters(p) {
+  const f = $('filters');
+  f.textContent = '';
+  const n = st => st === 'all'
+    ? p.controls.length
+    : p.controls.filter(c => c.status === st).length;
+  STATUSES.forEach(st => {
+    const b = el('button', FILTER === st ? 'on' : null, st + ' (' + n(st) + ')');
+    b.dataset.f = st;
+    b.onclick = () => { FILTER = st; renderFilters(PACK); renderControls(PACK); };
+    f.appendChild(b);
+  });
+}
+
+function citation(e) {
+  const d = el('div', 'cite');
+  const loc = e.file + (e.line ? ':' + e.line : '');
+  d.appendChild(el('span', 'loc', loc));
+  if (e.untracked) {
+    d.appendChild(document.createTextNode(' '));
+    d.appendChild(el('span', 'tag', '[untracked]'));
+  }
+  if (e.excerpt) d.appendChild(el('pre', null, e.excerpt));
+  return d;
+}
+
+function checkNode(k) {
+  const d = el('div', 'check ' + k.status);
+  const head = el('div');
+  head.appendChild(el('span', 'cid', k.check_id));
+  head.appendChild(document.createTextNode(' '));
+  head.appendChild(el('span', 'kind', '(' + k.kind + ') — ' + k.status));
+  d.appendChild(head);
+  if (k.rationale) d.appendChild(el('div', 'rationale', k.rationale));
+  if (k.note) d.appendChild(el('div', 'note', k.note));
+  (k.evidence || []).forEach(e => d.appendChild(citation(e)));
+  if ((k.evidence || []).some(e => e.untracked)) {
+    d.appendChild(el('div', 'legend',
+      '[untracked] — matched by a .gitignore rule: present on disk but not in version '
+      + 'control. Still an exposure on developer machines and backups, but not a '
+      + 'commit to source.'));
+  }
+  return d;
+}
+
+function controlNode(c) {
+  const d = el('div', 'ctrl');
+  const head = el('div', 'head');
+  head.appendChild(el('span', 'id', c.id));
+  head.appendChild(el('span', 'title', c.title));
+  head.appendChild(el('span', 'sev ' + c.severity, c.severity));
+  head.appendChild(el('span', 'pill ' + c.status, c.status));
+  head.onclick = () => d.classList.toggle('open');
+  d.appendChild(head);
+
+  const detail = el('div', 'detail');
+  if (c.intent) detail.appendChild(el('div', 'intent', c.intent));
+  detail.appendChild(el('div', 'why', 'Determination: ' + c.rationale));
+  (c.checks || []).forEach(k => detail.appendChild(checkNode(k)));
+  if (c.remediation) {
+    detail.appendChild(el('div', 'remediation',
+      (c.status === 'unknown' ? 'Obtain: ' : 'Remediation: ') + c.remediation));
+  }
+  d.appendChild(detail);
+
+  // Gaps and errors open by default — they are why someone opened this page.
+  if (c.status === 'gap' || c.status === 'error') d.classList.add('open');
+  return d;
+}
+
+function renderControls(p) {
+  const body = $('ctrl-body');
+  body.textContent = '';
+  const rows = p.controls
+    .filter(c => FILTER === 'all' || c.status === FILTER)
+    .slice()
+    .sort((a, b) =>
+      (ORDER[a.status] - ORDER[b.status])
+      || (SEV_ORDER[a.severity] - SEV_ORDER[b.severity])
+      || a.id.localeCompare(b.id));
+
+  $('ctrl-count').textContent = '(' + rows.length + ' shown, gaps first)';
+  if (!rows.length) {
+    body.appendChild(el('div', 'empty', 'No controls with this status.'));
+    return;
+  }
+  rows.forEach(c => body.appendChild(controlNode(c)));
+}
+
+function render(p) {
+  PACK = p;
+  renderHeader(p);
+  renderScope(p);
+  renderScore(p);
+  renderFilters(p);
+  renderControls(p);
+}
+
+async function load() {
+  setStatus('● loading', 'var(--yellow)');
+  try {
+    const r = await fetch(withK('/report'));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    render(await r.json());
+    setStatus('● ready', 'var(--green)');
+  } catch (e) {
+    setStatus('● ' + e.message, 'var(--red)');
+    $('ctrl-body').textContent = '';
+    $('ctrl-body').appendChild(el('div', 'empty', 'Could not load the evidence pack: ' + e.message));
+  }
+}
+
+$('rerun').onclick = async () => {
+  const b = $('rerun');
+  b.disabled = true;
+  setStatus('● auditing', 'var(--yellow)');
+  try {
+    const r = await fetch('/audit', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + TOKEN },
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    render(await r.json());
+    setStatus('● ready', 'var(--green)');
+  } catch (e) {
+    setStatus('● ' + e.message, 'var(--red)');
+  } finally {
+    b.disabled = false;
+  }
+};
+
+load();
+</script>
+</body>
+</html>

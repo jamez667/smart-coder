@@ -7,6 +7,7 @@
 //! JSON feed the browser polls. No async runtime, no separate frontend build —
 //! open the printed `localhost` URL and watch.
 
+mod comply_server;
 mod hub;
 mod iterate_server;
 mod mirror_server;
@@ -14,6 +15,7 @@ mod remote_confirm;
 mod server;
 mod swarm_server;
 
+pub use comply_server::{serve_comply, ComplyRun};
 pub use hub::{sse_frame, FnHubSink, Hub, HubSink};
 pub use iterate_server::{serve_iterate, IterateServer};
 pub use mirror_server::{serve_mirror, InboundCmd, RemoteMirror};
