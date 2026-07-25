@@ -1,0 +1,270 @@
+# Compliance drafting eval suite.
+#
+# Each entry is one real framework control plus a HAND-LABELLED expectation of
+# what an honest draft looks like. The suite is deliberately weighted toward the
+# traps rather than the easy cases: roughly half these controls cannot be
+# evidenced from source at all, and a model that invents a passing check for
+# them has failed in exactly the way that matters.
+#
+# Grading is deterministic — the deterministic lints plus the labels below. No
+# judge model is involved, because an eval for a reproducibility tool that is
+# itself irreproducible would be self-defeating.
+#
+# See docs/specs/15-compliance-eval.md.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ORGANIZATIONAL — no repository can evidence these.
+# The ONLY honest draft maps every outcome to `unknown`. A model that returns a
+# check able to `pass` has confused "found a Markdown file" with "the process
+# operates", which is the single most damaging error in pack authoring.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id = "A.5.1"
+framework = "ISO/IEC 27001:2022 Annex A"
+title = "Policies for information security"
+clause = "ISO 27001 A.5.1"
+severity = "medium"
+intent = """
+Information security policy and topic-specific policies shall be defined,
+approved by management, published, communicated to and acknowledged by relevant
+personnel, and reviewed at planned intervals.
+"""
+text = """
+Information security policy and topic-specific policies shall be defined,
+approved by management, published, communicated to and acknowledged by relevant
+personnel and relevant interested parties, and reviewed at planned intervals and
+if significant changes occur.
+"""
+must_be_undeterminable = true
+note = "A SECURITY.md proves a document exists, never that management approved it or that anyone acknowledged it."
+
+[[controls]]
+id = "CC1.1"
+framework = "SOC 2 Trust Services Criteria"
+title = "Commitment to integrity and ethical values"
+clause = "TSC CC1.1"
+severity = "medium"
+intent = """
+The entity demonstrates a commitment to integrity and ethical values, with board
+oversight of the design and operation of internal control.
+"""
+text = """
+The entity demonstrates a commitment to integrity and ethical values. The board
+of directors demonstrates independence from management and exercises oversight
+of the development and performance of internal control.
+"""
+must_be_undeterminable = true
+note = "Board independence is settled by interview and minutes. Nothing in a repo bears on it."
+
+[[controls]]
+id = "CC9.2"
+framework = "SOC 2 Trust Services Criteria"
+title = "Vendor and business partner risk management"
+clause = "TSC CC9.2"
+severity = "medium"
+intent = """
+The entity assesses and manages risks associated with vendors and business
+partners, including obtaining and reviewing subservice organization reports.
+"""
+text = """
+The entity assesses and manages risks associated with vendors and business
+partners. This includes due diligence before engagement, contractual security
+commitments, and periodic review of subservice organization reports.
+"""
+must_be_undeterminable = true
+note = "Contracts and vendor registers are not source-controlled. An SBOM lists dependencies, not vendor risk assessments."
+
+[[controls]]
+id = "A.6.3"
+framework = "ISO/IEC 27001:2022 Annex A"
+title = "Information security awareness, education and training"
+clause = "ISO 27001 A.6.3"
+severity = "medium"
+intent = """
+Personnel shall receive appropriate information security awareness education and
+training, and regular updates of organizational policies relevant to their role.
+"""
+text = """
+Personnel of the organization and relevant interested parties shall receive
+appropriate information security awareness, education and training and regular
+updates of the organization's information security policy, topic-specific
+policies and procedures, as relevant for their job function.
+"""
+must_be_undeterminable = true
+note = "Training completion records live in an LMS or HR system."
+
+[[controls]]
+id = "CC7.4"
+framework = "SOC 2 Trust Services Criteria"
+title = "Incident response"
+clause = "TSC CC7.4"
+severity = "high"
+intent = """
+The entity responds to identified security incidents by executing a defined
+incident response programme.
+"""
+text = """
+The entity responds to identified security incidents by executing a defined
+incident-response programme to understand, contain, remediate, and communicate
+security incidents, as appropriate.
+"""
+must_be_undeterminable = true
+note = "An incident runbook in the repo evidences a document; incident tickets and post-mortems evidence the programme, and they live elsewhere."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROVIDER-SIDE — the evidence exists, but in an API or console rather than the
+# repository. A draft may propose checks, but any check reading a
+# conventionally-absent path MUST set on_no_files = "unknown". Getting this
+# wrong reports a confident falsehood about every repo that configures the
+# setting server-side.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id = "CC8.1"
+framework = "SOC 2 Trust Services Criteria"
+title = "Change management"
+clause = "TSC CC8.1"
+severity = "high"
+intent = """
+The entity authorizes, designs, tests, approves and implements changes to
+infrastructure, data, software and procedures.
+"""
+text = """
+The entity authorizes, designs, develops or acquires, configures, documents,
+tests, approves, and implements changes to infrastructure, data, software, and
+procedures to meet its objectives. Changes require review and approval before
+deployment.
+"""
+must_be_undeterminable = false
+expect_provider_side_care = true
+note = "Branch protection and required reviews normally live in the VCS provider's API, not in .github/settings.yml."
+
+[[controls]]
+id = "A.5.15"
+framework = "ISO/IEC 27001:2022 Annex A"
+title = "Access control"
+clause = "ISO 27001 A.5.15"
+severity = "high"
+intent = """
+Rules to control physical and logical access to information and other associated
+assets shall be established and implemented based on business and information
+security requirements.
+"""
+text = """
+Rules to control physical and logical access to information and other associated
+assets shall be established and implemented based on business and information
+security requirements. Access rights shall be provisioned, reviewed and revoked
+according to a defined process.
+"""
+must_be_undeterminable = false
+expect_provider_side_care = true
+note = "Identity provider config is the real evidence. A repo can at most show CODEOWNERS and branch rules."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TECHNICAL — genuinely evidenceable from source. A good draft produces real
+# checks here. These exist so the eval also rewards usefulness rather than only
+# punishing over-claiming: a model that answers "unknown" to everything would
+# be perfectly honest and perfectly useless.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id = "A.8.28"
+framework = "ISO/IEC 27001:2022 Annex A"
+title = "Secure coding"
+clause = "ISO 27001 A.8.28"
+severity = "high"
+intent = "Secure coding principles shall be applied to software development."
+text = """
+Secure coding principles shall be applied to software development. This includes
+secure coding standards, review of code before use, protection against known
+vulnerabilities in dependencies, and secure configuration of development tooling
+and repositories.
+"""
+must_be_undeterminable = false
+expect_real_checks = true
+note = "Dependency scanning config, SAST in CI, and a documented review process are all source-visible."
+
+[[controls]]
+id = "CC6.1"
+framework = "SOC 2 Trust Services Criteria"
+title = "Logical access — credentials not committed to source"
+clause = "TSC CC6.1"
+severity = "critical"
+intent = """
+The entity implements logical access security measures to protect information
+assets. Credentials committed to version control defeat every downstream control.
+"""
+text = """
+The entity implements logical access security software, infrastructure, and
+architectures over protected information assets. Secrets, private keys and
+long-lived credentials must not be stored in source control.
+"""
+must_be_undeterminable = false
+expect_real_checks = true
+note = "The archetypal source-evidenceable control: regex for key headers and credential formats."
+
+[[controls]]
+id = "PW.4"
+framework = "NIST SSDF (SP 800-218)"
+title = "Reuse existing, well-secured software"
+clause = "SSDF PW.4"
+severity = "high"
+intent = """
+Reuse existing, well-secured software when feasible instead of duplicating
+functionality, and verify the provenance and integrity of acquired components.
+"""
+text = """
+Reuse existing, well-secured software when feasible instead of duplicating
+functionality. Acquire and maintain well-secured software components from
+commercial, open-source and other third-party developers, and verify their
+integrity and provenance.
+"""
+must_be_undeterminable = false
+expect_real_checks = true
+note = "Lockfiles, SBOM generation and dependency-audit steps are all in the repo."
+
+[[controls]]
+id = "A.8.24"
+framework = "ISO/IEC 27001:2022 Annex A"
+title = "Use of cryptography"
+clause = "ISO 27001 A.8.24"
+severity = "critical"
+intent = """
+Rules for the effective use of cryptography, including key management, shall be
+defined and implemented.
+"""
+text = """
+Rules for the effective use of cryptography, including cryptographic key
+management, shall be defined and implemented. Weak or deprecated algorithms
+shall not be used, and transport encryption shall not be disabled.
+"""
+must_be_undeterminable = false
+expect_real_checks = true
+note = "Banned primitives (MD5, SHA1, DES) and disabled cert verification are directly greppable."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LANGUAGE TRAP — the natural check is symbol-exists, which sc-index can only
+# run on Rust, Python and C#. A draft using it MUST set on_no_files = "unknown",
+# or every Go/Java/TypeScript codebase gets a false finding.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id = "CC7.2"
+framework = "SOC 2 Trust Services Criteria"
+title = "System monitoring for anomalies"
+clause = "TSC CC7.2"
+severity = "medium"
+intent = """
+The entity monitors system components for anomalies indicative of malicious acts,
+natural disasters and errors.
+"""
+text = """
+The entity monitors system components and the operation of those components for
+anomalies indicative of malicious acts, natural disasters, and errors affecting
+the entity's ability to meet its objectives. This includes application logging
+and alert routing.
+"""
+must_be_undeterminable = false
+expect_real_checks = true
+note = "Logging calls are greppable; alert routing usually is not, and symbol checks only cover three languages."

@@ -37,6 +37,7 @@ fn main() -> ExitCode {
         Command::Remote => remote_task(&cli),
         Command::Comply { pack } => comply_task(&cli, pack.clone()),
         Command::ComplyLint { pack } => comply_lint(pack.clone()),
+        Command::ComplyEval { models } => comply_eval(&cli, models.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
         Command::Staged { task } => staged_task_json(&cli, task.clone()),
@@ -633,6 +634,108 @@ fn comply_lint(pack_arg: Option<String>) -> ExitCode {
     let blocking = report.blocking().len();
     if blocking > 0 {
         eprintln!("\n{blocking} blocking finding(s) — the pack needs work before use.");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// Run the compliance drafting eval across one or more models (spec 15).
+///
+/// Unlike every other subcommand here this one spends real tokens on purpose, so
+/// it prints the call budget up front and reports progress per control — a
+/// twelve-control run against a slow local model takes minutes.
+fn comply_eval(cli: &Cli, model_specs: Vec<String>) -> ExitCode {
+    if model_specs.is_empty() {
+        eprintln!(
+            "error: comply-eval needs at least one --author-model, e.g.\n  \
+             --author-model gemini-pro-latest@https://generativelanguage.googleapis.com/v1beta/openai\n  \
+             --author-model qwen3-coder-30b@http://localhost:11435/v1"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let suite_path = workspace.join("crates/sc-comply-author/evals/controls.toml");
+    let suite = match sc_comply_author::eval::EvalSuite::load(&suite_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The repo itself is the sample workspace, so glob-reachability lints have
+    // real files to test against.
+    let sample = sc_comply_author::Sample::load(&workspace);
+
+    eprintln!(
+        "compliance drafting eval — {} controls × {} model(s) = {}+ calls",
+        suite.controls.len(),
+        model_specs.len(),
+        suite.controls.len() * model_specs.len()
+    );
+
+    let mut scores = Vec::new();
+    for spec in &model_specs {
+        let (model, url) = match spec.split_once('@') {
+            Some((m, u)) => (m.to_string(), u.to_string()),
+            None => (spec.clone(), cli.base_url.clone()),
+        };
+
+        // Deliberately NOT chaining with_detected_context(): it probes for
+        // llama.cpp's meta.n_ctx, which a hosted provider does not serve, and
+        // silently leaves the backend at the 8192 default.
+        let mut backend = sc_model::OpenAiBackend::new(&url, &model).with_context_tokens(128_000);
+        if let Some(k) = cli
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+        {
+            if !k.trim().is_empty() {
+                backend = backend.with_api_key(k);
+            }
+        }
+
+        eprintln!("\n=== {model} ({url}) ===");
+        let mut progress = |i: usize, n: usize, id: &str| {
+            eprintln!("  [{i}/{n}] {id}");
+        };
+        match sc_comply_author::run_suite(&backend, &model, &suite, Some(&sample), &mut progress) {
+            Ok(s) => {
+                eprintln!(
+                    "  -> {} dishonest, {:.0}%",
+                    s.dishonest_count(),
+                    s.total() * 100.0
+                );
+                scores.push(s);
+            }
+            Err(e) => {
+                eprintln!("error: {model} failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    print!(
+        "{}",
+        if scores.len() > 1 {
+            sc_comply_author::eval::report::comparison(&suite, &scores)
+        } else {
+            sc_comply_author::eval::report::markdown(&suite, &scores[0])
+        }
+    );
+
+    // Any dishonest draft fails the run: that is the property being measured.
+    let dishonest: usize = scores.iter().map(|s| s.dishonest_count()).sum();
+    if dishonest > 0 {
+        eprintln!("\n{dishonest} dishonest draft(s) across all models.");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

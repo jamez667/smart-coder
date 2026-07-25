@@ -41,6 +41,14 @@ pub enum Command {
     /// detectors, controls claiming determinism they cannot have. No model is
     /// involved. `--pack <path>` selects the pack to lint.
     ComplyLint { pack: Option<String> },
+    /// Run the compliance drafting eval (spec 15): draft a suite of real
+    /// framework controls and grade each against a hand-labelled expectation.
+    /// Measures whether a model stays honest when the easy answer is to invent
+    /// evidence. Repeat `--author-model` to compare models side by side.
+    ComplyEval {
+        /// Models to compare, as `name` or `name@base_url`.
+        models: Vec<String>,
+    },
     /// Run a task with the worker swarm (orchestrator + parallel workers) and
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
@@ -203,6 +211,29 @@ impl Cli {
                 "comply" if command.is_none() => command = Some(Command::Comply { pack: None }),
                 "comply-lint" if command.is_none() => {
                     command = Some(Command::ComplyLint { pack: None })
+                }
+                "comply-eval" if command.is_none() => {
+                    command = Some(Command::ComplyEval { models: Vec::new() })
+                }
+                // Repeatable, so two models can be compared in one run. Accepts
+                // `model` or `model@base_url` — the local server and Gemini live
+                // at different endpoints, and a comparison needs both.
+                "--author-model" => {
+                    let spec = it.next().ok_or_else(|| {
+                        DcError::Eval(
+                            "--author-model requires a model name, optionally with an \
+                             endpoint: `--author-model qwen3-coder-30b@http://localhost:11435/v1`"
+                                .to_string(),
+                        )
+                    })?;
+                    match &mut command {
+                        Some(Command::ComplyEval { models }) => models.push(spec),
+                        _ => {
+                            return Err(DcError::Eval(
+                                "--author-model only applies to `comply-eval`".to_string(),
+                            ))
+                        }
+                    }
                 }
                 // `--pack` only means anything to the compliance subcommands;
                 // accepted after the subcommand so
@@ -934,6 +965,10 @@ COMMANDS:
     comply-lint     Critique a compliance pack's own authoring (spec 14): unsafe
                     on_no_files, unreachable patterns, over-claiming controls.
                     Deterministic — no model involved. See --pack.
+    comply-eval     Grade models on compliance drafting honesty (spec 15).
+                    Repeat --author-model to compare, e.g.
+                    --author-model gemini-pro-latest@https://…/v1beta/openai
+                    --author-model qwen3-coder-30b@http://localhost:11435/v1
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -1713,7 +1748,54 @@ mod tests {
     fn usage_lists_comply() {
         assert!(usage().contains("comply"));
         assert!(usage().contains("comply-lint"));
+        assert!(usage().contains("comply-eval"));
         assert!(usage().contains("--pack"));
+    }
+
+    #[test]
+    fn comply_eval_collects_repeated_author_models() {
+        // Repeatable is the whole point: one run, two models, side by side.
+        let cli = Cli::parse([
+            "comply-eval",
+            "--author-model",
+            "gemini-pro-latest@https://example.invalid/v1",
+            "--author-model",
+            "qwen3-coder-30b@http://localhost:11435/v1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::ComplyEval { models } => {
+                assert_eq!(models.len(), 2);
+                assert!(models[0].starts_with("gemini-pro-latest@"));
+                assert!(models[1].starts_with("qwen3-coder-30b@"));
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comply_eval_accepts_a_bare_model_name() {
+        let cli = Cli::parse(["comply-eval", "--author-model", "local-model"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::ComplyEval {
+                models: vec!["local-model".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn author_model_without_a_value_errors() {
+        assert!(Cli::parse(["comply-eval", "--author-model"]).is_err());
+    }
+
+    #[test]
+    fn author_model_outside_comply_eval_is_rejected() {
+        let err = Cli::parse(["doctor", "--author-model", "x"]).unwrap_err();
+        assert!(
+            format!("{err}").contains("only applies to `comply-eval`"),
+            "{err}"
+        );
     }
 
     #[test]
