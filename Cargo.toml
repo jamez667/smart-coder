@@ -10,6 +10,7 @@ members = [
     "crates/sc-comply",
     "crates/sc-android",
     "crates/sc-core",
+    "crates/sc-comply-author",
     "crates/sc-iterate",
     "crates/sc-swarm",
     "crates/sc-workflow",

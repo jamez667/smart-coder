@@ -65,6 +65,9 @@ secret scanner as a pre-commit hook.
   ]
   on_match    = "gap"
   on_no_match = "pass"
+  # Searching files and finding no key is a genuine pass; searching NO files is
+  # not. Without this, an empty or renamed tree reports green having read nothing.
+  on_no_files = "unknown"
   rationale   = "A committed private key is a direct CC6.1 failure."
 
   [[controls.checks]]
@@ -78,6 +81,7 @@ secret scanner as a pre-commit hook.
   ]
   on_match    = "gap"
   on_no_match = "pass"
+  on_no_files = "unknown"
   rationale   = "Long-lived static credentials embedded in tracked files."
 
   [[controls.checks]]
@@ -133,8 +137,15 @@ that disables certificate verification.
   kind        = "regex-must-not-match"
   glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
   pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  # This tool's own test fixtures use `danger_accept_invalid_certs(true)` as a
+  # sample finding; without the exclusion they are reported as real TLS defects.
+  exclude_globs = [
+    "crates/sc-comply/src/**/*",
+    "crates/sc-comply-author/src/**/*",
+  ]
   on_match    = "gap"
   on_no_match = "pass"
+  on_no_files = "unknown"
   rationale   = "Disabling certificate verification voids transit encryption."
 
   [[controls.checks]]
@@ -164,6 +175,7 @@ that disables certificate verification.
   pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
   on_match    = "gap"
   on_no_match = "pass"
+  on_no_files = "unknown"
   rationale   = """
 Outbound plaintext HTTP to a public host. Localhost, loopback and namespace URIs
 are excluded by requiring a public TLD.
