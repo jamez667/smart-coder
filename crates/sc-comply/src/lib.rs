@@ -16,6 +16,7 @@ pub mod engine;
 pub mod evidence;
 pub mod glob;
 pub mod pack;
+pub mod registry;
 pub mod report;
 pub mod scan;
 pub mod status;
@@ -31,5 +32,6 @@ pub use evidence::{
 };
 pub use glob::Glob;
 pub use pack::{Assertion, Check, CheckKind, Control, Pack};
+pub use registry::{load_shipped, ShippedPack, SHIPPED};
 pub use scan::{scan_workspace, TextFile};
 pub use status::{ControlStatus, Outcome, OutcomePolicy, Severity};

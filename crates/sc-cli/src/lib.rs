@@ -41,6 +41,8 @@ pub enum Command {
     /// detectors, controls claiming determinism they cannot have. No model is
     /// involved. `--pack <path>` selects the pack to lint.
     ComplyLint { pack: Option<String> },
+    /// List the compliance framework packs shipped with the tool.
+    ListPacks,
     /// Run the compliance drafting eval (spec 15): draft a suite of real
     /// framework controls and grade each against a hand-labelled expectation.
     /// Measures whether a model stays honest when the easy answer is to invent
@@ -209,6 +211,7 @@ impl Cli {
                 "chat" if command.is_none() => command = Some(Command::Chat),
                 "remote" if command.is_none() => command = Some(Command::Remote),
                 "comply" if command.is_none() => command = Some(Command::Comply { pack: None }),
+                "--list-packs" if command.is_none() => command = Some(Command::ListPacks),
                 "comply-lint" if command.is_none() => {
                     command = Some(Command::ComplyLint { pack: None })
                 }
@@ -986,8 +989,11 @@ OPTIONS:
                           for a hosted provider). Also read from GEMINI_API_KEY.
     --no-think            Append /no_think to the prompt (needed for Qwen3 models;
                           auto-applied when the model name contains 'qwen3').
-    --pack PATH           Compliance framework pack for `comply`. Defaults to the
-                          bundled SOC 2 pack when auditing this repo.
+    --pack NAME|PATH      Compliance framework for `comply`/`comply-lint`: a
+                          shipped pack name (soc2, iso27001, ssdf, slsa, cis,
+                          pci, nist-800-53, hipaa, gdpr, eu-regulatory) or a
+                          path to your own. Defaults to soc2.
+    --list-packs          List the shipped compliance packs and exit.
     --plan                Decompose the task into a plan before running (`run`)
   run output, logging & safety (spec 06):
     --json                Emit the event stream as JSON lines on stdout (no TUI)
@@ -1750,6 +1756,28 @@ mod tests {
         assert!(usage().contains("comply-lint"));
         assert!(usage().contains("comply-eval"));
         assert!(usage().contains("--pack"));
+        assert!(usage().contains("--list-packs"));
+    }
+
+    #[test]
+    fn parses_list_packs() {
+        assert_eq!(
+            Cli::parse(["--list-packs"]).unwrap().command,
+            Command::ListPacks
+        );
+    }
+
+    #[test]
+    fn pack_accepts_a_shipped_name_not_just_a_path() {
+        // The interface that makes ten packs usable: `--pack iso27001` rather
+        // than a path into the crate's internals.
+        let cli = Cli::parse(["comply", "--pack", "iso27001"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Comply {
+                pack: Some("iso27001".to_string())
+            }
+        );
     }
 
     #[test]

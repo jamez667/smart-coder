@@ -37,6 +37,10 @@ fn main() -> ExitCode {
         Command::Remote => remote_task(&cli),
         Command::Comply { pack } => comply_task(&cli, pack.clone()),
         Command::ComplyLint { pack } => comply_lint(pack.clone()),
+        Command::ListPacks => {
+            print!("{}", sc_comply::registry::listing());
+            ExitCode::SUCCESS
+        }
         Command::ComplyEval { models } => comply_eval(&cli, models.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
@@ -531,24 +535,9 @@ fn comply_task(cli: &Cli, pack_arg: Option<String>) -> ExitCode {
         }
     };
 
-    let pack_path = match pack_arg {
-        Some(p) => std::path::PathBuf::from(p),
-        None => match default_pack_path(&workspace) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "error: no pack given and the bundled SOC 2 pack was not found.\n\
-                     pass one explicitly, e.g. \
-                     `smart-coder comply --pack crates/sc-comply/packs/soc2-tsc.toml`"
-                );
-                return ExitCode::FAILURE;
-            }
-        },
-    };
-
     // Parse and validate before binding a port: a malformed pack must fail here,
     // not halfway through an audit whose output someone will sign.
-    let pack = match sc_comply::pack::Pack::load(&pack_path) {
+    let pack = match resolve_pack(pack_arg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -601,22 +590,7 @@ fn comply_lint(pack_arg: Option<String>) -> ExitCode {
         }
     };
 
-    let pack_path = match pack_arg {
-        Some(p) => std::path::PathBuf::from(p),
-        None => match default_pack_path(&workspace) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "error: no pack given and the bundled SOC 2 pack was not found.\n\
-                     pass one explicitly, e.g. \
-                     `smart-coder comply-lint --pack path/to/pack.toml`"
-                );
-                return ExitCode::FAILURE;
-            }
-        },
-    };
-
-    let pack = match sc_comply::pack::Pack::load(&pack_path) {
+    let pack = match resolve_pack(pack_arg) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -741,17 +715,33 @@ fn comply_eval(cli: &Cli, model_specs: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Locate the bundled SOC 2 pack relative to the workspace being audited.
+/// Resolve `--pack` to a loaded pack.
 ///
-/// Only finds it when auditing the smart-coder repo itself (or a checkout that
-/// vendors the crate); any other project must pass `--pack`. Returning `None`
-/// rather than guessing keeps the failure explicit.
-fn default_pack_path(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
-    let candidates = [
-        workspace.join("crates/sc-comply/packs/soc2-tsc.toml"),
-        workspace.join("packs/soc2-tsc.toml"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
+/// Accepts a shipped pack NAME (`soc2`, `iso27001`, …) or a filesystem path to a
+/// pack the user authored. Name first: the shipped packs are embedded, so a name
+/// works from any directory against any workspace, whereas a path only works
+/// relative to where the user happens to be standing.
+///
+/// With no argument, defaults to SOC 2 — the most widely requested framework and
+/// a reasonable starting point for someone who has not yet chosen.
+fn resolve_pack(arg: Option<String>) -> Result<sc_comply::pack::Pack, String> {
+    let Some(spec) = arg else {
+        return sc_comply::registry::load_shipped("soc2").map_err(|e| e.to_string());
+    };
+
+    if sc_comply::registry::find(&spec).is_some() {
+        return sc_comply::registry::load_shipped(&spec).map_err(|e| e.to_string());
+    }
+
+    let path = std::path::PathBuf::from(&spec);
+    if path.is_file() {
+        return sc_comply::pack::Pack::load(&path).map_err(|e| e.to_string());
+    }
+
+    Err(format!(
+        "{spec:?} is neither a shipped pack name nor a readable file.\n\n{}",
+        sc_comply::registry::listing()
+    ))
 }
 
 /// Serve the remote iterate server for the Android client: idle until a phone POSTs a
