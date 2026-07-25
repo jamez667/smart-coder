@@ -1,0 +1,474 @@
+# CIS Critical Security Controls v8 — source-controlled evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# CIS v8 has 18 controls and 153 safeguards, most of which govern an ENTERPRISE
+# ESTATE — endpoints, network devices, accounts, physical media. A repository is
+# one asset within that estate, so this pack evidences the software-development
+# and configuration slice and declares the rest.
+#
+# Where CIS overlaps SSDF and ISO (secure development, vulnerability management)
+# the checks here are deliberately similar. That is correct: the frameworks ask
+# the same question, and an evidence pack should answer it the same way rather
+# than inventing a different-looking check for the sake of variety.
+
+[framework]
+id        = "cis-controls-v8"
+name      = "CIS Critical Security Controls v8"
+version   = "1.0.0"
+authority = "Center for Internet Security"
+scope_note = """
+This pack inspects source-controlled artifacts only. CIS v8 governs an
+enterprise estate: endpoint inventory, account management, network
+infrastructure, malware defences, physical media and security awareness. None of
+that is visible from a repository.
+
+What this pack evidences: the software-development safeguards (Control 16),
+configuration-as-code (Control 4), audit logging (Control 8), data protection
+(Control 3), and continuous vulnerability management (Control 7) — as they
+appear in source.
+
+Implementation Groups (IG1/IG2/IG3) are not modelled: a safeguard's group
+depends on organizational size and risk, which this tool cannot know.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Control 16 — Application Software Security (the core of what a repo shows)
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "CIS-16.1"
+title     = "Establish and maintain a secure application development process"
+clause    = "CIS v8 16.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Establish and maintain a secure application development process addressing
+secure design standards, secure coding practices, developer training,
+vulnerability management, and third-party code security.
+"""
+remediation = """
+Document the development process and evidence its automated gates in CI. The
+training component must be evidenced outside the repository.
+"""
+
+  [[controls.checks]]
+  id          = "development-process-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", ".github/CONTRIBUTING.md", "docs/development.md", "docs/specs"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented process. Presence evidences documentation, not adherence."
+
+  [[controls.checks]]
+  id          = "automated-quality-gate"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,scripts/check.*}"
+  pattern     = "(?i)(fmt --check|clippy|lint|test|build)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "An enforced automated gate in the development process."
+
+[[controls]]
+id        = "CIS-16.11"
+title     = "Leverage vetted modules or services for application security components"
+clause    = "CIS v8 16.11"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Use vetted modules or services for application security components such as
+identity management, encryption, auditing and logging, rather than implementing
+them from scratch.
+"""
+remediation = "Replace hand-rolled cryptography with a vetted library; pin and audit dependencies."
+
+  [[controls.checks]]
+  id          = "no-hand-rolled-crypto-primitives"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|createHash\\s*\\(\\s*[\"'](md5|sha1)[\"']|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"DES)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  weight      = 2.0
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Broken or deprecated primitives. Non-security uses are false positives worth reviewing."
+
+  [[controls.checks]]
+  id          = "dependency-inventory-pinned"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "Vetted modules must at minimum be pinned, or 'vetted' means nothing."
+
+[[controls]]
+id        = "CIS-16.12"
+title     = "Implement code-level security checks"
+clause    = "CIS v8 16.12"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Apply static and dynamic analysis tools to verify that secure coding practices
+are being adhered to.
+"""
+remediation = "Add SAST to CI; add DAST or fuzzing for input-handling surfaces."
+
+  [[controls.checks]]
+  id          = "static-analysis-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,scripts/check.*}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|checkmarx|fortify|coverity)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Static analysis in the pipeline."
+
+  [[controls.checks]]
+  id          = "dynamic-analysis-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},**/fuzz/**/*}"
+  pattern     = "(?i)(cargo[- ]fuzz|libfuzzer|afl|oss-fuzz|atheris|jazzer|zap-baseline|nuclei|dastardly)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Dynamic analysis or fuzzing. Absent for most projects; not a gap alone."
+
+[[controls]]
+id        = "CIS-16.4"
+title     = "Establish and manage an inventory of third-party software components"
+clause    = "CIS v8 16.4"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Establish and manage an updated inventory of third-party components used in
+development, often called a bill of materials, and monitor it for risk.
+"""
+remediation = "Generate an SBOM in CI and keep lockfiles committed."
+
+  [[controls.checks]]
+  id          = "sbom-generated"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(syft|cyclonedx|spdx-sbom|sbom-tool|anchore/sbom-action|bom generate)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Machine-readable component inventory produced by the pipeline."
+
+  [[controls.checks]]
+  id          = "lockfile-inventory"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A lockfile is the minimum viable component inventory."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Control 7 — Continuous Vulnerability Management
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "CIS-7.1"
+title     = "Establish and maintain a vulnerability management process"
+clause    = "CIS v8 7.1, 7.5"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Establish and maintain a documented vulnerability management process, and
+perform automated vulnerability scans of internal enterprise assets.
+"""
+remediation = "Add automated dependency and container scanning to CI."
+
+  [[controls.checks]]
+  id          = "automated-vulnerability-scanning"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check|clair)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated scanning in the pipeline. Enterprise-wide scanning is out of repository scope."
+
+  [[controls.checks]]
+  id          = "remediation-automation"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated remediation of known-vulnerable dependencies."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Control 4 — Secure Configuration
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "CIS-4.1"
+title     = "Establish and maintain a secure configuration process"
+clause    = "CIS v8 4.1, 4.2"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Establish and maintain a secure configuration process for enterprise assets and
+software, and for network infrastructure. Review and update documentation
+annually or on significant change.
+"""
+remediation = "Define configuration as code and scan it against a hardening baseline."
+
+  [[controls.checks]]
+  id          = "configuration-as-code"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml}"
+  pattern     = "(?m)^\\s*(resource|module|provider)\\s+\"|(?i)(apiVersion:\\s*apps/|kind:\\s*(Deployment|StatefulSet|DaemonSet))"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Configuration established as code. Endpoint and network config is outside a repository."
+
+  [[controls.checks]]
+  id          = "configuration-baseline-scanning"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(checkov|tfsec|tflint|terrascan|kics|cfn-lint|kube-score|kubesec|conftest|cis-benchmark|inspec)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Automated comparison against a hardening baseline."
+
+[[controls]]
+id        = "CIS-4.8"
+title     = "Uninstall or disable unnecessary services"
+clause    = "CIS v8 4.8"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Uninstall or disable unnecessary services on enterprise assets and software,
+reducing the attack surface to what the workload requires.
+"""
+remediation = "Remove debug endpoints and permissive defaults from production configuration."
+
+  [[controls.checks]]
+  id          = "no-debug-defaults"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,rb,js,ts,yml,yaml,json,toml,conf}"
+  pattern     = "(?i)(DEBUG\\s*[:=]\\s*True\\b|FLASK_DEBUG\\s*[:=]\\s*1|NODE_ENV\\s*[:=]\\s*[\"']?development[\"']?\\s*$)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*", "**/test/**/*", "**/*.test.*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Debug modes expand attack surface. Test trees are excluded."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Control 3 — Data Protection
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "CIS-3.11"
+title     = "Encrypt sensitive data at rest and in transit"
+clause    = "CIS v8 3.10, 3.11"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Encrypt sensitive data in transit and at rest on servers, applications and
+databases, using algorithms and key lengths that remain fit for purpose.
+"""
+remediation = "Enforce TLS on external endpoints and enable storage encryption; never disable verification."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification voids transit encryption."
+
+  [[controls.checks]]
+  id          = "no-plaintext-http"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Plaintext transport to a public host. Documentation URLs are known false positives."
+
+  [[controls.checks]]
+  id          = "encryption-at-rest-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml,json}"
+  pattern     = "(?i)(encrypted\\s*[:=]\\s*true|storage_encrypted|server_side_encryption|kms_key_id|encryption_at_rest|sse_algorithm)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Storage encryption declared in infrastructure code. Often a platform default instead."
+
+[[controls]]
+id        = "CIS-3.3"
+title     = "Configure data access control lists"
+clause    = "CIS v8 3.3"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Configure data access control lists based on a user's need to know, applying
+least privilege to data stores and buckets.
+"""
+remediation = "Remove public-read grants and wildcard IAM principals from infrastructure code."
+
+  [[controls.checks]]
+  id          = "no-public-storage-acls"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{tf,yml,yaml,json}"
+  pattern     = "(?i)(acl\\s*[:=]\\s*[\"']?public-read|\"Principal\"\\s*:\\s*\"\\*\"|Principal\\s*=\\s*[\"']\\*[\"']|block_public_acls\\s*=\\s*false)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Public ACLs and wildcard principals defeat need-to-know on data stores."
+
+  [[controls.checks]]
+  id          = "no-committed-secrets"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Access control begins with keys not being readable by everyone with repo access."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Control 8 — Audit Log Management
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "CIS-8.2"
+title     = "Collect audit logs"
+clause    = "CIS v8 8.2, 8.5"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Collect audit logs across enterprise assets, ensuring logging has been enabled
+and includes detailed information sufficient to reconstruct events.
+"""
+remediation = "Adopt structured logging with correlation ids; ship logs to protected retention."
+
+  [[controls.checks]]
+  id          = "application-logging-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.|logrus)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "The application emits logs. Collection and retention are infrastructure facts."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Enterprise-estate controls — declared, not omitted.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "CIS-1"
+title     = "Inventory and control of enterprise assets"
+clause    = "CIS v8 Control 1"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Actively manage all enterprise assets — end-user devices, network devices,
+servers, IoT — connected to the infrastructure, to accurately know the totality
+of assets that must be monitored and protected.
+"""
+remediation = "Provide the asset inventory from the CMDB, MDM or cloud provider."
+
+  [[controls.checks]]
+  id          = "asset-inventory-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/assets.md", "inventory.yml"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Enterprise asset inventory lives in a CMDB, MDM or cloud provider console, never
+in a repository. Declared so the pack does not imply this control was examined.
+"""
+
+[[controls]]
+id        = "CIS-5"
+title     = "Account management"
+clause    = "CIS v8 Control 5"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Use processes and tools to assign and manage authorization to credentials for
+user accounts, including administrator accounts and service accounts.
+"""
+remediation = "Provide identity provider configuration, account inventory and access review records."
+
+  [[controls.checks]]
+  id          = "account-management-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+CODEOWNERS routes review; it is not account management. Provisioning, review and
+revocation live in the identity provider. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "CIS-14"
+title     = "Security awareness and skills training"
+clause    = "CIS v8 Control 14"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Establish and maintain a security awareness programme to influence behaviour
+among the workforce so it is security conscious and appropriately skilled.
+"""
+remediation = "Provide training completion records from the LMS."
+
+  [[controls.checks]]
+  id          = "training-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/security-training.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Training completion is recorded in an LMS or HR system. Reported Unknown
+unconditionally.
+"""
+
+[[controls]]
+id        = "CIS-17"
+title     = "Incident response management"
+clause    = "CIS v8 Control 17"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Establish a programme to develop and maintain incident response capability —
+policies, plans, procedures, defined roles, training and communications — to
+prepare, detect and quickly respond to an attack.
+"""
+remediation = "Provide the incident response plan, contact list, and post-incident reviews."
+
+  [[controls.checks]]
+  id          = "incident-response-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/incident-response.md", "SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A runbook evidences a document; incident tickets, on-call rotas and post-incident
+reviews evidence the capability, and they live elsewhere. Reported Unknown
+unconditionally.
+"""

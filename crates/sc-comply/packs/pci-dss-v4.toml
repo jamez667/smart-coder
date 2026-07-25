@@ -1,0 +1,558 @@
+# PCI DSS v4.0 — source-controlled evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# SCOPING WARNING, and it is the important part of this file:
+#
+# PCI DSS applies to the Cardholder Data Environment (CDE) — the systems that
+# store, process or transmit account data — and most of its twelve requirements
+# govern NETWORK and INFRASTRUCTURE facts: segmentation, firewalls, physical
+# access, wireless, anti-malware. A repository is not the CDE.
+#
+# This pack evidences Requirement 6 (develop and maintain secure systems and
+# software), the parts of Requirements 3 and 8 that surface in code, and v4.0's
+# new script-integrity rules. Everything else is declared undeterminable.
+#
+# A passing result here is NOT a PCI attestation. Only a QSA can produce one, and
+# scope determination — what is even in the CDE — is their first question.
+
+[framework]
+id        = "pci-dss-v4"
+name      = "PCI DSS v4.0"
+version   = "1.0.0"
+authority = "PCI Security Standards Council"
+scope_note = """
+PCI DSS governs the Cardholder Data Environment. This pack inspects a source
+repository, which is at most one component of that environment and frequently
+sits entirely outside it.
+
+Evidenced here: Requirement 6 (secure development, secure coding, code review,
+change control, script integrity), plus the code-visible slivers of Requirement
+3 (do not store sensitive authentication data) and Requirement 8 (no shared or
+hardcoded credentials).
+
+NOT evidenced, and declared explicitly: network segmentation (Req 1), default
+passwords on infrastructure (Req 2), stored-account-data protection at rest
+(most of Req 3), transmission encryption across public networks (Req 4),
+anti-malware (Req 5), physical access (Req 9), logging and monitoring across the
+CDE (Req 10), penetration testing and ASV scans (Req 11), and policy/programme
+governance (Req 12).
+
+Scope determination is a QSA's first question and this tool cannot answer it. A
+clean result here says nothing about PCI compliance overall.
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Requirement 6 — Develop and Maintain Secure Systems and Software
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "PCI-6.2.1"
+title     = "Bespoke and custom software is developed securely"
+clause    = "PCI DSS v4.0 6.2.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Bespoke and custom software is developed securely: based on industry standards
+and best practices, in accordance with PCI DSS, and incorporating information
+security throughout the software development life cycle.
+"""
+remediation = """
+Document the secure SDLC, enforce it with automated gates in CI, and evidence
+developer training separately.
+"""
+
+  [[controls.checks]]
+  id          = "sdlc-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", "docs/development.md", "docs/sdlc.md", "docs/specs"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented development process. Presence evidences documentation, not adherence."
+
+  [[controls.checks]]
+  id          = "automated-security-gate"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,scripts/check.*}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|bandit|gosec|clippy|eslint|snyk|checkmarx|fortify|trivy)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Security analysis integrated into the development lifecycle."
+
+[[controls]]
+id        = "PCI-6.2.2"
+title     = "Software development personnel are trained in secure coding"
+clause    = "PCI DSS v4.0 6.2.2"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Software development personnel working on bespoke and custom software are
+trained at least once every 12 months in software security relevant to their job
+function and development languages, including secure design and coding.
+"""
+remediation = "Provide annual secure-coding training records for all developers."
+
+  [[controls.checks]]
+  id          = "training-records-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/security-training.md", "docs/onboarding.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Annual training completion per developer is recorded in an LMS or HR system,
+never in a repository. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "PCI-6.2.3"
+title     = "Bespoke and custom software is reviewed prior to release"
+clause    = "PCI DSS v4.0 6.2.3, 6.2.3.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Bespoke and custom software is reviewed prior to being released into production
+to identify and correct potential coding vulnerabilities. Reviews are performed
+by individuals other than the originating author, and either manually or via
+automated code review tools.
+"""
+remediation = """
+Require pull-request review by someone other than the author, and retain the
+branch protection configuration as code where the provider allows it.
+"""
+
+  [[controls.checks]]
+  id          = "review-required-as-code"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  # PCI is specific that review must be by someone OTHER than the author, which
+  # is a provider setting. Absence of this file is not evidence of absent review.
+  on_no_files = "unknown"
+  rationale   = """
+Review by a second person enforced as code. Usually configured in the VCS
+provider's API; the assessor must obtain that configuration.
+"""
+
+  [[controls.checks]]
+  id          = "automated-code-review-tooling"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|checkmarx|fortify|coverity)"
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "PCI accepts automated review tools as an alternative to manual review."
+
+  [[controls.checks]]
+  id          = "code-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", ".gitlab/CODEOWNERS"]
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named reviewers per area supports the other-than-author requirement."
+
+[[controls]]
+id        = "PCI-6.2.4"
+title     = "Software engineering techniques prevent common attacks"
+clause    = "PCI DSS v4.0 6.2.4"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Software engineering techniques or other methods are defined and in use to
+prevent or mitigate common software attacks: injection attacks, attacks on data
+and data structures, attacks on cryptography usage, and attacks on business
+logic.
+"""
+remediation = """
+Remove injection sinks, restore certificate verification, and replace broken
+cryptographic primitives.
+"""
+
+  [[controls.checks]]
+  id          = "no-sql-string-concatenation"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php,cs,java,go}"
+  # Query text built by concatenation or interpolation — the classic injection
+  # sink. Parameterized queries do not look like this.
+  pattern     = "(?i)(SELECT|INSERT|UPDATE|DELETE)\\s+[^\"'\\n]*[\"']\\s*\\+|execute\\s*\\(\\s*f[\"'](SELECT|INSERT|UPDATE|DELETE)|query\\s*\\(\\s*[\"'`][^\"'`]*\\$\\{"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Query text assembled by concatenation or interpolation. A hit warrants review —
+the input may be trusted — but this is the pattern PCI 6.2.4 names first.
+"""
+
+  [[controls.checks]]
+  id          = "no-command-injection-sinks"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php}"
+  pattern     = "(?i)(subprocess\\.(run|call|Popen|check_output)\\([^)]*shell\\s*=\\s*True|os\\.system\\s*\\(|child_process\\.exec\\s*\\(|\\beval\\s*\\(\\s*(req|request|params|input|argv))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Command and code injection sinks."
+
+  [[controls.checks]]
+  id          = "no-broken-cryptography"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"(DES|RC4)|createHash\\s*\\(\\s*[\"'](md5|sha1)[\"'])"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Attacks on cryptography usage — deprecated primitives are explicitly in scope for 6.2.4."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification defeats transport protection."
+
+[[controls]]
+id        = "PCI-6.3.1"
+title     = "Security vulnerabilities are identified and managed"
+clause    = "PCI DSS v4.0 6.3.1, 6.3.3"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Security vulnerabilities are identified and managed: new vulnerabilities are
+identified from industry sources, assigned a risk ranking, and system components
+are protected from known vulnerabilities by installing applicable security
+patches.
+"""
+remediation = "Add dependency vulnerability scanning to CI and adopt an automated patch policy."
+
+  [[controls.checks]]
+  id          = "vulnerability-scanning-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated identification of known-vulnerable components."
+
+  [[controls.checks]]
+  id          = "patch-automation-configured"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated policy for applying security patches to components."
+
+  [[controls.checks]]
+  id          = "component-inventory"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "PCI 6.3.2 requires an inventory of bespoke and third-party components."
+
+[[controls]]
+id        = "PCI-6.4.3"
+title     = "Payment page scripts are managed and their integrity assured"
+clause    = "PCI DSS v4.0 6.4.3"
+severity  = "critical"
+aggregate = "any"
+intent    = """
+All payment page scripts loaded and executed in the consumer's browser are
+managed: a method is implemented to confirm each script is authorized, a method
+assures the integrity of each script, and an inventory of scripts with written
+business justification is maintained.
+
+This requirement is new in v4.0 and exists because of Magecart-style skimming.
+"""
+remediation = """
+Add subresource integrity (SRI) hashes to every external script tag and adopt a
+Content-Security-Policy restricting script sources.
+"""
+
+  [[controls.checks]]
+  id          = "subresource-integrity-used"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{html,htm,hbs,ejs,erb,jsx,tsx,vue,svelte,php}"
+  pattern     = "integrity\\s*=\\s*[\"']sha(256|384|512)-"
+  on_match    = "pass"
+  on_no_match = "gap"
+  # No web templates at all means no payment page in this repo — genuinely
+  # indeterminate rather than a failure.
+  on_no_files = "unknown"
+  rationale   = """
+SRI hashes assure script integrity in the browser, which is exactly what 6.4.3
+asks for. Absence of any web template means this repo likely has no payment page.
+"""
+
+  [[controls.checks]]
+  id          = "content-security-policy-declared"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{html,htm,js,ts,rs,py,cs,go,conf,yml,yaml}"
+  pattern     = "(?i)(Content-Security-Policy|script-src\\s)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "A CSP restricting script sources supports the authorization half of 6.4.3."
+
+[[controls]]
+id        = "PCI-6.5.1"
+title     = "Changes are managed through a formal change control process"
+clause    = "PCI DSS v4.0 6.5.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.7
+gap_below = 0.35
+intent    = """
+Changes to all system components in the production environment are made
+according to established procedures that include the reason for the change,
+documentation of impact, documented approval, and testing to verify the change
+does not adversely impact system security.
+"""
+remediation = "Require review and a green test run before merge; retain approval records."
+
+  [[controls.checks]]
+  id          = "ci-pipeline-defined"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated pipeline is the mechanism the change process runs through."
+
+  [[controls.checks]]
+  id          = "testing-before-release"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "Testing to verify a change does not adversely impact security."
+
+  [[controls.checks]]
+  id          = "approval-enforced"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Documented approval before a change lands. Usually a provider setting."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Requirements 3 & 8 — the code-visible slivers
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "PCI-3.3.1"
+title     = "Sensitive authentication data is not retained after authorization"
+clause    = "PCI DSS v4.0 3.3.1"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Sensitive authentication data — full track data, card verification code, PIN and
+PIN block — is not retained after authorization, even if encrypted.
+"""
+remediation = """
+Remove any storage of CVV/CVC, track data or PIN blocks. Ensure logging does not
+capture them either.
+"""
+
+  [[controls.checks]]
+  id          = "no-cvv-storage-identifiers"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,sql}"
+  # Storage-shaped mentions of CVV/track/PIN block: a column, field or property
+  # named for sensitive authentication data. Deliberately narrow — the strings
+  # "cvv" or "pin" alone appear far too widely to be a signal.
+  pattern     = "(?i)((cvv2?|cvc2?|cav2|cid)\\s*[:=]\\s*|[\"'`](cvv2?|cvc2?)[\"'`]\\s*:|column\\s*\\(\\s*[\"'](cvv|cvc|track_?data|pin_?block)|(track_?(1|2|data)|pin_?block)\\s*[:=])"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Fields or columns named for sensitive authentication data. Retaining these after
+authorization is prohibited outright, encrypted or not — one of the few PCI rules
+with no compensating control.
+"""
+
+[[controls]]
+id        = "PCI-8.6.1"
+title     = "Accounts used by systems are managed; credentials are not hardcoded"
+clause    = "PCI DSS v4.0 8.6.1, 8.6.2"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Accounts used by systems or applications for interactive login are managed, and
+passwords or passphrases for any application and system accounts are not
+hardcoded in scripts, configuration files, or bespoke and custom source code.
+"""
+remediation = """
+Rotate any exposed credential — deletion is insufficient, the value remains in
+git history — and move secrets to a managed secret store.
+"""
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "8.6.2 prohibits hardcoded credentials in source and configuration explicitly."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A committed private key is a hardcoded credential by any reading."
+
+  [[controls.checks]]
+  id          = "env-file-not-tracked"
+  kind        = "file-absent"
+  path        = ".env"
+  on_match    = "gap"
+  on_no_match = "pass"
+  rationale   = "A tracked .env commonly carries system-account credentials."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Infrastructure requirements — declared, not omitted.
+# ═════════════════════════════════════════════════════════════════════════════
+
+[[controls]]
+id        = "PCI-1"
+title     = "Install and maintain network security controls"
+clause    = "PCI DSS v4.0 Requirement 1"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Network security controls such as firewalls and other network security
+technologies are installed and maintained between trusted and untrusted
+networks, and CDE segmentation is enforced.
+"""
+remediation = "Provide network diagrams, firewall rule sets, and segmentation test results."
+
+  [[controls.checks]]
+  id          = "network-controls-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/network-diagram.md", "docs/architecture.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Firewall configuration, network diagrams and segmentation testing are
+infrastructure facts. Even Terraform in this repo would describe intent, not the
+deployed CDE boundary. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "PCI-4"
+title     = "Protect cardholder data with strong cryptography during transmission"
+clause    = "PCI DSS v4.0 Requirement 4"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Strong cryptography and security protocols are implemented to safeguard PAN
+during transmission over open, public networks.
+"""
+remediation = "Provide the TLS configuration of every CDE endpoint and the certificate inventory."
+
+  [[controls.checks]]
+  id          = "transmission-encryption-declared"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{conf,yml,yaml,tf,toml,json}"
+  pattern     = "(?i)(ssl_protocols\\s+TLSv1\\.[23]|minimum_protocol_version|min_tls_version|MinimumTlsVersion)"
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  # A TLS floor in a config file is weak evidence about the deployed CDE, which
+  # is what Requirement 4 is about.
+  rationale   = """
+A TLS floor may appear in configuration, but Requirement 4 concerns the deployed
+CDE endpoints and their certificate inventory. Reported Unknown; the assessor
+must test the live endpoints.
+"""
+
+[[controls]]
+id        = "PCI-11.3"
+title     = "External and internal vulnerability scans and penetration testing"
+clause    = "PCI DSS v4.0 11.3, 11.4"
+severity  = "high"
+aggregate = "all"
+intent    = """
+External vulnerability scans are performed quarterly by an Approved Scanning
+Vendor (ASV), internal scans are performed quarterly, and penetration testing is
+performed at least annually and after significant change.
+"""
+remediation = "Provide ASV scan reports and the annual penetration test report."
+
+  [[controls.checks]]
+  id          = "asv-and-pentest-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/pentest.md", "docs/security-assessments.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+ASV scans and penetration tests are performed against deployed systems by
+external parties and delivered as reports. No repository evidences them.
+Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "PCI-12"
+title     = "Support information security with organizational policies and programs"
+clause    = "PCI DSS v4.0 Requirement 12"
+severity  = "high"
+aggregate = "all"
+intent    = """
+An overall information security policy is established, published, maintained and
+disseminated; acceptable use, risk assessment, security awareness, personnel
+screening and incident response are all governed.
+"""
+remediation = "Provide the information security policy set, acknowledgements and the incident response plan."
+
+  [[controls.checks]]
+  id          = "security-policy-present"
+  kind        = "file-exists"
+  paths       = ["SECURITY.md", "docs/SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A SECURITY.md is a vulnerability disclosure contact, not the PCI Requirement 12
+policy programme — which covers acceptable use, risk assessment, personnel
+screening and annual acknowledgement. Reported Unknown unconditionally.
+"""
