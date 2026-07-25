@@ -41,8 +41,27 @@ machine-checkable oracle a dumb model lacks: it turns "trust the model" into
 ## Status
 
 🚧 **Early implementation.** Specs are in [`docs/specs/`](docs/specs/) (start with
-the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, ~700 tests):
+the [overview](docs/specs/00-overview.md)). Landed so far (`crates/`, ~1,070 tests):
 
+- **M9 compliance evidence engine** (`sc-comply`, `sc-comply-author` — specs
+  [13](docs/specs/13-compliance-evidence.md)–[15](docs/specs/15-compliance-eval.md)) —
+  audits a repository against **ten framework packs** (SOC 2, ISO 27001, NIST SSDF,
+  SLSA+SBOM, CIS v8, PCI DSS v4, NIST 800-53, HIPAA, GDPR, EU NIS2/DORA/AI Act;
+  110 controls, 193 checks) and emits an **auditor-facing evidence pack** —
+  control-by-control status with `file:line` citations, a gap list, and a
+  manual-evidence worklist. **Deterministic by design:** no model runs during an
+  audit, so the same repo produces the same pack. The governing rule is that an
+  evidence pack is *an argument, not a verdict* — `Unknown` is a first-class
+  status (85% of a framework like SOC 2 is organizational and invisible to a code
+  scan), there is deliberately **no headline compliance percentage**, and
+  pack-driven shell commands are off by default. Frameworks are **TOML packs, not
+  code**, so adding one is an authoring task. `sc-comply-author` critiques packs
+  with **16 deterministic lints** (it found five real defects in the shipped SOC 2
+  pack on its first run) and can draft new ones via Gemini, graded by a
+  [drafting eval](docs/specs/15-compliance-eval.md) that measures *honesty under
+  temptation* — does a model refuse to invent evidence for a control no repository
+  can settle? A live dashboard (`comply`), a lint gate (`comply-lint`), and a
+  **redacted static export** for GitHub Pages (`comply-export`) round it out.
 - **M8 native Windows client** (`sc-win`, the vibe-coding desktop app — spec 12) —
   an [iced](https://iced.rs) GUI over the proven core: type intent, watch the agent
   and swarm work. It drives the full **staged workflow** end to end. **Breakdown**
@@ -213,6 +232,20 @@ more reasoning, and `gemini-2.5-pro` is rarely worth the cost/latency for breakd
 - **CLI / TUI** — `smart-coder run "<task>"` (terminal dashboard) or
   `smart-coder serve "<task>"` (prints a `localhost` URL for the web dashboard);
   `smart-coder doctor` checks the backend.
+- **Compliance** — no model backend needed; the audit path is deterministic.
+
+  | Command | What it does |
+  | --- | --- |
+  | `smart-coder --list-packs` | The ten shipped framework packs |
+  | `smart-coder comply` | Audit **all** frameworks; serve a dashboard with a selector |
+  | `smart-coder comply --pack iso27001` | Audit one framework (name or path) |
+  | `smart-coder comply-lint --pack soc2` | Critique a pack's own authoring; non-zero on a blocking finding |
+  | `smart-coder comply-export` | Write a **redacted** static site to `docs/compliance/` |
+  | `smart-coder comply-eval --author-model …` | Grade a model on drafting honesty (needs an API key) |
+
+  Add `--no-token` to `comply` for a plain `http://127.0.0.1:8177/` link on a
+  local run. It stays loopback-only, but **do not** combine it with
+  `tailscale serve` — that would expose an unauthenticated page to your tailnet.
 
 ## Key decisions
 
@@ -238,3 +271,6 @@ more reasoning, and `gemini-2.5-pro` is rarely worth the cost/latency for breakd
 - [10 — Prior art & references](docs/specs/10-prior-art.md)
 - [11 — Testing & TDD](docs/specs/11-testing-and-tdd.md)
 - [12 — Platform clients (Windows)](docs/specs/12-platform-clients.md)
+- [13 — Compliance evidence](docs/specs/13-compliance-evidence.md)
+- [14 — Pack authoring](docs/specs/14-pack-authoring.md)
+- [15 — Compliance drafting eval](docs/specs/15-compliance-eval.md)

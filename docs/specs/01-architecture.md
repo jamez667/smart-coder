@@ -51,6 +51,8 @@ smart-coder/
 │   ├── sc-tools/           # Tool Registry + built-in tools (fs, shell, git, search)
 │   ├── sc-context/         # Context Manager: window builder, summarizer, history
 │   ├── sc-index/           # Retrieval index over the repo
+│   ├── sc-comply/          # Compliance evidence engine — NO sc-model dependency
+│   ├── sc-comply-author/   # Pack lints + model-backed drafting (authoring only)
 │   └── sc-proto/           # shared types: messages, tool schemas, events, errors
 └── docs/specs/
 ```
@@ -58,6 +60,12 @@ smart-coder/
 > Module names are provisional; the boundaries are the point. `sc-core` never
 > talks to a concrete backend or a concrete shell — only to the `sc-model` and
 > `sc-tools` traits.
+>
+> One boundary is load-bearing rather than provisional: **`sc-comply` must never
+> depend on `sc-model`.** An evidence pack has to be reproducible, so the audit
+> path cannot reach a model — and a separate `sc-comply-author` crate makes that
+> a compile error rather than a convention. See
+> [13 — Compliance evidence](13-compliance-evidence.md).
 
 ## Core components
 

@@ -200,6 +200,49 @@ backends ([12](12-platform-clients.md)).
 
 ---
 
+## M9 — Compliance evidence ✅
+**Goal:** turn the tree-sitter index and verification machinery into a second
+product surface — auditing a repository against regulatory frameworks
+([13](13-compliance-evidence.md)).
+
+The thesis is a reversal of the rest of this roadmap: **no model runs during an
+audit.** Roughly 70% of code-relevant compliance controls are mechanically
+decidable, and for those an LLM makes the output strictly worse — non-reproducible
+and unciteable, which is disqualifying when the deliverable *is* an audit trail.
+
+- **`sc-comply`** — one engine, frameworks as **TOML packs**. Ten shipped (SOC 2,
+  ISO 27001 Annex A, NIST SSDF, SLSA+SBOM, CIS v8, PCI DSS v4, NIST 800-53,
+  HIPAA, GDPR, EU NIS2/DORA/AI Act): 110 controls, 193 checks. Adding a framework
+  is authoring, not engineering.
+- **The honesty properties**, which are the design rather than a feature list:
+  `Unknown` is a first-class status; there is no headline compliance percentage;
+  weighted scoring divides by *observable* weight so a codebase is not penalised
+  for the tool's blind spots; pack-driven shell commands are off by default.
+- **`sc-comply-author`** ([14](14-pack-authoring.md)) — 16 deterministic lints
+  over pack authoring. It found five real defects in the shipped SOC 2 pack on
+  its first run, and one false positive in itself. A Gemini drafting path
+  proposes checks for new frameworks; every draft is validated, linted and
+  marked `# DRAFT` before a human sees it.
+- **The drafting eval** ([15](15-compliance-eval.md)) — twelve real controls
+  weighted toward the traps, graded deterministically by the lints plus
+  hand-written labels. It measures *honesty under temptation*: does a model
+  refuse to invent evidence for a control no repository can settle? Dishonesty
+  scores zero, not a partial deduction.
+- **Surfaces:** a live dashboard with a framework selector (`sc-web`), a lint
+  gate (`comply-lint`, non-zero on a blocking finding), and a **redacted** static
+  export for GitHub Pages (`comply-export`) — redaction is structural, and the
+  renderer panics rather than publish citations.
+- **Exit criteria:** ✅ audits this repo against all ten frameworks with zero
+  collector errors; every shipped pack lints clean; the self-critique test
+  enrolls new packs automatically.
+
+**Deliberately not built:** the judgment collector — an LLM for controls regex
+cannot express ("is authorization enforced on *every* admin route?"). Its
+authority is already settled: **`Gap` or `Unknown`, never `Pass`**, enforced in
+the collector rather than the pack so an author cannot route around it.
+
+---
+
 ## Post-v1 / future ideas
 - **User-defined tools** via config.
 - **Heterogeneous swarms** — specialized worker roles (searcher/editor/tester/

@@ -87,3 +87,10 @@ major design decision in `smart-coder` is a direct response to one of these:
    failing test defines every unit of work, and "done" is green. The test is the
    objective oracle a small model lacks — trust the test runner, not the model.
    See [11 — Testing & TDD](11-testing-and-tdd.md).
+9. **Don't use a model where determinism will do.** A model is the right tool
+   for judgment, not for questions a scanner can settle. Where an output must be
+   reproducible and citable — a compliance evidence pack, a lint — the model is
+   *removed from the path* rather than merely constrained, and the code is
+   structured so it cannot creep back in. See
+   [13 — Compliance evidence](13-compliance-evidence.md) and
+   [14 — Pack authoring](14-pack-authoring.md).
