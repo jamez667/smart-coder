@@ -36,6 +36,7 @@ fn main() -> ExitCode {
         Command::Serve { task } => serve_task(&cli, task.clone()),
         Command::Remote => remote_task(&cli),
         Command::Comply { pack } => comply_task(&cli, pack.clone()),
+        Command::ComplyLint { pack } => comply_lint(pack.clone()),
         Command::Swarm { task } => swarm_task(&cli, task.clone()),
         Command::Plan { task, interactive } => plan_task(&cli, task.clone(), *interactive),
         Command::Staged { task } => staged_task_json(&cli, task.clone()),
@@ -583,6 +584,58 @@ fn comply_task(cli: &Cli, pack_arg: Option<String>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Critique a compliance pack's own authoring (spec 14).
+///
+/// Deterministic and model-free: this is the half of the authoring assistant
+/// that needs no API key. It exits non-zero on a blocking finding so it can be
+/// wired into a check gate.
+fn comply_lint(pack_arg: Option<String>) -> ExitCode {
+    let workspace = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let pack_path = match pack_arg {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match default_pack_path(&workspace) {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "error: no pack given and the bundled SOC 2 pack was not found.\n\
+                     pass one explicitly, e.g. \
+                     `smart-coder comply-lint --pack path/to/pack.toml`"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let pack = match sc_comply::pack::Pack::load(&pack_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The current directory doubles as the sample workspace: the file-dependent
+    // lints need real files to test globs and paths against.
+    let sample = sc_comply_author::Sample::load(&workspace);
+    let report = sc_comply_author::lint_pack(&pack, Some(&sample));
+
+    print!("{}", sc_comply_author::report::markdown(&report));
+
+    let blocking = report.blocking().len();
+    if blocking > 0 {
+        eprintln!("\n{blocking} blocking finding(s) — the pack needs work before use.");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// Locate the bundled SOC 2 pack relative to the workspace being audited.

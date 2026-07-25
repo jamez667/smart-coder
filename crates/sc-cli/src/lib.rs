@@ -36,6 +36,11 @@ pub enum Command {
     /// evidence pack as a local dashboard (spec 13). No task — the pack decides
     /// what is evaluated. `--pack <path>` selects the framework.
     Comply { pack: Option<String> },
+    /// Critique a compliance pack with the deterministic authoring lints
+    /// (spec 14): `on_no_files` mistakes, unreachable patterns, self-referential
+    /// detectors, controls claiming determinism they cannot have. No model is
+    /// involved. `--pack <path>` selects the pack to lint.
+    ComplyLint { pack: Option<String> },
     /// Run a task with the worker swarm (orchestrator + parallel workers) and
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
@@ -196,9 +201,12 @@ impl Cli {
                 "chat" if command.is_none() => command = Some(Command::Chat),
                 "remote" if command.is_none() => command = Some(Command::Remote),
                 "comply" if command.is_none() => command = Some(Command::Comply { pack: None }),
-                // `--pack` only means anything to `comply`; accepted after the
-                // subcommand so `smart-coder comply --pack soc2.toml` reads
-                // naturally.
+                "comply-lint" if command.is_none() => {
+                    command = Some(Command::ComplyLint { pack: None })
+                }
+                // `--pack` only means anything to the compliance subcommands;
+                // accepted after the subcommand so
+                // `smart-coder comply --pack soc2.toml` reads naturally.
                 "--pack" => {
                     let path = it.next().ok_or_else(|| {
                         DcError::Eval(
@@ -208,10 +216,12 @@ impl Cli {
                         )
                     })?;
                     match &mut command {
-                        Some(Command::Comply { pack }) => *pack = Some(path),
+                        Some(Command::Comply { pack }) | Some(Command::ComplyLint { pack }) => {
+                            *pack = Some(path)
+                        }
                         _ => {
                             return Err(DcError::Eval(
-                                "--pack only applies to `comply`".to_string(),
+                                "--pack only applies to `comply` and `comply-lint`".to_string(),
                             ))
                         }
                     }
@@ -921,6 +931,9 @@ COMMANDS:
     replay <id>     Re-render a recorded session from its log (spec 06)
     comply          Audit this dir against a compliance pack; serve the evidence
                     pack as a dashboard (spec 13). See --pack.
+    comply-lint     Critique a compliance pack's own authoring (spec 14): unsafe
+                    on_no_files, unreachable patterns, over-claiming controls.
+                    Deterministic — no model involved. See --pack.
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -1669,15 +1682,37 @@ mod tests {
         // Silently ignoring it would let `smart-coder run --pack x` look like it
         // did something.
         let err = Cli::parse(["doctor", "--pack", "x.toml"]).unwrap_err();
-        assert!(
-            format!("{err}").contains("only applies to `comply`"),
-            "{err}"
+        assert!(format!("{err}").contains("only applies to"), "{err}");
+    }
+
+    #[test]
+    fn parses_comply_lint_with_and_without_a_pack() {
+        let bare = Cli::parse(["comply-lint"]).unwrap();
+        assert_eq!(bare.command, Command::ComplyLint { pack: None });
+
+        let with_pack = Cli::parse(["comply-lint", "--pack", "packs/iso.toml"]).unwrap();
+        assert_eq!(
+            with_pack.command,
+            Command::ComplyLint {
+                pack: Some("packs/iso.toml".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn comply_and_comply_lint_are_distinct_subcommands() {
+        // `comply` audits a codebase; `comply-lint` critiques the pack itself.
+        // Conflating them would run an audit when a critique was asked for.
+        assert_ne!(
+            Cli::parse(["comply"]).unwrap().command,
+            Cli::parse(["comply-lint"]).unwrap().command
         );
     }
 
     #[test]
     fn usage_lists_comply() {
         assert!(usage().contains("comply"));
+        assert!(usage().contains("comply-lint"));
         assert!(usage().contains("--pack"));
     }
 

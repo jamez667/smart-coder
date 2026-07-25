@@ -20,4 +20,5 @@ sc-workflow = { path = "../sc-workflow" }
 sc-tui = { path = "../sc-tui" }
 sc-web = { path = "../sc-web" }
 sc-comply = { path = "../sc-comply" }
+sc-comply-author = { path = "../sc-comply-author" }
 serde_json = { workspace = true }

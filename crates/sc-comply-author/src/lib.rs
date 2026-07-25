@@ -16,6 +16,7 @@
 //!
 //! See `docs/specs/14-pack-authoring.md`.
 
+pub mod draft;
 pub mod lint;
 pub mod report;
 pub mod sample;
@@ -23,6 +24,7 @@ pub mod sample;
 #[cfg(test)]
 mod test_support;
 
+pub use draft::{draft_control, DraftRequest, DraftResult, Provenance};
 pub use lint::{lint_pack, LintCtx, LintFinding, LintReport};
 pub use sample::Sample;
 
