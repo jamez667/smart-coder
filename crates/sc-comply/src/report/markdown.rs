@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 
-use crate::evidence::{ControlResult, EvidencePack};
+use crate::evidence::{ControlResult, EvidencePack, Score};
 use crate::status::ControlStatus;
 
 /// Render the full evidence pack as Markdown.
@@ -127,19 +127,70 @@ fn summary(s: &mut String, pack: &EvidencePack) {
     );
     let _ = writeln!(s);
 
-    let _ = writeln!(s, "| Control | Title | Status | Severity | Checks |");
-    let _ = writeln!(s, "|---|---|---|---|---|");
+    by_section(s, pack);
+
+    let _ = writeln!(
+        s,
+        "| Control | Section | Title | Status | Severity | Checks |"
+    );
+    let _ = writeln!(s, "|---|---|---|---|---|---|");
     for c in pack.controls_for_report() {
         let _ = writeln!(
             s,
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |",
             c.id,
+            c.section.label(),
             escape_pipes(&c.title),
             status_badge(c.status),
             c.severity.label(),
             c.checks.len()
         );
     }
+    let _ = writeln!(s);
+}
+
+/// Per-evidence-domain scores.
+///
+/// The blended figures above answer "how much of this framework did we settle?".
+/// These answer the question a reader can act on: *of the things a repository
+/// can evidence, how many does it?* An Organizational row reading 0% is a
+/// statement of scope — the evidence is in an HR system — and it sits beside a
+/// Code figure it cannot drag down.
+fn by_section(s: &mut String, pack: &EvidencePack) {
+    let sections = Score::by_section(&pack.controls);
+    if sections.len() < 2 {
+        return; // One domain: the blended figures above already say it.
+    }
+
+    let _ = writeln!(s, "### By evidence domain");
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "| Domain | Evidence lives in | Controls | Pass | Gap | Unknown | Coverage | Determinacy |"
+    );
+    let _ = writeln!(s, "|---|---|---|---|---|---|---|---|");
+    for (section, sc) in &sections {
+        let _ = writeln!(
+            s,
+            "| **{}** | {} | {} | {} | {} | {} | {:.0}% | {:.0}% |",
+            section.label(),
+            section.evidence_lives_in(),
+            sc.total,
+            sc.passed,
+            sc.gaps,
+            sc.unknown,
+            sc.coverage() * 100.0,
+            sc.determinacy() * 100.0,
+        );
+    }
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "> These are deliberately **not** combined into one figure. A framework is completed \
+         mostly by declaring organizational controls, which a repository can never settle — \
+         blending them in would make an honest pack look worse than a selective one, and would \
+         let a large governance section hide a poor Code result."
+    );
     let _ = writeln!(s);
 }
 
@@ -424,6 +475,7 @@ mod tests {
     use super::*;
     use crate::evidence::{CheckResult, Evidence, FrameworkMeta};
     use crate::status::Severity;
+    use crate::Section;
 
     fn evidence(file: &str, line: Option<u32>, excerpt: &str, check: &str) -> Evidence {
         Evidence::new(file, line, excerpt, check, "regex")
@@ -631,13 +683,58 @@ mod tests {
     #[test]
     fn summary_table_is_sorted_gaps_first() {
         let md = render(&sample());
-        let table = md.find("| Control | Title |").expect("table");
+        let table = md.find("| Control | Section | Title |").expect("table");
         let after = &md[table..];
         let gap_at = after.find("CC6.1").expect("gap row");
         let unknown_at = after.find("CC8.1").expect("unknown row");
         let pass_at = after.find("CC7.2").expect("pass row");
         assert!(gap_at < unknown_at, "gaps sort before unknowns");
         assert!(unknown_at < pass_at, "unknowns sort before passes");
+    }
+
+    /// A mixed pack reports each evidence domain separately.
+    #[test]
+    fn the_summary_breaks_the_score_down_by_evidence_domain() {
+        let mut controls = sample().controls;
+        controls[0].section = Section::Code;
+        controls[1].section = Section::Organizational;
+        let pack = EvidencePack::new(
+            sample().framework,
+            "w".into(),
+            "t".into(),
+            String::new(),
+            controls,
+            vec![],
+        );
+        let md = render(&pack);
+
+        assert!(md.contains("### By evidence domain"), "{md}");
+        assert!(md.contains("**Code**"), "{md}");
+        assert!(md.contains("**Organizational**"), "{md}");
+        // The reader is told where the evidence lives, so a 0% row reads as
+        // scope rather than as a failure.
+        assert!(md.contains("HR records"), "{md}");
+        // And is told explicitly not to blend them.
+        assert!(md.contains("not** combined into one figure"), "{md}");
+    }
+
+    /// A single-domain pack gets no breakdown — one row restating the blended
+    /// figures is noise.
+    #[test]
+    fn a_single_domain_pack_omits_the_breakdown() {
+        let mut controls = sample().controls;
+        for c in &mut controls {
+            c.section = Section::Code;
+        }
+        let pack = EvidencePack::new(
+            sample().framework,
+            "w".into(),
+            "t".into(),
+            String::new(),
+            controls,
+            vec![],
+        );
+        assert!(!render(&pack).contains("### By evidence domain"));
     }
 
     #[test]

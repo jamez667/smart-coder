@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::evidence::EvidencePack;
+use crate::evidence::{EvidencePack, Score};
+use crate::section::Section;
 use crate::status::{ControlStatus, Severity};
 
 /// A finding that appears in more than one framework.
@@ -61,6 +62,13 @@ pub struct Rollup {
     pub weakest_coverage: Vec<(String, f64)>,
     /// Capabilities switched off, deduplicated.
     pub disabled_capabilities: Vec<String>,
+    /// Totals per evidence domain, across every framework.
+    ///
+    /// The blended figures above answer "how much of these frameworks did we
+    /// settle?". These answer what a reader can act on, and are what any
+    /// summary should lead with: an Organizational score near zero is a
+    /// statement about where the evidence lives, not about the project.
+    pub by_section: BTreeMap<Section, Score>,
 }
 
 impl Rollup {
@@ -213,6 +221,15 @@ pub fn roll_up(packs: &[EvidencePack]) -> Rollup {
 
     for pack in packs {
         out.controls += pack.score.total;
+        for (section, score) in Score::by_section(&pack.controls) {
+            let e = out.by_section.entry(section).or_default();
+            e.total += score.total;
+            e.passed += score.passed;
+            e.gaps += score.gaps;
+            e.unknown += score.unknown;
+            e.errors += score.errors;
+            e.not_applicable += score.not_applicable;
+        }
         out.passed += pack.score.passed;
         out.gaps += pack.score.gaps;
         out.unknown += pack.score.unknown;

@@ -184,6 +184,56 @@ pub fn framework_page(pack: &EvidencePack, back_link: Option<&str>) -> String {
     framework_page_inner(pack, back_link, &[])
 }
 
+/// Per-evidence-domain scores, as a table.
+///
+/// The blended figures answer "how much of this framework did we settle?". This
+/// answers what a reader can act on: *of the things a repository can evidence,
+/// how many does it?* Each row names where its evidence lives and who owns it,
+/// so an Organizational row at 0% reads as scope rather than as a failing grade.
+///
+/// Returns empty for a single-domain pack — one row restating the headline
+/// figures is noise.
+fn by_section(pack: &EvidencePack) -> String {
+    let sections = crate::evidence::Score::by_section(&pack.controls);
+    if sections.len() < 2 {
+        return String::new();
+    }
+
+    let pct = |v: f64| (v * 100.0).round() as u32;
+    let mut b = String::with_capacity(2 * 1024);
+    b.push_str(
+        "<h3>By evidence domain</h3>\
+         <table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th>\
+         <th>Determinacy</th></tr></thead><tbody>",
+    );
+    for (section, sc) in &sections {
+        let _ = write!(
+            b,
+            "<tr><td><strong>{}</strong><br><span class=\"scope\">owned by {}</span></td>\
+             <td class=\"scope\">{}</td>\
+             <td>{} <span class=\"scope\">({} pass · {} gap · {} unknown)</span></td>\
+             <td><strong>{}%</strong><div class=\"bar\"><div style=\"width:{}%\"></div></div></td></tr>",
+            esc(section.label()),
+            esc(section.owner()),
+            esc(section.evidence_lives_in()),
+            sc.total,
+            sc.passed,
+            sc.gaps,
+            sc.unknown,
+            pct(sc.determinacy()),
+            pct(sc.determinacy()),
+        );
+    }
+    b.push_str("</tbody></table>");
+    b.push_str(
+        "<p class=\"scope\">These are deliberately not combined into a single figure. A framework \
+         is completed mostly by declaring organizational controls, which a repository can never \
+         settle — blending them in would make an honest pack look worse than a selective one, and \
+         would let a large governance section hide a poor result in code.</p>",
+    );
+    b
+}
+
 fn framework_page_inner(
     pack: &EvidencePack,
     back_link: Option<&str>,
@@ -257,6 +307,8 @@ fn framework_page_inner(
          at low determinacy means little was verified and what was happened to pass.</p>",
     );
 
+    b.push_str(&by_section(pack));
+
     if !pack.disabled_capabilities.is_empty() {
         let caps: Vec<String> = pack
             .disabled_capabilities
@@ -272,16 +324,17 @@ fn framework_page_inner(
 
     // Controls, problems first.
     b.push_str(
-        "<h2>Controls</h2><table><thead><tr><th>Control</th><th>Status</th>\
+        "<h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th>\
                 <th>Severity</th><th>Determination</th></tr></thead><tbody>",
     );
     for c in pack.controls_for_report() {
         let _ = write!(
             b,
             "<tr><td><strong>{}</strong><br><span class=\"scope\">{}</span></td>\
-             <td>{}</td><td>{}</td><td class=\"scope\">{}</td></tr>",
+             <td class=\"scope\">{}</td><td>{}</td><td>{}</td><td class=\"scope\">{}</td></tr>",
             esc(&c.id),
             esc(&c.title),
+            esc(c.section.label()),
             pill(c.status),
             esc(c.severity.label()),
             esc(&c.rationale)
@@ -639,6 +692,43 @@ mod tests {
         assert!(html.contains("Rotate the credential."));
     }
 
+    /// A pack spanning several evidence domains reports each one separately.
+    #[test]
+    fn a_multi_domain_pack_reports_each_domain() {
+        let base = pack(false);
+        let mut org = base.controls[0].clone();
+        org.id = "CC1.1".into();
+        org.section = crate::Section::Organizational;
+        org.status = ControlStatus::Unknown;
+        let mut controls = base.controls.clone();
+        controls.push(org);
+
+        let p = EvidencePack::new(
+            base.framework.clone(),
+            base.workspace.clone(),
+            base.generated_at.clone(),
+            base.scope_note.clone(),
+            controls,
+            vec![],
+        );
+        let html = framework_page(&p.redacted(), None);
+
+        assert!(html.contains("By evidence domain"), "{html}");
+        assert!(html.contains("Organizational"), "{html}");
+        // Each row says where the evidence is and who owns it, so a 0% row
+        // reads as a statement of scope rather than a failing grade.
+        assert!(html.contains("HR records"), "{html}");
+        assert!(html.contains("owned by"), "{html}");
+        assert!(html.contains("not combined into a single figure"), "{html}");
+    }
+
+    /// A single-domain pack gets no breakdown table.
+    #[test]
+    fn a_single_domain_pack_omits_the_breakdown() {
+        let html = framework_page(&pack(false).redacted(), None);
+        assert!(!html.contains("By evidence domain"), "{html}");
+    }
+
     #[test]
     #[should_panic(expected = "unredacted pack")]
     fn refuses_to_render_an_unredacted_pack() {
@@ -758,6 +848,27 @@ mod tests {
                 remediation: Some("Add gitleaks to CI.".into()),
             }],
             weakest_coverage: vec![("ISO 27001".into(), 0.3)],
+            by_section: [
+                (
+                    crate::Section::Code,
+                    crate::evidence::Score {
+                        total: 10,
+                        passed: 8,
+                        gaps: 2,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    crate::Section::Organizational,
+                    crate::evidence::Score {
+                        total: 10,
+                        unknown: 10,
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
             disabled_capabilities: vec!["command-exit-code".into()],
         }
     }

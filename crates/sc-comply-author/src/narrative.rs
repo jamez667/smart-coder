@@ -113,7 +113,15 @@ pub fn narrative_messages(rollup: &Rollup, project: &str) -> Vec<Message> {
          4. Lead with what is verified and what is outstanding. If a finding appears in \
             several frameworks, say so — that is one fix with several times the leverage, \
             and it is the most useful thing on the page.\n\
-         5. Be plain. No marketing language, no hedging padding, no bullet-point soup.\n\
+         5. Controls are grouped by EVIDENCE DOMAIN — where the evidence physically \
+            lives. Lead with the domains a repository can actually settle (code, \
+            infrastructure), because those are the numbers the reader can act on. A low \
+            organizational figure is a statement about where that evidence lives — HR \
+            systems, contracts, board minutes — not a shortfall. Say so plainly. NEVER \
+            average or combine the domains into a single figure: doing so would let a \
+            large organizational section hide a poor result in code, and would make a \
+            more honest report look worse than a selective one.\n\
+         6. Be plain. No marketing language, no hedging padding, no bullet-point soup.\n\
          \n\
          FORMAT: two or three short paragraphs, under 250 words total. Plain prose, no \
          headings, no markdown, no lists. Write as the project team reporting to an outside \
@@ -139,6 +147,28 @@ pub fn narrative_messages(rollup: &Rollup, project: &str) -> Vec<Message> {
         rollup.pass_rate() * 100.0,
         rollup.determinacy() * 100.0,
     ));
+
+    if !rollup.by_section.is_empty() {
+        facts.push_str(
+            "By evidence domain — where the evidence physically lives. These are separate \
+             scores and must NOT be averaged together:\n",
+        );
+        for (section, sc) in &rollup.by_section {
+            facts.push_str(&format!(
+                "- {} (evidence in {}; owned by {}): {} controls, {} passed, {} gaps, \
+                 {} unknown. Determinacy {:.0}%.\n",
+                section.label(),
+                section.evidence_lives_in(),
+                section.owner(),
+                sc.total,
+                sc.passed,
+                sc.gaps,
+                sc.unknown,
+                sc.determinacy() * 100.0,
+            ));
+        }
+        facts.push('\n');
+    }
 
     let shared = rollup.shared_findings();
     if shared.is_empty() {
@@ -221,23 +251,29 @@ pub fn validate(text: &str, rollup: &Rollup) -> std::result::Result<String, Reje
 /// invention.
 fn allowed_figures(rollup: &Rollup) -> Vec<u32> {
     let mut out = Vec::new();
-    for exact in [rollup.pass_rate() * 100.0, rollup.determinacy() * 100.0] {
-        let r = exact.round() as i64;
+    let mut allow = |ratio: f64| {
+        // A ±1 band: the prompt hands over pre-rounded figures, and a model that
+        // re-renders "42%" as "43%" is rounding, not inventing.
+        let r = (ratio * 100.0).round() as i64;
         for d in [-1, 0, 1] {
             let v = r + d;
             if (0..=100).contains(&v) {
                 out.push(v as u32);
             }
         }
-    }
+    };
+
+    allow(rollup.pass_rate());
+    allow(rollup.determinacy());
     for (_, det) in &rollup.weakest_coverage {
-        let r = (det * 100.0).round() as i64;
-        for d in [-1, 0, 1] {
-            let v = r + d;
-            if (0..=100).contains(&v) {
-                out.push(v as u32);
-            }
-        }
+        allow(*det);
+    }
+    // Per-domain figures are handed to the model too, so they must be allowed —
+    // otherwise the summary would be rejected precisely when it does what the
+    // brief asks and leads with the domain a reader can act on.
+    for score in rollup.by_section.values() {
+        allow(score.determinacy());
+        allow(score.coverage());
     }
     out
 }
@@ -338,7 +374,79 @@ mod tests {
             }],
             weakest_coverage: vec![("EU cluster".into(), 0.20), ("SOC 2".into(), 0.44)],
             disabled_capabilities: vec!["command-exit-code".into()],
+            by_section: [
+                (
+                    sc_comply::Section::Code,
+                    sc_comply::evidence::Score {
+                        total: 40,
+                        passed: 30,
+                        gaps: 4,
+                        unknown: 6,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    sc_comply::Section::Organizational,
+                    sc_comply::evidence::Score {
+                        total: 70,
+                        unknown: 70,
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
         }
+    }
+
+    /// The brief must hand over the per-domain figures and forbid blending them.
+    #[test]
+    fn the_prompt_gives_the_evidence_domains_and_forbids_averaging_them() {
+        let msgs = narrative_messages(&rollup(), "acme-api");
+        let system = &msgs[0].content;
+        let user = &msgs[1].content;
+
+        assert!(user.contains("By evidence domain"), "{user}");
+        assert!(user.contains("Code"), "{user}");
+        assert!(user.contains("Organizational"), "{user}");
+        assert!(
+            system.contains("NEVER \\\n            average") || system.contains("NEVER average"),
+            "the brief must forbid blending the domains: {system}"
+        );
+        assert!(
+            system.contains("hide a poor result in code"),
+            "the brief must say WHY blending is wrong: {system}"
+        );
+    }
+
+    /// A per-domain percentage must survive validation.
+    ///
+    /// The brief now asks the model to lead with the domain figures, so those
+    /// figures have to be in the allow-list. Without this the summary would be
+    /// rejected exactly when it did what it was told.
+    #[test]
+    fn a_per_domain_percentage_is_not_treated_as_invented() {
+        let r = rollup();
+        // Code: 34 of 40 determinable = 85%.
+        let det = r.by_section[&sc_comply::Section::Code].determinacy();
+        assert_eq!((det * 100.0).round() as u32, 85);
+
+        let text = "Evidence that lives in source is 85% determinable. Everything \
+                    organizational sits outside this repository and is reported unknown.";
+        assert!(
+            validate(text, &r).is_ok(),
+            "a figure the prompt supplied must not be rejected as invented"
+        );
+    }
+
+    /// A figure from no domain at all is still rejected.
+    #[test]
+    fn a_figure_from_nowhere_is_still_rejected() {
+        let text = "Evidence that lives in source is 73% determinable.";
+        assert!(matches!(
+            validate(text, &rollup()),
+            Err(Rejection::InventedFigure(_))
+        ));
     }
 
     #[test]
