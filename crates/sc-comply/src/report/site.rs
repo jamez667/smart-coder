@@ -577,6 +577,61 @@ pub struct IndexEntry {
 /// deterministic summary below stands on its own — the page must be complete
 /// without a model, because most people running this will not have one
 /// configured.
+/// Cross-framework scores per evidence domain, for the index.
+///
+/// The per-framework table below this answers "how complete is each framework?".
+/// This answers the question a reader actually has: *of the things a repository
+/// can evidence, how many does this project evidence?* Those are different
+/// questions, and only the second one is actionable.
+///
+/// Deliberately no combined figure. A blend is what would let 35 declared
+/// governance controls drag down a good result in code — and, worse, make a pack
+/// look better the fewer organizational controls it honestly declares.
+fn rollup_by_section(rollup: &crate::rollup::Rollup) -> String {
+    if rollup.by_section.len() < 2 {
+        return String::new();
+    }
+
+    let pct = |v: f64| (v * 100.0).round() as u32;
+    let mut b = String::with_capacity(2 * 1024);
+    b.push_str("<h2>By evidence domain</h2>");
+    b.push_str(
+        "<p class=\"scope\">Controls grouped by where their evidence physically lives. \
+         A domain a repository cannot see is reported as unknown — that is a statement \
+         about the evidence, not about the project.</p>",
+    );
+    b.push_str(
+        "<table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th>\
+         <th>Determinacy</th></tr></thead><tbody>",
+    );
+    for (section, sc) in &rollup.by_section {
+        let _ = write!(
+            b,
+            "<tr><td><strong>{}</strong><br><span class=\"scope\">owned by {}</span></td>\
+             <td class=\"scope\">{}</td>\
+             <td>{} <span class=\"scope\">({} pass · {} gap · {} unknown)</span></td>\
+             <td><strong>{}%</strong><div class=\"bar\"><div style=\"width:{}%\"></div></div></td></tr>",
+            esc(section.label()),
+            esc(section.owner()),
+            esc(section.evidence_lives_in()),
+            sc.total,
+            sc.passed,
+            sc.gaps,
+            sc.unknown,
+            pct(sc.determinacy()),
+            pct(sc.determinacy()),
+        );
+    }
+    b.push_str("</tbody></table>");
+    b.push_str(
+        "<p class=\"scope\">These are deliberately not combined into a single figure. A framework \
+         is completed mostly by declaring organizational controls, which a repository can never \
+         settle — blending them would make an honest report look worse than a selective one, and \
+         would let a large governance section hide a poor result in code.</p>",
+    );
+    b
+}
+
 pub fn index_page(
     entries: &[IndexEntry],
     workspace_label: &str,
@@ -594,6 +649,11 @@ pub fn index_page(
 
     b.push_str(&disclaimer(true));
     b.push_str(&executive_summary(rollup, narrative));
+
+    // Domains BEFORE the per-framework table. A reader who takes one number away
+    // should take away the one for the domain they can act on, not a blend of
+    // four domains that answer different questions.
+    b.push_str(&rollup_by_section(rollup));
 
     b.push_str(
         "<h2>Frameworks</h2><table><thead><tr><th>Framework</th><th>Pass</th><th>Gap</th>\
@@ -944,6 +1004,47 @@ mod tests {
         let counts = html.find("<span>controls</span>").expect("counts");
         let table = html.find("<h2>Frameworks</h2>").unwrap_or(html.len());
         assert!(counts < table);
+    }
+
+    /// The index carries the cross-framework domain breakdown.
+    ///
+    /// This shipped missing once: `by_section` was wired into the framework
+    /// pages and the narrative prompt but not into `index_page`, so regenerating
+    /// the site faithfully re-rendered a summary page with no breakdown on it.
+    /// The prose mentioned domains the tables never showed.
+    #[test]
+    fn the_index_reports_each_evidence_domain() {
+        let html = index_page(&two_entries(), "repo", &sample_rollup(), None);
+
+        assert!(html.contains("<h2>By evidence domain</h2>"), "{html}");
+        assert!(html.contains("Organizational"), "{html}");
+        // Each row says where the evidence is and who owns it, so a 0% row reads
+        // as scope rather than as a failing grade.
+        assert!(html.contains("HR records"), "{html}");
+        assert!(html.contains("owned by"), "{html}");
+        assert!(html.contains("not combined into a single figure"), "{html}");
+    }
+
+    /// Domains come before the per-framework table.
+    ///
+    /// The per-framework table answers "how complete is each framework?"; the
+    /// domain table answers what a reader can act on. Order is the whole point.
+    #[test]
+    fn the_domain_breakdown_precedes_the_framework_table() {
+        let html = index_page(&two_entries(), "repo", &sample_rollup(), None);
+        let domains = html.find("<h2>By evidence domain</h2>").expect("domains");
+        let frameworks = html.find("<h2>Frameworks</h2>").expect("frameworks");
+        assert!(
+            domains < frameworks,
+            "the actionable split must come before the per-framework totals"
+        );
+    }
+
+    /// An empty rollup renders without a stray empty table.
+    #[test]
+    fn an_index_with_no_domain_data_omits_the_breakdown() {
+        let html = index_page(&[], "x", &crate::rollup::Rollup::default(), None);
+        assert!(!html.contains("By evidence domain"), "{html}");
     }
 
     #[test]
