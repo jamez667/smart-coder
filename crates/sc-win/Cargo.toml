@@ -15,6 +15,8 @@ name = "sc_win"
 path = "src/lib.rs"
 
 [dependencies]
+sc-comply = { path = "../sc-comply" }
+sc-comply-author = { path = "../sc-comply-author" }
 sc-core = { path = "../sc-core" }
 sc-iterate = { path = "../sc-iterate" }
 sc-swarm = { path = "../sc-swarm" }

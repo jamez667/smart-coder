@@ -11,6 +11,7 @@ pub mod chat;
 pub mod chat_session;
 pub mod codeview;
 pub mod comments;
+pub mod comply;
 pub mod config;
 pub mod filetree;
 pub mod gitdiff;

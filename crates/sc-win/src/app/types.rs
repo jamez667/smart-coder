@@ -81,6 +81,16 @@ pub(crate) struct App {
     pub(crate) verify_input: String,
     pub(crate) suffix_input: String,
     pub(crate) settings_open: bool,
+    // --- Compliance report (File → Compliance report…) ---
+    /// The pick-a-model dialog is showing.
+    pub(crate) comply_open: bool,
+    /// Which model writes the summary and guidance. Defaults to None: the audit
+    /// is deterministic, and a menu click must not silently spend API credits.
+    pub(crate) comply_model: sc_win::comply::ComplyModel,
+    /// An audit is running. Blocks a second run and drives the button label.
+    pub(crate) comply_running: bool,
+    /// The outcome of the last run — `Ok` renders the totals, `Err` the reason.
+    pub(crate) comply_result: Option<Result<sc_win::comply::ComplyReport, String>>,
     /// Which settings tab is showing (Connections vs Routing).
     pub(crate) settings_tab: SettingsTab,
     /// Activity rows accumulated from the event stream.
@@ -424,6 +434,10 @@ impl Default for App {
             last_reload: None,
             intent: String::new(),
             settings_open: false,
+            comply_open: false,
+            comply_model: sc_win::comply::ComplyModel::default(),
+            comply_running: false,
+            comply_result: None,
             rows: Vec::new(),
             board: Vec::new(),
             swarm_board: sc_win::SwarmBoard::default(),
@@ -529,6 +543,19 @@ pub(crate) enum Message {
     GeminiKeyChanged(String),
     // --- Per-stage routing: which connection a stage uses ---
     CoderProviderChanged(sc_win::config::Provider),
+    // --- Compliance report ---
+    /// File → Compliance report… — show the pick-a-model dialog.
+    OpenComplyDialog,
+    CloseComplyDialog,
+    /// Pick which model writes the summary and guidance (None / Local / Gemini).
+    ComplyModelChanged(sc_win::comply::ComplyModel),
+    /// Run the audit over the open workspace.
+    RunComply,
+    /// The audit finished off-thread. `Err` carries a reason to show in place of
+    /// the totals — never a silent failure on a compliance feature.
+    ComplyDone(Result<sc_win::comply::ComplyReport, String>),
+    /// Open the generated report in the default browser.
+    OpenComplyReport,
     PlannerProviderChanged(sc_win::config::Provider),
     AdvisorProviderChanged(sc_win::config::Provider),
     /// Switch the settings modal tab (Connections / Routing).

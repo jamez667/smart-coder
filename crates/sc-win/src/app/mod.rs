@@ -207,6 +207,7 @@ mod logic_b;
 mod logic_c;
 mod update;
 mod view_code;
+mod view_comply;
 mod view_core;
 mod view_menus;
 mod view_panels;
@@ -217,6 +218,61 @@ pub(crate) use helpers::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sc_win::comply::ComplyModel;
+
+    /// The dialog opens with no model selected.
+    ///
+    /// The whole reason "None" is the default: a menu click must not silently
+    /// spend API credits, and the report is complete without prose.
+    #[test]
+    fn the_compliance_dialog_defaults_to_no_model() {
+        let app = App::default();
+        assert_eq!(app.comply_model, ComplyModel::None);
+        assert!(!app.comply_open);
+        assert!(!app.comply_running);
+    }
+
+    /// Opening the dialog clears the previous run's outcome.
+    ///
+    /// Showing last run's totals beside a fresh dialog invites reading them as
+    /// current — on a compliance report that is a real misread.
+    #[test]
+    fn reopening_the_dialog_drops_the_previous_result() {
+        let mut app = App::default();
+        app.comply_result = Some(Err("stale".to_string()));
+        let _ = app.update(Message::OpenComplyDialog);
+        assert!(app.comply_open);
+        assert!(app.comply_result.is_none());
+    }
+
+    /// A second Run while one is in flight is ignored.
+    #[test]
+    fn a_second_audit_cannot_be_started_while_one_runs() {
+        let mut app = App::default();
+        app.comply_running = true;
+        app.comply_result = Some(Err("previous".to_string()));
+        let _ = app.update(Message::RunComply);
+        // Untouched: the guard returned before resetting anything.
+        assert!(app.comply_running);
+        assert!(app.comply_result.is_some());
+    }
+
+    /// A finished audit clears the running flag and records the outcome.
+    #[test]
+    fn a_failed_audit_reports_its_reason_rather_than_failing_silently() {
+        let mut app = App::default();
+        app.comply_running = true;
+        let _ = app.update(Message::ComplyDone(Err("no workspace".to_string())));
+        assert!(!app.comply_running);
+        assert!(matches!(app.comply_result, Some(Err(ref e)) if e.contains("no workspace")));
+    }
+
+    #[test]
+    fn picking_a_model_updates_the_choice() {
+        let mut app = App::default();
+        let _ = app.update(Message::ComplyModelChanged(ComplyModel::Gemini));
+        assert_eq!(app.comply_model, ComplyModel::Gemini);
+    }
 
     #[test]
     fn git_range_selects_inclusive_span_in_display_order() {

@@ -32,3 +32,27 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
 pub fn git() -> Command {
     command("git")
 }
+
+/// Open a local file in the user's default application (the browser, for HTML).
+///
+/// Windows has no `xdg-open`; the shell verb lives in `explorer.exe`, which takes
+/// the path directly and hands it to the registered handler. Deliberately NOT
+/// `cmd /C start`, which would treat a path containing `&` as a command
+/// separator — a real hazard for a path the user chose.
+///
+/// Best-effort: a failure to launch a viewer is not a reason to fail the work
+/// that produced the file, so this reports the error and the caller carries on.
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // `explorer.exe` returns a non-zero exit code even on success, so spawn
+        // and detach rather than checking status.
+        Command::new("explorer").arg(path).spawn()?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        command("xdg-open").arg(path).spawn()?;
+        Ok(())
+    }
+}

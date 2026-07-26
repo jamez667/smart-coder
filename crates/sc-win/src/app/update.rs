@@ -29,6 +29,55 @@ impl App {
                     self.commit_settings();
                 }
             }
+            Message::OpenComplyDialog => {
+                self.open_menu = None;
+                self.comply_open = true;
+                // Drop the previous run's outcome: showing last time's totals
+                // beside a fresh dialog invites reading them as current.
+                self.comply_result = None;
+            }
+            Message::CloseComplyDialog => self.comply_open = false,
+            Message::ComplyModelChanged(m) => self.comply_model = m,
+            Message::RunComply => {
+                if self.comply_running {
+                    return Task::none(); // never stack two audits
+                }
+                // Fold the settings inputs into cfg first, so a key the user
+                // just typed into Connections is actually used by this run.
+                self.commit_settings();
+                self.comply_running = true;
+                self.comply_result = None;
+
+                let workspace = self.workspace_root();
+                let out_dir = workspace.join("docs").join("compliance");
+                let choice = self.comply_model;
+                let cfg = self.cfg.clone();
+                return Task::perform(
+                    async move {
+                        // Blocking: a ten-framework audit walks the workspace
+                        // once per pack, and with a model chosen also makes
+                        // network calls. Never on the UI thread.
+                        tokio::task::spawn_blocking(move || {
+                            sc_win::comply::run(&workspace, &out_dir, choice, &cfg)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("the audit thread panicked: {e}")))
+                    },
+                    Message::ComplyDone,
+                );
+            }
+            Message::ComplyDone(result) => {
+                self.comply_running = false;
+                self.comply_result = Some(result);
+            }
+            Message::OpenComplyReport => {
+                if let Some(Ok(r)) = &self.comply_result {
+                    // Best-effort: failing to launch a viewer is no reason to
+                    // disturb the report that was successfully written.
+                    let _ = sc_win::proc::open_path(&r.index);
+                }
+            }
             Message::ToggleYolo(v) => self.cfg.yolo = v,
             Message::ToggleDryRun(v) => self.cfg.dry_run = v,
             Message::RunTdd => self.start(RunKind::Tdd),

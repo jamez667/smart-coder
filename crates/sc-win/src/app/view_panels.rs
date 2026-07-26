@@ -478,6 +478,14 @@ impl App {
                 } else {
                     vec![("📁  Open folder…".to_string(), Message::PickWorkspace)]
                 };
+                // Only offered with a project open — the audit reads the
+                // workspace, and an entry that can only fail is worse than none.
+                if self.picked_workspace.is_some() {
+                    v.push((
+                        "🛡  Compliance report…".to_string(),
+                        Message::OpenComplyDialog,
+                    ));
+                }
                 // Recent projects (most-recent first), excluding the currently-open one.
                 let recents = sc_win::persist::load().recents;
                 let current = self.picked_workspace.clone();

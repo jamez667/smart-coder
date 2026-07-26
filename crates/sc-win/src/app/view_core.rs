@@ -73,6 +73,9 @@ impl App {
         if self.settings_open {
             layers = layers.push(self.view_settings_modal());
         }
+        if self.comply_open {
+            layers = layers.push(self.view_comply_modal());
+        }
         layers.width(Fill).height(Fill).into()
     }
 
