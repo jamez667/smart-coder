@@ -80,6 +80,7 @@ fn evaluate_control(
             return ControlResult {
                 id: control.id.clone(),
                 title: control.title.clone(),
+                section: control.section,
                 clause: control.clause.clone(),
                 intent: control.intent.trim().to_string(),
                 severity: control.severity,
@@ -102,6 +103,7 @@ fn evaluate_control(
     ControlResult {
         id: control.id.clone(),
         title: control.title.clone(),
+        section: control.section,
         clause: control.clause.clone(),
         intent: control.intent.trim().to_string(),
         severity: control.severity,
@@ -218,10 +220,9 @@ mod tests {
     use crate::status::Severity;
     use crate::test_support::{temp_repo, write};
 
-    const PACK: &str = include_str!("../packs/soc2-tsc.toml");
-
     fn soc2() -> Pack {
-        Pack::from_toml_str(PACK).expect("shipped pack parses")
+        // Assembled from the pack directory: shipped packs are split by section.
+        crate::registry::load_shipped("soc2").expect("shipped soc2 loads")
     }
 
     fn run(root: &Path) -> EvidencePack {

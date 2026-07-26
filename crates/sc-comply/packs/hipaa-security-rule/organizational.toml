@@ -1,0 +1,90 @@
+# hipaa-security-rule — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "164.308"
+title     = "Administrative safeguards"
+clause    = "45 CFR 164.308"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Security management process (including the required risk analysis and risk
+management), assigned security responsibility, workforce security, information
+access management, security awareness and training, security incident
+procedures, contingency plan, and periodic evaluation.
+"""
+remediation = """
+Provide the risk analysis, workforce clearance records, training completion,
+incident procedures and contingency plan. The risk analysis is the foundational
+required specification — begin there.
+"""
+
+  [[controls.checks]]
+  id          = "administrative-safeguards-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/risk-analysis.md", "docs/security-policy.md", "SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+The administrative safeguards are the largest part of the Security Rule and none
+of them are source-controlled. The §164.308(a)(1)(ii)(A) risk analysis in
+particular is a required specification with no technical proxy. Reported Unknown
+unconditionally.
+"""
+
+[[controls]]
+id        = "164.310"
+title     = "Physical safeguards"
+clause    = "45 CFR 164.310"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Facility access controls, workstation use and security, and device and media
+controls including disposal and media re-use.
+"""
+remediation = "Provide facility documentation, or the cloud provider's audited attestation where hosting is delegated."
+
+  [[controls.checks]]
+  id          = "physical-safeguards-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/physical-security.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Physical safeguards are not observable from a repository. For cloud-hosted
+systems these largely inherit from the provider under the BAA. Reported Unknown
+unconditionally.
+"""
+
+[[controls]]
+id        = "164.314"
+title     = "Organizational requirements — business associate contracts"
+clause    = "45 CFR 164.314(a)"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+A covered entity must obtain satisfactory assurances, documented through a
+written business associate agreement, that each business associate will
+appropriately safeguard the ePHI it creates, receives, maintains or transmits.
+"""
+remediation = "Provide executed BAAs for every business associate, including cloud and SaaS providers."
+
+  [[controls.checks]]
+  id          = "baa-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/vendors.md", "docs/business-associates.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Business Associate Agreements are executed contracts. A dependency lockfile
+inventories software, not business associates. Reported Unknown unconditionally;
+note that cloud and SaaS providers touching ePHI each require a BAA.
+"""

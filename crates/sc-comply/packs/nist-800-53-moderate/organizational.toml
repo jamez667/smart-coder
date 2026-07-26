@@ -1,0 +1,59 @@
+# nist-800-53-moderate — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CA-2"
+title     = "Control assessments and authorization"
+clause    = "NIST SP 800-53 Rev. 5 CA-2, CA-6"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Assess the controls in the system and its environment of operation to determine
+the extent to which they are implemented correctly, and obtain an authorization
+to operate from a senior official.
+"""
+remediation = "Provide the System Security Plan, Security Assessment Report, and the ATO letter."
+
+  [[controls.checks]]
+  id          = "assessment-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/ssp.md", "docs/security-plan.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+An authorization to operate requires an independent assessor and an authorizing
+official's risk acceptance. No scanner produces one. Reported Unknown
+unconditionally.
+"""
+
+[[controls]]
+id        = "PE-CP-PS-AT"
+title     = "Physical, contingency, personnel and training families"
+clause    = "NIST SP 800-53 Rev. 5 families PE, CP, PS, AT, IR, MA, MP"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Physical and environmental protection, contingency planning, personnel security,
+awareness and training, incident response, maintenance and media protection.
+"""
+remediation = "Provide facility documentation, contingency plans and test results, personnel screening and training records."
+
+  [[controls.checks]]
+  id          = "operational-families-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/contingency-plan.md", "docs/physical-security.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Seven complete control families with no source-code surface, grouped here so the
+evidence pack does not imply they were examined. Each requires operational and
+documentary evidence. Reported Unknown unconditionally.
+"""

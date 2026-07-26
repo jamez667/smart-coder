@@ -71,6 +71,8 @@ fn redact_control(control: &ControlResult) -> ControlResult {
     ControlResult {
         id: control.id.clone(),
         title: control.title.clone(),
+        // Preserved: the section is structural, never sensitive.
+        section: control.section,
         clause: control.clause.clone(),
         intent: control.intent.clone(),
         severity: control.severity,
@@ -151,6 +153,7 @@ mod tests {
             vec![ControlResult {
                 id: "CC6.1".into(),
                 title: "Logical access".into(),
+                section: Default::default(),
                 clause: "TSC CC6.1".into(),
                 intent: "Credentials must not be committed.".into(),
                 severity: Severity::Critical,

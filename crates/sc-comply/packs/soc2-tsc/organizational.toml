@@ -1,0 +1,84 @@
+# soc2-tsc — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CC1.1"
+title     = "Control environment — commitment to integrity and ethical values"
+clause    = "TSC CC1.1"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+The entity demonstrates a commitment to integrity and ethical values. This is an
+organizational control: board oversight, tone at the top, and a code of conduct
+whose operation is tested through interview and observation, not code review.
+"""
+remediation = "Provide the code of conduct, its acknowledgement records, and evidence of board oversight."
+
+  [[controls.checks]]
+  id          = "code-of-conduct-published"
+  kind        = "file-exists"
+  paths       = ["CODE_OF_CONDUCT.md", "docs/CODE_OF_CONDUCT.md", ".github/CODE_OF_CONDUCT.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A published code of conduct is weak evidence that this control is documented,
+and no evidence at all that it operates. Reported Unknown either way.
+"""
+
+[[controls]]
+id        = "CC2.3"
+title     = "Communication with external parties"
+clause    = "TSC CC2.3"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+The entity communicates with external parties regarding matters affecting the
+functioning of internal control, including a channel for reporting security
+issues.
+"""
+remediation = "Provide the vulnerability disclosure policy and evidence of its use."
+
+  [[controls.checks]]
+  id          = "security-disclosure-policy"
+  kind        = "file-exists"
+  paths       = ["SECURITY.md", "docs/SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "gap"
+  rationale   = """
+A documented security contact. Its presence does not evidence that reports are
+triaged, so a hit is Unknown; its total absence is a genuine communication gap.
+"""
+
+[[controls]]
+id        = "CC9.2"
+title     = "Vendor and business partner risk management"
+clause    = "TSC CC9.2"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+The entity assesses and manages risks associated with vendors and business
+partners. Contracts, due-diligence records and subservice-organization reports
+are the evidence, none of which is source-controlled.
+"""
+remediation = "Provide the vendor register, risk assessments, and subservice SOC 2 reports."
+
+  [[controls.checks]]
+  id          = "third-party-inventory-present"
+  kind        = "file-exists"
+  paths       = ["docs/vendors.md", "VENDORS.md", "docs/third-party.md", "sbom.json", "sbom.xml"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  # There is no source-visible answer here in either direction, and saying so
+  # is more useful than inventing one.
+  rationale   = """
+Vendor management is contractual and lives outside version control. Reported
+Unknown unconditionally; the auditor must obtain the vendor register directly.
+"""

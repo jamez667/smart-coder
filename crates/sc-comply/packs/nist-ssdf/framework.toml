@@ -1,0 +1,32 @@
+# NIST Secure Software Development Framework (SP 800-218 v1.1) — evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# SSDF is the most mechanically checkable framework in this collection: it is
+# about how software is BUILT, and a repository is where building happens. The
+# PS (Protect Software) and PW (Produce Well-Secured Software) practice groups
+# yield real evidence; PO (Prepare the Organization) and RV (Respond to
+# Vulnerabilities) are largely process and are declared undeterminable.
+#
+# This pack matters commercially: SSDF underpins the US federal secure-software
+# attestation (EO 14028 / CISA form), so "can we evidence this" is a question
+# with a contract attached.
+
+[framework]
+id        = "nist-ssdf-800-218"
+name      = "NIST Secure Software Development Framework (SP 800-218 v1.1)"
+version   = "1.0.0"
+authority = "NIST"
+scope_note = """
+This pack inspects source-controlled artifacts only. It cannot observe build
+infrastructure, signing key custody, developer training records, or vulnerability
+disclosure handling.
+
+SSDF is unusually amenable to source inspection because it governs the software
+production process itself. Even so, roughly half of its practices are
+organizational and are declared undeterminable here rather than omitted.
+
+A passing result is evidence toward a practice, never a completed attestation.
+The CISA secure software development attestation form requires an authorised
+signatory, not a scanner.
+"""

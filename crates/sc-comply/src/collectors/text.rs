@@ -14,6 +14,24 @@ use crate::evidence::Evidence;
 use crate::glob::Glob;
 use crate::pack::{Check, CheckKind};
 
+/// The compliance tool's own sources, never searched by a text check.
+///
+/// A secret detector matches its own detection pattern; a weak-crypto check
+/// matches the regex that defines it. Excluding these structurally — rather than
+/// asking every pack author to remember `exclude_globs` — is what keeps the
+/// collection scalable: without it, each new pattern added to any pack becomes a
+/// potential finding for every other pack.
+///
+/// Deliberately narrow: only this crate and its authoring sibling. A project that
+/// legitimately vendors compliance tooling still gets scanned.
+pub const TOOL_SOURCE_GLOBS: &[&str] = &[
+    "crates/sc-comply/src/**/*",
+    "crates/sc-comply/packs/**/*.toml",
+    "crates/sc-comply-author/src/**/*",
+    "crates/sc-comply-author/catalogs/*.toml",
+    "crates/sc-comply-author/evals/*.toml",
+];
+
 /// Handles `regex-match-in-glob` and `regex-must-not-match`.
 pub struct RegexCollector;
 
@@ -48,11 +66,21 @@ impl Collector for RegexCollector {
         let re = Regex::new(pattern)
             .map_err(|e| DcError::Comply(format!("check {:?}: invalid regex: {e}", check.id)))?;
 
-        let excludes: Vec<Glob> = check
+        let mut excludes: Vec<Glob> = check
             .exclude_globs
             .iter()
             .map(|g| Glob::new(g))
             .collect::<Result<Vec<_>>>()?;
+
+        // The tool's own sources are ALWAYS excluded, without the pack having to
+        // say so. A detector inevitably matches its own detection patterns, and
+        // requiring every author to remember `exclude_globs` scales badly: each
+        // new pattern lands in the packs directory and becomes a potential hit
+        // for every other pack, so adding a control to PCI could break the ISO
+        // audit. Making it structural removes the whole class of failure.
+        for g in TOOL_SOURCE_GLOBS {
+            excludes.push(Glob::new(g)?);
+        }
 
         let matched_glob: Vec<_> = ctx
             .files
@@ -72,13 +100,19 @@ impl Collector for RegexCollector {
 
         // Suppression is a correctness hazard, so it is never silent: if an
         // exclusion actually removed a file from consideration, the report says
-        // so and names how many.
+        // so and names how many. Built-in tool-source exclusions are named
+        // separately from the pack's own, so a reader is not told the author
+        // suppressed something they did not.
         let excluded_count = matched_glob.len() - selected.len();
         let exclusion_note = (excluded_count > 0).then(|| {
-            format!(
-                "{excluded_count} file(s) excluded by {:?}",
-                check.exclude_globs
-            )
+            if check.exclude_globs.is_empty() {
+                format!("{excluded_count} file(s) excluded (the tool's own sources)")
+            } else {
+                format!(
+                    "{excluded_count} file(s) excluded by {:?} and the tool's own sources",
+                    check.exclude_globs
+                )
+            }
         });
 
         if selected.is_empty() {
@@ -460,6 +494,79 @@ mod tests {
         assert_eq!(o.matched, Some(true));
         assert_eq!(o.evidence.len(), 1, "only the real finding should remain");
         assert_eq!(o.evidence[0].file, "deploy/real.key");
+    }
+
+    #[test]
+    fn the_tools_own_sources_are_excluded_without_the_pack_asking() {
+        // The scaling fix: a pack author must NOT have to remember
+        // exclude_globs for the detector's own sources. Without this, every new
+        // pattern added to any pack becomes a potential finding for every other
+        // pack — adding a control to PCI could break the ISO audit.
+        let files = vec![
+            file(
+                "crates/sc-comply/packs/soc2-tsc/code.toml",
+                "pattern = \"BEGIN RSA PRIVATE KEY\"\n",
+            ),
+            file(
+                "crates/sc-comply/src/collectors/text.rs",
+                "\"BEGIN RSA PRIVATE KEY\"\n",
+            ),
+            file("deploy/real.key", "-----BEGIN RSA PRIVATE KEY-----\n"),
+        ];
+        // NOTE: no exclude_globs at all on this check.
+        let c = check(
+            "keys",
+            CheckKind::RegexMustNotMatch {
+                glob: "**/*".into(),
+                pattern: "BEGIN RSA PRIVATE KEY".into(),
+            },
+        );
+        let o = run(&files, &c);
+
+        assert_eq!(o.matched, Some(true));
+        assert_eq!(
+            o.evidence.len(),
+            1,
+            "only the real finding: {:?}",
+            o.evidence
+        );
+        assert_eq!(o.evidence[0].file, "deploy/real.key");
+    }
+
+    #[test]
+    fn the_builtin_exclusion_is_disclosed_distinctly() {
+        // Suppression is never silent, but a reader must not be told the pack
+        // author suppressed something the tool suppressed for them.
+        let files = vec![
+            file("crates/sc-comply/src/x.rs", "SECRET_MARKER\n"),
+            file("real.txt", "SECRET_MARKER\n"),
+        ];
+        let c = check(
+            "marker",
+            CheckKind::RegexMustNotMatch {
+                glob: "**/*".into(),
+                pattern: "SECRET_MARKER".into(),
+            },
+        );
+        let note = run(&files, &c).note.expect("disclosed");
+        assert!(note.contains("the tool's own sources"), "{note}");
+        // No pack-declared globs, so it must not claim any.
+        assert!(!note.contains("[]"), "{note}");
+    }
+
+    #[test]
+    fn a_project_that_vendors_the_tool_still_scans_its_own_code() {
+        // The exclusion is deliberately narrow — it must not blind the scanner
+        // to an audited project's real sources.
+        let files = vec![file("src/collectors/text.rs", "SECRET_MARKER\n")];
+        let c = check(
+            "marker",
+            CheckKind::RegexMustNotMatch {
+                glob: "**/*".into(),
+                pattern: "SECRET_MARKER".into(),
+            },
+        );
+        assert_eq!(run(&files, &c).matched, Some(true));
     }
 
     #[test]

@@ -1,0 +1,42 @@
+# slsa-supply-chain — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "SLSA-P-1"
+title     = "Build platform isolation and key custody"
+clause    = "SLSA v1.0 build platform requirements"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The build platform isolates builds from one another, prevents user-defined steps
+from accessing provenance signing material, and protects the signing keys.
+"""
+remediation = """
+Obtain the CI provider's isolation documentation and evidence of signing key
+custody (KMS/HSM policy, or Sigstore keyless configuration).
+"""
+
+  [[controls.checks]]
+  id          = "platform-isolation-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/build-platform.md", "docs/ci-security.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  # Present so the report shows this requirement exists and was consciously
+  # excluded rather than overlooked — it is what separates real L3 from
+  # "the workflow says slsa3".
+  rationale   = """
+Build isolation and signing key custody are properties of the build PLATFORM and
+cannot be observed from a repository under any circumstances. This is the
+requirement that separates a genuine L3 from a workflow that merely names a
+level. Reported Unknown unconditionally; the auditor must verify with the CI
+provider.
+"""

@@ -265,7 +265,9 @@ fn server_error(msg: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 mod tests {
     use super::*;
 
-    const PACK: &str = include_str!("../../sc-comply/packs/soc2-tsc.toml");
+    fn soc2() -> sc_comply::Pack {
+        sc_comply::load_shipped("soc2").expect("shipped soc2 loads")
+    }
 
     fn temp_repo(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -282,7 +284,7 @@ mod tests {
             workspace: root.to_path_buf(),
             frameworks: vec![FrameworkEntry {
                 name: "soc2".to_string(),
-                pack: Pack::from_toml_str(PACK).expect("pack parses"),
+                pack: soc2(),
             }],
             options: ComplyOptions::default(),
         }

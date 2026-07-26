@@ -303,6 +303,7 @@ mod tests {
         ControlResult {
             id: id.into(),
             title: "t".into(),
+            section: Default::default(),
             clause: "c".into(),
             intent: "i".into(),
             severity: sev,

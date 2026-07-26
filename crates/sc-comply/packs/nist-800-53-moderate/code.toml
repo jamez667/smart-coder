@@ -1,0 +1,195 @@
+# nist-800-53-moderate — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "SA-22"
+title     = "Unsupported system components"
+clause    = "NIST SP 800-53 Rev. 5 SA-22"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Replace system components when support for the components is no longer
+available from the developer, vendor or manufacturer; or provide justification
+and documented approval for continued use.
+"""
+remediation = "Pin the toolchain to a supported version and keep dependencies inventoried."
+
+  [[controls.checks]]
+  id          = "component-inventory"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  on_match    = "unknown"
+  on_no_match = "gap"
+  # Asymmetric deliberately. Having NO inventory is a real, source-visible gap:
+  # you cannot identify unsupported components without knowing what you use.
+  # But HAVING one proves only that — whether any listed component is still
+  # supported by its vendor is a fact about the vendor, not the lockfile.
+  rationale   = """
+An inventory is the precondition for this control, not satisfaction of it:
+SA-22 turns on whether each component is still SUPPORTED BY ITS VENDOR, which no
+lockfile records. A hit is Unknown; total absence is a genuine gap.
+"""
+
+  [[controls.checks]]
+  id          = "toolchain-pinned"
+  kind        = "file-exists"
+  paths       = ["rust-toolchain.toml", "rust-toolchain", ".nvmrc", ".python-version", ".tool-versions", "go.mod"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A pinned version is visible; whether that version is still vendor-supported is
+not. Reported Unknown either way — the auditor must check support lifecycles
+against the inventory.
+"""
+
+[[controls]]
+id        = "SC-8"
+title     = "Transmission confidentiality and integrity"
+clause    = "NIST SP 800-53 Rev. 5 SC-8, SC-8(1)"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Protect the confidentiality and integrity of transmitted information, using
+cryptographic mechanisms to prevent unauthorized disclosure and detect changes
+during transmission.
+"""
+remediation = "Enforce TLS on all external endpoints and never disable certificate verification."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling verification defeats both confidentiality and integrity of transmission."
+
+  [[controls.checks]]
+  id          = "no-plaintext-transport"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Plaintext transport to a public host."
+
+[[controls]]
+id        = "SC-13"
+title     = "Cryptographic protection"
+clause    = "NIST SP 800-53 Rev. 5 SC-13"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Determine the cryptographic uses required and implement the types of
+cryptography required for each use, using FIPS-validated or NSA-approved
+cryptography where applicable.
+"""
+remediation = "Replace deprecated primitives; federal systems additionally require FIPS-validated modules."
+
+  [[controls.checks]]
+  id          = "no-broken-primitives"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"(DES|RC4))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Deprecated primitives. Note SC-13 for federal systems also requires FIPS-VALIDATED
+modules, which is a property of the crypto library build and not source-visible.
+"""
+
+[[controls]]
+id        = "IA-5"
+title     = "Authenticator management"
+clause    = "NIST SP 800-53 Rev. 5 IA-5, IA-5(7)"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Manage system authenticators, and specifically ensure that unencrypted static
+authenticators are not embedded in applications or other forms of static
+storage.
+"""
+remediation = "Rotate any exposed credential and move secrets to a managed store."
+
+  [[controls.checks]]
+  id          = "no-embedded-authenticators"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "IA-5(7) prohibits unencrypted static authenticators embedded in applications, explicitly."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A committed private key is an embedded static authenticator."
+
+[[controls]]
+id        = "SI-10"
+title     = "Information input validation"
+clause    = "NIST SP 800-53 Rev. 5 SI-10"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Check the validity of information inputs to the system, verifying that inputs
+match specified definitions for format and content.
+"""
+remediation = "Parameterize queries and remove command injection sinks."
+
+  [[controls.checks]]
+  id          = "no-injection-sinks"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php}"
+  pattern     = "(?i)(subprocess\\.(run|call|Popen|check_output)\\([^)]*shell\\s*=\\s*True|os\\.system\\s*\\(|child_process\\.exec\\s*\\(|\\beval\\s*\\(\\s*(req|request|params|input|argv))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Unvalidated input reaching a command or code interpreter."
+
+[[controls]]
+id        = "AU-2"
+title     = "Event logging"
+clause    = "NIST SP 800-53 Rev. 5 AU-2, AU-3"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Identify the event types the system is capable of logging, and ensure audit
+records contain sufficient information to establish what occurred, when, where,
+the source, and the outcome.
+"""
+remediation = "Adopt structured logging with correlation and identity fields."
+
+  [[controls.checks]]
+  id          = "application-logging-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.|logrus)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "The system emits audit records. Their sufficiency under AU-3 is not source-determinable."

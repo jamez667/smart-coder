@@ -1,0 +1,40 @@
+# NIST SP 800-53 Rev. 5 — moderate baseline, thin evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# DELIBERATELY THIN. 800-53 Rev. 5 defines over 1,000 controls across 20
+# families; the FIPS 199 moderate baseline selects roughly 300 of them. Of those,
+# perhaps twenty have any source-visible component — the rest govern system
+# operation, personnel, physical facilities, contingency planning and
+# organizational programme management.
+#
+# This pack covers the SA (System and Services Acquisition), SI (System and
+# Information Integrity), CM (Configuration Management) and SC (System and
+# Communications Protection) families where they touch code, and names the
+# families it does not cover so the omission is deliberate rather than implied.
+
+[framework]
+id        = "nist-800-53r5-moderate"
+name      = "NIST SP 800-53 Rev. 5 (moderate baseline, source-visible subset)"
+version   = "1.0.0"
+authority = "NIST"
+scope_note = """
+DELIBERATELY NARROW. The moderate baseline selects roughly 300 controls. This
+pack addresses about a dozen — those with a genuine source-code component.
+
+Covered in part: SA-11 (developer testing), SA-15 (development process), SA-22
+(unsupported components), SI-2 (flaw remediation), SI-10 (input validation),
+CM-2/CM-3 (baseline and change control), SC-8 (transmission confidentiality),
+SC-13 (cryptographic protection), SC-28 (protection at rest), IA-5 (authenticator
+management), AU-2 (event logging).
+
+NOT covered — entire families with no source surface: AT (awareness and
+training), CP (contingency planning), IR (incident response), MA (maintenance),
+MP (media protection), PE (physical and environmental), PS (personnel security),
+PM (programme management), RA (risk assessment, beyond dependency scanning), and
+most of AC (access control) and CA (assessment and authorization).
+
+An ATO requires a System Security Plan, an assessment by an independent
+assessor, and an authorizing official's risk acceptance. This pack contributes
+evidence to a handful of control implementations; it is not an assessment.
+"""

@@ -1,0 +1,126 @@
+# nist-800-53-moderate — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "SA-11"
+title     = "Developer testing and evaluation"
+clause    = "NIST SP 800-53 Rev. 5 SA-11"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Require the developer of the system, component or service to create and
+implement a security assessment plan, perform testing and evaluation at the
+depth and coverage specified, and correct flaws identified during testing.
+"""
+remediation = "Run the test suite and static analysis in CI on every change."
+
+  [[controls.checks]]
+  id          = "automated-testing-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "Developer testing performed automatically on every change."
+
+  [[controls.checks]]
+  id          = "static-analysis-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|bandit|gosec|clippy|eslint|checkmarx|fortify|coverity)"
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "SA-11(1) calls for static code analysis specifically."
+
+[[controls]]
+id        = "SI-2"
+title     = "Flaw remediation"
+clause    = "NIST SP 800-53 Rev. 5 SI-2"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Identify, report and correct system flaws; test software and firmware updates
+for effectiveness and potential side effects before installation; and install
+security-relevant updates within an organization-defined time period.
+"""
+remediation = "Add dependency vulnerability scanning and an automated update policy."
+
+  [[controls.checks]]
+  id          = "vulnerability-scanning"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated identification of flaws in components."
+
+  [[controls.checks]]
+  id          = "automated-remediation-policy"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "SI-2(5) automatic update capability, or an equivalent policy."
+
+[[controls]]
+id        = "CM-3"
+title     = "Configuration change control"
+clause    = "NIST SP 800-53 Rev. 5 CM-2, CM-3"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.7
+gap_below = 0.35
+intent    = """
+Develop and maintain a baseline configuration, and determine, document, approve
+and test configuration-controlled changes before implementation.
+"""
+remediation = "Require review and automated testing before merge."
+
+  [[controls.checks]]
+  id          = "change-pipeline-defined"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated change pipeline."
+
+  [[controls.checks]]
+  id          = "change-testing"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "CM-3 requires changes to be tested before implementation."
+
+  [[controls.checks]]
+  id          = "change-approval"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Documented approval before implementation. Usually a provider setting."

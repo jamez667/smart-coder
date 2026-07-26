@@ -1,0 +1,31 @@
+# SLSA v1.0 build track + SBOM practice — supply-chain evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# This is the most deterministic pack in the collection. SLSA is about *how an
+# artifact was built*, and the build definition lives in the repository — so
+# unlike ISO or SOC 2, most of what SLSA asks can be answered from source.
+#
+# The honest limit: SLSA levels are properties of the BUILD PLATFORM, not of the
+# build definition. A workflow can request provenance and still run on a builder
+# that permits tampering. Every level check below therefore evidences INTENT and
+# is explicit that platform verification is the auditor's job.
+
+[framework]
+id        = "slsa-v1-build"
+name      = "SLSA v1.0 Build Track + SBOM practice"
+version   = "1.0.0"
+authority = "OpenSSF"
+scope_note = """
+This pack inspects source-controlled build definitions. It cannot observe the
+build platform itself, signing key custody, or the runtime integrity of the
+builder — and SLSA levels are ultimately properties of that platform.
+
+What this pack CAN evidence: that a build requests provenance, that artifacts
+are signed, that dependencies are pinned and inventoried, and that the build is
+reproducible in intent. What it CANNOT evidence: that the builder is isolated,
+that provenance is unforgeable, or that keys are held securely.
+
+Treat a passing result as "the repository asks for the right things". Level
+attestation requires verifying the platform.
+"""

@@ -1,0 +1,139 @@
+# cis-controls-v8 — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CIS-16.11"
+title     = "Leverage vetted modules or services for application security components"
+clause    = "CIS v8 16.11"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Use vetted modules or services for application security components such as
+identity management, encryption, auditing and logging, rather than implementing
+them from scratch.
+"""
+remediation = "Replace hand-rolled cryptography with a vetted library; pin and audit dependencies."
+
+  [[controls.checks]]
+  id          = "no-hand-rolled-crypto-primitives"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|createHash\\s*\\(\\s*[\"'](md5|sha1)[\"']|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"DES)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  weight      = 2.0
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Broken or deprecated primitives. Non-security uses are false positives worth reviewing."
+
+  [[controls.checks]]
+  id          = "dependency-inventory-pinned"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "Vetted modules must at minimum be pinned, or 'vetted' means nothing."
+
+[[controls]]
+id        = "CIS-16.4"
+title     = "Establish and manage an inventory of third-party software components"
+clause    = "CIS v8 16.4"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Establish and manage an updated inventory of third-party components used in
+development, often called a bill of materials, and monitor it for risk.
+"""
+remediation = "Generate an SBOM in CI and keep lockfiles committed."
+
+  [[controls.checks]]
+  id          = "sbom-generated"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(syft|cyclonedx|spdx-sbom|sbom-tool|anchore/sbom-action|bom generate)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Machine-readable component inventory produced by the pipeline."
+
+  [[controls.checks]]
+  id          = "lockfile-inventory"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A lockfile is the minimum viable component inventory."
+
+[[controls]]
+id        = "CIS-3.11"
+title     = "Encrypt sensitive data at rest and in transit"
+clause    = "CIS v8 3.10, 3.11"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Encrypt sensitive data in transit and at rest on servers, applications and
+databases, using algorithms and key lengths that remain fit for purpose.
+"""
+remediation = "Enforce TLS on external endpoints and enable storage encryption; never disable verification."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification voids transit encryption."
+
+  [[controls.checks]]
+  id          = "no-plaintext-http"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Plaintext transport to a public host. Documentation URLs are known false positives."
+
+  [[controls.checks]]
+  id          = "encryption-at-rest-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml,json}"
+  pattern     = "(?i)(encrypted\\s*[:=]\\s*true|storage_encrypted|server_side_encryption|kms_key_id|encryption_at_rest|sse_algorithm)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Storage encryption declared in infrastructure code. Often a platform default instead."
+
+[[controls]]
+id        = "CIS-8.2"
+title     = "Collect audit logs"
+clause    = "CIS v8 8.2, 8.5"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Collect audit logs across enterprise assets, ensuring logging has been enabled
+and includes detailed information sufficient to reconstruct events.
+"""
+remediation = "Adopt structured logging with correlation ids; ship logs to protected retention."
+
+  [[controls.checks]]
+  id          = "application-logging-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.|logrus)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "The application emits logs. Collection and retention are infrastructure facts."

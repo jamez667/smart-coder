@@ -1,0 +1,129 @@
+# nist-ssdf — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "PW.4"
+title     = "Reuse existing, well-secured software rather than duplicating functionality"
+clause    = "SSDF PW.4.1, PW.4.4"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Acquire and maintain well-secured software components from third-party
+developers, and verify that each component remains secure over time — including
+checking for known vulnerabilities.
+"""
+remediation = """
+Add a dependency vulnerability audit to CI and adopt an automated update policy.
+"""
+
+  [[controls.checks]]
+  id          = "dependency-audit-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|yarn audit|safety check|snyk|trivy|grype|osv-scanner|dependency-check)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated vulnerability scanning of acquired components."
+
+  [[controls.checks]]
+  id          = "automated-update-policy"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", ".renovaterc", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A policy for keeping components current, or for denying disallowed ones."
+
+  [[controls.checks]]
+  id          = "lockfile-pins-versions"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "Reproducible dependency resolution — the precondition for knowing what you shipped."
+
+[[controls]]
+id        = "PW.5"
+title     = "Create source code by adhering to secure coding practices"
+clause    = "SSDF PW.5.1"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Follow all secure coding practices appropriate to the development languages and
+environment, including avoiding unsafe functions and known vulnerable patterns.
+"""
+remediation = """
+Remove disabled certificate verification and broken cryptographic primitives;
+adopt a linter configuration that forbids them.
+"""
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification is an unsafe practice in every language."
+
+  [[controls.checks]]
+  id          = "no-shell-injection-sinks"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php}"
+  # Deliberately narrow: `shell=True` and `eval` on a constructed string are the
+  # classic injection sinks. A hit is a prompt to review, not proof of a flaw.
+  pattern     = "(?i)(subprocess\\.(run|call|Popen|check_output)\\([^)]*shell\\s*=\\s*True|os\\.system\\s*\\(|child_process\\.exec\\s*\\(|\\beval\\s*\\(\\s*(req|request|params|input|argv))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Classic command/code injection sinks. A hit warrants review rather than proving
+a vulnerability — the input may be fully trusted.
+"""
+
+[[controls]]
+id        = "PW.9"
+title     = "Configure software to have secure settings by default"
+clause    = "SSDF PW.9.1, PW.9.2"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Define a secure baseline configuration and implement default settings that are
+secure, so the software is safe when deployed without customization.
+"""
+remediation = "Remove debug defaults and permissive CORS from production configuration."
+
+  [[controls.checks]]
+  id          = "no-debug-enabled-by-default"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,rb,js,ts,yml,yaml,json,toml,conf}"
+  pattern     = "(?i)(DEBUG\\s*[:=]\\s*True\\b|debug\\s*[:=]\\s*true\\b.*prod|FLASK_DEBUG\\s*[:=]\\s*1)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*", "**/test/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Debug mode leaks stack traces and disables protections. Test fixtures are excluded."
+
+  [[controls.checks]]
+  id          = "no-wildcard-cors"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,yml,yaml,conf}"
+  pattern     = "(?i)(Access-Control-Allow-Origin[\"']?\\s*[:,=]\\s*[\"']\\*|allow_origins\\s*=\\s*\\[\\s*[\"']\\*|cors\\s*\\(\\s*origin\\s*:\\s*[\"']\\*)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A wildcard CORS origin is an insecure default for any authenticated endpoint."

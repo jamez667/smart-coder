@@ -1,0 +1,43 @@
+# PCI DSS v4.0 — source-controlled evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# SCOPING WARNING, and it is the important part of this file:
+#
+# PCI DSS applies to the Cardholder Data Environment (CDE) — the systems that
+# store, process or transmit account data — and most of its twelve requirements
+# govern NETWORK and INFRASTRUCTURE facts: segmentation, firewalls, physical
+# access, wireless, anti-malware. A repository is not the CDE.
+#
+# This pack evidences Requirement 6 (develop and maintain secure systems and
+# software), the parts of Requirements 3 and 8 that surface in code, and v4.0's
+# new script-integrity rules. Everything else is declared undeterminable.
+#
+# A passing result here is NOT a PCI attestation. Only a QSA can produce one, and
+# scope determination — what is even in the CDE — is their first question.
+
+[framework]
+id        = "pci-dss-v4"
+name      = "PCI DSS v4.0"
+version   = "1.0.0"
+authority = "PCI Security Standards Council"
+scope_note = """
+PCI DSS governs the Cardholder Data Environment. This pack inspects a source
+repository, which is at most one component of that environment and frequently
+sits entirely outside it.
+
+Evidenced here: Requirement 6 (secure development, secure coding, code review,
+change control, script integrity), plus the code-visible slivers of Requirement
+3 (do not store sensitive authentication data) and Requirement 8 (no shared or
+hardcoded credentials).
+
+NOT evidenced, and declared explicitly: network segmentation (Req 1), default
+passwords on infrastructure (Req 2), stored-account-data protection at rest
+(most of Req 3), transmission encryption across public networks (Req 4),
+anti-malware (Req 5), physical access (Req 9), logging and monitoring across the
+CDE (Req 10), penetration testing and ASV scans (Req 11), and policy/programme
+governance (Req 12).
+
+Scope determination is a QSA's first question and this tool cannot answer it. A
+clean result here says nothing about PCI compliance overall.
+"""

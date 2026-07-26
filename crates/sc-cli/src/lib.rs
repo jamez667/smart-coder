@@ -277,7 +277,7 @@ impl Cli {
                     let path = it.next().ok_or_else(|| {
                         DcError::Eval(
                             "--pack requires a path to a framework pack, e.g. \
-                             `--pack crates/sc-comply/packs/soc2-tsc.toml`"
+                             `--pack crates/sc-comply/packs/soc2-tsc`"
                                 .to_string(),
                         )
                     })?;

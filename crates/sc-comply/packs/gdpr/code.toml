@@ -1,0 +1,45 @@
+# gdpr — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "Art32-1a"
+title     = "Pseudonymisation and encryption of personal data"
+clause    = "GDPR Art. 32(1)(a)"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Taking into account the state of the art and the risks, the controller and
+processor shall implement appropriate technical measures including, as
+appropriate, the pseudonymisation and encryption of personal data.
+"""
+remediation = """
+Enforce TLS on endpoints carrying personal data, enable storage encryption, and
+replace deprecated cryptographic primitives.
+"""
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification is not an appropriate measure under any risk assessment."
+
+  [[controls.checks]]
+  id          = "no-broken-cryptography"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"(DES|RC4))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "\"State of the art\" in Art. 32 excludes primitives broken for two decades."

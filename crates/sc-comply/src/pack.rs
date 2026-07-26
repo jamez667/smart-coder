@@ -26,6 +26,7 @@ use serde::Deserialize;
 
 use crate::aggregate::{Aggregate, WeightCfg};
 use crate::glob::Glob;
+use crate::section::Section;
 use crate::status::{Outcome, OutcomePolicy, Severity};
 
 /// Framework identity and scope.
@@ -240,6 +241,13 @@ impl Check {
 pub struct Control {
     pub id: String,
     pub title: String,
+    /// Which evidence domain this control belongs to.
+    ///
+    /// Defaults to [`Section::Code`] so packs written before sections existed
+    /// load unchanged. When a pack is loaded from a per-section file, the loader
+    /// sets this from the filename — see [`crate::registry`].
+    #[serde(default)]
+    pub section: Section,
     #[serde(default)]
     pub clause: String,
     /// What a human auditor is actually asking. Rendered verbatim.
@@ -282,7 +290,18 @@ impl Control {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Pack {
     pub framework: FrameworkSection,
+    /// Defaulted so a directory pack's `framework.toml` parses on its own, with
+    /// the controls appended from the section fragments. An actually empty pack
+    /// is still rejected by [`Pack::validate`].
+    #[serde(default)]
     pub controls: Vec<Control>,
+}
+
+/// One section file: nothing but `[[controls]]`.
+#[derive(Debug, Deserialize)]
+struct ControlsFragment {
+    #[serde(default)]
+    controls: Vec<Control>,
 }
 
 impl Pack {
@@ -294,11 +313,79 @@ impl Pack {
         Ok(pack)
     }
 
-    /// Load and validate a pack from disk.
+    /// Parse one section file: `[[controls]]` and nothing else.
+    ///
+    /// The caller sets each control's section — from the filename on disk, or
+    /// from the registry entry for an embedded pack.
+    pub fn controls_from_toml_str(s: &str) -> Result<Vec<Control>> {
+        let frag: ControlsFragment =
+            toml::from_str(s).map_err(|e| DcError::Comply(format!("{e}")))?;
+        Ok(frag.controls)
+    }
+
+    /// Load and validate a pack from a file, or from a directory of fragments.
+    ///
+    /// A directory is loaded by [`Pack::from_dir`]; a file is parsed whole.
     pub fn load(path: &Path) -> Result<Self> {
+        if path.is_dir() {
+            return Self::from_dir(path);
+        }
         let text = std::fs::read_to_string(path)
             .map_err(|e| DcError::Comply(format!("reading pack {}: {e}", path.display())))?;
         Self::from_toml_str(&text)
+    }
+
+    /// Assemble a pack from a directory: `framework.toml` plus one file per
+    /// [`Section`].
+    ///
+    /// ```text
+    /// packs/soc2/
+    ///   framework.toml        [framework] — identity and scope note
+    ///   code.toml             [[controls]] evidenced from source
+    ///   infrastructure.toml   [[controls]] evidenced from IaC and CI config
+    ///   documentation.toml    [[controls]] evidenced from committed policy
+    ///   organizational.toml   [[controls]] declared, not evidenceable
+    /// ```
+    ///
+    /// **The section comes from the filename**, overriding any `section = `
+    /// value inside. A control physically sitting in `organizational.toml`
+    /// cannot claim to be Code, so the directory layout and the score can never
+    /// disagree — the classification is visible in a file listing rather than
+    /// buried on line 400 of a 660-line file.
+    ///
+    /// Section files are optional: most frameworks have nothing to say in one
+    /// section or another, and an absent file is an absent section rather than
+    /// an empty one.
+    pub fn from_dir(dir: &Path) -> Result<Self> {
+        let meta_path = dir.join("framework.toml");
+        let meta = std::fs::read_to_string(&meta_path).map_err(|e| {
+            DcError::Comply(format!(
+                "reading {}: {e}. A pack directory needs a framework.toml holding the [framework] table.",
+                meta_path.display()
+            ))
+        })?;
+        let mut pack: Pack = toml::from_str(&meta)
+            .map_err(|e| DcError::Comply(format!("parsing {}: {e}", meta_path.display())))?;
+
+        for section in Section::ALL {
+            let path = dir.join(format!("{}.toml", section.slug()));
+            if !path.exists() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| DcError::Comply(format!("reading {}: {e}", path.display())))?;
+            let mut frag = Self::controls_from_toml_str(&text)
+                .map_err(|e| DcError::Comply(format!("parsing {}: {e}", path.display())))?;
+            for c in &mut frag {
+                c.section = *section;
+            }
+            pack.controls.append(&mut frag);
+        }
+
+        // `validate()` catches duplicate ids across fragments, so the same
+        // control appearing in two sections is a load error, not a double count.
+        pack.validate()?;
+        Ok(pack)
     }
 
     /// Reject malformed packs at load time.
@@ -453,7 +540,9 @@ mod tests {
 
     /// The shipped SOC 2 pack, parsed as part of the test suite so a broken
     /// pack fails CI rather than an audit.
-    const SOC2: &str = include_str!("../packs/soc2-tsc.toml");
+    fn soc2() -> Pack {
+        crate::registry::load_shipped("soc2").expect("shipped soc2 loads")
+    }
 
     const MINIMAL: &str = r#"
 [framework]
@@ -473,7 +562,7 @@ checks = [
 
     #[test]
     fn parses_the_shipped_soc2_pack() {
-        let pack = Pack::from_toml_str(SOC2).expect("shipped pack must parse");
+        let pack = soc2();
         assert_eq!(pack.framework.id, "soc2-tsc-2017");
         assert!(
             !pack.framework.scope_note.trim().is_empty(),

@@ -1,0 +1,33 @@
+# CIS Critical Security Controls v8 — source-controlled evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# CIS v8 has 18 controls and 153 safeguards, most of which govern an ENTERPRISE
+# ESTATE — endpoints, network devices, accounts, physical media. A repository is
+# one asset within that estate, so this pack evidences the software-development
+# and configuration slice and declares the rest.
+#
+# Where CIS overlaps SSDF and ISO (secure development, vulnerability management)
+# the checks here are deliberately similar. That is correct: the frameworks ask
+# the same question, and an evidence pack should answer it the same way rather
+# than inventing a different-looking check for the sake of variety.
+
+[framework]
+id        = "cis-controls-v8"
+name      = "CIS Critical Security Controls v8"
+version   = "1.0.0"
+authority = "Center for Internet Security"
+scope_note = """
+This pack inspects source-controlled artifacts only. CIS v8 governs an
+enterprise estate: endpoint inventory, account management, network
+infrastructure, malware defences, physical media and security awareness. None of
+that is visible from a repository.
+
+What this pack evidences: the software-development safeguards (Control 16),
+configuration-as-code (Control 4), audit logging (Control 8), data protection
+(Control 3), and continuous vulnerability management (Control 7) — as they
+appear in source.
+
+Implementation Groups (IG1/IG2/IG3) are not modelled: a safeguard's group
+depends on organizational size and risk, which this tool cannot know.
+"""

@@ -21,6 +21,7 @@ pub mod registry;
 pub mod report;
 pub mod rollup;
 pub mod scan;
+pub mod section;
 pub mod status;
 
 #[cfg(test)]
@@ -36,4 +37,5 @@ pub use glob::Glob;
 pub use pack::{Assertion, Check, CheckKind, Control, Pack};
 pub use registry::{load_shipped, ShippedPack, SHIPPED};
 pub use scan::{scan_workspace, TextFile};
+pub use section::Section;
 pub use status::{ControlStatus, Outcome, OutcomePolicy, Severity};

@@ -610,6 +610,7 @@ mod tests {
             vec![ControlResult {
                 id: "CC6.1".into(),
                 title: "Logical access".into(),
+                section: Default::default(),
                 clause: "TSC CC6.1".into(),
                 intent: "Credentials must not be committed.".into(),
                 severity: Severity::Critical,

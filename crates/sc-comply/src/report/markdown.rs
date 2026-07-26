@@ -455,6 +455,7 @@ mod tests {
         ControlResult {
             id: id.to_string(),
             title: format!("{id} title"),
+            section: Default::default(),
             clause: format!("TSC {id}"),
             intent: "the intent".to_string(),
             severity,

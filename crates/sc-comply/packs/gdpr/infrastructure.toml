@@ -1,0 +1,71 @@
+# gdpr — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "Art32-1b"
+title     = "Ongoing confidentiality, integrity, availability and resilience"
+clause    = "GDPR Art. 32(1)(b)"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The ability to ensure the ongoing confidentiality, integrity, availability and
+resilience of processing systems and services.
+"""
+remediation = "Rotate any exposed credential and move secrets to a managed store."
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A credential in source is a confidentiality failure of the processing system itself."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A committed private key compromises confidentiality of everything it protects."
+
+[[controls]]
+id        = "Art32-1d"
+title     = "Regular testing and evaluation of security measures"
+clause    = "GDPR Art. 32(1)(d)"
+severity  = "high"
+aggregate = "all"
+intent    = """
+A process for regularly testing, assessing and evaluating the effectiveness of
+technical and organisational measures for ensuring the security of processing.
+"""
+remediation = "Add automated security testing to CI; evidence periodic assessment separately."
+
+  [[controls.checks]]
+  id          = "automated-security-testing"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(codeql|semgrep|bandit|gosec|clippy|snyk|trivy|cargo[- ]audit|pip-audit|npm audit|osv-scanner)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = """
+Automated security testing is part of "regularly testing". The organisational
+evaluation Art. 32(1)(d) also requires is not source-visible.
+"""

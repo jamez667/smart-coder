@@ -43,7 +43,9 @@ mod self_critique {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    const SOC2: &str = include_str!("../../sc-comply/packs/soc2-tsc.toml");
+    fn soc2() -> sc_comply::Pack {
+        sc_comply::load_shipped("soc2").expect("shipped soc2 loads")
+    }
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,7 +57,7 @@ mod self_critique {
 
     #[test]
     fn the_shipped_soc2_pack_has_no_blocking_findings() {
-        let pack = sc_comply::Pack::from_toml_str(SOC2).expect("shipped pack parses");
+        let pack = soc2();
         let sample = Sample::load(&repo_root());
         let report = lint_pack(&pack, Some(&sample));
 
@@ -88,10 +90,13 @@ mod self_critique {
         let dir = repo_root().join("crates/sc-comply/packs");
         let sample = Sample::load(&repo_root());
 
+        // Each pack is a DIRECTORY of section files, assembled by `Pack::load`.
+        // Enumerating the directory rather than a hardcoded list means adding a
+        // pack automatically enrolls it here.
         let mut packs: Vec<PathBuf> = std::fs::read_dir(&dir)
             .expect("packs directory")
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .filter(|p| p.is_dir())
             .collect();
         packs.sort();
 
@@ -103,7 +108,7 @@ mod self_critique {
 
         let mut failures = Vec::new();
         for path in &packs {
-            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
             let pack = match sc_comply::Pack::load(path) {
                 Ok(p) => p,
                 Err(e) => {
@@ -134,7 +139,7 @@ mod self_critique {
     #[test]
     fn linting_the_shipped_pack_needs_no_model_and_does_not_panic() {
         // Also the smoke test that every lint survives a real 4k-file tree.
-        let pack = sc_comply::Pack::from_toml_str(SOC2).expect("parses");
+        let pack = soc2();
         let sample = Sample::load(&repo_root());
         let report = lint_pack(&pack, Some(&sample));
         assert!(report.had_sample);

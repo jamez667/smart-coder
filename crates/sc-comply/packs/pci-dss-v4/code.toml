@@ -1,0 +1,240 @@
+# pci-dss-v4 — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "PCI-6.2.1"
+title     = "Bespoke and custom software is developed securely"
+clause    = "PCI DSS v4.0 6.2.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Bespoke and custom software is developed securely: based on industry standards
+and best practices, in accordance with PCI DSS, and incorporating information
+security throughout the software development life cycle.
+"""
+remediation = """
+Document the secure SDLC, enforce it with automated gates in CI, and evidence
+developer training separately.
+"""
+
+  [[controls.checks]]
+  id          = "sdlc-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", "docs/development.md", "docs/sdlc.md", "docs/specs"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented development process. Presence evidences documentation, not adherence."
+
+  [[controls.checks]]
+  id          = "automated-security-gate"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,scripts/check.*}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|bandit|gosec|clippy|eslint|snyk|checkmarx|fortify|trivy)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Security analysis integrated into the development lifecycle."
+
+[[controls]]
+id        = "PCI-6.2.4"
+title     = "Software engineering techniques prevent common attacks"
+clause    = "PCI DSS v4.0 6.2.4"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Software engineering techniques or other methods are defined and in use to
+prevent or mitigate common software attacks: injection attacks, attacks on data
+and data structures, attacks on cryptography usage, and attacks on business
+logic.
+"""
+remediation = """
+Remove injection sinks, restore certificate verification, and replace broken
+cryptographic primitives.
+"""
+
+  [[controls.checks]]
+  id          = "no-sql-string-concatenation"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php,cs,java,go}"
+  # Query text built by concatenation or interpolation — the classic injection
+  # sink. Parameterized queries do not look like this.
+  pattern     = "(?i)(SELECT|INSERT|UPDATE|DELETE)\\s+[^\"'\\n]*[\"']\\s*\\+|execute\\s*\\(\\s*f[\"'](SELECT|INSERT|UPDATE|DELETE)|query\\s*\\(\\s*[\"'`][^\"'`]*\\$\\{"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Query text assembled by concatenation or interpolation. A hit warrants review —
+the input may be trusted — but this is the pattern PCI 6.2.4 names first.
+"""
+
+  [[controls.checks]]
+  id          = "no-command-injection-sinks"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,js,ts,rb,php}"
+  pattern     = "(?i)(subprocess\\.(run|call|Popen|check_output)\\([^)]*shell\\s*=\\s*True|os\\.system\\s*\\(|child_process\\.exec\\s*\\(|\\beval\\s*\\(\\s*(req|request|params|input|argv))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Command and code injection sinks."
+
+  [[controls.checks]]
+  id          = "no-broken-cryptography"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"(DES|RC4)|createHash\\s*\\(\\s*[\"'](md5|sha1)[\"'])"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Attacks on cryptography usage — deprecated primitives are explicitly in scope for 6.2.4."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification defeats transport protection."
+
+[[controls]]
+id        = "PCI-6.4.3"
+title     = "Payment page scripts are managed and their integrity assured"
+clause    = "PCI DSS v4.0 6.4.3"
+severity  = "critical"
+aggregate = "any"
+intent    = """
+All payment page scripts loaded and executed in the consumer's browser are
+managed: a method is implemented to confirm each script is authorized, a method
+assures the integrity of each script, and an inventory of scripts with written
+business justification is maintained.
+
+This requirement is new in v4.0 and exists because of Magecart-style skimming.
+"""
+remediation = """
+Add subresource integrity (SRI) hashes to every external script tag and adopt a
+Content-Security-Policy restricting script sources.
+"""
+
+  [[controls.checks]]
+  id          = "subresource-integrity-used"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{html,htm,hbs,ejs,erb,jsx,tsx,vue,svelte,php}"
+  pattern     = "integrity\\s*=\\s*[\"']sha(256|384|512)-"
+  on_match    = "pass"
+  on_no_match = "gap"
+  # No web templates at all means no payment page in this repo — genuinely
+  # indeterminate rather than a failure.
+  on_no_files = "unknown"
+  rationale   = """
+SRI hashes assure script integrity in the browser, which is exactly what 6.4.3
+asks for. Absence of any web template means this repo likely has no payment page.
+"""
+
+  [[controls.checks]]
+  id          = "content-security-policy-declared"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{html,htm,js,ts,rs,py,cs,go,conf,yml,yaml}"
+  pattern     = "(?i)(Content-Security-Policy|script-src\\s)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "A CSP restricting script sources supports the authorization half of 6.4.3."
+
+[[controls]]
+id        = "PCI-3.3.1"
+title     = "Sensitive authentication data is not retained after authorization"
+clause    = "PCI DSS v4.0 3.3.1"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Sensitive authentication data — full track data, card verification code, PIN and
+PIN block — is not retained after authorization, even if encrypted.
+"""
+remediation = """
+Remove any storage of CVV/CVC, track data or PIN blocks. Ensure logging does not
+capture them either.
+"""
+
+  [[controls.checks]]
+  id          = "no-cvv-storage-identifiers"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,sql}"
+  # Storage-shaped mentions of CVV/track/PIN block: a column, field or property
+  # named for sensitive authentication data. Deliberately narrow — the strings
+  # "cvv" or "pin" alone appear far too widely to be a signal.
+  pattern     = "(?i)((cvv2?|cvc2?|cav2|cid)\\s*[:=]\\s*|[\"'`](cvv2?|cvc2?)[\"'`]\\s*:|column\\s*\\(\\s*[\"'](cvv|cvc|track_?data|pin_?block)|(track_?(1|2|data)|pin_?block)\\s*[:=])"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Fields or columns named for sensitive authentication data. Retaining these after
+authorization is prohibited outright, encrypted or not — one of the few PCI rules
+with no compensating control.
+"""
+
+[[controls]]
+id        = "PCI-8.6.1"
+title     = "Accounts used by systems are managed; credentials are not hardcoded"
+clause    = "PCI DSS v4.0 8.6.1, 8.6.2"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Accounts used by systems or applications for interactive login are managed, and
+passwords or passphrases for any application and system accounts are not
+hardcoded in scripts, configuration files, or bespoke and custom source code.
+"""
+remediation = """
+Rotate any exposed credential — deletion is insufficient, the value remains in
+git history — and move secrets to a managed secret store.
+"""
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "8.6.2 prohibits hardcoded credentials in source and configuration explicitly."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "A committed private key is a hardcoded credential by any reading."
+
+  [[controls.checks]]
+  id          = "env-file-not-tracked"
+  kind        = "file-absent"
+  path        = ".env"
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  rationale   = "A tracked .env commonly carries system-account credentials."

@@ -14,13 +14,19 @@ use sc_comply::Glob;
 
 use super::{locus, LintCtx, LintFinding};
 
-/// Globs that select the tooling's own sources — where a secret detector will
-/// always find its own detection patterns and test fixtures.
-const SELF_GLOBS: &[&str] = &[
-    "crates/sc-comply/src/**/*",
-    "crates/sc-comply/packs/*.toml",
-    "crates/sc-comply-author/src/**/*",
-];
+// NOTE: the `self-referential-pattern` lint was REMOVED here.
+//
+// It fired when a `regex-must-not-match` pattern hit the compliance tool's own
+// sources — a detector matching its own detection rules. That is now prevented
+// structurally: `sc_comply::collectors::text::TOOL_SOURCE_GLOBS` are excluded at
+// collection time, so the condition the lint reported can no longer occur.
+//
+// The lint was deleted rather than kept, because a lint that cannot fire is
+// noise in the report and a maintenance cost for the next reader. The scaling
+// argument for moving it into the collector: with the lint, every pack author
+// had to remember `exclude_globs` on every negative scan, and each new pattern
+// landing in the packs directory became a potential hit for every *other* pack —
+// so adding a control to PCI could break the ISO audit.
 
 /// The glob and pattern a text check carries.
 fn text_parts(kind: &CheckKind) -> Option<(&str, &str)> {
@@ -37,7 +43,6 @@ pub fn run(ctx: &LintCtx<'_>, out: &mut Vec<LintFinding>) {
         look_around_unsupported(check, &at, out);
         glob_matches_nothing(ctx, check, &at, out);
         pattern_never_matches(ctx, check, &at, out);
-        self_referential_pattern(ctx, check, &at, out);
         must_not_match_without_exclusions(check, &at, out);
         untracked_only_evidence(ctx, check, &at, out);
     }
@@ -134,73 +139,6 @@ fn pattern_never_matches(ctx: &LintCtx<'_>, check: &Check, at: &str, out: &mut V
         "Either the pattern is too narrow, or this repo genuinely lacks the evidence. The lint cannot tell which, but a pattern that never fires on any real repo is worth re-reading.".to_string(),
         "Test the pattern against a repo you know satisfies the control. If it still does not fire, widen it or reconsider the check.",
     ));
-}
-
-/// The pattern matches the tooling's own sources, with no exclusion covering
-/// them.
-///
-/// This is the defect the first self-audit surfaced: a secret detector matches
-/// its own detection pattern, so the shipped pack's regexes and this crate's
-/// test fixtures dominate the findings list and bury the one real hit.
-fn self_referential_pattern(
-    ctx: &LintCtx<'_>,
-    check: &Check,
-    at: &str,
-    out: &mut Vec<LintFinding>,
-) {
-    let (Some(sample), Some((glob_src, pattern))) = (ctx.sample, text_parts(&check.kind)) else {
-        return;
-    };
-    if !matches!(check.kind, CheckKind::RegexMustNotMatch { .. }) {
-        return;
-    }
-    let (Ok(glob), Ok(re)) = (Glob::new(glob_src), Regex::new(pattern)) else {
-        return;
-    };
-    let excludes: Vec<Glob> = check
-        .exclude_globs
-        .iter()
-        .filter_map(|g| Glob::new(g).ok())
-        .collect();
-
-    let self_hits: Vec<&str> = sample
-        .matching(&glob)
-        .into_iter()
-        .filter(|f| {
-            is_self_path(&f.path)
-                && !excludes.iter().any(|e| e.is_match(&f.path))
-                && f.contents.lines().any(|l| re.is_match(l))
-        })
-        .map(|f| f.path.as_str())
-        .collect();
-
-    if self_hits.is_empty() {
-        return;
-    }
-    let shown = self_hits
-        .iter()
-        .take(3)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    out.push(LintFinding::new(
-        "self-referential-pattern",
-        Severity::High,
-        at,
-        format!(
-            "the pattern matches the tooling's own sources ({} file(s), e.g. {shown})",
-            self_hits.len()
-        ),
-        "These are the detector's own patterns and fixtures, not findings. They crowd out the genuine hit and train the reader to skim past this control.".to_string(),
-        "Add the offending paths to `exclude_globs`. Every suppression is disclosed in the evidence pack, so this does not hide anything from an auditor.",
-    ));
-}
-
-fn is_self_path(path: &str) -> bool {
-    SELF_GLOBS
-        .iter()
-        .filter_map(|g| Glob::new(g).ok())
-        .any(|g| g.is_match(path))
 }
 
 /// A repo-wide `must-not-match` with no exclusions at all.
@@ -345,55 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn flags_a_self_referential_must_not_match() {
-        let src = pack_of(&check_with(
-            "keys",
-            r#"kind = "regex-must-not-match"
-  glob = "**/*"
-  pattern = "BEGIN RSA PRIVATE KEY"
-  on_match = "gap"
-  on_no_match = "pass"
-  on_no_files = "unknown""#,
-        ));
-        let sample = sample_with_contents(&[
-            (
-                "crates/sc-comply/src/collectors/text.rs",
-                "\"BEGIN RSA PRIVATE KEY\"",
-            ),
-            ("deploy/real.key", "BEGIN RSA PRIVATE KEY"),
-        ]);
-        let found = findings(&src, Some(&sample), "self-referential-pattern");
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(
-            found[0].summary.contains("sc-comply"),
-            "{}",
-            found[0].summary
-        );
-    }
-
-    #[test]
-    fn exclusions_silence_the_self_reference_lint() {
-        let src = pack_of(&check_with(
-            "keys",
-            r#"kind = "regex-must-not-match"
-  glob = "**/*"
-  pattern = "BEGIN RSA PRIVATE KEY"
-  exclude_globs = ["crates/sc-comply/src/**/*"]
-  on_match = "gap"
-  on_no_match = "pass"
-  on_no_files = "unknown""#,
-        ));
-        let sample = sample_with_contents(&[
-            (
-                "crates/sc-comply/src/collectors/text.rs",
-                "\"BEGIN RSA PRIVATE KEY\"",
-            ),
-            ("deploy/real.key", "BEGIN RSA PRIVATE KEY"),
-        ]);
-        assert!(findings(&src, Some(&sample), "self-referential-pattern").is_empty());
-    }
-
-    #[test]
     fn flags_repo_wide_must_not_match_without_exclusions() {
         let src = pack_of(&check_with(
             "keys",
@@ -516,7 +405,6 @@ mod tests {
         for lint in [
             "glob-matches-nothing",
             "pattern-matches-nothing-in-sample",
-            "self-referential-pattern",
             "untracked-only-evidence",
         ] {
             assert!(

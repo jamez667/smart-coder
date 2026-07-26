@@ -32,6 +32,7 @@ mod tests {
             vec![ControlResult {
                 id: "CC6.1".into(),
                 title: "t".into(),
+                section: Default::default(),
                 clause: "c".into(),
                 intent: "i".into(),
                 severity: Severity::Critical,

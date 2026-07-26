@@ -1,0 +1,40 @@
+# HIPAA Security Rule (45 CFR Part 164 Subpart C) — thin evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# DELIBERATELY THIN. The Security Rule is organised into administrative,
+# physical and technical safeguards. The administrative safeguards (risk
+# analysis, workforce security, training, contingency planning, BAAs) and the
+# physical safeguards (facility access, workstation security, device disposal)
+# yield nothing from a repository. Only the technical safeguards touch code, and
+# even they turn on a question this tool cannot answer: WHERE IS THE ePHI?
+#
+# A repository with no ePHI in scope is not "compliant" — it is out of scope,
+# which is a different statement. This pack evidences engineering hygiene that
+# SUPPORTS the technical safeguards; it does not assess HIPAA compliance.
+
+[framework]
+id        = "hipaa-security-rule"
+name      = "HIPAA Security Rule (45 CFR 164 Subpart C)"
+version   = "1.0.0"
+authority = "US Department of Health and Human Services"
+scope_note = """
+DELIBERATELY NARROW. This pack covers only the technical safeguards of the
+HIPAA Security Rule as they surface in source code, and even then indirectly.
+
+Not covered, because no repository can evidence them: the entire administrative
+safeguard set (§164.308 — risk analysis, sanction policy, workforce clearance,
+security awareness training, incident procedures, contingency plan, evaluation),
+the entire physical safeguard set (§164.310 — facility access, workstation use,
+device and media controls), Business Associate Agreements (§164.314), and
+policy documentation and retention (§164.316).
+
+The prior question this tool cannot answer: **is ePHI in scope for this
+repository at all?** Encryption is an addressable — not required —
+implementation specification, meaning a covered entity may document why an
+alternative is reasonable. A clean result here is engineering hygiene, never a
+compliance determination.
+
+Consult counsel and a qualified assessor. This pack is a starting point for a
+technical conversation, not an assessment.
+"""

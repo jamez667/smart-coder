@@ -103,6 +103,7 @@ mod tests {
         ControlResult {
             id: id.to_string(),
             title: format!("{id} title"),
+            section: Default::default(),
             clause: format!("TSC {id}"),
             intent: "i".into(),
             severity,

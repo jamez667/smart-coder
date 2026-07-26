@@ -1,0 +1,45 @@
+# EU regulatory cluster: NIS2, DORA and the AI Act — thin evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE. See docs/specs/13 and 14.
+#
+# THREE REGULATIONS IN ONE PACK, deliberately. Each has only a handful of
+# source-visible obligations, and shipping three near-empty packs would imply
+# more coverage than exists. Combining them makes the thinness visible.
+#
+# All three are governance regimes with management accountability at their core:
+# NIS2 makes management bodies personally liable for cybersecurity risk
+# measures; DORA governs ICT risk in financial entities and their critical
+# third-party providers; the AI Act classifies systems by risk and imposes
+# conformity assessment on high-risk ones. None of that lives in a repository.
+#
+# What DOES surface: the software-development hygiene each regime assumes, and —
+# for the AI Act — whether AI components are even present, which is the first
+# question a scoping conversation asks.
+
+[framework]
+id        = "eu-nis2-dora-aiact"
+name      = "EU regulatory cluster: NIS2, DORA, AI Act"
+version   = "1.0.0"
+authority = "European Union"
+scope_note = """
+DELIBERATELY THIN, and covering three regulations at once because each has only
+a handful of source-visible obligations.
+
+NIS2 (Directive (EU) 2022/2555): cybersecurity risk-management measures with
+management-body accountability, and incident reporting within 24/72 hours.
+Almost entirely governance and process.
+
+DORA (Regulation (EU) 2022/2554): ICT risk management for financial entities,
+incident classification and reporting, digital operational resilience testing
+(including threat-led penetration testing), and oversight of critical ICT
+third-party providers via contractual registers. Entirely institutional.
+
+EU AI Act (Regulation (EU) 2024/1689): risk classification, conformity
+assessment, technical documentation, data governance, human oversight and
+transparency for high-risk systems. Determined by INTENDED PURPOSE, which no
+scanner can infer from code.
+
+This pack evidences the engineering hygiene these regimes assume and flags
+whether AI components are present at all. It does not assess applicability,
+which is the threshold question for all three and requires legal analysis.
+"""

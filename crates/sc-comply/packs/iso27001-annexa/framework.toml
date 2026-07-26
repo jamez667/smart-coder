@@ -1,0 +1,28 @@
+# ISO/IEC 27001:2022 Annex A — source-controlled evidence pack.
+#
+# Globs and paths address the AUDITED WORKSPACE, not this file's location.
+# See docs/specs/13-compliance-evidence.md and 14-pack-authoring.md.
+#
+# SCOPING: Annex A has 93 controls. Roughly twenty yield real evidence from a
+# repository; the rest are organizational (people, physical, governance) and are
+# declared here as explicit `unknown` rather than omitted — a pack that drops
+# them lets a reader believe the framework was fully examined.
+
+[framework]
+id        = "iso27001-2022-annexa"
+name      = "ISO/IEC 27001:2022 Annex A"
+version   = "1.0.0"
+authority = "ISO/IEC"
+scope_note = """
+This pack inspects source-controlled artifacts only. It cannot observe running
+infrastructure, identity provider configuration, physical security, HR records,
+supplier contracts, or management review minutes.
+
+Annex A defines 93 controls across four themes (organizational, people,
+physical, technological). This pack evidences roughly twenty — almost entirely
+from the technological theme. The people and physical themes yield nothing from
+a repository and are declared undeterminable, not omitted.
+
+A passing result is evidence toward a control, never an attestation of
+conformity. Certification requires an accredited auditor.
+"""

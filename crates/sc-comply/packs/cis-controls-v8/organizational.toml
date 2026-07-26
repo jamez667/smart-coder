@@ -1,0 +1,105 @@
+# cis-controls-v8 — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CIS-1"
+title     = "Inventory and control of enterprise assets"
+clause    = "CIS v8 Control 1"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Actively manage all enterprise assets — end-user devices, network devices,
+servers, IoT — connected to the infrastructure, to accurately know the totality
+of assets that must be monitored and protected.
+"""
+remediation = "Provide the asset inventory from the CMDB, MDM or cloud provider."
+
+  [[controls.checks]]
+  id          = "asset-inventory-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/assets.md", "inventory.yml"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Enterprise asset inventory lives in a CMDB, MDM or cloud provider console, never
+in a repository. Declared so the pack does not imply this control was examined.
+"""
+
+[[controls]]
+id        = "CIS-5"
+title     = "Account management"
+clause    = "CIS v8 Control 5"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Use processes and tools to assign and manage authorization to credentials for
+user accounts, including administrator accounts and service accounts.
+"""
+remediation = "Provide identity provider configuration, account inventory and access review records."
+
+  [[controls.checks]]
+  id          = "account-management-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+CODEOWNERS routes review; it is not account management. Provisioning, review and
+revocation live in the identity provider. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "CIS-14"
+title     = "Security awareness and skills training"
+clause    = "CIS v8 Control 14"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Establish and maintain a security awareness programme to influence behaviour
+among the workforce so it is security conscious and appropriately skilled.
+"""
+remediation = "Provide training completion records from the LMS."
+
+  [[controls.checks]]
+  id          = "training-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/security-training.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Training completion is recorded in an LMS or HR system. Reported Unknown
+unconditionally.
+"""
+
+[[controls]]
+id        = "CIS-17"
+title     = "Incident response management"
+clause    = "CIS v8 Control 17"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Establish a programme to develop and maintain incident response capability —
+policies, plans, procedures, defined roles, training and communications — to
+prepare, detect and quickly respond to an attack.
+"""
+remediation = "Provide the incident response plan, contact list, and post-incident reviews."
+
+  [[controls.checks]]
+  id          = "incident-response-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/incident-response.md", "SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+A runbook evidences a document; incident tickets, on-call rotas and post-incident
+reviews evidence the capability, and they live elsewhere. Reported Unknown
+unconditionally.
+"""

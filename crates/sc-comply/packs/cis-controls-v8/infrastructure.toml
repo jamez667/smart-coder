@@ -1,0 +1,162 @@
+# cis-controls-v8 — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CIS-16.12"
+title     = "Implement code-level security checks"
+clause    = "CIS v8 16.12"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Apply static and dynamic analysis tools to verify that secure coding practices
+are being adhered to.
+"""
+remediation = "Add SAST to CI; add DAST or fuzzing for input-handling surfaces."
+
+  [[controls.checks]]
+  id          = "static-analysis-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,scripts/check.*}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|checkmarx|fortify|coverity)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Static analysis in the pipeline."
+
+  [[controls.checks]]
+  id          = "dynamic-analysis-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},**/fuzz/**/*}"
+  pattern     = "(?i)(cargo[- ]fuzz|libfuzzer|afl|oss-fuzz|atheris|jazzer|zap-baseline|nuclei|dastardly)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Dynamic analysis or fuzzing. Absent for most projects; not a gap alone."
+
+[[controls]]
+id        = "CIS-7.1"
+title     = "Establish and maintain a vulnerability management process"
+clause    = "CIS v8 7.1, 7.5"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Establish and maintain a documented vulnerability management process, and
+perform automated vulnerability scans of internal enterprise assets.
+"""
+remediation = "Add automated dependency and container scanning to CI."
+
+  [[controls.checks]]
+  id          = "automated-vulnerability-scanning"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check|clair)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated scanning in the pipeline. Enterprise-wide scanning is out of repository scope."
+
+  [[controls.checks]]
+  id          = "remediation-automation"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated remediation of known-vulnerable dependencies."
+
+[[controls]]
+id        = "CIS-4.1"
+title     = "Establish and maintain a secure configuration process"
+clause    = "CIS v8 4.1, 4.2"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Establish and maintain a secure configuration process for enterprise assets and
+software, and for network infrastructure. Review and update documentation
+annually or on significant change.
+"""
+remediation = "Define configuration as code and scan it against a hardening baseline."
+
+  [[controls.checks]]
+  id          = "configuration-as-code"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml}"
+  pattern     = "(?m)^\\s*(resource|module|provider)\\s+\"|(?i)(apiVersion:\\s*apps/|kind:\\s*(Deployment|StatefulSet|DaemonSet))"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Configuration established as code. Endpoint and network config is outside a repository."
+
+  [[controls.checks]]
+  id          = "configuration-baseline-scanning"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(checkov|tfsec|tflint|terrascan|kics|cfn-lint|kube-score|kubesec|conftest|cis-benchmark|inspec)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Automated comparison against a hardening baseline."
+
+[[controls]]
+id        = "CIS-4.8"
+title     = "Uninstall or disable unnecessary services"
+clause    = "CIS v8 4.8"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Uninstall or disable unnecessary services on enterprise assets and software,
+reducing the attack surface to what the workload requires.
+"""
+remediation = "Remove debug endpoints and permissive defaults from production configuration."
+
+  [[controls.checks]]
+  id          = "no-debug-defaults"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{py,rb,js,ts,yml,yaml,json,toml,conf}"
+  pattern     = "(?i)(DEBUG\\s*[:=]\\s*True\\b|FLASK_DEBUG\\s*[:=]\\s*1|NODE_ENV\\s*[:=]\\s*[\"']?development[\"']?\\s*$)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/tests/**/*", "**/test/**/*", "**/*.test.*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Debug modes expand attack surface. Test trees are excluded."
+
+[[controls]]
+id        = "CIS-3.3"
+title     = "Configure data access control lists"
+clause    = "CIS v8 3.3"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Configure data access control lists based on a user's need to know, applying
+least privilege to data stores and buckets.
+"""
+remediation = "Remove public-read grants and wildcard IAM principals from infrastructure code."
+
+  [[controls.checks]]
+  id          = "no-public-storage-acls"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{tf,yml,yaml,json}"
+  pattern     = "(?i)(acl\\s*[:=]\\s*[\"']?public-read|\"Principal\"\\s*:\\s*\"\\*\"|Principal\\s*=\\s*[\"']\\*[\"']|block_public_acls\\s*=\\s*false)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Public ACLs and wildcard principals defeat need-to-know on data stores."
+
+  [[controls.checks]]
+  id          = "no-committed-secrets"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Access control begins with keys not being readable by everyone with repo access."

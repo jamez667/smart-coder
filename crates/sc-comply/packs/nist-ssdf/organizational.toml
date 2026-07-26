@@ -1,0 +1,57 @@
+# nist-ssdf — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "PO.2"
+title     = "Implement roles and responsibilities"
+clause    = "SSDF PO.2.1, PO.2.2"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Create new roles and alter responsibilities for personnel to encompass all parts
+of the SSDF, and provide role-based training so personnel can perform them.
+"""
+remediation = "Provide the role definitions, assignment records, and training completion evidence."
+
+  [[controls.checks]]
+  id          = "roles-documented"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", "docs/roles.md", "CONTRIBUTING.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+CODEOWNERS assigns review routing, not SSDF roles, and cannot evidence training.
+Reported Unknown unconditionally; the auditor must obtain role assignments and
+training records.
+"""
+
+[[controls]]
+id        = "RV.2"
+title     = "Assess, prioritize and remediate vulnerabilities"
+clause    = "SSDF RV.2.1, RV.2.2"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Analyze each vulnerability to gather sufficient information to plan its
+remediation, and develop and implement a remediation plan.
+"""
+remediation = "Provide the vulnerability register and remediation SLA evidence."
+
+  [[controls.checks]]
+  id          = "remediation-tracking"
+  kind        = "file-exists"
+  paths       = ["docs/security-advisories.md", "SECURITY.md", ".github/SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Vulnerability triage and remediation are tracked in an issue tracker or
+vulnerability management system, not in source. Reported Unknown unconditionally.
+"""

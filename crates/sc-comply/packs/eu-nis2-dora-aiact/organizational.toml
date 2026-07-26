@@ -1,0 +1,113 @@
+# eu-nis2-dora-aiact — organizational controls.
+#
+# Evidence lives outside the repository entirely: HR systems,
+# contracts, board minutes, training records. These resolve to `unknown` by
+# construction — that is the honest answer, and why they are declared rather
+# than omitted.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "NIS2-20"
+title     = "Governance — management body accountability"
+clause    = "NIS2 Art. 20"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Management bodies must approve the cybersecurity risk-management measures,
+oversee their implementation, and can be held liable for infringements.
+Management body members must follow specific training.
+"""
+remediation = "Provide management approval records, oversight minutes and training attendance."
+
+  [[controls.checks]]
+  id          = "governance-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/governance.md", "docs/security-policy.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Management-body approval, oversight and training are the distinguishing feature
+of NIS2 and are evidenced by board minutes and attendance records. Reported
+Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "NIS2-23"
+title     = "Incident reporting obligations"
+clause    = "NIS2 Art. 23"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Early warning to the CSIRT within 24 hours of becoming aware of a significant
+incident, an incident notification within 72 hours, and a final report within
+one month.
+"""
+remediation = "Provide the incident reporting procedure and the register of notifications made."
+
+  [[controls.checks]]
+  id          = "incident-reporting-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/incident-response.md", "SECURITY.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Statutory reporting deadlines are met by a process, evidenced by the register of
+notifications actually made to the CSIRT. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "DORA-28"
+title     = "Management of ICT third-party risk"
+clause    = "DORA Art. 28, 30"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Maintain a register of information on all contractual arrangements with ICT
+third-party service providers, ensure contracts contain mandatory provisions,
+and manage concentration risk — with critical providers subject to direct EU
+oversight.
+"""
+remediation = "Provide the register of information and the ICT third-party contracts."
+
+  [[controls.checks]]
+  id          = "third-party-register-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/vendors.md", "docs/third-party.md", "sbom.json"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+An SBOM inventories software components; DORA's register of information covers
+CONTRACTUAL arrangements with ICT service providers and their mandatory terms.
+These are different artifacts. Reported Unknown unconditionally.
+"""
+
+[[controls]]
+id        = "AIACT-9-11-14"
+title     = "Risk management, technical documentation and human oversight"
+clause    = "AI Act Art. 9, 11, 14, 17"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+High-risk AI systems require a risk management system across the lifecycle,
+technical documentation per Annex IV, human oversight measures, and a quality
+management system — assessed through conformity assessment before market placement.
+"""
+remediation = """
+Provide the Annex IV technical documentation, risk management records, human
+oversight design and the conformity assessment.
+"""
+
+  [[controls.checks]]
+  id          = "aiact-obligations-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/ai-risk-management.md", "docs/model-card.md", "MODEL_CARD.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Annex IV technical documentation, the risk management system, human oversight
+design and conformity assessment are documentary and procedural. A model card is
+a useful artifact but not an Annex IV file. Reported Unknown unconditionally.
+"""

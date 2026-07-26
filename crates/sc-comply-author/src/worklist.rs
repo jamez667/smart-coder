@@ -73,6 +73,8 @@ pub enum Rejection {
     TooLong,
     /// Names a control that was not asked about.
     UnknownControl(String),
+    /// The model could not be reached for one batch. The other batches stand.
+    Backend(String),
 }
 
 impl std::fmt::Display for Rejection {
@@ -84,6 +86,7 @@ impl std::fmt::Display for Rejection {
             Rejection::Empty => write!(f, "empty"),
             Rejection::TooLong => write!(f, "over the per-field length limit"),
             Rejection::UnknownControl(id) => write!(f, "invented control {id:?}"),
+            Rejection::Backend(e) => write!(f, "model unreachable for this batch: {e}"),
         }
     }
 }
@@ -243,11 +246,31 @@ pub fn validate(text: &str) -> std::result::Result<(), Rejection> {
     Ok(())
 }
 
+/// How many controls one model call is asked to cover.
+///
+/// The reply is structured JSON — roughly 120 tokens per item once a reasoning
+/// model has spent its thinking budget — so a request must stay well inside
+/// `MAX_TOKENS`. Twenty leaves better than 5x headroom.
+///
+/// The failure this bounds is silent. An over-long reply is cut mid-array,
+/// `parse` reports `Empty`, and `generate` returns `Ok(vec![])` — indistinguishable
+/// from a framework with nothing to guide on. Without batching, that arrives
+/// exactly when the worklist becomes valuable: a large pack with many unknowns.
+pub const BATCH_SIZE: usize = 20;
+
+/// Token ceiling for one batch's reply.
+const MAX_TOKENS: usize = 16_000;
+
 /// Generate guidance for one framework's undeterminable controls.
 ///
 /// Returns an empty vec rather than an error when the model is unavailable or
 /// its output cannot be trusted: the report is complete without guidance, and a
 /// failed export would be the worse outcome.
+///
+/// Controls are sent in batches of [`BATCH_SIZE`]. A batch that is rejected or
+/// errors is reported through `on_reject` and skipped — partial guidance over
+/// most of a framework beats none over all of it, and each batch's controls are
+/// independent of every other's.
 pub fn generate(
     backend: &dyn ModelBackend,
     pack: &EvidencePack,
@@ -258,20 +281,29 @@ pub fn generate(
         return Ok(Vec::new());
     }
 
-    let mut req = GenerateRequest::new(worklist_messages(&pack.framework.name, &controls));
-    // Generous: a reasoning model spends most of its budget before emitting, and
-    // this asks for structured output over up to a dozen controls.
-    req.max_tokens = 16000;
-    req.temperature = 0.2;
+    let mut out = Vec::new();
+    for batch in controls.chunks(BATCH_SIZE) {
+        let mut req = GenerateRequest::new(worklist_messages(&pack.framework.name, batch));
+        // Generous: a reasoning model spends most of its budget before emitting,
+        // and this asks for structured output over a whole batch.
+        req.max_tokens = MAX_TOKENS;
+        req.temperature = 0.2;
 
-    let reply = backend.generate(&req)?;
-    match parse(&reply.content, &controls) {
-        Ok(items) => Ok(items),
-        Err(r) => {
-            on_reject(&r);
-            Ok(Vec::new())
+        // A transport failure on one batch must not discard the batches that
+        // already succeeded. Reported as a rejection so the caller still sees it.
+        let reply = match backend.generate(&req) {
+            Ok(r) => r,
+            Err(e) => {
+                on_reject(&Rejection::Backend(e.to_string()));
+                continue;
+            }
+        };
+        match parse(&reply.content, batch) {
+            Ok(items) => out.extend(items),
+            Err(r) => on_reject(&r),
         }
     }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -285,6 +317,7 @@ mod tests {
         ControlResult {
             id: id.into(),
             title: format!("{id} title"),
+            section: Default::default(),
             clause: "c".into(),
             intent: "The entity demonstrates board oversight.".into(),
             severity: Severity::Medium,
@@ -446,6 +479,76 @@ mod tests {
         let items = generate(&backend, &p, &mut on_reject).expect("no error");
         assert!(items.is_empty());
         assert_eq!(seen.len(), 1);
+    }
+
+    /// A large pack is split across calls rather than sent as one request.
+    ///
+    /// This is the regression test for a silent failure: a single call covering
+    /// 45 controls would truncate mid-array, `parse` would report `Empty`, and
+    /// `generate` would return `Ok(vec![])` — the worklist quietly disappearing
+    /// exactly when a framework is big enough to need one.
+    #[test]
+    fn a_large_pack_is_split_into_batches() {
+        let controls: Vec<ControlResult> = (0..45)
+            .map(|i| control(&format!("CC{i}"), ControlStatus::Unknown))
+            .collect();
+        let p = pack(controls);
+
+        // One scripted reply per expected batch: 45 controls / 20 = 3.
+        // MockBackend errors when the script runs out, so a 4th call would fail
+        // the test, and an unused reply is caught by the item count below.
+        let replies: Vec<String> = (0..3)
+            .map(|b| {
+                let ids: Vec<String> = (0..20)
+                    .map(|i| b * 20 + i)
+                    .filter(|n| *n < 45)
+                    .map(|n| format!(
+                        r#"{{"control_id":"CC{n}","evidence":["Dated board minutes","Signed acknowledgements"],
+                            "owner":"Company secretary","auditor_asks":"Whether the review recurred on schedule."}}"#
+                    ))
+                    .collect();
+                format!("[{}]", ids.join(","))
+            })
+            .collect();
+
+        let backend = MockBackend::new(replies);
+        let mut seen = Vec::new();
+        let mut on_reject = |r: &Rejection| seen.push(r.clone());
+        let items = generate(&backend, &p, &mut on_reject).expect("generate");
+
+        assert!(seen.is_empty(), "unexpected rejections: {seen:?}");
+        assert_eq!(items.len(), 45, "every control got guidance across batches");
+    }
+
+    /// One bad batch must not discard the batches that worked.
+    ///
+    /// Without this, a single malformed reply in the middle of a large framework
+    /// would throw away every item already collected.
+    #[test]
+    fn a_rejected_batch_does_not_discard_the_others() {
+        let controls: Vec<ControlResult> = (0..25)
+            .map(|i| control(&format!("CC{i}"), ControlStatus::Unknown))
+            .collect();
+        let p = pack(controls);
+
+        // Batch 1 (20 controls) is fine; batch 2 (5) reaches a verdict.
+        let ok: Vec<String> = (0..20)
+            .map(|n| format!(
+                r#"{{"control_id":"CC{n}","evidence":["Dated board minutes","Signed acknowledgements"],
+                    "owner":"Company secretary","auditor_asks":"Whether the review recurred on schedule."}}"#
+            ))
+            .collect();
+        let good = format!("[{}]", ok.join(","));
+        let bad = r#"[{"control_id":"CC20","evidence":["none"],"owner":"x",
+                      "auditor_asks":"This control is compliant."}]"#;
+
+        let backend = MockBackend::new([good, bad.to_string()]);
+        let mut seen = Vec::new();
+        let mut on_reject = |r: &Rejection| seen.push(r.clone());
+        let items = generate(&backend, &p, &mut on_reject).expect("no error");
+
+        assert_eq!(items.len(), 20, "the good batch survived the bad one");
+        assert_eq!(seen.len(), 1, "the bad batch was reported, not swallowed");
     }
 
     #[test]

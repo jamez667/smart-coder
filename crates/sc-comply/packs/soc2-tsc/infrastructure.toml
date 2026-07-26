@@ -1,0 +1,180 @@
+# soc2-tsc — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CC7.2"
+title     = "System monitoring for anomalies"
+clause    = "TSC CC7.2"
+severity  = "medium"
+aggregate = "majority"
+intent    = """
+The entity monitors system components and the operation of those components for
+anomalies indicative of malicious acts, natural disasters, and errors affecting
+the entity's ability to meet its objectives.
+"""
+remediation = """
+Adopt structured logging with a correlation id, and route alerts to an on-call
+destination. Evidence of the alert routing usually lives outside the repo.
+"""
+
+  [[controls.checks]]
+  id          = "structured-logging-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "The application emits logs usable for monitoring."
+
+  [[controls.checks]]
+  id          = "error-handling-entry-point"
+  kind        = "symbol-exists"
+  name_pattern = "(?i)(handle_error|on_error|ErrorHandler|report_panic|init_tracing|setup_logging)"
+  languages    = ["rust", "python", "csharp"]
+  on_match     = "pass"
+  on_no_match  = "unknown"
+  on_no_files  = "unknown"
+  rationale    = "A named error/telemetry entry point in indexable source."
+
+  [[controls.checks]]
+  id          = "alerting-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,json}"
+  pattern     = "(?i)(alertmanager|pagerduty|opsgenie|sentry|cloudwatch_metric_alarm|prometheusrule|datadog_monitor)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Alert routing is frequently external; absence is not evidence."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CC8.1 — Change management
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id        = "CC8.1"
+title     = "Change management"
+clause    = "TSC CC8.1"
+severity  = "high"
+# Evidence here is not equally weighted: an enforced CI gate is a far stronger
+# signal than a CONTRIBUTING.md describing one.
+aggregate = "weighted"
+pass_at   = 0.75
+gap_below = 0.40
+intent    = """
+The entity authorizes, designs, develops or acquires, configures, documents,
+tests, approves, and implements changes to infrastructure, data, software, and
+procedures to meet its objectives.
+"""
+remediation = """
+Require pull-request review and a green automated test run before merge, and
+retain the configuration as code where the provider allows it.
+"""
+
+  [[controls.checks]]
+  id          = "ci-pipeline-defined"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml"]
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated build/test pipeline runs on change."
+
+  [[controls.checks]]
+  id          = "ci-runs-tests"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml,.circleci/config.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  # No CI definition at all IS the change-management gap, not an unknown.
+  on_no_files = "gap"
+  rationale   = "The testing gate is evidenced in the pipeline definition."
+
+  [[controls.checks]]
+  id          = "contribution-process-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", ".github/CONTRIBUTING.md"]
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented change procedure exists."
+
+  [[controls.checks]]
+  id          = "code-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named reviewers per area. Often configured server-side instead."
+
+  [[controls.checks]]
+  id          = "pr-review-required"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 4.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  # The important one. Branch protection normally lives in the provider's API,
+  # not in the repository, so the absence of this file is NOT evidence that
+  # review is unenforced.
+  on_no_files = "unknown"
+  rationale   = """
+Branch protection requiring review before merge. Usually configured server-side
+and invisible to source inspection; the auditor must obtain an API export or
+screenshot from the VCS provider.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CC7.1 — Vulnerability management (partially observable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id        = "CC7.1"
+title     = "Vulnerability detection in dependencies"
+clause    = "TSC CC7.1"
+severity  = "high"
+aggregate = "any"
+intent    = """
+The entity uses detection and monitoring procedures to identify changes to
+configurations that introduce new vulnerabilities, and susceptibilities to
+newly discovered vulnerabilities.
+"""
+remediation = "Add a dependency audit step (cargo audit, pip-audit, npm audit, Dependabot) to CI."
+
+  [[controls.checks]]
+  id          = "dependency-audit-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|safety check|snyk|trivy|grype|dependency-check)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An automated dependency vulnerability scan runs in the pipeline."
+
+  [[controls.checks]]
+  id          = "automated-dependency-updates"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated dependency update or denial policy is configured."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Organizational controls.
+#
+# These are declared, not omitted. Each is Unknown by construction: the check
+# looks for a policy document, and finding one is weak evidence that the control
+# is DOCUMENTED — never that it is OPERATING. An auditor must test operating
+# effectiveness by other means, which is exactly what the worklist says.
+# ─────────────────────────────────────────────────────────────────────────────

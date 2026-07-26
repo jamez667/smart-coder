@@ -1,0 +1,233 @@
+# iso27001-annexa — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "A.8.28"
+title     = "Secure coding"
+clause    = "ISO 27001 A.8.28"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.25
+intent    = """
+Secure coding principles shall be applied to software development, including
+secure coding standards, review of code before use, protection against known
+vulnerabilities, and secure configuration of development tooling.
+"""
+remediation = """
+Adopt a documented secure-coding standard, enforce review before merge, and run
+dependency and static analysis in CI.
+"""
+
+  [[controls.checks]]
+  id          = "dependency-scanning-configured"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated dependency update/denial policy. May instead run in an external pipeline."
+
+  [[controls.checks]]
+  id          = "static-analysis-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|trivy|snyk|checkmarx)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Static analysis in the pipeline. CI may be hosted where source cannot see it."
+
+  [[controls.checks]]
+  id          = "contribution-standard-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", ".github/CONTRIBUTING.md", "docs/coding-standards.md"]
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented contribution/coding standard. Presence does not evidence adherence."
+
+  [[controls.checks]]
+  id          = "review-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named reviewers per area. Review enforcement usually lives in the VCS provider."
+
+[[controls]]
+id        = "A.8.24"
+title     = "Use of cryptography"
+clause    = "ISO 27001 A.8.24"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Rules for the effective use of cryptography, including key management, shall be
+defined and implemented. Weak or deprecated algorithms shall not be used.
+"""
+remediation = """
+Replace deprecated primitives with SHA-256+/AES-GCM, and remove any code path
+that disables certificate verification. Rotate any key found in source.
+"""
+
+  [[controls.checks]]
+  id          = "no-broken-hash-primitives"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  # Deliberately narrow: matches CONSTRUCTION of a weak digest, not the words
+  # "md5"/"sha1" in a comment, a filename, or a dependency-integrity field where
+  # the algorithm is not the application's choice.
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|sha1\\.New\\s*\\(|createHash\\s*\\(\\s*[\"'](md5|sha1)[\"']|MessageDigest\\.getInstance\\s*\\(\\s*\"(MD5|SHA-?1)\")"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Construction of a broken digest for security purposes. Non-security uses (checksums, cache keys) are false positives worth reviewing."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification voids transport encryption entirely."
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Key management begins with keys not being in version control."
+
+[[controls]]
+id        = "A.8.12"
+title     = "Data leakage prevention"
+clause    = "ISO 27001 A.8.12"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Data leakage prevention measures shall be applied to systems, networks and
+devices that process, store or transmit sensitive information.
+"""
+remediation = """
+Rotate any exposed credential — deletion is insufficient, the value remains in
+git history. Add a secret scanner as a pre-commit hook and to CI.
+"""
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|ghp_[0-9A-Za-z]{36}|-----BEGIN OPENSSH)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Long-lived static credentials embedded in tracked files."
+
+  [[controls.checks]]
+  id          = "env-file-not-tracked"
+  kind        = "file-absent"
+  path        = ".env"
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  rationale   = "A tracked .env commonly carries live credentials."
+
+  [[controls.checks]]
+  id          = "secret-exclusions-configured"
+  kind        = "regex-match-in-glob"
+  glob        = ".gitignore"
+  pattern     = "(?m)^\\s*[/*]*\\.?(env|\\*\\.pem|\\*\\.key|secrets?)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Preventive: secrets excluded from version control."
+
+[[controls]]
+id        = "A.8.15"
+title     = "Logging"
+clause    = "ISO 27001 A.8.15"
+severity  = "medium"
+aggregate = "any"
+intent    = """
+Logs recording activities, exceptions, faults and other relevant events shall be
+produced, stored, protected and analysed.
+"""
+remediation = "Adopt structured logging with correlation ids and ship logs to protected retention."
+
+  [[controls.checks]]
+  id          = "structured-logging-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.|logrus)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "The application emits logs. Storage, protection and analysis are not source-visible."
+
+  [[controls.checks]]
+  id          = "log-shipping-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,conf}"
+  pattern     = "(?i)(fluentd|fluent-bit|logstash|vector\\.dev|cloudwatch_log|loki|datadog|splunk)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Log shipping to protected retention. Usually infrastructure, not repository."
+
+[[controls]]
+id        = "A.5.14"
+title     = "Information transfer"
+clause    = "ISO 27001 A.5.14"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Transfer rules, procedures and agreements shall be in place for all types of
+transfer facilities within the organization and between the organization and
+other parties.
+"""
+remediation = "Enforce TLS on all external endpoints; remove plaintext HTTP to public hosts."
+
+  [[controls.checks]]
+  id          = "no-plaintext-http-endpoints"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  # Written WITHOUT look-around (the regex crate rejects it): match a public TLD
+  # rather than "not localhost". Known false positives on documentation URLs and
+  # example.com, accepted as noise over missing a real plaintext endpoint.
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Outbound plaintext transfer to a public host."
+
+  [[controls.checks]]
+  id          = "tls-floor-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{conf,yml,yaml,tf,toml,json}"
+  pattern     = "(?i)(ssl_protocols\\s+TLSv1\\.[23]|minimum_protocol_version|min_tls_version|MinimumTlsVersion|ssl_min_version)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An explicit TLS floor. Absence may only mean the platform sets it."

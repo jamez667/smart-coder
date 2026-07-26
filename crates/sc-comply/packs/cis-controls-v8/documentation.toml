@@ -1,0 +1,46 @@
+# cis-controls-v8 — documentation controls.
+#
+# Evidence is a document committed to this repository. A published
+# document evidences that the document exists, never that it is followed.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CIS-16.1"
+title     = "Establish and maintain a secure application development process"
+clause    = "CIS v8 16.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Establish and maintain a secure application development process addressing
+secure design standards, secure coding practices, developer training,
+vulnerability management, and third-party code security.
+"""
+remediation = """
+Document the development process and evidence its automated gates in CI. The
+training component must be evidenced outside the repository.
+"""
+
+  [[controls.checks]]
+  id          = "development-process-documented"
+  kind        = "file-exists"
+  paths       = ["CONTRIBUTING.md", "docs/CONTRIBUTING.md", ".github/CONTRIBUTING.md", "docs/development.md", "docs/specs"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A documented process. Presence evidences documentation, not adherence."
+
+  [[controls.checks]]
+  id          = "automated-quality-gate"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,scripts/check.*}"
+  pattern     = "(?i)(fmt --check|clippy|lint|test|build)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "An enforced automated gate in the development process."

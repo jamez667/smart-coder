@@ -1,0 +1,198 @@
+# iso27001-annexa — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "A.8.8"
+title     = "Management of technical vulnerabilities"
+clause    = "ISO 27001 A.8.8"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Information about technical vulnerabilities of information systems in use shall
+be obtained, exposure evaluated, and appropriate measures taken.
+"""
+remediation = "Add a dependency audit step (cargo audit, pip-audit, npm audit, Dependabot) to CI."
+
+  [[controls.checks]]
+  id          = "vulnerability-scanning-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|safety check|snyk|trivy|grype|dependency-check|osv-scanner)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An automated vulnerability scan runs in the pipeline."
+
+  [[controls.checks]]
+  id          = "automated-update-policy"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Automated dependency update or denial policy."
+
+[[controls]]
+id        = "A.8.31"
+title     = "Separation of development, test and production environments"
+clause    = "ISO 27001 A.8.31"
+severity  = "medium"
+# One check, so `all` — `any` with a single check differs only in its Unknown
+# handling and reads as accidental.
+aggregate = "all"
+intent    = """
+Development, testing and production environments shall be separated and secured.
+"""
+remediation = "Provide the deployment topology; environment separation is largely an infrastructure fact."
+
+  [[controls.checks]]
+  id          = "environment-separation-declared"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,tfvars,json}"
+  pattern     = "(?i)(environment\\s*[:=]\\s*[\"']?(prod|production|staging|dev|development)|workspace\\s*[:=]\\s*[\"']?(prod|staging)|env\\s*[:=]\\s*[\"']?(prod|staging))"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Environment-aware configuration suggests separation. Real separation is an infrastructure property this cannot confirm."
+
+[[controls]]
+id        = "A.8.16"
+title     = "Monitoring activities"
+clause    = "ISO 27001 A.8.16"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Networks, systems and applications shall be monitored for anomalous behaviour
+and appropriate actions taken to evaluate potential security incidents.
+"""
+remediation = "Route alerts to an on-call destination; provide the alerting configuration."
+
+  [[controls.checks]]
+  id          = "alerting-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{yml,yaml,tf,json}"
+  pattern     = "(?i)(alertmanager|pagerduty|opsgenie|sentry|cloudwatch_metric_alarm|prometheusrule|datadog_monitor)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Alert routing is frequently external; absence is not evidence of absence."
+
+[[controls]]
+id        = "A.8.32"
+title     = "Change management"
+clause    = "ISO 27001 A.8.32"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.7
+gap_below = 0.35
+intent    = """
+Changes to information processing facilities and information systems shall be
+subject to change management procedures.
+"""
+remediation = """
+Require review and a green automated test run before merge; retain the branch
+protection configuration as code where the provider allows it.
+"""
+
+  [[controls.checks]]
+  id          = "ci-pipeline-defined"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml"]
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated pipeline runs on change."
+
+  [[controls.checks]]
+  id          = "ci-runs-tests"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "A testing gate is evidenced in the pipeline definition."
+
+  [[controls.checks]]
+  id          = "review-required"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  # Branch protection normally lives in the provider's API. Absence here is NOT
+  # evidence that review is unenforced.
+  on_no_files = "unknown"
+  rationale   = """
+Branch protection requiring review. Usually configured server-side; the auditor
+must obtain an API export or screenshot from the VCS provider.
+"""
+
+[[controls]]
+id        = "A.8.9"
+title     = "Configuration management"
+clause    = "ISO 27001 A.8.9"
+severity  = "high"
+aggregate = "any"
+intent    = """
+Configurations, including security configurations, of hardware, software,
+services and networks shall be established, documented, implemented, monitored
+and reviewed.
+"""
+remediation = "Define configuration as code and scan it for drift from secure baselines."
+
+  [[controls.checks]]
+  id          = "infrastructure-as-code"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml}"
+  pattern     = "(?m)^\\s*(resource|module|provider)\\s+\"|(?i)(apiVersion:\\s*apps/|kind:\\s*(Deployment|StatefulSet|DaemonSet))"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Configuration established as code. Hardware and network config is out of scope for a repository."
+
+  [[controls.checks]]
+  id          = "config-scanning-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(checkov|tfsec|tflint|terrascan|kics|cfn-lint|kube-score|kubesec|conftest)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "Automated detection of deviation from secure configuration templates."
+
+[[controls]]
+id        = "A.8.13"
+title     = "Information backup"
+clause    = "ISO 27001 A.8.13"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Backup copies of information, software and systems shall be maintained and
+regularly tested in accordance with the agreed topic-specific policy on backup.
+"""
+remediation = "Provide backup configuration and, critically, evidence of restore testing."
+
+  [[controls.checks]]
+  id          = "backup-configured-as-code"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{tf,yml,yaml}"
+  pattern     = "(?i)(backup_retention_period|backup_policy|velero|snapshot_schedule|point_in_time_recovery|aws_backup_plan)"
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  # Deliberately unconditional: finding backup CONFIG says nothing about whether
+  # a restore was ever tested, which is what the control actually requires.
+  rationale   = """
+Backup configuration may be visible, but this control requires evidence that
+restores are regularly TESTED. No repository can show that. Reported Unknown
+unconditionally; the auditor must obtain restore test records.
+"""

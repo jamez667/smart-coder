@@ -1,0 +1,72 @@
+# eu-nis2-dora-aiact — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "DORA-9"
+title     = "Protection and prevention — ICT security"
+clause    = "DORA Art. 9"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Financial entities shall continuously monitor and control the security of ICT
+systems and tools, minimise the impact of ICT risk through appropriate security
+tools, policies and procedures, and ensure data confidentiality, integrity and
+availability including during transit.
+"""
+remediation = "Enforce transport encryption and remove hardcoded credentials."
+
+  [[controls.checks]]
+  id          = "no-hardcoded-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,})"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Credentials in source are an ICT confidentiality failure."
+
+  [[controls.checks]]
+  id          = "no-plaintext-transport"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Data in transit must be protected; plaintext HTTP to a public host is not."
+
+[[controls]]
+id        = "DORA-24"
+title     = "Digital operational resilience testing"
+clause    = "DORA Art. 24, 25, 26"
+severity  = "high"
+aggregate = "all"
+intent    = """
+Establish a sound and comprehensive digital operational resilience testing
+programme, including vulnerability assessments, scenario-based tests, and — for
+significant entities — threat-led penetration testing (TLPT) at least every
+three years.
+"""
+remediation = "Provide the testing programme, results, and TLPT reports where applicable."
+
+  [[controls.checks]]
+  id          = "resilience-testing-out-of-scope"
+  kind        = "file-exists"
+  paths       = ["docs/pentest.md", "docs/resilience-testing.md"]
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  rationale   = """
+Threat-led penetration testing is conducted against live systems by accredited
+testers under regulator-recognised frameworks (TIBER-EU). Automated CI scanning
+is not a substitute and must not be presented as one. Reported Unknown.
+"""

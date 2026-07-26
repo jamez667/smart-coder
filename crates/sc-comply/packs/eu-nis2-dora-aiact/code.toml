@@ -1,0 +1,137 @@
+# eu-nis2-dora-aiact — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "NIS2-21-2e"
+title     = "Security in network and information systems acquisition, development and maintenance"
+clause    = "NIS2 Art. 21(2)(e)"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Security in network and information systems acquisition, development and
+maintenance, including vulnerability handling and disclosure.
+"""
+remediation = "Add vulnerability scanning to CI and publish a coordinated disclosure policy."
+
+  [[controls.checks]]
+  id          = "vulnerability-handling-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated vulnerability handling in development, which Art. 21(2)(e) names directly."
+
+  [[controls.checks]]
+  id          = "disclosure-policy-published"
+  kind        = "file-exists"
+  paths       = ["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md", ".well-known/security.txt"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "A coordinated vulnerability disclosure channel. Triage effectiveness is not source-visible."
+
+[[controls]]
+id        = "NIS2-21-2h"
+title     = "Policies and procedures regarding the use of cryptography"
+clause    = "NIS2 Art. 21(2)(h)"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+Policies and procedures regarding the use of cryptography and, where
+appropriate, encryption.
+"""
+remediation = "Replace deprecated primitives and enforce TLS on external endpoints."
+
+  [[controls.checks]]
+  id          = "no-broken-cryptography"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php}"
+  pattern     = "(?i)(hashlib\\.(md5|sha1)\\s*\\(|MD5\\.Create\\s*\\(|md5\\.New\\s*\\(|DES\\.new\\s*\\(|Cipher\\.getInstance\\s*\\(\\s*\"(DES|RC4))"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Deprecated primitives in use contradict any cryptography policy."
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true)"
+  exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*"]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabled certificate verification defeats the encryption the policy requires."
+
+[[controls]]
+id        = "AIACT-SCOPE"
+title     = "Applicability — are AI components present at all?"
+clause    = "AI Act Art. 3, 6 (classification)"
+severity  = "high"
+aggregate = "all"
+intent    = """
+The AI Act applies to AI systems as defined in Art. 3 and classifies them by
+risk under Art. 6. High-risk classification depends on the system's INTENDED
+PURPOSE and its deployment context, not on its implementation.
+"""
+remediation = """
+Determine applicability with legal advice. If AI components are present,
+establish the intended purpose and classify accordingly before assessing
+technical obligations.
+"""
+
+  [[controls.checks]]
+  id          = "ai-components-detected"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{py,rs,ts,js,go,java,cs,toml,txt,json,yml,yaml}"
+  # A scoping SIGNAL, not a finding: this tells a reader whether the AI Act is
+  # even a conversation worth having, which is genuinely useful and honestly
+  # limited.
+  pattern     = "(?i)(torch|tensorflow|scikit-learn|sklearn|transformers|langchain|llama[-_]?index|openai|anthropic|huggingface|onnxruntime|xgboost|lightgbm)"
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = """
+Detecting an ML dependency indicates AI components MAY be present — a useful
+scoping signal. It cannot establish whether the system meets the Art. 3
+definition, nor its intended purpose, which is what determines classification.
+Reported Unknown either way; the presence or absence of a hit is the value here.
+"""
+
+[[controls]]
+id        = "AIACT-12"
+title     = "Record-keeping and logging for high-risk AI systems"
+clause    = "AI Act Art. 12"
+severity  = "high"
+aggregate = "all"
+intent    = """
+High-risk AI systems shall technically allow for the automatic recording of
+events (logs) over their lifetime, to a degree appropriate to the intended
+purpose, ensuring traceability of functioning.
+"""
+remediation = "Implement lifecycle logging appropriate to the system's intended purpose."
+
+  [[controls.checks]]
+  id          = "logging-capability-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java}"
+  pattern     = "\\b(tracing::|log::(info|warn|error)|logging\\.getLogger|ILogger<|winston|zap\\.|slog\\.)"
+  on_match    = "unknown"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = """
+Logging calls exist, but Art. 12 requires records appropriate to the intended
+purpose and sufficient for traceability — a design judgment against a
+classification this tool has not made. Reported Unknown unconditionally.
+"""

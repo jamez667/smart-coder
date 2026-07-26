@@ -1,0 +1,157 @@
+# pci-dss-v4 — infrastructure controls.
+#
+# Evidence lives in infrastructure-as-code, CI configuration and
+# cloud settings. Owned by the platform team.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "PCI-6.2.3"
+title     = "Bespoke and custom software is reviewed prior to release"
+clause    = "PCI DSS v4.0 6.2.3, 6.2.3.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Bespoke and custom software is reviewed prior to being released into production
+to identify and correct potential coding vulnerabilities. Reviews are performed
+by individuals other than the originating author, and either manually or via
+automated code review tools.
+"""
+remediation = """
+Require pull-request review by someone other than the author, and retain the
+branch protection configuration as code where the provider allows it.
+"""
+
+  [[controls.checks]]
+  id          = "review-required-as-code"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  # PCI is specific that review must be by someone OTHER than the author, which
+  # is a provider setting. Absence of this file is not evidence of absent review.
+  on_no_files = "unknown"
+  rationale   = """
+Review by a second person enforced as code. Usually configured in the VCS
+provider's API; the assessor must obtain that configuration.
+"""
+
+  [[controls.checks]]
+  id          = "automated-code-review-tooling"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(codeql|semgrep|sonarqube|sonarcloud|bandit|gosec|clippy|eslint|checkmarx|fortify|coverity)"
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "PCI accepts automated review tools as an alternative to manual review."
+
+  [[controls.checks]]
+  id          = "code-owners-defined"
+  kind        = "file-exists"
+  paths       = ["CODEOWNERS", ".github/CODEOWNERS", ".gitlab/CODEOWNERS"]
+  weight      = 1.0
+  on_match    = "pass"
+  on_no_match = "unknown"
+  rationale   = "Named reviewers per area supports the other-than-author requirement."
+
+[[controls]]
+id        = "PCI-6.3.1"
+title     = "Security vulnerabilities are identified and managed"
+clause    = "PCI DSS v4.0 6.3.1, 6.3.3"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.6
+gap_below = 0.3
+intent    = """
+Security vulnerabilities are identified and managed: new vulnerabilities are
+identified from industry sources, assigned a risk ranking, and system components
+are protected from known vulnerabilities by installing applicable security
+patches.
+"""
+remediation = "Add dependency vulnerability scanning to CI and adopt an automated patch policy."
+
+  [[controls.checks]]
+  id          = "vulnerability-scanning-in-ci"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml}"
+  pattern     = "(?i)(cargo[- ]audit|cargo[- ]deny|pip-audit|npm audit|osv-scanner|grype|trivy|snyk|dependency-check)"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Automated identification of known-vulnerable components."
+
+  [[controls.checks]]
+  id          = "patch-automation-configured"
+  kind        = "file-exists"
+  paths       = [".github/dependabot.yml", ".github/dependabot.yaml", "renovate.json", ".renovaterc.json", "deny.toml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated policy for applying security patches to components."
+
+  [[controls.checks]]
+  id          = "component-inventory"
+  kind        = "file-exists"
+  paths       = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "PCI 6.3.2 requires an inventory of bespoke and third-party components."
+
+[[controls]]
+id        = "PCI-6.5.1"
+title     = "Changes are managed through a formal change control process"
+clause    = "PCI DSS v4.0 6.5.1"
+severity  = "high"
+aggregate = "weighted"
+pass_at   = 0.7
+gap_below = 0.35
+intent    = """
+Changes to all system components in the production environment are made
+according to established procedures that include the reason for the change,
+documentation of impact, documented approval, and testing to verify the change
+does not adversely impact system security.
+"""
+remediation = "Require review and a green test run before merge; retain approval records."
+
+  [[controls.checks]]
+  id          = "ci-pipeline-defined"
+  kind        = "file-exists"
+  paths       = [".github/workflows", ".woodpecker", ".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml"]
+  weight      = 2.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "An automated pipeline is the mechanism the change process runs through."
+
+  [[controls.checks]]
+  id          = "testing-before-release"
+  kind        = "regex-match-in-glob"
+  glob        = "{.github/workflows/*.{yml,yaml},.woodpecker/*.{yml,yaml},.gitlab-ci.yml,azure-pipelines.yml}"
+  pattern     = "(?i)(cargo test|pytest|dotnet test|npm (run )?test|go test|mvn test|check\\.(sh|ps1))"
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "gap"
+  rationale   = "Testing to verify a change does not adversely impact security."
+
+  [[controls.checks]]
+  id          = "approval-enforced"
+  kind        = "json-path"
+  path        = ".github/settings.yml"
+  key_path    = "branches.0.protection.required_pull_request_reviews.required_approving_review_count"
+  assert      = { kind = "gte", value = 1 }
+  weight      = 3.0
+  on_match    = "pass"
+  on_no_match = "gap"
+  on_no_files = "unknown"
+  rationale   = "Documented approval before a change lands. Usually a provider setting."

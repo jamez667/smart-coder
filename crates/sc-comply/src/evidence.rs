@@ -8,8 +8,10 @@
 //! See `docs/specs/13-compliance-evidence.md`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::section::Section;
 use crate::status::{ControlStatus, Severity};
 
 /// Cited excerpts longer than this are truncated. An evidence pack is read by a
@@ -130,6 +132,11 @@ pub struct CheckResult {
 pub struct ControlResult {
     pub id: String,
     pub title: String,
+    /// The evidence domain this control belongs to, carried from the pack.
+    ///
+    /// Scoring reads this rather than the pack, so a report stays scoreable
+    /// after serialization without needing the pack that produced it.
+    pub section: Section,
     pub clause: String,
     pub intent: String,
     pub severity: Severity,
@@ -219,20 +226,52 @@ pub struct Score {
 impl Score {
     /// Tally a run's control results.
     pub fn tally(controls: &[ControlResult]) -> Self {
-        let mut s = Score {
-            total: controls.len(),
-            ..Default::default()
-        };
+        let mut s = Score::default();
         for c in controls {
-            match c.status {
-                ControlStatus::Pass => s.passed += 1,
-                ControlStatus::Gap => s.gaps += 1,
-                ControlStatus::Unknown => s.unknown += 1,
-                ControlStatus::Error => s.errors += 1,
-                ControlStatus::NotApplicable => s.not_applicable += 1,
-            }
+            s.count(c.status);
         }
         s
+    }
+
+    /// Tally each evidence domain separately.
+    ///
+    /// This is the answer to a scoring problem that gets *worse* as a pack gets
+    /// more honest. [`coverage`](Score::coverage) and
+    /// [`determinacy`](Score::determinacy) both count `Unknown` in the
+    /// denominator — correct within a domain, since an unobserved control must
+    /// dilute the result. But completing a framework means adding mostly
+    /// organizational controls, which can never be anything but `Unknown`, so a
+    /// single blended figure falls the more of the framework is declared.
+    ///
+    /// Per-section scores answer questions that have answers: *what fraction of
+    /// what a repository can evidence, does it evidence?* An organizational
+    /// section reading "0 of 43 determinable" is a statement of scope, not a
+    /// failing grade, and it sits beside a Code figure it cannot drag down.
+    ///
+    /// Sections **partition**: the per-section totals always sum to the flat
+    /// [`tally`](Score::tally). Only sections that have controls appear.
+    ///
+    /// There is deliberately no blended figure derived from this — see the
+    /// type-level note on why a single headline number is the misreading this
+    /// crate exists to prevent.
+    pub fn by_section(controls: &[ControlResult]) -> BTreeMap<Section, Score> {
+        let mut out: BTreeMap<Section, Score> = BTreeMap::new();
+        for c in controls {
+            out.entry(c.section).or_default().count(c.status);
+        }
+        out
+    }
+
+    /// Fold one control's status into the tally.
+    fn count(&mut self, status: ControlStatus) {
+        self.total += 1;
+        match status {
+            ControlStatus::Pass => self.passed += 1,
+            ControlStatus::Gap => self.gaps += 1,
+            ControlStatus::Unknown => self.unknown += 1,
+            ControlStatus::Error => self.errors += 1,
+            ControlStatus::NotApplicable => self.not_applicable += 1,
+        }
     }
 
     /// Controls actually in scope: everything except N/A.
@@ -400,9 +439,14 @@ mod tests {
     use super::*;
 
     fn ctrl(id: &str, status: ControlStatus) -> ControlResult {
+        sectioned(id, status, Section::Code)
+    }
+
+    fn sectioned(id: &str, status: ControlStatus, section: Section) -> ControlResult {
         ControlResult {
             id: id.to_string(),
             title: "t".into(),
+            section,
             clause: "c".into(),
             intent: "i".into(),
             severity: Severity::Medium,
@@ -411,6 +455,103 @@ mod tests {
             rationale: "r".into(),
             remediation: None,
         }
+    }
+
+    /// **The property the whole sectioning design rests on.**
+    ///
+    /// Completing a framework means adding organizational controls, which can
+    /// never be anything but `Unknown`. If that could move the Code score, then
+    /// every honest addition to a pack would make its most trustworthy number
+    /// look worse — and the rational response would be to stop declaring
+    /// controls the tool cannot see, which is precisely the dishonesty the
+    /// declarations exist to prevent.
+    #[test]
+    fn organizational_controls_cannot_move_the_code_score() {
+        let code = vec![
+            sectioned("A", ControlStatus::Pass, Section::Code),
+            sectioned("B", ControlStatus::Pass, Section::Code),
+            sectioned("C", ControlStatus::Gap, Section::Code),
+        ];
+        let before = Score::by_section(&code);
+        let code_before = before[&Section::Code];
+
+        // Now declare forty organizational controls, all undeterminable — the
+        // realistic shape of completing SOC 2 or ISO 27001.
+        let mut after_controls = code.clone();
+        for i in 0..40 {
+            after_controls.push(sectioned(
+                &format!("ORG{i}"),
+                ControlStatus::Unknown,
+                Section::Organizational,
+            ));
+        }
+        let after = Score::by_section(&after_controls);
+
+        assert_eq!(
+            after[&Section::Code],
+            code_before,
+            "declaring organizational controls changed the Code tally"
+        );
+        assert!(
+            (after[&Section::Code].determinacy() - 1.0).abs() < f64::EPSILON,
+            "Code determinacy must stay at 100%, got {}",
+            after[&Section::Code].determinacy()
+        );
+
+        // The blended figure, for contrast: this is what a single score does.
+        let blended = Score::tally(&after_controls);
+        assert!(
+            blended.determinacy() < 0.08,
+            "the blended figure should have collapsed, got {}",
+            blended.determinacy()
+        );
+    }
+
+    #[test]
+    fn sections_partition_the_controls() {
+        // Per-section totals must sum to the flat tally: a section split that
+        // dropped or duplicated a control would silently misreport every score.
+        let controls = vec![
+            sectioned("A", ControlStatus::Pass, Section::Code),
+            sectioned("B", ControlStatus::Gap, Section::Infrastructure),
+            sectioned("C", ControlStatus::Unknown, Section::Documentation),
+            sectioned("D", ControlStatus::Unknown, Section::Organizational),
+            sectioned("E", ControlStatus::NotApplicable, Section::Code),
+        ];
+        let flat = Score::tally(&controls);
+        let by = Score::by_section(&controls);
+
+        let sum = |f: fn(&Score) -> usize| by.values().map(f).sum::<usize>();
+        assert_eq!(sum(|s| s.total), flat.total);
+        assert_eq!(sum(|s| s.passed), flat.passed);
+        assert_eq!(sum(|s| s.gaps), flat.gaps);
+        assert_eq!(sum(|s| s.unknown), flat.unknown);
+        assert_eq!(sum(|s| s.errors), flat.errors);
+        assert_eq!(sum(|s| s.not_applicable), flat.not_applicable);
+    }
+
+    #[test]
+    fn an_absent_section_is_omitted_rather_than_reported_as_zero() {
+        // A framework with no infrastructure controls should not render an
+        // "Infrastructure — 0%" heading, which reads as a failure rather than
+        // as an absence.
+        let by = Score::by_section(&[sectioned("A", ControlStatus::Pass, Section::Code)]);
+        assert_eq!(by.len(), 1);
+        assert!(!by.contains_key(&Section::Infrastructure));
+    }
+
+    #[test]
+    fn sections_are_ordered_most_source_visible_first() {
+        // BTreeMap iteration order is the report's reading order, so the
+        // sections a reader can act on come first.
+        let controls = vec![
+            sectioned("D", ControlStatus::Unknown, Section::Organizational),
+            sectioned("A", ControlStatus::Pass, Section::Code),
+            sectioned("C", ControlStatus::Unknown, Section::Documentation),
+            sectioned("B", ControlStatus::Gap, Section::Infrastructure),
+        ];
+        let order: Vec<Section> = Score::by_section(&controls).into_keys().collect();
+        assert_eq!(order, Section::ALL);
     }
 
     #[test]

@@ -1,0 +1,229 @@
+# soc2-tsc — code controls.
+#
+# Evidence lives in source files. Owned by engineers.
+#
+# The section is taken from THIS FILENAME, not from any `section =` key,
+# so the directory layout and the score cannot disagree.
+# See docs/specs/13-compliance-evidence.md.
+
+[[controls]]
+id        = "CC6.1"
+title     = "Logical access — credentials are not committed to source"
+clause    = "TSC CC6.1"
+severity  = "critical"
+aggregate = "all"
+intent    = """
+The entity implements logical access security software, infrastructure, and
+architectures over protected information assets to protect them from security
+events. Credentials committed to version control defeat every downstream access
+control, because the repository history retains them after deletion.
+"""
+remediation = """
+Rotate any exposed credential immediately — deleting the file is not sufficient,
+as the value remains in git history. Then add the path to .gitignore and adopt a
+secret scanner as a pre-commit hook.
+"""
+
+  [[controls.checks]]
+  id          = "no-committed-private-keys"
+  kind        = "regex-must-not-match"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  # A secret detector inevitably matches its own detector. Without these, this
+  # tool's own fixtures and pattern definitions dominate the findings list and
+  # bury the genuine one — which is how a scanner trains its readers to ignore
+  # it. Every suppression is disclosed in the report.
+  exclude_globs = [
+    "crates/sc-comply/packs/*.toml",
+    "crates/sc-comply/src/**/*",
+    "**/*.snap",
+  ]
+  # This control is about what was COMMITTED. A gitignored key on a developer's
+  # disk is a real exposure but not a committed one, and reporting it here would
+  # state something false. On-disk exposure is CC6.1-LOCAL below.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  # Searching files and finding no key is a genuine pass; searching NO files is
+  # not. Without this, an empty or renamed tree reports green having read nothing.
+  on_no_files = "unknown"
+  rationale   = "A committed private key is a direct CC6.1 failure."
+
+  [[controls.checks]]
+  id          = "no-hardcoded-cloud-credentials"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb,php,yml,yaml,toml,json,tf,sh,ps1}"
+  pattern     = "(?i)(aws_secret_access_key\\s*[:=]|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN OPENSSH|ghp_[0-9A-Za-z]{36})"
+  exclude_globs = [
+    "crates/sc-comply/packs/*.toml",
+    "crates/sc-comply/src/**/*",
+  ]
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Long-lived static credentials embedded in tracked files."
+
+  [[controls.checks]]
+  id          = "env-file-not-tracked"
+  kind        = "file-absent"
+  path        = ".env"
+  # A gitignored .env is correct practice, not a finding. Without this the check
+  # fires on every well-configured repository — the definition of a linter that
+  # gets ignored.
+  tracked_only = true
+  on_match    = "gap"
+  on_no_match = "pass"
+  rationale   = "A TRACKED .env commonly carries live credentials. A gitignored one is correct practice."
+
+  [[controls.checks]]
+  id          = "gitignore-excludes-secrets"
+  kind        = "regex-match-in-glob"
+  glob        = ".gitignore"
+  pattern     = "(?m)^\\s*[/*]*\\.?(env|\\*\\.pem|\\*\\.key|secrets?)"
+  on_match    = "pass"
+  on_no_match = "gap"
+  # No .gitignore at all: we cannot distinguish "no policy" from "policy lives
+  # elsewhere", so we decline to call it either way.
+  on_no_files = "unknown"
+  rationale   = "Preventive control: secrets excluded from version control."
+
+  [[controls.checks]]
+  id          = "secret-scanning-configured"
+  kind        = "file-exists"
+  paths       = [".gitleaks.toml", ".github/workflows/gitleaks.yml", ".pre-commit-config.yaml", ".secrets.baseline", "trufflehog.yaml"]
+  on_match    = "pass"
+  on_no_match = "gap"
+  rationale   = "Automated secret detection prevents recurrence."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CC6.1-LOCAL — the companion to CC6.1, worded for what it can actually show.
+#
+# A secret sitting untracked in a working directory is a genuine exposure — it
+# is on a laptop, in backups, and one `git add -f` from being permanent. But it
+# is NOT "committed to source", and a control that says so of a gitignored file
+# is making a false statement.
+#
+# So it gets its own control, at a lower severity, worded accurately. This is
+# the honest way to report it: not by softening CC6.1 until it means nothing,
+# and not by staying silent.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id        = "CC6.1-LOCAL"
+title     = "Local secret hygiene — untracked credentials in the working tree"
+clause    = "TSC CC6.1 (supporting)"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Secrets present in a working directory but excluded from version control are not
+committed, and are therefore outside the strict scope of CC6.1. They remain an
+exposure on developer machines and in backups, and are one forced add away from
+entering history permanently.
+"""
+remediation = """
+Prefer a managed secret store or an OS keychain over a file on disk. Where a
+local file is unavoidable, keep it gitignored (as here), restrict its
+permissions, and rotate on any suspicion of exposure.
+"""
+
+  [[controls.checks]]
+  id          = "untracked-key-material-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = [
+    "crates/sc-comply/packs/*.toml",
+    "crates/sc-comply/src/**/*",
+    "crates/sc-comply-author/src/**/*",
+    "**/*.snap",
+  ]
+  # Deliberately NOT tracked_only — this control exists precisely to see the
+  # files CC6.1 correctly ignores.
+  on_match    = "unknown"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  # Unknown rather than gap on a hit: local key material is normal and often
+  # correct (a dev TLS cert, an SSH key). Whether THIS one is acceptable depends
+  # on what it protects and how the machine is managed — a judgment no scanner
+  # can make. Reporting it as a gap would cry wolf on every developer laptop.
+  rationale   = """
+Key material present on disk but excluded from version control. This is
+frequently legitimate — a local TLS certificate or SSH key — so it is reported
+for awareness rather than as a finding. The reviewer should confirm the file is
+intended, permission-restricted, and not synced to shared storage.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CC6.6 — Encryption in transit
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[controls]]
+id        = "CC6.6"
+title     = "Encryption of data in transit"
+clause    = "TSC CC6.6"
+severity  = "critical"
+# Several mechanisms are individually sufficient, so any one is evidence.
+aggregate = "any"
+intent    = """
+The entity implements logical access security measures to protect against
+threats from sources outside its system boundaries, including encryption of
+data transmitted over public networks.
+"""
+remediation = """
+Enforce TLS 1.2 or higher on every external endpoint and remove any code path
+that disables certificate verification.
+"""
+
+  [[controls.checks]]
+  id          = "no-tls-verification-disabled"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,java,rb}"
+  pattern     = "(?i)(verify\\s*=\\s*False|danger_accept_invalid_certs\\s*\\(\\s*true|rejectUnauthorized\\s*:\\s*false|InsecureSkipVerify\\s*:\\s*true|CURLOPT_SSL_VERIFYPEER\\s*,\\s*(0|false))"
+  # This tool's own test fixtures use `danger_accept_invalid_certs(true)` as a
+  # sample finding; without the exclusion they are reported as real TLS defects.
+  exclude_globs = [
+    "crates/sc-comply/src/**/*",
+    "crates/sc-comply-author/src/**/*",
+  ]
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = "Disabling certificate verification voids transit encryption."
+
+  [[controls.checks]]
+  id          = "tls-minimum-version-configured"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*.{conf,yml,yaml,tf,toml,json}"
+  pattern     = "(?i)(ssl_protocols\\s+TLSv1\\.[23]|minimum_protocol_version|min_tls_version|MinimumTlsVersion|ssl_min_version)"
+  on_match    = "pass"
+  on_no_match = "unknown"
+  on_no_files = "unknown"
+  rationale   = "An explicit TLS floor. Absence may only mean the platform sets it."
+
+  [[controls.checks]]
+  id          = "no-plaintext-http-endpoints"
+  kind        = "regex-must-not-match"
+  glob        = "**/*.{rs,py,cs,ts,js,go,yml,yaml,tf}"
+  # Written WITHOUT look-around: the `regex` crate does not support it, so
+  # "http:// not followed by localhost" is inexpressible. Instead this matches
+  # a hostname bearing a public TLD, which excludes localhost, bare loopback
+  # IPs and most namespace URIs by construction.
+  #
+  # Known false positives: documentation URLs on real domains, and the reserved
+  # example.com/.org/.net. Excluding those needs negative look-ahead, so they
+  # are accepted as noise rather than silently dropping real findings. An
+  # auditor reading a hit on example.com can dismiss it in one glance; a missed
+  # plaintext endpoint is the far costlier error.
+  pattern     = "http://[a-zA-Z0-9][a-zA-Z0-9.-]*\\.(com|org|net|io|dev|co|ai|cloud|app)\\b"
+  on_match    = "gap"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  rationale   = """
+Outbound plaintext HTTP to a public host. Localhost, loopback and namespace URIs
+are excluded by requiring a public TLD.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CC7.2 — System monitoring
+# ─────────────────────────────────────────────────────────────────────────────
