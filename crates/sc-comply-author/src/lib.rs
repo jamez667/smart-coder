@@ -22,6 +22,7 @@ pub mod lint;
 pub mod narrative;
 pub mod report;
 pub mod sample;
+pub mod worklist;
 
 #[cfg(test)]
 mod test_support;

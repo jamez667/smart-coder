@@ -64,6 +64,10 @@ padding:.55rem .9rem;min-width:5.5rem}
 .ctl .intent{font-size:.93rem;margin:.5rem 0 0}
 .ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
 .exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
+.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
+border-left:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
+.guide p{margin:.35rem 0 0}
 footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
 "#;
 
@@ -137,6 +141,38 @@ fn page_shell(title: &str, body: &str) -> String {
     )
 }
 
+/// Guidance for one undeterminable control, as the site renders it.
+///
+/// Deliberately mirrors `sc_comply_author::worklist::GuidanceItem` as a plain
+/// data type rather than depending on that crate: `sc-comply` must stay
+/// model-free, and this is the seam. It carries no status — guidance describes
+/// what to obtain and can never change a verdict.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ControlGuidance {
+    pub control_id: String,
+    pub evidence: Vec<String>,
+    pub owner: String,
+    pub auditor_asks: String,
+}
+
+/// Render one framework's report as a standalone page.
+///
+/// `guidance` supplies optional auditor-worklist entries for undeterminable
+/// controls. Absent, the page is unchanged — most runs have no model configured.
+///
+/// # Panics
+///
+/// If `pack` still contains citations. Publishing an unredacted pack is the one
+/// mistake this module exists to prevent, so it fails loudly rather than
+/// producing a plausible-looking page that leaks.
+pub fn framework_page_with_guidance(
+    pack: &EvidencePack,
+    back_link: Option<&str>,
+    guidance: &[ControlGuidance],
+) -> String {
+    framework_page_inner(pack, back_link, guidance)
+}
+
 /// Render one framework's report as a standalone page.
 ///
 /// # Panics
@@ -145,6 +181,14 @@ fn page_shell(title: &str, body: &str) -> String {
 /// mistake this module exists to prevent, so it fails loudly rather than
 /// producing a plausible-looking page that leaks.
 pub fn framework_page(pack: &EvidencePack, back_link: Option<&str>) -> String {
+    framework_page_inner(pack, back_link, &[])
+}
+
+fn framework_page_inner(
+    pack: &EvidencePack,
+    back_link: Option<&str>,
+    guidance: &[ControlGuidance],
+) -> String {
     assert!(
         !pack.has_citations(),
         "refusing to render a page from an unredacted pack ({}): call EvidencePack::redacted() first",
@@ -273,6 +317,33 @@ pub fn framework_page(pack: &EvidencePack, back_link: Option<&str>) -> String {
                 let _ = write!(b, "<p class=\"intent\">{}</p>", esc(c.intent.trim()));
             }
             let _ = write!(b, "<p class=\"why\">{}</p>", esc(&c.rationale));
+
+            // Auditor guidance, where a model supplied it. Rendered as a
+            // worklist item — what to obtain, from whom, and what will be
+            // probed — never as a judgment about the control.
+            if let Some(g) = guidance.iter().find(|g| g.control_id == c.id) {
+                b.push_str("<div class=\"guide\"><strong>Evidence to obtain</strong><ul>");
+                for e in &g.evidence {
+                    let _ = write!(b, "<li>{}</li>", esc(e));
+                }
+                b.push_str("</ul>");
+                if !g.owner.trim().is_empty() {
+                    let _ = write!(
+                        b,
+                        "<p><strong>Usually held by:</strong> {}</p>",
+                        esc(&g.owner)
+                    );
+                }
+                if !g.auditor_asks.trim().is_empty() {
+                    let _ = write!(
+                        b,
+                        "<p><strong>What an auditor will probe:</strong> {}</p>",
+                        esc(&g.auditor_asks)
+                    );
+                }
+                b.push_str("</div>");
+            }
+
             if let Some(r) = &c.remediation {
                 let label = if c.status == ControlStatus::Unknown {
                     "Obtain"
@@ -587,6 +658,58 @@ mod tests {
         ] {
             assert!(!html.contains(leak), "page leaked {leak:?}");
         }
+    }
+
+    #[test]
+    fn guidance_renders_as_a_worklist_not_a_verdict() {
+        let mut p = pack(false).redacted();
+        p.controls[0].status = ControlStatus::Unknown;
+        let guidance = vec![ControlGuidance {
+            control_id: "CC6.1".into(),
+            evidence: vec![
+                "Board meeting minutes".into(),
+                "Signed acknowledgements".into(),
+            ],
+            owner: "HR and the company secretary".into(),
+            auditor_asks: "Whether oversight recurred, evidenced by dated minutes.".into(),
+        }];
+        let html = framework_page_with_guidance(&p, None, &guidance);
+
+        assert!(html.contains("Evidence to obtain"));
+        assert!(html.contains("Board meeting minutes"));
+        assert!(html.contains("Usually held by:"));
+        assert!(html.contains("What an auditor will probe:"));
+        // It must never restate the control as decided.
+        assert!(!html.contains("is satisfied"));
+    }
+
+    #[test]
+    fn guidance_is_escaped_and_matched_by_control_id() {
+        let mut p = pack(false).redacted();
+        p.controls[0].status = ControlStatus::Unknown;
+        // Guidance for a DIFFERENT control must not attach to this one.
+        let other = vec![ControlGuidance {
+            control_id: "ZZ9.9".into(),
+            evidence: vec!["<script>alert(1)</script>".into()],
+            owner: "x".into(),
+            auditor_asks: "y".into(),
+        }];
+        let html = framework_page_with_guidance(&p, None, &other);
+        assert!(
+            !html.contains("Evidence to obtain"),
+            "wrong control got guidance"
+        );
+        assert!(!html.contains("<script>alert"));
+    }
+
+    #[test]
+    fn a_page_without_guidance_is_unchanged() {
+        // The no-model path, which is what most runs use.
+        let p = pack(false).redacted();
+        assert_eq!(
+            framework_page(&p, None),
+            framework_page_with_guidance(&p, None, &[])
+        );
     }
 
     #[test]

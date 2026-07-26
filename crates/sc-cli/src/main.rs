@@ -803,8 +803,17 @@ fn comply_export(out_arg: Option<String>) -> ExitCode {
             shipped.name, public.score.passed, public.score.gaps, public.score.unknown
         );
 
+        // Auditor guidance for the controls a code scan cannot settle. Optional
+        // and best-effort: guidance never changes a status, so its absence
+        // costs a worklist, not correctness.
+        let guidance = auditor_guidance(&public);
+
         let href = format!("{}.html", shipped.name);
-        let html = sc_comply::report::site::framework_page(&public, Some("index.html"));
+        let html = sc_comply::report::site::framework_page_with_guidance(
+            &public,
+            Some("index.html"),
+            &guidance,
+        );
         if let Err(e) = std::fs::write(out_dir.join(&href), html) {
             eprintln!("error: writing {href}: {e}");
             return ExitCode::FAILURE;
@@ -878,21 +887,8 @@ fn comply_export(out_arg: Option<String>) -> ExitCode {
 /// designed to stand alone. Every skip reason is printed so the operator knows
 /// why the narrative is missing rather than wondering.
 fn exec_narrative(rollup: &sc_comply::rollup::Rollup, project: &str) -> Option<String> {
-    let key = std::env::var("GEMINI_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())?;
-    let model = std::env::var("SC_NARRATIVE_MODEL")
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| "gemini-pro-latest".to_string());
-
+    let (backend, model) = narrative_backend()?;
     eprintln!("writing the executive summary with {model} ...");
-
-    // NOT chaining with_detected_context(): it probes for llama.cpp's n_ctx,
-    // which a hosted provider does not serve, silently capping context at 8192.
-    let backend = sc_model::OpenAiBackend::new(GEMINI_OPENAI_URL, &model)
-        .with_api_key(key)
-        .with_context_tokens(128_000);
 
     let mut on_reject = |r: &sc_comply_author::narrative::Rejection| {
         eprintln!("  narrative rejected: {r} — publishing without it");
@@ -907,6 +903,73 @@ fn exec_narrative(rollup: &sc_comply::rollup::Rollup, project: &str) -> Option<S
         Err(e) => {
             eprintln!("  narrative unavailable ({e}) — publishing without it");
             None
+        }
+    }
+}
+
+/// Build the Gemini backend for authoring-time features, if a key is set.
+///
+/// Shared by the executive summary and the auditor worklist. Returns `None`
+/// with no key — every feature built on it is optional by design.
+fn narrative_backend() -> Option<(sc_model::OpenAiBackend, String)> {
+    let key = std::env::var("GEMINI_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())?;
+    let model = std::env::var("SC_NARRATIVE_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "gemini-pro-latest".to_string());
+
+    // NOT chaining with_detected_context(): it probes for llama.cpp's n_ctx,
+    // which a hosted provider does not serve, silently capping context at 8192.
+    let backend = sc_model::OpenAiBackend::new(GEMINI_OPENAI_URL, &model)
+        .with_api_key(key)
+        .with_context_tokens(128_000);
+    Some((backend, model))
+}
+
+/// Auditor guidance for the controls a code scan could not settle.
+///
+/// The model is asked *what evidence would settle this*, never *is this
+/// satisfied* — see `sc_comply_author::worklist`. Guidance carries no status and
+/// cannot change a verdict, which is what makes this a safe use of a model on
+/// organizational controls.
+fn auditor_guidance(
+    pack: &sc_comply::evidence::EvidencePack,
+) -> Vec<sc_comply::report::site::ControlGuidance> {
+    let unknowns = sc_comply_author::worklist::undeterminable(pack).len();
+    if unknowns == 0 {
+        return Vec::new();
+    }
+    let Some((backend, _)) = narrative_backend() else {
+        return Vec::new();
+    };
+
+    let mut on_reject = |r: &sc_comply_author::worklist::Rejection| {
+        eprintln!("    guidance rejected: {r}");
+    };
+
+    match sc_comply_author::worklist::generate(&backend, pack, &mut on_reject) {
+        Ok(items) => {
+            if !items.is_empty() {
+                eprintln!(
+                    "    guidance for {}/{unknowns} manual control(s)",
+                    items.len()
+                );
+            }
+            items
+                .into_iter()
+                .map(|g| sc_comply::report::site::ControlGuidance {
+                    control_id: g.control_id,
+                    evidence: g.evidence,
+                    owner: g.owner,
+                    auditor_asks: g.auditor_asks,
+                })
+                .collect()
+        }
+        Err(e) => {
+            eprintln!("    guidance unavailable ({e})");
+            Vec::new()
         }
     }
 }
