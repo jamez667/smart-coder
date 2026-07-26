@@ -812,7 +812,26 @@ fn comply_export(out_arg: Option<String>) -> ExitCode {
         entries.push(sc_comply::report::site::IndexEntry { href, pack: public });
     }
 
-    let index = sc_comply::report::site::index_page(&entries, "the smart-coder repository");
+    // Cross-framework analysis, computed deterministically. This is what makes
+    // an executive summary possible: a finding appearing in six of ten
+    // frameworks is one fix with six times the leverage, and no per-framework
+    // page can show that.
+    let packs: Vec<sc_comply::evidence::EvidencePack> =
+        entries.iter().map(|e| e.pack.clone()).collect();
+    let rollup = sc_comply::rollup::roll_up(&packs);
+
+    let project = workspace
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "this project".to_string());
+
+    // The narrative is OPTIONAL. Without a configured model there is no
+    // narrative and no error — the deterministic summary is complete on its own,
+    // and most people running this will not have a key.
+    let narrative = exec_narrative(&rollup, &project);
+
+    let index =
+        sc_comply::report::site::index_page(&entries, &project, &rollup, narrative.as_deref());
     if let Err(e) = std::fs::write(out_dir.join("index.html"), index) {
         eprintln!("error: writing index.html: {e}");
         return ExitCode::FAILURE;
@@ -850,6 +869,50 @@ fn comply_export(out_arg: Option<String>) -> ExitCode {
     println!("review the output before committing, then enable GitHub Pages on docs/.");
     ExitCode::SUCCESS
 }
+
+/// Generate the executive summary, or `None` if no model is configured or the
+/// output cannot be trusted.
+///
+/// Deliberately best-effort. An export that failed because a summary could not
+/// be written would be a worse outcome than a page without one, and the page is
+/// designed to stand alone. Every skip reason is printed so the operator knows
+/// why the narrative is missing rather than wondering.
+fn exec_narrative(rollup: &sc_comply::rollup::Rollup, project: &str) -> Option<String> {
+    let key = std::env::var("GEMINI_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())?;
+    let model = std::env::var("SC_NARRATIVE_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "gemini-pro-latest".to_string());
+
+    eprintln!("writing the executive summary with {model} ...");
+
+    // NOT chaining with_detected_context(): it probes for llama.cpp's n_ctx,
+    // which a hosted provider does not serve, silently capping context at 8192.
+    let backend = sc_model::OpenAiBackend::new(GEMINI_OPENAI_URL, &model)
+        .with_api_key(key)
+        .with_context_tokens(128_000);
+
+    let mut on_reject = |r: &sc_comply_author::narrative::Rejection| {
+        eprintln!("  narrative rejected: {r} — publishing without it");
+    };
+
+    match sc_comply_author::narrative::generate(&backend, rollup, project, &mut on_reject) {
+        Ok(Some(text)) => {
+            eprintln!("  summary written ({} chars)", text.chars().count());
+            Some(text)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("  narrative unavailable ({e}) — publishing without it");
+            None
+        }
+    }
+}
+
+/// Gemini's OpenAI-compatible endpoint.
+const GEMINI_OPENAI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /// The canonical repository URL, for links out of the published site.
 const REPO_URL: &str = "https://github.com/jamez667/smart-coder";

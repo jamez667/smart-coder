@@ -19,6 +19,7 @@ pub mod pack;
 pub mod redact;
 pub mod registry;
 pub mod report;
+pub mod rollup;
 pub mod scan;
 pub mod status;
 

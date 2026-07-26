@@ -63,6 +63,7 @@ padding:.55rem .9rem;min-width:5.5rem}
 .ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
 .ctl .intent{font-size:.93rem;margin:.5rem 0 0}
 .ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
+.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
 footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
 "#;
 
@@ -294,6 +295,82 @@ pub fn framework_page(pack: &EvidencePack, back_link: Option<&str>) -> String {
     )
 }
 
+/// The executive summary block: headline numbers, the narrative if there is
+/// one, and the cross-framework findings.
+///
+/// The deterministic part is written to stand alone. A narrative adds judgment
+/// about salience that arithmetic cannot produce, but its absence must not leave
+/// a hole.
+fn executive_summary(rollup: &crate::rollup::Rollup, narrative: Option<&str>) -> String {
+    let mut b = String::with_capacity(4 * 1024);
+    let pct = |v: f64| (v * 100.0).round() as u32;
+
+    b.push_str("<h2>Summary</h2>");
+
+    // Headline counts — the shape of the result in one line.
+    let _ = write!(
+        b,
+        "<div class=\"counts\">\
+         <div class=\"count\"><b>{}</b><span>controls</span></div>\
+         <div class=\"count\"><b class=\"pass\">{}</b><span>verified</span></div>\
+         <div class=\"count\"><b class=\"gap\">{}</b><span>gaps</span></div>\
+         <div class=\"count\"><b class=\"unknown\">{}</b><span>manual</span></div>\
+         <div class=\"count\"><b>{}</b><span>frameworks</span></div></div>",
+        rollup.controls, rollup.passed, rollup.gaps, rollup.unknown, rollup.frameworks
+    );
+
+    if let Some(text) = narrative {
+        // Model-written prose. Paragraph breaks are preserved; everything is
+        // escaped, because this text did not come from us.
+        b.push_str("<div class=\"exec\">");
+        for para in text.split("\n\n").filter(|p| !p.trim().is_empty()) {
+            let _ = write!(b, "<p>{}</p>", esc(para.trim()));
+        }
+        b.push_str("</div>");
+    }
+
+    // The cross-framework finding — the highest-leverage thing on the page, and
+    // the one thing no per-framework report can show.
+    let shared = rollup.shared_findings();
+    if !shared.is_empty() {
+        b.push_str(
+            "<h3>Outstanding items affecting several frameworks</h3>\
+             <p class=\"scope\">One change here resolves the same finding in every framework \
+             listed.</p><table><thead><tr><th>Item</th><th>Frameworks</th><th>Severity</th>\
+             </tr></thead><tbody>",
+        );
+        for f in shared.iter().take(6) {
+            let _ = write!(
+                b,
+                "<tr><td><code>{}</code><br><span class=\"scope\">{}</span></td>\
+                 <td>{}</td><td>{}</td></tr>",
+                esc(&f.check),
+                esc(&f.rationale),
+                f.reach(),
+                esc(f.severity.label())
+            );
+        }
+        b.push_str("</tbody></table>");
+    } else if rollup.has_gaps() {
+        b.push_str(
+            "<p class=\"scope\">No single finding recurs across frameworks — the outstanding \
+             items are specific to individual controls.</p>",
+        );
+    }
+
+    // Determinacy, stated as the credibility of everything above it.
+    let _ = write!(
+        b,
+        "<div class=\"note\"><strong>{}% of assessed controls could be determined from source.</strong> \
+         The remainder are organizational — policies, training records, vendor agreements, \
+         incident procedures — and require documentary evidence a code scan cannot reach. \
+         That is a limit of this method, not a finding about the project.</div>",
+        pct(rollup.determinacy())
+    );
+
+    b
+}
+
 /// One entry in the docs landing page's spec list.
 pub struct SpecLink {
     /// Displayed title, e.g. `"13 — Compliance evidence"`.
@@ -371,8 +448,18 @@ pub struct IndexEntry {
 }
 
 /// Render the index page linking every framework.
-pub fn index_page(entries: &[IndexEntry], workspace_label: &str) -> String {
-    let mut b = String::with_capacity(8 * 1024);
+///
+/// `narrative` is an optional model-written executive summary. When absent the
+/// deterministic summary below stands on its own — the page must be complete
+/// without a model, because most people running this will not have one
+/// configured.
+pub fn index_page(
+    entries: &[IndexEntry],
+    workspace_label: &str,
+    rollup: &crate::rollup::Rollup,
+    narrative: Option<&str>,
+) -> String {
+    let mut b = String::with_capacity(12 * 1024);
     let _ = write!(b, "<h1>Compliance evidence</h1>");
     let _ = write!(
         b,
@@ -382,6 +469,7 @@ pub fn index_page(entries: &[IndexEntry], workspace_label: &str) -> String {
     );
 
     b.push_str(&disclaimer(true));
+    b.push_str(&executive_summary(rollup, narrative));
 
     b.push_str(
         "<h2>Frameworks</h2><table><thead><tr><th>Framework</th><th>Pass</th><th>Gap</th>\
@@ -530,9 +618,28 @@ mod tests {
         assert!(html.contains("<style>"));
     }
 
-    #[test]
-    fn the_index_links_every_framework() {
-        let entries = vec![
+    fn sample_rollup() -> crate::rollup::Rollup {
+        crate::rollup::Rollup {
+            frameworks: 2,
+            controls: 20,
+            passed: 8,
+            gaps: 2,
+            unknown: 10,
+            errors: 0,
+            recurring: vec![crate::rollup::RecurringFinding {
+                check: "secret-scanning-configured".into(),
+                frameworks: vec!["SOC 2".into(), "ISO 27001".into()],
+                severity: Severity::Critical,
+                rationale: "Automated secret detection prevents recurrence.".into(),
+                remediation: Some("Add gitleaks to CI.".into()),
+            }],
+            weakest_coverage: vec![("ISO 27001".into(), 0.3)],
+            disabled_capabilities: vec!["command-exit-code".into()],
+        }
+    }
+
+    fn two_entries() -> Vec<IndexEntry> {
+        vec![
             IndexEntry {
                 href: "soc2.html".into(),
                 pack: pack(false).redacted(),
@@ -541,12 +648,67 @@ mod tests {
                 href: "iso.html".into(),
                 pack: pack(false).redacted(),
             },
-        ];
-        let html = index_page(&entries, "this repository");
+        ]
+    }
+
+    #[test]
+    fn the_index_links_every_framework() {
+        let html = index_page(&two_entries(), "this repository", &sample_rollup(), None);
         assert!(html.contains("soc2.html"));
         assert!(html.contains("iso.html"));
         assert!(html.contains("Determinacy"));
         assert!(html.contains("not a compliance attestation"));
+    }
+
+    #[test]
+    fn the_summary_is_complete_without_a_narrative() {
+        // Most people running this will have no model configured. The page must
+        // be good anyway.
+        let html = index_page(&two_entries(), "repo", &sample_rollup(), None);
+        assert!(html.contains("<h2>Summary</h2>"));
+        assert!(
+            html.contains("secret-scanning-configured"),
+            "the shared finding"
+        );
+        assert!(html.contains("Outstanding items affecting several frameworks"));
+        assert!(html.contains("could be determined from source"));
+    }
+
+    #[test]
+    fn a_narrative_is_rendered_above_the_findings() {
+        let html = index_page(
+            &two_entries(),
+            "repo",
+            &sample_rollup(),
+            Some("First paragraph.\n\nSecond paragraph."),
+        );
+        assert!(html.contains("<p>First paragraph.</p>"));
+        assert!(html.contains("<p>Second paragraph.</p>"));
+        let narrative = html.find("First paragraph").expect("narrative");
+        let findings = html.find("Outstanding items").expect("findings");
+        assert!(narrative < findings, "prose leads, detail follows");
+    }
+
+    #[test]
+    fn a_narrative_is_escaped() {
+        // It came from a model, not from us.
+        let html = index_page(
+            &two_entries(),
+            "repo",
+            &sample_rollup(),
+            Some("<script>alert(1)</script>"),
+        );
+        assert!(!html.contains("<script>alert"));
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn the_summary_leads_with_counts_not_a_score() {
+        // No single headline percentage — the same rule as every other renderer.
+        let html = index_page(&two_entries(), "repo", &sample_rollup(), None);
+        let counts = html.find("<span>controls</span>").expect("counts");
+        let table = html.find("<h2>Frameworks</h2>").unwrap_or(html.len());
+        assert!(counts < table);
     }
 
     #[test]
@@ -598,7 +760,7 @@ mod tests {
     fn the_index_explains_what_low_determinacy_means() {
         // Without this a reader reads 20% as "bad security" rather than
         // "mostly a governance framework".
-        let html = index_page(&[], "x");
+        let html = index_page(&[], "x", &crate::rollup::Rollup::default(), None);
         assert!(html.contains("organizational"));
         assert!(html.contains("not visible in source code"));
     }

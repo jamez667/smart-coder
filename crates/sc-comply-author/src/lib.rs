@@ -19,6 +19,7 @@
 pub mod draft;
 pub mod eval;
 pub mod lint;
+pub mod narrative;
 pub mod report;
 pub mod sample;
 
