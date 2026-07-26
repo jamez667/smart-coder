@@ -145,6 +145,7 @@ mod tests {
             on_no_files: None,
             weight: 1.0,
             exclude_globs: vec![],
+            tracked_only: false,
             rationale: String::new(),
         }
     }
@@ -225,6 +226,7 @@ mod tests {
             on_no_files: None,
             weight: 1.0,
             exclude_globs: vec![],
+            tracked_only: false,
             rationale: String::new(),
         };
         let files: Vec<TextFile> = vec![];

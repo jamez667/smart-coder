@@ -207,6 +207,19 @@ pub struct Check {
     /// exclusion that actually suppressed something is disclosed in the report.
     #[serde(default)]
     pub exclude_globs: Vec<String>,
+    /// Search only files that are in version control, skipping gitignored ones.
+    ///
+    /// Set this on any check whose control is about what was **committed**. A
+    /// secret sitting untracked in a working directory is a real exposure, but
+    /// it is a *different* one: it is not in the repository, not in history, and
+    /// not visible to anyone who clones. A control titled "credentials are not
+    /// committed to source" that fires on a gitignored file states something
+    /// false, which is exactly the overclaiming this engine exists to avoid.
+    ///
+    /// Pair it with a separate, honestly-worded control if on-disk exposure also
+    /// matters — see `local-secret-hygiene` in the shipped SOC 2 pack.
+    #[serde(default)]
+    pub tracked_only: bool,
     /// Why this check is evidence for the control. Rendered in the report.
     #[serde(default)]
     pub rationale: String,

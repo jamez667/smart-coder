@@ -63,6 +63,10 @@ impl Collector for RegexCollector {
         let selected: Vec<_> = matched_glob
             .iter()
             .filter(|f| !excludes.iter().any(|e| e.is_match(&f.path)))
+            // `tracked_only` drops gitignored files. A control about what was
+            // COMMITTED must not fire on a file that is not in the repository —
+            // saying "committed to source" of an untracked file is simply false.
+            .filter(|f| !(check.tracked_only && f.ignored))
             .copied()
             .collect();
 
@@ -181,6 +185,7 @@ mod tests {
             on_no_files: None,
             weight: 1.0,
             exclude_globs: vec![],
+            tracked_only: false,
             rationale: String::new(),
         }
     }
@@ -190,6 +195,84 @@ mod tests {
             exclude_globs: excludes.iter().map(|s| s.to_string()).collect(),
             ..check(id, kind)
         }
+    }
+
+    fn ignored_file(path: &str, contents: &str) -> TextFile {
+        TextFile {
+            path: path.to_string(),
+            contents: contents.to_string(),
+            ignored: true,
+        }
+    }
+
+    #[test]
+    fn tracked_only_skips_gitignored_files() {
+        // The fix for the CC6.1 overclaim: a control titled "not committed to
+        // source" must not fire on a gitignored file, because that file is not
+        // in the repository and the claim would be false.
+        let files = vec![
+            file("src/lib.rs", "fn main() {}\n"),
+            ignored_file("local.key", "-----BEGIN EC PRIVATE KEY-----\n"),
+        ];
+        let c = Check {
+            tracked_only: true,
+            ..check(
+                "committed-keys",
+                CheckKind::RegexMustNotMatch {
+                    glob: "**/*".into(),
+                    pattern: "BEGIN EC PRIVATE KEY".into(),
+                },
+            )
+        };
+        let o = run(&files, &c);
+        assert_eq!(
+            o.matched,
+            Some(false),
+            "an untracked key is not committed to source"
+        );
+    }
+
+    #[test]
+    fn without_tracked_only_the_same_file_is_still_seen() {
+        // The companion control depends on this: on-disk exposure is real and
+        // must still be reportable, just under an honestly-worded control.
+        let files = vec![ignored_file(
+            "local.key",
+            "-----BEGIN EC PRIVATE KEY-----\n",
+        )];
+        let c = check(
+            "on-disk-keys",
+            CheckKind::RegexMustNotMatch {
+                glob: "**/*".into(),
+                pattern: "BEGIN EC PRIVATE KEY".into(),
+            },
+        );
+        let o = run(&files, &c);
+        assert_eq!(o.matched, Some(true));
+        assert!(o.evidence[0].untracked, "and it is labelled untracked");
+    }
+
+    #[test]
+    fn tracked_only_still_finds_a_genuinely_committed_secret() {
+        // The fix must not blunt the control it protects.
+        let files = vec![
+            file("committed.key", "-----BEGIN EC PRIVATE KEY-----\n"),
+            ignored_file("local.key", "-----BEGIN EC PRIVATE KEY-----\n"),
+        ];
+        let c = Check {
+            tracked_only: true,
+            ..check(
+                "committed-keys",
+                CheckKind::RegexMustNotMatch {
+                    glob: "**/*".into(),
+                    pattern: "BEGIN EC PRIVATE KEY".into(),
+                },
+            )
+        };
+        let o = run(&files, &c);
+        assert_eq!(o.matched, Some(true), "a tracked key is still a finding");
+        assert_eq!(o.evidence.len(), 1);
+        assert_eq!(o.evidence[0].file, "committed.key");
     }
 
     fn run_with(files: &[TextFile], c: &Check, opts: &ComplyOptions) -> Observation {

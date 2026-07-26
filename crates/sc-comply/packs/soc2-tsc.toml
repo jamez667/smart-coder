@@ -63,6 +63,10 @@ secret scanner as a pre-commit hook.
     "crates/sc-comply/src/**/*",
     "**/*.snap",
   ]
+  # This control is about what was COMMITTED. A gitignored key on a developer's
+  # disk is a real exposure but not a committed one, and reporting it here would
+  # state something false. On-disk exposure is CC6.1-LOCAL below.
+  tracked_only = true
   on_match    = "gap"
   on_no_match = "pass"
   # Searching files and finding no key is a genuine pass; searching NO files is
@@ -79,6 +83,7 @@ secret scanner as a pre-commit hook.
     "crates/sc-comply/packs/*.toml",
     "crates/sc-comply/src/**/*",
   ]
+  tracked_only = true
   on_match    = "gap"
   on_no_match = "pass"
   on_no_files = "unknown"
@@ -88,9 +93,13 @@ secret scanner as a pre-commit hook.
   id          = "env-file-not-tracked"
   kind        = "file-absent"
   path        = ".env"
+  # A gitignored .env is correct practice, not a finding. Without this the check
+  # fires on every well-configured repository — the definition of a linter that
+  # gets ignored.
+  tracked_only = true
   on_match    = "gap"
   on_no_match = "pass"
-  rationale   = "A tracked .env commonly carries live credentials."
+  rationale   = "A TRACKED .env commonly carries live credentials. A gitignored one is correct practice."
 
   [[controls.checks]]
   id          = "gitignore-excludes-secrets"
@@ -111,6 +120,63 @@ secret scanner as a pre-commit hook.
   on_match    = "pass"
   on_no_match = "gap"
   rationale   = "Automated secret detection prevents recurrence."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CC6.1-LOCAL — the companion to CC6.1, worded for what it can actually show.
+#
+# A secret sitting untracked in a working directory is a genuine exposure — it
+# is on a laptop, in backups, and one `git add -f` from being permanent. But it
+# is NOT "committed to source", and a control that says so of a gitignored file
+# is making a false statement.
+#
+# So it gets its own control, at a lower severity, worded accurately. This is
+# the honest way to report it: not by softening CC6.1 until it means nothing,
+# and not by staying silent.
+# ─────────────────────────────────────────────────────────────────────────────
+[[controls]]
+id        = "CC6.1-LOCAL"
+title     = "Local secret hygiene — untracked credentials in the working tree"
+clause    = "TSC CC6.1 (supporting)"
+severity  = "medium"
+aggregate = "all"
+intent    = """
+Secrets present in a working directory but excluded from version control are not
+committed, and are therefore outside the strict scope of CC6.1. They remain an
+exposure on developer machines and in backups, and are one forced add away from
+entering history permanently.
+"""
+remediation = """
+Prefer a managed secret store or an OS keychain over a file on disk. Where a
+local file is unavoidable, keep it gitignored (as here), restrict its
+permissions, and rotate on any suspicion of exposure.
+"""
+
+  [[controls.checks]]
+  id          = "untracked-key-material-present"
+  kind        = "regex-match-in-glob"
+  glob        = "**/*"
+  pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+  exclude_globs = [
+    "crates/sc-comply/packs/*.toml",
+    "crates/sc-comply/src/**/*",
+    "crates/sc-comply-author/src/**/*",
+    "**/*.snap",
+  ]
+  # Deliberately NOT tracked_only — this control exists precisely to see the
+  # files CC6.1 correctly ignores.
+  on_match    = "unknown"
+  on_no_match = "pass"
+  on_no_files = "unknown"
+  # Unknown rather than gap on a hit: local key material is normal and often
+  # correct (a dev TLS cert, an SSH key). Whether THIS one is acceptable depends
+  # on what it protects and how the machine is managed — a judgment no scanner
+  # can make. Reporting it as a gap would cry wolf on every developer laptop.
+  rationale   = """
+Key material present on disk but excluded from version control. This is
+frequently legitimate — a local TLS certificate or SSH key — so it is reported
+for awareness rather than as a finding. The reviewer should confirm the file is
+intended, permission-restricted, and not synced to shared storage.
+"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CC6.6 — Encryption in transit

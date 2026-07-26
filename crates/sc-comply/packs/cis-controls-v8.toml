@@ -343,6 +343,8 @@ remediation = "Remove public-read grants and wildcard IAM principals from infras
   glob        = "**/*"
   pattern     = "-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
   exclude_globs = ["crates/sc-comply/**/*", "crates/sc-comply-author/**/*", "**/*.snap"]
+  # This control is about what was COMMITTED; a gitignored file is not.
+  tracked_only = true
   on_match    = "gap"
   on_no_match = "pass"
   on_no_files = "unknown"
