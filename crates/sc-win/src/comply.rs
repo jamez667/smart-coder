@@ -95,6 +95,22 @@ impl ComplyModel {
     }
 }
 
+/// Where a generated report is written inside a project.
+///
+/// `.smart-coder/` is this tool's existing home for generated artifacts: it is
+/// already gitignored and already hidden from the IDE's file explorer, so a
+/// report does not turn up as untracked clutter in the user's `git status`.
+///
+/// Deliberately **not** `docs/compliance/`. That is where *this* repository
+/// publishes its own GitHub Pages site, and it was the obvious-looking choice —
+/// but for any other project it silently creates a `docs/` directory the user
+/// never asked for. Someone who clicked "generate a report" did not ask to have
+/// a documentation tree added to their repo, and a compliance report is not
+/// automatically something they want to publish.
+pub fn output_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".smart-coder").join("compliance")
+}
+
 /// Why a report could not be produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComplyError {
@@ -416,10 +432,88 @@ mod tests {
         );
     }
 
+    /// The report lands in the tool's own artifact dir, not the user's `docs/`.
+    ///
+    /// `docs/compliance/` is where *this* repo publishes its Pages site, which
+    /// made it the tempting default — but writing there puts a dozen untracked
+    /// HTML files into any other project's `git status`. `.smart-coder/` is
+    /// already gitignored and already hidden from the file explorer.
+    #[test]
+    fn the_report_is_written_to_the_tool_artifact_dir() {
+        let out = output_dir(Path::new("C:/projects/someone-elses-app"));
+        assert!(out.ends_with("compliance"));
+        assert!(
+            out.to_string_lossy().contains(".smart-coder"),
+            "must live under .smart-coder/, got {}",
+            out.display()
+        );
+        assert!(
+            !out.to_string_lossy().replace('\\', "/").contains("/docs/"),
+            "must not create a docs/ tree in the user's project: {}",
+            out.display()
+        );
+    }
+
+    /// The output dir is inside the audited project, not a shared global one.
+    ///
+    /// Two projects open in sequence must not overwrite each other's report,
+    /// and the Open button must show the report for the project just audited.
+    #[test]
+    fn each_project_gets_its_own_report_directory() {
+        let a = output_dir(Path::new("C:/projects/alpha"));
+        let b = output_dir(Path::new("C:/projects/beta"));
+        assert_ne!(a, b);
+        assert!(a.starts_with("C:/projects/alpha"));
+    }
+
     #[test]
     fn every_choice_is_listed_in_display_order() {
         assert_eq!(ComplyModel::ALL.len(), 3);
         assert_eq!(ComplyModel::ALL[0], ComplyModel::None);
+    }
+
+    /// The audit reads the workspace it is given, not the tool's own source.
+    ///
+    /// This is the property that matters most for an IDE action: a user opens
+    /// *their* project and clicks the menu item, and the report must describe
+    /// that project. Asserted by auditing a throwaway tree and checking the
+    /// results differ from this repository's and that the report names it.
+    #[test]
+    fn the_audit_targets_the_opened_project_not_this_repo() {
+        let tmp = std::env::temp_dir().join("sc-win-comply-target-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let project = tmp.join("someone-elses-app");
+        std::fs::create_dir_all(project.join("src")).expect("mkdir");
+        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write");
+
+        let cfg = cfg_with("http://localhost:11435/v1", None);
+        let out = output_dir(&project);
+        let theirs = run(&project, &out, ComplyModel::None, &cfg).expect("audit runs");
+
+        // The report names THEIR project.
+        let html = std::fs::read_to_string(&theirs.index).expect("readable");
+        assert!(
+            html.contains("someone-elses-app"),
+            "the report must name the audited project"
+        );
+
+        // And it is a genuinely different result from auditing this repo — a
+        // near-empty project cannot evidence what a mature one does.
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+        let ours = run(&repo, &tmp.join("ours"), ComplyModel::None, &cfg).expect("audit runs");
+        assert_ne!(
+            theirs.passed, ours.passed,
+            "auditing an empty project produced this repo's numbers — wrong tree"
+        );
+
+        // Written inside their project, and nowhere near this repo.
+        assert!(theirs.index.starts_with(&project));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The deterministic path produces a full report with no model at all.

@@ -49,7 +49,7 @@ impl App {
                 self.comply_result = None;
 
                 let workspace = self.workspace_root();
-                let out_dir = workspace.join("docs").join("compliance");
+                let out_dir = sc_win::comply::output_dir(&workspace);
                 let choice = self.comply_model;
                 let cfg = self.cfg.clone();
                 return Task::perform(
