@@ -23,6 +23,8 @@
 
 pub mod atomic;
 pub mod config;
+pub mod feedback;
+pub mod intake;
 pub mod park;
 pub mod preflight;
 pub mod queue;
@@ -33,6 +35,8 @@ pub mod task;
 mod test_support;
 
 pub use config::{DaemonConfig, Repo};
+pub use feedback::{Feedback, FeedbackStore};
+pub use intake::IntakeKind;
 pub use park::ParkingGate;
 pub use preflight::NotReady;
 pub use queue::Queue;

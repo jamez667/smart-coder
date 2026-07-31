@@ -111,6 +111,13 @@ pub struct Task {
     /// configured set. Never a path: a request that carried one would put path
     /// handling on the network path (spec 18).
     pub repo: String,
+    /// What kind of request this is. Shapes the drafting prompt — a bug spec and
+    /// a feature spec are not the same document (see [`crate::intake`]).
+    ///
+    /// `serde(default)` so a task filed before kinds existed reads as a feature
+    /// rather than becoming unreadable.
+    #[serde(default)]
+    pub kind: crate::intake::IntakeKind,
     pub state: TaskState,
     /// Unix ms when it was filed.
     pub filed_ms: u64,
@@ -131,10 +138,24 @@ impl Task {
             id: id.into(),
             text: text.into(),
             repo: repo.into(),
+            kind: crate::intake::IntakeKind::default(),
             state: TaskState::Queued,
             filed_ms: now_ms(),
             note: None,
             artifact_dir: None,
+        }
+    }
+
+    /// File a request of a particular kind.
+    pub fn of_kind(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        repo: impl Into<String>,
+        kind: crate::intake::IntakeKind,
+    ) -> Self {
+        Self {
+            kind,
+            ..Self::new(id, text, repo)
         }
     }
 

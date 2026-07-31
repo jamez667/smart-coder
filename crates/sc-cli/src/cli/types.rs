@@ -81,9 +81,13 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
     /// File a request against a configured repository.
+    ///
+    /// `kind` decides what happens: bug/feature/improvement draft a spec,
+    /// **feedback is kept as a note and never reaches a model**.
     File {
         text: String,
         repo: String,
+        kind: sc_daemon::IntakeKind,
     },
     /// Show the queue: what needs a human first.
     List,
@@ -106,6 +110,16 @@ pub enum QueueAction {
     },
     /// Print the drafted spec for a task.
     Show {
+        id: String,
+    },
+    /// Show kept feedback — the intake kind that never becomes a spec.
+    Feedback {
+        repo: Option<String>,
+        all: bool,
+    },
+    /// Mark a piece of feedback read. It is kept, not deleted.
+    AckFeedback {
+        repo: String,
         id: String,
     },
     /// List the repositories this daemon serves.

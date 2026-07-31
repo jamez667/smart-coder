@@ -32,13 +32,20 @@ COMMANDS:
                     --author-model qwen3-coder-30b@http://localhost:11435/v1
     queue ACTION    The task queue (spec 19): file a request against any configured
                     repository, draft its spec, approve or send it back. Actions:
-                      file TEXT --repo NAME   file a request
+                      file TEXT --repo NAME [--kind K]
+                                              file a request. K is bug, feature
+                                              (default), improvement or feedback.
+                                              The first three draft a spec; feedback
+                                              is just kept — no model, no repo write.
                       list                    show the queue
                       run                     draft queued tasks (Ctrl-C is safe)
                       show ID                 print a drafted spec
                       approve ID              settle the spec; starts nothing
                       send-back ID NOTES      redraft it, with a reason
                       discard ID              drop a task
+                      feedback [--repo N] [--all]
+                                              show kept feedback
+                      ack ID --repo NAME      mark feedback read (kept, not deleted)
                       repos                   what this daemon serves
                       add-repo NAME PATH      serve another repository
                       forget-repo NAME        stop serving one

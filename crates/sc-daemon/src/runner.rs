@@ -79,6 +79,20 @@ pub fn draft(
     cfg: &DaemonConfig,
     task: &Task,
 ) -> Result<Drafted> {
+    // 0. Feedback never reaches a model. It is a note, not a request, and it is
+    //    kept in the daemon's own store rather than drafted into a repository —
+    //    see `crate::feedback`. Reaching here at all means something enqueued it
+    //    as a task, which is a caller bug worth surfacing rather than quietly
+    //    drafting a spec nobody asked for.
+    if !task.kind.drafts_a_spec() {
+        let reason = format!(
+            "{} is {} — that is kept as a note, not drafted into a spec",
+            task.id, task.kind
+        );
+        queue.set_state(&task.id, TaskState::Failed, Some(reason.clone()))?;
+        return Ok(Drafted::Failed { reason });
+    }
+
     // 1. Resolve the repository by NAME against the configured set. A request
     //    never carried a path, so there is none to validate here (spec 18).
     let repo = match cfg.repo(&task.repo) {
@@ -107,6 +121,14 @@ pub fn draft(
     queue.set_state(&task.id, TaskState::Drafting, None)?;
 
     let gate = ParkingGate::new(spec_gate_set());
+    // The kind shapes the question: a bug spec needs reproduction and
+    // expected-versus-actual, a feature spec needs non-goals. One generic prompt
+    // cannot ask for both, and a bug filed from a phone would come back as a
+    // feature-shaped document (see `crate::intake`).
+    //
+    // The artifact directory is resolved from the RAW text so the slug stays the
+    // request rather than the framing.
+    let framed = task.kind.frame(&task.text);
     let (artifact_dir, rel) = sc_workflow::artifact_dirs(&task.text, &repo);
     let outcome = sc_workflow::run_workflow_moded_to(
         orchestrator,
@@ -114,7 +136,7 @@ pub fn draft(
         // the orchestrator keeps the signature honest rather than inventing a
         // stub whose failure mode nobody would recognise.
         orchestrator,
-        &task.text,
+        &framed,
         &repo,
         sc_workflow::ThinkPolicy::default(),
         spec_only_mode(),

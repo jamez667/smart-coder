@@ -481,10 +481,12 @@ fn queue_file_needs_a_repo_chosen_by_name() {
     let cli = Cli::parse(["queue", "file", "add seat types", "--repo", "city"]).unwrap();
     match &cli.command {
         Command::Queue {
-            action: QueueAction::File { text, repo },
+            action: QueueAction::File { text, repo, kind },
         } => {
             assert_eq!(text, "add seat types");
             assert_eq!(repo, "city");
+            // Feature is the least surprising default to get back.
+            assert_eq!(*kind, sc_daemon::IntakeKind::Feature);
         }
         other => panic!("expected a File action, got {other:?}"),
     }
@@ -588,4 +590,77 @@ fn queue_with_no_action_and_an_unknown_action_both_fail_loudly() {
     );
     // …and specifically, there is no build action on this surface.
     assert!(!unknown.to_string().contains("build,"), "{unknown}");
+}
+
+#[test]
+fn an_intake_kind_can_be_chosen_and_an_unknown_one_is_refused() {
+    // A bug and a feature are not the same request wearing different labels —
+    // the kind shapes the drafting prompt, so getting it wrong returns the wrong
+    // shape of document.
+    for (word, expected) in [
+        ("bug", sc_daemon::IntakeKind::Bug),
+        ("feature", sc_daemon::IntakeKind::Feature),
+        ("improvement", sc_daemon::IntakeKind::Improvement),
+        ("feedback", sc_daemon::IntakeKind::Feedback),
+    ] {
+        let cli = Cli::parse([
+            "queue",
+            "file",
+            "something",
+            "--repo",
+            "city",
+            "--kind",
+            word,
+        ])
+        .unwrap();
+        match &cli.command {
+            Command::Queue {
+                action: QueueAction::File { kind, .. },
+            } => assert_eq!(*kind, expected, "{word}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // Silently defaulting an unrecognised kind would return a feature-shaped
+    // spec for a crash (spec 00 — fail loud).
+    let err = Cli::parse(["queue", "file", "x", "--repo", "city", "--kind", "urgent"])
+        .expect_err("unknown kind");
+    assert!(err.to_string().contains("unknown kind"), "{err}");
+}
+
+#[test]
+fn the_feedback_actions_parse() {
+    assert_eq!(
+        Cli::parse(["queue", "feedback"]).unwrap().command,
+        Command::Queue {
+            action: QueueAction::Feedback {
+                repo: None,
+                all: false
+            }
+        }
+    );
+    assert_eq!(
+        Cli::parse(["queue", "feedback", "--repo", "city", "--all"])
+            .unwrap()
+            .command,
+        Command::Queue {
+            action: QueueAction::Feedback {
+                repo: Some("city".into()),
+                all: true
+            }
+        }
+    );
+    assert_eq!(
+        Cli::parse(["queue", "ack", "f-1", "--repo", "city"])
+            .unwrap()
+            .command,
+        Command::Queue {
+            action: QueueAction::AckFeedback {
+                repo: "city".into(),
+                id: "f-1".into()
+            }
+        }
+    );
+    // Feedback is stored per repository, so acknowledging needs to know which.
+    assert!(Cli::parse(["queue", "ack", "f-1"]).is_err());
 }

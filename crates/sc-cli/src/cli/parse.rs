@@ -745,7 +745,7 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
     let action = it.next().ok_or_else(|| {
         DcError::Eval(
             "queue needs an action: file | list | run | approve | send-back | \
-             discard | show | repos | add-repo | forget-repo"
+             discard | show | feedback | ack | repos | add-repo | forget-repo"
                 .to_string(),
         )
     })?;
@@ -756,10 +756,25 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
     // into the free text — that is what lets `queue run --orchestrator-url …` reach
     // the backend config instead of looking accepted and doing nothing (found live).
     let mut repo: Option<String> = None;
+    let mut kind: Option<sc_daemon::IntakeKind> = None;
+    let mut all = false;
     let mut words: Vec<String> = Vec::new();
     let mut leftover: Vec<String> = Vec::new();
     while let Some(w) = it.next() {
         match w.as_str() {
+            "--all" => all = true,
+            "--kind" => {
+                let raw = it
+                    .next()
+                    .ok_or_else(|| DcError::Eval("--kind needs a value".to_string()))?;
+                kind = Some(sc_daemon::IntakeKind::parse(&raw).ok_or_else(|| {
+                    DcError::Eval(format!(
+                        "unknown kind {raw:?} — expected bug, feature, improvement or \
+                         feedback. Defaulting silently would return a feature-shaped \
+                         spec for a crash."
+                    ))
+                })?);
+            }
             "--repo" => {
                 repo =
                     Some(it.next().ok_or_else(|| {
@@ -799,11 +814,31 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
                         .to_string(),
                 )
             })?;
-            Ok((QueueAction::File { text: joined, repo }, leftover))
+            Ok((
+                QueueAction::File {
+                    text: joined,
+                    repo,
+                    // Feature is the default because it is the commonest filing and
+                    // the least surprising to get back; an *unknown* kind still
+                    // errors rather than falling through to it.
+                    kind: kind.unwrap_or_default(),
+                },
+                leftover,
+            ))
         }
         "list" => Ok((QueueAction::List, leftover)),
         "run" => Ok((QueueAction::Run, leftover)),
         "repos" => Ok((QueueAction::Repos, leftover)),
+        "feedback" => Ok((QueueAction::Feedback { repo, all }, leftover)),
+        "ack" => {
+            let id = require_id(&first, "ack")?;
+            let repo = repo.ok_or_else(|| {
+                DcError::Eval(
+                    "queue ack needs --repo <name>: feedback is stored per repository".to_string(),
+                )
+            })?;
+            Ok((QueueAction::AckFeedback { repo, id }, leftover))
+        }
         "approve" => Ok((
             QueueAction::Approve {
                 id: require_id(&first, "approve")?,
@@ -854,7 +889,7 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
         )),
         other => Err(DcError::Eval(format!(
             "unknown queue action {other:?} — expected file, list, run, approve, \
-             send-back, discard, show, repos, add-repo or forget-repo"
+             send-back, discard, show, feedback, ack, repos, add-repo or forget-repo"
         ))),
     }
 }

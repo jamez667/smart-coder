@@ -28,13 +28,15 @@ pub fn queue(cli: &Cli, action: &QueueAction) -> ExitCode {
     };
 
     let outcome = match action {
-        QueueAction::File { text, repo } => file(&q, &cfg, text, repo),
+        QueueAction::File { text, repo, kind } => file(&q, &cfg, text, repo, *kind),
         QueueAction::List => list(&q),
         QueueAction::Run => return run(cli, &q, &cfg),
         QueueAction::Show { id } => show(&q, &cfg, id),
         QueueAction::Approve { id } => approve(&q, &cfg, id),
         QueueAction::SendBack { id, notes } => send_back(&q, &cfg, id, notes),
         QueueAction::Discard { id } => discard(&q, id),
+        QueueAction::Feedback { repo, all } => feedback(&cfg, repo.as_deref(), *all),
+        QueueAction::AckFeedback { repo, id } => ack_feedback(repo, id),
         QueueAction::Repos => repos(&cfg),
         QueueAction::AddRepo { name, path } => add_repo(name, path),
         QueueAction::ForgetRepo { name } => forget_repo(name),
@@ -54,15 +56,65 @@ fn file(
     cfg: &sc_daemon::DaemonConfig,
     text: &str,
     repo: &str,
+    kind: sc_daemon::IntakeKind,
 ) -> sc_proto::Result<()> {
     // Resolve the name up front so a typo is caught at the terminal rather than
     // at 3am when the runner claims it.
     cfg.require_repo(repo)?;
-    let task = sc_daemon::Task::new(sc_daemon::task::new_id(), text, repo);
+
+    // Feedback never enters the queue: it is a note, not a request, so it costs
+    // no model call and touches no repository. Routing it here rather than
+    // filtering it later is what keeps that structural.
+    if !kind.drafts_a_spec() {
+        let store = sc_daemon::FeedbackStore::default_store()?;
+        let item = sc_daemon::Feedback::new(sc_daemon::task::new_id(), text, repo);
+        store.put(&item)?;
+        println!("noted for {repo} ({})", item.id);
+        println!("  {}", item.summary());
+        println!("\nKept as feedback — no spec, nothing queued.");
+        return Ok(());
+    }
+
+    let task = sc_daemon::Task::of_kind(sc_daemon::task::new_id(), text, repo, kind);
     q.put(&task)?;
-    println!("filed {} against {repo}", task.id);
+    println!("filed {} against {repo} ({kind})", task.id);
     println!("  {}", task.summary());
     println!("\nRun `smart-coder queue run` to draft it.");
+    Ok(())
+}
+
+fn feedback(cfg: &sc_daemon::DaemonConfig, repo: Option<&str>, all: bool) -> sc_proto::Result<()> {
+    if let Some(r) = repo {
+        cfg.require_repo(r)?;
+    }
+    let store = sc_daemon::FeedbackStore::default_store()?;
+    let items = if all {
+        store.all(repo)?
+    } else {
+        store.outstanding(repo)?
+    };
+    if items.is_empty() {
+        println!(
+            "no {}feedback{}",
+            if all { "" } else { "outstanding " },
+            repo.map(|r| format!(" for {r}")).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    for f in &items {
+        let mark = if f.acknowledged { "·" } else { "◆" };
+        println!("{mark} {:<16} {:<8} {}", f.id, f.repo, f.summary());
+    }
+    if !all {
+        println!("\n(`--all` also shows what you have already acknowledged)");
+    }
+    Ok(())
+}
+
+fn ack_feedback(repo: &str, id: &str) -> sc_proto::Result<()> {
+    let store = sc_daemon::FeedbackStore::default_store()?;
+    let item = store.acknowledge(repo, id)?;
+    println!("acknowledged {id} — {}", item.summary());
     Ok(())
 }
 
@@ -78,9 +130,10 @@ fn list(q: &sc_daemon::Queue) -> sc_proto::Result<()> {
 
     for t in &tasks {
         println!(
-            "{:<16} {:<10} {:<8} {}",
+            "{:<16} {:<10} {:<12} {:<8} {}",
             t.id,
             t.state.label(),
+            t.kind.slug(),
             t.repo,
             t.summary()
         );
