@@ -295,17 +295,32 @@ self-approval, under any ceremony, behind any flag.
   run startable on a phone and finishable on the desktop with no handoff step.
 - **The trust boundary is the design** ([18](18-task-intake.md)): the web surface
   holds no workspace, runs no model, and has no `sc-workflow` dependency at all.
-  It enqueues and it renders. Auth reuses `sc-web`'s proven token posture —
-  per-launch bearer token, `?k=` on reads, `Authorization` on writes, loopback
-  bind with `tailscale serve` terminating TLS.
+  It takes requests and renders specs. **The daemon dials out** to a hosted server
+  — long-polling for work, drafting locally, pushing the spec back — so it has no
+  listening socket and nothing reaches it. That removes the bind-address and
+  tunnel-misconfiguration classes rather than guarding them. Per-daemon API key
+  for the machine; per-device credentials for the browser. **Tailscale is the
+  Android agent's connection only**, and is not part of this path.
+- **Specs only, structurally.** The public surface drafts Phase 1 and cannot reach
+  a later phase or the build path — the daemon constructs a spec-only pipeline, so
+  those are unreachable rather than declined. Approving writes the spec into the
+  repository and starts nothing; the developer builds it in their IDE when they
+  choose. A private full-agent surface is a separate, later thing that does not get
+  built by widening this one.
 - **Agent choice is a named profile**, never a URL/model/key form
   ([02](02-model-backends.md)). A credential field on a network-reachable page is
   a stolen credential, and a free model field is the frontier-model escape hatch
   [00](00-overview.md) refuses, wearing a web form.
-- **Exit criteria:** ⬚ a task filed from a phone with the desktop closed produces
-  an approved spec artifact; a parked run survives a daemon restart; a run started
-  on the phone is finishable on the desktop; budget exhaustion fails a run without
-  a human present.
+- ✅ **The queue and the local runner** — durable on-disk queue, per-repository
+  serialisation, a parking gate that never approves, a git preflight that refuses
+  a tree mid-rebase but runs on a merely dirty one, and four intake kinds
+  (bug/feature/improvement shape the drafting prompt; feedback is kept as a note
+  and never reaches a model). Driven end to end against a live qwen3-coder-30b.
+- **Exit criteria:** ✅ a request filed against any configured repository produces
+  a drafted spec that parks for review, and approving writes it into that
+  repository and starts nothing; the queue survives a restart. ⬚ The same filed
+  from a phone with the desktop closed — that needs the hosted server and the
+  daemon's poll loop, which are the remaining work.
 
 **Deliberately not built:** concurrent runs (one local model server is the
 bottleneck, so concurrency buys contention), cross-run scheduling or priorities,

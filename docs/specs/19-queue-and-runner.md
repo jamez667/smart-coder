@@ -63,12 +63,21 @@ gate trait all exist and are reused unchanged.
 The queue is **on disk, not in memory**. A daemon that loses its queue to a power
 cut is one nobody trusts with a task filed from a train.
 
-*Not built:* the queue, the daemon and the runner are all greenfield. What *does*
-exist is everything they drive: the five phases, the gate trait, the artifact
-directories and the resume path, reused unchanged — plus the single-writer
-machinery below, built ahead of the daemon because the GUI and CLI could already
-clobber each other without it. The sections below are requirements, not
-descriptions, except where marked ✅.
+✅ **The local half is built** <!--@ crates/sc-daemon/src/lib.rs -->: the durable
+queue, the state machine, the parking gate, the git preflight, the spec-only
+runner, the four intake kinds and the feedback store. It is driveable today
+through `smart-coder queue`, and has been run end to end against a live model.
+
+⬚ **The remote half is not**: the hosted server ([18](18-task-intake.md)) and the
+daemon's long-poll loop that reaches it. Until those exist, a request is filed at
+a terminal rather than from a phone — which is the same queue, entered by a
+different door.
+
+What was never new is everything the runner drives: the five phases, the gate
+trait, the artifact directories and the resume path, reused unchanged — plus the
+single-writer machinery below, built ahead of the daemon because the GUI and CLI
+could already clobber each other without it. The sections below are requirements,
+not descriptions, except where marked ✅.
 
 ## The state machine
 
