@@ -54,7 +54,13 @@ impl Cli {
         let mut port: u16 = 8177;
         let mut no_token = false;
 
-        let mut it = args.into_iter().map(Into::into);
+        // Collected rather than lazily mapped so a greedy subcommand can hand back
+        // the flags it did not own and have them re-enter this same loop.
+        let mut it = args
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<String>>()
+            .into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
@@ -140,11 +146,17 @@ impl Cli {
                 // `queue <action> [args…]` — the task queue (spec 19). Its actions
                 // take the rest of argv, so it is parsed as a unit rather than
                 // leaving loose words for the top-level loop to trip over.
+                //
+                // Backend flags still have to work, though: `queue run
+                // --orchestrator-url …` silently probing the default endpoint is a
+                // flag that looks accepted and does nothing (found live). So the
+                // action parser hands back what it did not own, and those tokens go
+                // through this same loop.
                 "queue" if command.is_none() => {
                     let rest: Vec<String> = it.by_ref().collect();
-                    command = Some(Command::Queue {
-                        action: parse_queue_action(rest)?,
-                    });
+                    let (action, leftover) = parse_queue_action(rest)?;
+                    command = Some(Command::Queue { action });
+                    it = leftover.into_iter();
                 }
                 "replay" if command.is_none() => {
                     let session = it.next().ok_or_else(|| {
@@ -728,7 +740,7 @@ fn parse_review_action(v: &str) -> Result<sc_swarm::ReviewAction> {
 /// Errors name the usage rather than just refusing, because these are typed by a
 /// developer at a terminal who should not have to go and read the help text to
 /// recover from a missing argument.
-fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
+fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
     let mut it = rest.into_iter();
     let action = it.next().ok_or_else(|| {
         DcError::Eval(
@@ -740,8 +752,12 @@ fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
 
     // `--repo <name>` may appear anywhere after the action; everything else is
     // positional. Pulling it out first keeps `file` able to take free text.
+    // Anything starting `--` that is not ours is handed BACK rather than swallowed
+    // into the free text — that is what lets `queue run --orchestrator-url …` reach
+    // the backend config instead of looking accepted and doing nothing (found live).
     let mut repo: Option<String> = None;
     let mut words: Vec<String> = Vec::new();
+    let mut leftover: Vec<String> = Vec::new();
     while let Some(w) = it.next() {
         match w.as_str() {
             "--repo" => {
@@ -749,6 +765,16 @@ fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
                     Some(it.next().ok_or_else(|| {
                         DcError::Eval("--repo needs a repository name".to_string())
                     })?)
+            }
+            other if other.starts_with("--") => {
+                leftover.push(w);
+                // Keep a flag's value adjacent to it: the top-level loop reads the
+                // pair together. A value-less flag simply passes through, and a
+                // stray value becomes an unknown token there — which is the loud
+                // failure we want rather than a silent misparse.
+                if let Some(next) = it.next() {
+                    leftover.push(next);
+                }
             }
             _ => words.push(w),
         }
@@ -773,20 +799,29 @@ fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
                         .to_string(),
                 )
             })?;
-            Ok(QueueAction::File { text: joined, repo })
+            Ok((QueueAction::File { text: joined, repo }, leftover))
         }
-        "list" => Ok(QueueAction::List),
-        "run" => Ok(QueueAction::Run),
-        "repos" => Ok(QueueAction::Repos),
-        "approve" => Ok(QueueAction::Approve {
-            id: require_id(&first, "approve")?,
-        }),
-        "discard" => Ok(QueueAction::Discard {
-            id: require_id(&first, "discard")?,
-        }),
-        "show" => Ok(QueueAction::Show {
-            id: require_id(&first, "show")?,
-        }),
+        "list" => Ok((QueueAction::List, leftover)),
+        "run" => Ok((QueueAction::Run, leftover)),
+        "repos" => Ok((QueueAction::Repos, leftover)),
+        "approve" => Ok((
+            QueueAction::Approve {
+                id: require_id(&first, "approve")?,
+            },
+            leftover,
+        )),
+        "discard" => Ok((
+            QueueAction::Discard {
+                id: require_id(&first, "discard")?,
+            },
+            leftover,
+        )),
+        "show" => Ok((
+            QueueAction::Show {
+                id: require_id(&first, "show")?,
+            },
+            leftover,
+        )),
         "send-back" => {
             let id = require_id(&first, "send-back")?;
             let notes = words[1..].join(" ");
@@ -798,7 +833,7 @@ fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
                         .to_string(),
                 ));
             }
-            Ok(QueueAction::SendBack { id, notes })
+            Ok((QueueAction::SendBack { id, notes }, leftover))
         }
         "add-repo" => {
             let name = require_id(&first, "add-repo")?;
@@ -809,11 +844,14 @@ fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
                         .to_string(),
                 )
             })?;
-            Ok(QueueAction::AddRepo { name, path })
+            Ok((QueueAction::AddRepo { name, path }, leftover))
         }
-        "forget-repo" => Ok(QueueAction::ForgetRepo {
-            name: require_id(&first, "forget-repo")?,
-        }),
+        "forget-repo" => Ok((
+            QueueAction::ForgetRepo {
+                name: require_id(&first, "forget-repo")?,
+            },
+            leftover,
+        )),
         other => Err(DcError::Eval(format!(
             "unknown queue action {other:?} — expected file, list, run, approve, \
              send-back, discard, show, repos, add-repo or forget-repo"

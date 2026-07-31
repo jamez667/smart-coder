@@ -35,7 +35,7 @@ pub fn source_files(workspace: &Path) -> Vec<String> {
                         .unwrap_or(&path)
                         .to_string_lossy()
                         .replace('\\', "/");
-                    if !is_test_file(&rel) {
+                    if !is_test_file(&rel) && !is_workflow_artifact(&rel) {
                         out.push(rel);
                     }
                 }
@@ -45,6 +45,38 @@ pub fn source_files(workspace: &Path) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// Whether a path is the workflow's **own output** rather than project source.
+///
+/// `specs/<slug>/` holds the planning artifacts a run writes — `spec.md`,
+/// `state.json`, and the daemon's `lease.json` — and unlike `.smart-coder/` it is
+/// deliberately not hidden, because those artifacts are meant to be reviewed as a
+/// diff and committed.
+///
+/// Surveying them as *source* feeds a run its own bookkeeping. Observed live: a
+/// spec drafted against an empty repository listed `lease.json` under "Files to
+/// Touch", because the only file the survey found was the lease the drafting run
+/// was itself holding. The model was reasoning correctly about a survey that was
+/// wrong.
+fn is_workflow_artifact(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    if !lower.starts_with("specs/") {
+        return false;
+    }
+    // Only the machinery — a hand-written `specs/foo/notes.md` is still source,
+    // and excluding a whole directory tree would hide real design documents.
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    matches!(
+        name,
+        "state.json"
+            | "lease.json"
+            | "spec.md"
+            | "architecture.md"
+            | "layout.md"
+            | "breakdown.md"
+            | "decomposition.md"
+    )
 }
 
 /// Whether a workspace-relative path looks like a test file (so it's excluded from the
