@@ -1,0 +1,19 @@
+[package]
+name = "sc-trace"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Spec traceability: check anchored spec claims against the code (spec 17)."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-index = { path = "../sc-index" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# A targeted *measurement* pass over Rust, distinct from `sc-index`'s graph query:
+# counting an array literal's elements is not something the symbol graph models,
+# and widening that shared query to serve one consumer would degrade the repo map
+# and `find_symbol` workspace-wide (spec 17).
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"

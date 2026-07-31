@@ -8,3 +8,4 @@ pub mod plan;
 pub mod replay;
 pub mod run;
 pub mod swarm;
+pub mod trace;

@@ -8,6 +8,7 @@ members = [
     "crates/sc-index",
     "crates/sc-verify",
     "crates/sc-review",
+    "crates/sc-trace",
     "crates/sc-comply",
     "crates/sc-android",
     "crates/sc-core",

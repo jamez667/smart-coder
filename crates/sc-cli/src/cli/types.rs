@@ -57,6 +57,11 @@ pub enum Command {
     /// --workspace`). Always emits the JSON-lines event stream — the headless
     /// entry point (it never uses the single-loop `run`).
     Staged { task: String },
+    /// Check the specs against the code (spec 17): anchors that no longer
+    /// resolve, assertions that are false, crates no spec claims. Deterministic —
+    /// no model runs. With `check`, exits non-zero on a broken or stale claim,
+    /// which is what makes it a CI gate.
+    Trace { check: bool },
     /// Re-render a recorded session from its JSON-lines log (spec 06). `session`
     /// is a session id (resolved under `.smart-coder/sessions/`) or a path to a log.
     Replay { session: String },

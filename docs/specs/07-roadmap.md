@@ -374,6 +374,58 @@ paying for calls it cannot yet show properly.
 
 ---
 
+## M12 — Spec traceability ✅
+**Goal:** make the drift that has bitten this project repeatedly fail a build
+instead of waiting for someone to read two documents side by side
+([17](17-spec-traceability.md)).
+
+The evidence was already in the repo: the pipeline ran on five phases while every
+spec described six; `ThinkPolicy` carried a dead array slot sized for the phase
+that no longer existed; `sc-cli` printed "6 phase artifacts" while writing five.
+None of it was *wrong code*, so no test caught it. The commitment is **drift is
+detected by a machine, not by remembering to look** — and the machine is boring,
+deterministic and model-free, which is what lets it run every time.
+
+- ✅ **`sc-trace`** — engine only, mirroring `sc-verify`/`sc-comply`. Anchors are
+  HTML comments in the prose (`<!--@ sc_workflow::Phase::ALL len=5 -->`), so specs
+  stay readable for their primary audience and the checker reads only the anchors.
+- ✅ **Honest statuses**, borrowed wholesale from [13](13-compliance-evidence.md):
+  `BROKEN` (the anchor names what is gone), `STALE` (it resolved and the assertion
+  is false), `UNGOVERNED` (a crate no spec claims), `UNKNOWN` (the *checker* could
+  not look). `UNKNOWN` is never coerced into a pass, and there is no headline
+  score — the missing few percent is where the drift is.
+- ✅ **`len=N` checks two things**, which is the amendment implementation forced:
+  element count *and* declared array length. Checking only the former would have
+  reproduced the dead-slot bug rather than caught it, since a spec agreeing with
+  the wrong declared length reads as clean. Counting is a targeted parse, kept out
+  of `sc-index`'s shared query so the repo map and `find_symbol` are not degraded
+  to serve one consumer.
+- ✅ **Resolution refuses to cry wolf.** A false `BROKEN` is how a gate gets
+  deleted, so only the crate segment may reject (it maps to a manifest member,
+  verifiably); ambiguous names, unindexable crates and re-exported module paths
+  all yield `UNKNOWN`. A symbol absent from its named crate but present elsewhere
+  is `BROKEN` *and the message says where it went*.
+- ✅ **Coverage at crate granularity** — narrowed from the spec's "crate and
+  top-level module" on measurement: crates give 2 findings here, modules give
+  dozens, and the spec's own "a noisy check gets `--no-verify`'d" warning decides
+  it. Whole-token matching only, so "run tests, iterate" does not govern a crate
+  by accident.
+- ✅ **`smart-coder trace [--check] [--json]`**, gated in **both** `scripts/check.sh`
+  and `scripts/check.ps1`. `--check` fails on `BROKEN`/`STALE` only.
+- **Exit criteria:** ✅ every anchor in `docs/specs/` resolves (0 broken, 0 stale,
+  0 unknown); breaking one fails the gate with a message naming the file, line and
+  reason; a dead array slot is caught whatever the spec claims. The tool checks
+  itself — a test asserts this repo has no broken anchors, and writing spec 17's
+  own prose about malformed anchors briefly produced one, which it caught.
+
+**Deliberately not built:** module-granularity coverage (noise, per above), and
+any caching — sources are re-read per anchor, which is ~2s over this workspace and
+noise beside the `cargo test` gate it sits next to. The `spec-guardian` agent is
+unchanged and stays the semantic layer above this: it reads meaning anchors cannot
+capture, and this removes the load-bearing cases from its shoulders.
+
+---
+
 ## Post-v1 / future ideas
 - **User-defined tools** via config.
 - **Heterogeneous swarms** — specialized worker roles (searcher/editor/tester/
@@ -382,11 +434,6 @@ paying for calls it cannot yet show properly.
 - **Embedding-based retrieval** with a small local embedder (optional).
 - **TUI** (v2 interface).
 - **LoRA/adapter experiments** — light task-specific tuning of the small model.
-- **Spec traceability** ([17](17-spec-traceability.md)) — anchored spec claims
-  checked deterministically in CI, so drift fails a build instead of waiting for
-  someone to read two documents side by side. The `spec-guardian` agent stays as
-  the semantic layer above it.
-
 ## Cross-cutting throughout
 - **We dogfood TDD.** Every milestone lands with unit tests for its components,
   written test-first ([11](11-testing-and-tdd.md)) — the harness that drives

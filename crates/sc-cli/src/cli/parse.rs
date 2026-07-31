@@ -43,6 +43,7 @@ impl Cli {
         let mut review = false;
         let mut review_action = sc_swarm::ReviewAction::default();
         let mut review_gate = sc_swarm::Severity::High;
+        let mut trace_check = false;
         let mut json = false;
         let mut log: Option<String> = None;
         let mut yolo = false;
@@ -57,6 +58,7 @@ impl Cli {
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
+                "trace" if command.is_none() => command = Some(Command::Trace { check: false }),
                 "chat" if command.is_none() => command = Some(Command::Chat),
                 "remote" if command.is_none() => command = Some(Command::Remote),
                 "comply" if command.is_none() => command = Some(Command::Comply { pack: None }),
@@ -64,6 +66,11 @@ impl Cli {
                 // Loopback-only, read-only dashboard: the 64-char token in the
                 // URL is friction for a local run. Opt-in only, never a default.
                 "--no-token" => no_token = true,
+                // `trace --check` — the CI gate (spec 17). Held in a local rather
+                // than mutated onto the command, so `--check trace` parses the
+                // same as `trace --check`: a gate flag that silently does nothing
+                // because it came first is a gate that is not running.
+                "--check" => trace_check = true,
                 "comply-lint" if command.is_none() => {
                     command = Some(Command::ComplyLint { pack: None })
                 }
@@ -392,6 +399,17 @@ impl Cli {
             .filter(|s| !s.trim().is_empty());
         let api_key = api_key.or_else(|| env_key.clone());
         let orchestrator_key = orchestrator_key.or_else(|| api_key.clone()).or(env_key);
+
+        // `--check` belongs to `trace`. Silently ignoring it elsewhere would let
+        // a user believe a gate was in place that never ran (spec 00 — fail loud).
+        let command = match (command, trace_check) {
+            (Some(Command::Trace { .. }), check) => Some(Command::Trace { check }),
+            (other, true) => {
+                let _ = other;
+                return Err(DcError::Eval("--check only applies to `trace`".to_string()));
+            }
+            (other, false) => other,
+        };
 
         Ok(Cli {
             command: command.unwrap_or(Command::Chat),

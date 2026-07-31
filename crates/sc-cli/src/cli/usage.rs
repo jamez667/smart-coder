@@ -30,6 +30,9 @@ COMMANDS:
                     Repeat --author-model to compare, e.g.
                     --author-model gemini-pro-latest@https://…/v1beta/openai
                     --author-model qwen3-coder-30b@http://localhost:11435/v1
+    trace           Check the specs against the code (spec 17): anchors that no
+                    longer resolve, assertions that are false, crates no spec
+                    claims. Deterministic — no model runs. See --check.
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -52,12 +55,17 @@ OPTIONS:
                           pci, nist-800-53, hipaa, gdpr, eu-regulatory) or a
                           path to your own. Defaults to soc2.
     --list-packs          List the shipped compliance packs and exit.
+    --check               `trace` only: exit non-zero on a broken or stale claim
+                          — the CI gate. `unknown` never gates (the checker could
+                          not look), and an ungoverned crate warns rather than
+                          fails. Pair with --json for machine-readable output.
     --no-token            Serve `comply` without a URL token — a plain
                           http://127.0.0.1:PORT/ link. Still loopback-only.
                           Do not combine with `tailscale serve`.
     --plan                Decompose the task into a plan before running (`run`)
   run output, logging & safety (spec 06):
-    --json                Emit the event stream as JSON lines on stdout (no TUI)
+    --json                Emit the event stream as JSON lines on stdout (no TUI).
+                          With `trace`, emits the claim report as JSON instead.
     --log PATH            Write the session log here  [default:
                           .smart-coder/sessions/<id>.jsonl]
     --dry-run             Preview only: run read-only tools but never apply an edit
@@ -114,6 +122,7 @@ EXAMPLES:
     smart-coder run \"fix parse_config\" --json --verify \"cargo test\" > run.jsonl
     smart-coder run \"refactor the parser\" --dry-run
     smart-coder replay 1718000000000
+    smart-coder trace --check
     smart-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
     smart-coder swarm \"add validation and a test\" --cli --verify \"python -m pytest -q\" \\
         --base-url http://localhost:11435/v1 --model coder-0 --max-workers 2 \\

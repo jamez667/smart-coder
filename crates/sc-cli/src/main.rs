@@ -48,6 +48,7 @@ fn main() -> ExitCode {
             cmd::plan::plan_task(&cli, task.clone(), *interactive)
         }
         Command::Staged { task } => cmd::run::staged_task_json(&cli, task.clone()),
+        Command::Trace { check } => cmd::trace::trace(cli.json, *check),
         Command::Replay { session } => cmd::replay::replay(session.clone()),
     }
 }

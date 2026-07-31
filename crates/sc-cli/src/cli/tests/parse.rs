@@ -179,6 +179,37 @@ fn an_unknown_review_action_is_an_error_not_a_silent_downgrade() {
 }
 
 #[test]
+fn trace_parses_with_and_without_the_check_gate() {
+    assert_eq!(
+        Cli::parse(["trace"]).unwrap().command,
+        Command::Trace { check: false },
+        "bare `trace` reports without gating"
+    );
+    assert_eq!(
+        Cli::parse(["trace", "--check"]).unwrap().command,
+        Command::Trace { check: true }
+    );
+    // Order must not matter. A gate flag that silently does nothing because it
+    // came first is a gate that is not running.
+    assert_eq!(
+        Cli::parse(["--check", "trace"]).unwrap().command,
+        Command::Trace { check: true }
+    );
+    // `--json` needs no special parsing; it selects the machine-readable report.
+    let cli = Cli::parse(["trace", "--json", "--check"]).unwrap();
+    assert_eq!(cli.command, Command::Trace { check: true });
+    assert!(cli.json);
+}
+
+#[test]
+fn check_outside_trace_is_an_error_not_a_silent_no_op() {
+    // A user who passes `--check` to the wrong command would otherwise believe a
+    // gate was in place that never ran (spec 00 — fail loud).
+    assert!(Cli::parse(["doctor", "--check"]).is_err());
+    assert!(Cli::parse(["--check"]).is_err());
+}
+
+#[test]
 fn staged_subcommand_parses_task_and_verify() {
     // `staged` is the headless entry; the task must peel cleanly and
     // `--verify` (the per-stage gate override) must survive the peel.

@@ -16,5 +16,9 @@ Invoke-Step 'rustfmt (check)' { cargo fmt --all -- --check }
 Invoke-Step 'clippy (deny warnings)' { cargo clippy --workspace --all-targets -- -D warnings }
 Invoke-Step 'build' { cargo check --workspace }
 Invoke-Step 'tests' { cargo test --workspace }
+# Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
+# Deterministic and model-free, so it costs nothing to run every time. `unknown`
+# never gates and an ungoverned crate only warns — this fails on BROKEN or STALE.
+Invoke-Step 'spec traceability' { cargo run --quiet -p sc-cli -- trace --check }
 
 Write-Host 'All checks passed.'
