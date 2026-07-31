@@ -156,6 +156,11 @@ impl Topology {
                 // Orchestrator integrated (or reverted) this coder's work.
                 self.fire(Peer::Orchestrator, subtask, now);
             }
+            // Review runs on the advisor/T1 backend, but it is not the advisor
+            // *consultation* the topology draws (a worker asking a senior). Firing
+            // that arrow for a review would show a message the worker never
+            // received. The findings surface in the activity stream instead.
+            ReviewStarted { .. } | ReviewFinding { .. } | ReviewFinished { .. } => {}
             SwarmDone { .. } => self.done = true,
         }
     }

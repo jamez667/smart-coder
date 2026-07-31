@@ -105,6 +105,21 @@ not hoped for:
   lookup runs *before* the model call, and its results go into the prompt. The
   model's job is then the part only it can do — "is this the same thing?" — rather
   than "does something like this exist?", which the index answers better.
+
+  *"The symbols the diff adds"* is the whole-file question, not the hunk question,
+  and getting that wrong silently disables this lens. Parsing a hunk's **added
+  lines** is the obvious implementation and it fails on the most ordinary edit
+  there is: a function inserted mid-file has added lines beginning with the closing
+  brace of the function above it (`+    format_date(0)` / `+}` / `+fn
+  format_date…`), which is not valid source, parses to nothing, and yields no
+  symbol to look up. So an added symbol is one **defined in the file after the
+  change and not before** — both whole files always parse.
+
+  Symmetrically, the lookup must exclude the diff's own files. The workspace
+  already holds the integrated change, so the added symbol is itself in the index
+  and would otherwise match itself — corroborating every duplication finding
+  against nothing, which is the worst available failure given corroboration is the
+  only thing permitted to gate.
 - **Abstraction fit** gets the surrounding file(s) beyond the diff hunk, since
   "does this match how the code around it solves this?" is unanswerable from
   changed lines alone.
@@ -229,11 +244,14 @@ connection; OpenAI is natively compatible; Anthropic is reachable through the sa
 shape. A reviewer is therefore a **connection + model name**, exactly like the
 coder, planner and advisor stages, and the panel is a *list* of them.
 
-The one real change: the connection model is a fixed pair (`Local`, `Gemini`) with
-one provider per stage. A panel needs *n* connections and a stage that holds
-several at once. That generalisation — named connections rather than a closed enum
-— is the actual work in this section, and it pays for itself elsewhere the moment
-anyone wants a second local endpoint.
+The reviewer *type* is already a list: a reviewer is a `ModelId` + a backend, and
+the engine takes a slice of them, so a panel needs no new shape — the first
+implementation simply passes a slice of length one. What remains is upstream of
+that: the connection model is a fixed pair (`Local`, `Gemini`) with one provider
+per stage, and it must generalise to *named connections* — rather than a closed
+enum — before more than one reviewer can be constructed at all. That
+generalisation is the actual work in this section, and it pays for itself
+elsewhere the moment anyone wants a second local endpoint.
 
 Because reviewers are remote and paid-for, the panel is **opt-in per run**, and the
 default panel is one reviewer. Fanning a four-lens review across three hosted
@@ -306,8 +324,28 @@ Three outcomes, chosen by configuration, in increasing order of intervention:
    uncorroborated finding is a suggestion, and a suggestion that halts a run is a
    tool that gets switched off.
 2. **Gate** — a corroborated finding at or above a configured severity stops the
-   run for a human checkpoint, reusing the existing `Gate` seam
-   ([09](09-workflow-and-checkpoints.md)) rather than inventing a second one.
+   run for a human checkpoint, in the shape of the existing `Gate` seam
+   ([09](09-workflow-and-checkpoints.md)).
+
+   Not literally that trait, as first written: `sc-workflow` already depends on
+   `sc-swarm`, so importing `Gate` into the orchestrator would invert the
+   dependency, and the trait decides *phase artifacts* while this decides one
+   subtask's findings. The swarm therefore has its own checkpoint at its own
+   granularity, following the same discipline — a human is asked, and where none is
+   available the run completes and reports loudly rather than hanging or dropping.
+
+   Two consequences of that discipline, both learned by wiring it:
+
+   - **`swarm --review-action gate` is the only path that reaches a review
+     checkpoint.** The staged workflow ([09](09-workflow-and-checkpoints.md)) runs
+     the swarm headless, and its human checkpoints are the *phase* gates; a second
+     per-subtask prompt inside a phase would double-gate one run. Review there
+     reports, and the phase gate is where a human sees it.
+   - **The checkpoint stops on EOF**, rather than treating "no answer" as consent.
+     A piped `swarm --review-action gate` has nobody to answer it, and continuing
+     past a corroborated finding nobody saw is the one outcome the gate exists to
+     prevent. Explicit headlessness (`--json`) is a different thing: it never asks
+     at all, and reports loudly instead.
 3. **Feed a retry** — a corroborated finding becomes feedback on a re-dispatch of
    the same subtask, exactly as still-failing tests do today
    ([08](08-orchestration-and-swarm.md), "Subtask retry"). This is the highest-value
@@ -363,13 +401,34 @@ loudly in the summary and the event stream — never dropped. This mirrors the
 existing honest-stop discipline ([06](06-cli-ux.md)): report what is true, including
 "green, with reservations," rather than flattening it to pass or fail.
 
+There is a subtler version of the same rule, found only by building it. A
+review-driven retry differs in kind from a test-driven one: the subtask is
+**already green and integrated**, so the retry is *speculative improvement* rather
+than repair. If that re-dispatched attempt comes back worse — an unusable
+proposal, or one the integration gate rejects — the ordinary retry-exhaustion path
+would mark the subtask `Failed` and revert it, destroying verified-correct work
+over a style finding. So: if a subtask was green on any earlier attempt, that
+result is kept and the subtask is `Done` with its findings attached. **Only a
+subtask that was never green may be `Failed`.**
+
+Stopping is likewise not reverting. A run halted at a review checkpoint keeps
+everything already integrated; the remaining subtasks stay pending, and the report
+says the run stopped at a checkpoint rather than reporting it as a failure or as
+completion.
+
 ## Cost, and when it doesn't run
 
 Review is model calls over a diff, on a machine that is already running an
 orchestrator and workers. It must be possible to not pay for it:
 
-- Off by default for `run`; on by default for `swarm` only where a T1 backend is
-  configured — reviewing with a 4B model produces 4B-quality review.
+- Off by default everywhere; `swarm --review` turns it on, and it is a no-op
+  without an advisor/T1 backend configured — reviewing with a 4B model produces
+  4B-quality review. (Written as "on by default for `swarm` where a T1 backend is
+  configured". Implementation showed that to be the wrong default: the advisor
+  backend is *always* configured on the swarm path — it defaults to the
+  orchestrator — so "where a T1 backend is configured" is not a condition that
+  ever fails, and the rule would have made four extra model calls per subtask
+  unavoidable. An explicit flag is the honest version of "you pay for this".)
 - Skipped entirely for a diff below a size threshold. A three-line change does not
   need four lenses.
 - Cost scales as *lenses × reviewers × subtasks*, and the middle term is the one a
@@ -398,6 +457,20 @@ Zero is the normal case.
 `reviewers_skipped` is carried explicitly rather than inferred from a shorter
 `considered_by`: a renderer must be able to say "3 of 4 reviewers ran" instead of
 quietly reporting a narrower review as a complete one.
+
+A review that **does not run at all** — disabled, no reviewer backend configured,
+or a diff below the size threshold — emits no events whatever. Silence on the
+stream means the question was never asked, and a renderer must not present it as a
+clean review. Note this rules out the tempting shortcut of emitting
+`ReviewStarted` before deciding whether to skip: a `ReviewFinished` carrying zero
+findings would then mean either "four lenses examined this and found nothing" or
+"nobody looked", and a renderer could not tell which. That distinction is the
+event-stream form of the same commitment `Unknown` makes in
+[13](13-compliance-evidence.md): "we did not look" and "we looked and found
+nothing" are different answers.
+
+A review that *did* run and found nothing must therefore still emit its pair of
+events. Absence is reserved for the unasked question.
 
 The desktop client renders findings as **line comments** on the diff
 ([12](12-platform-clients.md)), which is most of the way there already: the code

@@ -1,0 +1,15 @@
+[package]
+name = "sc-review"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Post-integration review: a second gate over the integrated diff (spec 16)."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-model = { path = "../sc-model" }
+sc-core = { path = "../sc-core" }
+sc-index = { path = "../sc-index" }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -148,6 +148,13 @@ impl SwarmBoard {
                 };
                 self.set_status(subtask, status);
             }
+            // Review (spec 16) does not change a subtask's *status*: a reviewed
+            // subtask is still Integrated, including when it carries unresolved
+            // findings — the work is verified correct. The findings themselves
+            // reach the user through the activity stream (see `view::swarm_rows`),
+            // never dropped. Rendering them as diff line comments is the desktop
+            // surface the spec describes and is not built yet.
+            ReviewStarted { .. } | ReviewFinding { .. } | ReviewFinished { .. } => {}
             SwarmDone { .. } => {}
         }
     }

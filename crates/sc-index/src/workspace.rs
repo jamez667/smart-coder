@@ -56,6 +56,46 @@ pub fn repo_map(root: &Path, boosts: &Boosts, top_k: usize) -> String {
     render_repo_map(&ranked)
 }
 
+/// One definition of a symbol, located. The structured counterpart of the
+/// [`find_symbol`] prose — a caller that needs to *act* on a hit (build a retry
+/// prompt naming the file and line, corroborate a review finding) needs the
+/// fields, not a sentence about them (spec 16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolHit {
+    pub name: String,
+    /// Workspace-relative path, `/`-separated.
+    pub path: String,
+    /// 1-based line of the definition.
+    pub line: usize,
+}
+
+/// Every definition of `name` in the workspace, as structured hits sorted by
+/// `(path, line)`. Empty when the name is empty, nothing matches, or the project
+/// has no indexable (Rust/Python/C#) files — the three are indistinguishable here
+/// by design; [`find_symbol`] is the surface that explains *which* to a model.
+pub fn find_symbol_hits(root: &Path, name: &str) -> Vec<SymbolHit> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for f in &collect_sources(root) {
+        let Some(lang) = Language::from_path(&f.path) else {
+            continue;
+        };
+        for d in extract_symbols(lang, &f.source).defs {
+            if d.name == name {
+                hits.push(SymbolHit {
+                    name: d.name,
+                    path: f.path.clone(),
+                    line: d.line,
+                });
+            }
+        }
+    }
+    hits.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+    hits
+}
+
 /// Locate where `name` is defined across the workspace. Returns a `find_symbol`
 /// observation: each definition as `path:line`, or a clear "not found".
 pub fn find_symbol(root: &Path, name: &str) -> String {
@@ -74,25 +114,16 @@ pub fn find_symbol(root: &Path, name: &str) -> String {
              search_code instead."
         );
     }
-    let mut hits = Vec::new();
-    for f in &sources {
-        let lang = match Language::from_path(&f.path) {
-            Some(l) => l,
-            None => continue,
-        };
-        for d in extract_symbols(lang, &f.source).defs {
-            if d.name == name {
-                hits.push(format!("{}:{}", f.path, d.line));
-            }
-        }
-    }
+    let hits: Vec<String> = find_symbol_hits(root, name)
+        .into_iter()
+        .map(|h| format!("{}:{}", h.path, h.line))
+        .collect();
     if hits.is_empty() {
         format!(
             "find_symbol {name:?}: no definition found in the indexed Rust/Python \
              files. Try search_code for a text match, or read_file directly."
         )
     } else {
-        hits.sort();
         format!("find_symbol {name:?}: {}", hits.join(", "))
     }
 }
@@ -134,6 +165,45 @@ mod tests {
         std::fs::write(root.join("a.rs"), "fn one() {}\nfn target() {}\n").unwrap();
         let out = find_symbol(&root, "target");
         assert!(out.contains("a.rs:2"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_symbol_hits_are_structured_and_ordered() {
+        // Corroborating a review finding needs the symbol AND its location as
+        // fields — not prose to re-parse (spec 16).
+        let root = temp_repo("hits");
+        std::fs::write(root.join("z.rs"), "fn dup() {}\n").unwrap();
+        std::fs::write(
+            root.join("a.rs"),
+            "fn other() {}\n\n\n\n\n\n\n\n\nfn dup() {}\nfn dup() {}\n",
+        )
+        .unwrap();
+
+        let hits = find_symbol_hits(&root, "dup");
+        assert_eq!(
+            hits,
+            vec![
+                SymbolHit {
+                    name: "dup".into(),
+                    path: "a.rs".into(),
+                    line: 10
+                },
+                SymbolHit {
+                    name: "dup".into(),
+                    path: "a.rs".into(),
+                    line: 11
+                },
+                SymbolHit {
+                    name: "dup".into(),
+                    path: "z.rs".into(),
+                    line: 1
+                },
+            ]
+        );
+        // A name nobody defines yields nothing (not an error, not a guess).
+        assert!(find_symbol_hits(&root, "ghost").is_empty());
+        assert!(find_symbol_hits(&root, "").is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

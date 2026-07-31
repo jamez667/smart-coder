@@ -62,12 +62,103 @@ pub enum SwarmEvent {
         accepted: bool,
         files: Vec<String>,
     },
+    /// Post-integration review began over a subtask's integrated diff (spec 16 —
+    /// a second gate, after verification, asking *should this code stay?* rather
+    /// than *does it work?*). `lenses` are the questions being asked and
+    /// `reviewers` who is being asked them; cost is `lenses × reviewers`, which is
+    /// why both are surfaced before the calls rather than after.
+    ReviewStarted {
+        subtask: String,
+        lenses: Vec<String>,
+        reviewers: Vec<String>,
+    },
+    /// One review finding. Emitted per finding so a renderer can show them as they
+    /// land rather than waiting for the whole review.
+    ///
+    /// `corroborated` is the load-bearing field: a deterministic check agreed, and
+    /// only a corroborated finding may gate the run or feed a retry. `evidence` is
+    /// what that check found — the text injected into a retry prompt — while
+    /// `summary` is the reviewer's prose, for a human reading the report. The two
+    /// are never interchanged. `raised_by` is who saw it; `considered_by` is who
+    /// reviewed this diff at all, which is what makes a lone finding interpretable
+    /// (contested vs merely unreviewed).
+    ReviewFinding {
+        subtask: String,
+        lens: String,
+        severity: String,
+        /// `file`, `hunk`, `symbol`, and a `line` that is a render hint only —
+        /// findings are never identified by line number (spec 16 — anchoring).
+        anchor: ReviewAnchor,
+        corroborated: bool,
+        evidence: Option<String>,
+        raised_by: Vec<String>,
+        considered_by: Vec<String>,
+        summary: String,
+    },
+    /// Review finished for a subtask.
+    ///
+    /// `blocking` is the count of findings that met the bar to stop the run —
+    /// corroborated AND at or above the configured gating severity. It is carried
+    /// rather than left for a renderer to recompute, so every surface agrees on
+    /// whether a review stopped anything. Zero is the normal case.
+    ///
+    /// `reviewers_skipped` is carried explicitly rather than inferred from a
+    /// shorter `considered_by`: a renderer must be able to say "3 of 4 reviewers
+    /// ran" instead of quietly reporting a narrower review as a complete one.
+    ReviewFinished {
+        subtask: String,
+        findings: usize,
+        blocking: usize,
+        reviewers_skipped: Vec<String>,
+    },
     /// The whole swarm run ended.
     SwarmDone {
         done: usize,
         failed: usize,
         all_done: bool,
     },
+}
+
+/// Where a review finding points, on the wire (spec 16 — anchoring).
+///
+/// A flattened [`sc_review::Anchor`]: the event stream is a public surface, so it
+/// carries plain strings rather than re-exporting the engine's types through it.
+/// `line` is a **render hint** — resolved from the hunk, never trusted from the
+/// model, and never used to identify or match a finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewAnchor {
+    pub file: String,
+    pub hunk: Option<usize>,
+    pub symbol: Option<String>,
+    pub line: Option<usize>,
+}
+
+impl From<&sc_review::Anchor> for ReviewAnchor {
+    fn from(a: &sc_review::Anchor) -> Self {
+        Self {
+            file: a.file.clone(),
+            hunk: a.hunk.map(|h| h.0),
+            symbol: a.symbol.clone(),
+            line: a.line,
+        }
+    }
+}
+
+impl SwarmEvent {
+    /// A [`SwarmEvent::ReviewFinding`] for one finding of `subtask`.
+    pub fn review_finding(subtask: &str, f: &sc_review::Finding) -> Self {
+        SwarmEvent::ReviewFinding {
+            subtask: subtask.to_string(),
+            lens: f.lens.to_string(),
+            severity: f.severity.to_string(),
+            anchor: ReviewAnchor::from(&f.anchor),
+            corroborated: f.corroborated,
+            evidence: f.evidence.clone(),
+            raised_by: f.raised_by.iter().map(|m| m.0.clone()).collect(),
+            considered_by: f.considered_by.iter().map(|m| m.0.clone()).collect(),
+            summary: f.summary.clone(),
+        }
+    }
 }
 
 /// Observer of the swarm event stream.
@@ -160,6 +251,50 @@ mod tests {
                 accepted: false,
                 files: vec!["suite went red".into()],
             },
+            SwarmEvent::ReviewStarted {
+                subtask: "s1".into(),
+                lenses: vec!["duplication".into(), "error-handling".into()],
+                reviewers: vec!["qwen".into()],
+            },
+            SwarmEvent::ReviewFinding {
+                subtask: "s1".into(),
+                lens: "duplication".into(),
+                severity: "high".into(),
+                anchor: ReviewAnchor {
+                    file: "src/report/render.rs".into(),
+                    hunk: Some(0),
+                    symbol: Some("format_date".into()),
+                    line: Some(12),
+                },
+                corroborated: true,
+                evidence: Some("`format_date` already exists at src/utils/date.rs:41".into()),
+                raised_by: vec!["qwen".into()],
+                considered_by: vec!["qwen".into(), "gemini".into()],
+                summary: "reimplements the date helper".into(),
+            },
+            // An uncorroborated finding: no evidence, and no anchor beyond the file.
+            SwarmEvent::ReviewFinding {
+                subtask: "s1".into(),
+                lens: "abstraction-fit".into(),
+                severity: "low".into(),
+                anchor: ReviewAnchor {
+                    file: "src/a.rs".into(),
+                    hunk: None,
+                    symbol: None,
+                    line: None,
+                },
+                corroborated: false,
+                evidence: None,
+                raised_by: vec!["qwen".into()],
+                considered_by: vec!["qwen".into()],
+                summary: "doesn't match the surrounding style".into(),
+            },
+            SwarmEvent::ReviewFinished {
+                subtask: "s1".into(),
+                findings: 2,
+                blocking: 1,
+                reviewers_skipped: vec!["offline".into()],
+            },
             SwarmEvent::SwarmDone {
                 done: 2,
                 failed: 1,
@@ -171,5 +306,46 @@ mod tests {
             let back: SwarmEvent = serde_json::from_str(&line).unwrap();
             assert_eq!(&back, ev, "round-trip mismatch for {line}");
         }
+    }
+
+    #[test]
+    fn a_review_finding_event_carries_evidence_and_summary_separately() {
+        // The two must never be interchanged: `evidence` is what a worker is
+        // handed on a retry, `summary` is what a human reads in the report.
+        let mut f = sc_review::Finding::new(
+            sc_review::Lens::Duplication,
+            sc_review::Severity::High,
+            sc_review::Anchor::file("src/report/render.rs")
+                .with_hunk(sc_review::HunkId(3))
+                .with_symbol("format_date")
+                .with_line(12),
+            "this smells like a duplicate",
+            sc_review::ModelId::new("qwen"),
+        );
+        f.corroborate("`format_date` already exists at src/utils/date.rs:41");
+        f.considered_by = vec![sc_review::ModelId::new("qwen")];
+
+        let SwarmEvent::ReviewFinding {
+            anchor,
+            corroborated,
+            evidence,
+            summary,
+            severity,
+            lens,
+            raised_by,
+            ..
+        } = SwarmEvent::review_finding("s1", &f)
+        else {
+            panic!("expected a ReviewFinding");
+        };
+        assert_eq!(lens, "duplication");
+        assert_eq!(severity, "high");
+        assert_eq!(anchor.hunk, Some(3));
+        assert_eq!(anchor.symbol.as_deref(), Some("format_date"));
+        assert_eq!(anchor.line, Some(12), "a render hint, carried as such");
+        assert!(corroborated);
+        assert!(evidence.unwrap().contains("src/utils/date.rs:41"));
+        assert_eq!(summary, "this smells like a duplicate");
+        assert_eq!(raised_by, vec!["qwen".to_string()]);
     }
 }

@@ -79,6 +79,18 @@ OPTIONS:
     --orchestrator-key T  Bearer token for the orchestrator/planner endpoint (the
                           Gemini API key). [default: --key / GEMINI_API_KEY]
     --max-workers N       Max parallel workers                    [default: 2]
+    --review              Review each integrated diff before calling the subtask done
+                          (spec 16): asks *should this code stay?* — duplication,
+                          swallowed errors, abstraction fit, unrelated changes — after
+                          the tests answered *does it work?*. Costs model calls on the
+                          advisor backend, so it is off unless asked for.
+    --review-action A     What happens to a finding: report (default, findings ride
+                          along and the run succeeds) | gate (stop for a human) |
+                          retry (re-dispatch the subtask with the evidence). Only a
+                          finding a deterministic check agreed with can gate or retry;
+                          an unconfirmed one is always report-only. Implies --review.
+    --review-gate SEV     Severity at which a confirmed finding stops the run:
+                          low | medium | high        [default: high] Implies --review.
     --interactive, --gate Halt at each `plan` phase boundary for a human checkpoint:
                           approve / revise / send-back / abort (spec 09). Default is
                           autonomous (auto-approve every gate).

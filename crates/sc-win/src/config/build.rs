@@ -199,6 +199,11 @@ impl UiConfig {
             frozen_paths: self.frozen_paths.clone(),
             max_subtask_retries: self.max_subtask_retries,
             sandbox: self.sandbox(),
+            // Post-integration review (spec 16) is off here: the desktop surface
+            // for it — findings as line comments on the subtask's diff — is not
+            // built yet, so turning it on would spend model calls the GUI cannot
+            // yet show properly. The CLI's `--review` is the way in for now.
+            review: sc_swarm::ReviewConfig::default(),
         }
     }
 

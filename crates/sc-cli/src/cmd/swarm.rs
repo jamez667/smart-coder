@@ -61,6 +61,9 @@ pub fn swarm_task(cli: &Cli, task: String) -> ExitCode {
                 "\nswarm: {} integrated, {} rejected, {} pending",
                 report.done, report.failed, report.pending
             );
+            if let Some(review) = review_summary(&report) {
+                println!("{review}");
+            }
             if report.all_done {
                 ExitCode::SUCCESS
             } else {
@@ -107,40 +110,53 @@ fn swarm_task_cli(
         println!("● swarm  {task}   (max {} workers)", cfg.max_workers);
     }
 
+    // Who decides at a review checkpoint. `--json` is a machine surface with no one
+    // at the keyboard, so it stays headless: findings are reported loudly in the
+    // stream and the run completes (spec 16 — never dropped, never hung on).
+    let auto = sc_swarm::AutoContinue;
+    let interactive = StdinReviewGate;
+    let gate: &dyn sc_swarm::ReviewGate = if cli.json { &auto } else { &interactive };
+
     // The sink renders each orchestrator event as it happens: JSON lines for
     // machines, the task-board view for humans.
     let report = if cli.json {
         let sink = JsonSwarmSink;
-        sc_swarm::run_swarm(
+        run_gated(
             orchestrator,
             worker,
-            Some(advisor as &(dyn sc_model::ModelBackend + Sync)),
+            advisor,
             &task,
-            "",
             workspace,
             &cfg,
             &sink,
+            gate,
         )
     } else {
         let sink = sc_swarm::FnSwarmSink(|e: &sc_swarm::SwarmEvent| print_swarm_event(e));
-        sc_swarm::run_swarm(
+        run_gated(
             orchestrator,
             worker,
-            Some(advisor as &(dyn sc_model::ModelBackend + Sync)),
+            advisor,
             &task,
-            "",
             workspace,
             &cfg,
             &sink,
+            gate,
         )
     };
 
     // Honest closing line (spec 06): the human-readable summary goes to stderr in
     // `--json` mode so it never pollutes the NDJSON a consumer is parsing.
-    let summary = format!(
+    let mut summary = format!(
         "swarm: {} integrated, {} rejected, {} pending",
         report.done, report.failed, report.pending
     );
+    // Unresolved findings ride the closing line rather than being dropped —
+    // especially headless, where no human is available to gate.
+    if let Some(review) = review_summary(&report) {
+        summary.push('\n');
+        summary.push_str(&review);
+    }
     if cli.json {
         eprintln!("{summary}");
     } else {
@@ -151,6 +167,76 @@ fn swarm_task_cli(
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Run the swarm with a review checkpoint attached — the two sink flavours differ
+/// only in their renderer, so the call is factored out rather than duplicated.
+#[allow(clippy::too_many_arguments)]
+fn run_gated(
+    orchestrator: &sc_model::OpenAiBackend,
+    worker: &sc_model::OpenAiBackend,
+    advisor: &sc_model::OpenAiBackend,
+    task: &str,
+    workspace: &std::path::Path,
+    cfg: &sc_swarm::SwarmConfig,
+    sink: &dyn sc_swarm::SwarmSink,
+    gate: &dyn sc_swarm::ReviewGate,
+) -> sc_swarm::SwarmReport {
+    sc_swarm::run_swarm_gated(
+        orchestrator,
+        worker,
+        Some(advisor as &(dyn sc_model::ModelBackend + Sync)),
+        task,
+        "",
+        workspace,
+        cfg,
+        sink,
+        gate,
+    )
+}
+
+/// The human checkpoint for a gating review finding (spec 16 — "Gate"), mirroring
+/// the staged workflow's stdin gate.
+///
+/// Only reachable with `--review-action gate`, and only for a **corroborated**
+/// finding at or above the gating severity — the swarm never asks a human about a
+/// model's unconfirmed opinion, because a gate that cries wolf is a gate that gets
+/// switched off.
+struct StdinReviewGate;
+
+impl sc_swarm::ReviewGate for StdinReviewGate {
+    fn checkpoint(
+        &self,
+        subtask: &str,
+        findings: &[sc_swarm::Finding],
+        blocking: usize,
+    ) -> sc_swarm::Checkpoint {
+        use std::io::{self, BufRead, Write};
+
+        println!(
+            "\n⛳ Review checkpoint [{subtask}] — {blocking} confirmed finding(s) to look at:"
+        );
+        for f in findings.iter().filter(|f| f.corroborated) {
+            println!("   · {} — {}", f.lens, f.anchor.file);
+            if let Some(ev) = &f.evidence {
+                println!("     {ev}");
+            }
+        }
+        print!("continue the run? [y]es · [n]o, stop here ▸ ");
+        if io::stdout().flush().is_err() {
+            return sc_swarm::Checkpoint::Stop;
+        }
+        let mut line = String::new();
+        match io::stdin().lock().read_line(&mut line) {
+            // EOF (piped/headless) — the safe answer is to stop rather than to
+            // barrel on past a finding nobody saw.
+            Ok(0) | Err(_) => sc_swarm::Checkpoint::Stop,
+            Ok(_) => match line.trim().to_ascii_lowercase().as_str() {
+                "n" | "no" | "s" | "stop" => sc_swarm::Checkpoint::Stop,
+                _ => sc_swarm::Checkpoint::Continue,
+            },
+        }
     }
 }
 
@@ -232,6 +318,83 @@ fn print_swarm_event(ev: &sc_swarm::SwarmEvent) {
                 println!("  ✗ [{subtask}] reverted — {reason}");
             }
         }
+        ReviewStarted {
+            subtask,
+            lenses,
+            reviewers,
+        } => {
+            // Cost is lenses × reviewers, named before the calls rather than after.
+            println!(
+                "  ◇ [{subtask}] reviewing — {} lenses × {} reviewer{}",
+                lenses.len(),
+                reviewers.len(),
+                if reviewers.len() == 1 { "" } else { "s" }
+            );
+        }
+        ReviewFinding {
+            subtask,
+            lens,
+            severity,
+            anchor,
+            corroborated,
+            evidence,
+            raised_by,
+            considered_by,
+            summary,
+        } => {
+            // The asymmetry made visible. A checked finding is marked and may act;
+            // an opinion is shown plainly and never can. Never flattened into one.
+            let mark = if *corroborated { "⚠" } else { "·" };
+            let kind = if *corroborated { "checked" } else { "opinion" };
+            let mut place = anchor.file.clone();
+            if let Some(sym) = &anchor.symbol {
+                place.push_str(&format!(" · {sym}"));
+            }
+            if let Some(line) = anchor.line {
+                place.push_str(&format!(":{line}"));
+            }
+            // A lone finding others reviewed and did not raise is contested — a
+            // different thing from one nobody else looked at.
+            let votes = if considered_by.len() > 1 && raised_by.len() == 1 {
+                format!(" · contested (1 of {})", considered_by.len())
+            } else if raised_by.len() > 1 {
+                format!(" · {} reviewers agree", raised_by.len())
+            } else {
+                String::new()
+            };
+            println!("  {mark} [{subtask}] {lens}/{severity} ({kind}){votes} — {place}");
+            println!("      {summary}");
+            // The evidence is what a worker would be handed; showing it lets a human
+            // judge the finding on the same basis a retry would act on it.
+            if let Some(ev) = evidence {
+                println!("      evidence: {ev}");
+            }
+        }
+        ReviewFinished {
+            subtask,
+            findings,
+            blocking,
+            reviewers_skipped,
+        } => {
+            // "3 of 4 reviewers ran" — a narrower review is never reported as a
+            // complete one.
+            let skipped = if reviewers_skipped.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({} unreachable: {})",
+                    reviewers_skipped.len(),
+                    reviewers_skipped.join(", ")
+                )
+            };
+            if *findings == 0 {
+                println!("  ◈ [{subtask}] review clean{skipped}");
+            } else {
+                println!(
+                    "  ◈ [{subtask}] review — {findings} finding(s), {blocking} blocking{skipped}"
+                );
+            }
+        }
         SwarmDone {
             done,
             failed,
@@ -241,6 +404,38 @@ fn print_swarm_event(ev: &sc_swarm::SwarmEvent) {
             println!("{mark} swarm done — {done} integrated, {failed} failed");
         }
     }
+}
+
+/// The closing review line, when review ran and found something.
+///
+/// Findings are reported **loudly and never dropped**, including in the headless
+/// case where no human is available to gate: the run reports "green, with
+/// reservations" rather than flattening it to a pass (spec 16 / spec 06 — honest
+/// stop). Returns `None` when there is nothing to say.
+fn review_summary(report: &sc_swarm::SwarmReport) -> Option<String> {
+    let total: usize = report.findings.iter().map(|(_, f)| f.len()).sum();
+    if total == 0 && !report.stopped_at_checkpoint {
+        return None;
+    }
+    let mut out = format!(
+        "review: {total} unresolved finding(s) across {} subtask(s)",
+        report.findings.len()
+    );
+    if report.blocking_findings > 0 {
+        out.push_str(&format!(
+            ", {} confirmed at or above the gating severity — green, with reservations",
+            report.blocking_findings
+        ));
+    }
+    // A run that stopped for a human ended for a reason, not from failure. Saying
+    // so keeps the pending subtasks from reading as work that went wrong.
+    if report.stopped_at_checkpoint {
+        out.push_str(
+            "\nreview: stopped at a checkpoint — everything integrated stayed integrated; \
+             the remaining subtasks are still pending",
+        );
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -293,12 +488,125 @@ mod tests {
                 accepted: false,
                 files: vec!["suite went red".into()],
             },
+            ReviewStarted {
+                subtask: "s1".into(),
+                lenses: vec!["duplication".into(), "error-handling".into()],
+                reviewers: vec!["qwen".into()],
+            },
+            // Corroborated: carries evidence, and is marked as able to act.
+            ReviewFinding {
+                subtask: "s1".into(),
+                lens: "duplication".into(),
+                severity: "high".into(),
+                anchor: sc_swarm::ReviewAnchor {
+                    file: "src/report/render.rs".into(),
+                    hunk: Some(0),
+                    symbol: Some("format_date".into()),
+                    line: Some(12),
+                },
+                corroborated: true,
+                evidence: Some("`format_date` already exists at src/utils/date.rs:41".into()),
+                raised_by: vec!["qwen".into()],
+                considered_by: vec!["qwen".into()],
+                summary: "reimplements the date helper".into(),
+            },
+            // Uncorroborated and contested — the no-evidence, no-anchor branch.
+            ReviewFinding {
+                subtask: "s1".into(),
+                lens: "abstraction-fit".into(),
+                severity: "low".into(),
+                anchor: sc_swarm::ReviewAnchor {
+                    file: "src/a.rs".into(),
+                    hunk: None,
+                    symbol: None,
+                    line: None,
+                },
+                corroborated: false,
+                evidence: None,
+                raised_by: vec!["qwen".into()],
+                considered_by: vec!["qwen".into(), "gemini".into()],
+                summary: "doesn't match the surrounding style".into(),
+            },
+            ReviewFinished {
+                subtask: "s1".into(),
+                findings: 2,
+                blocking: 1,
+                reviewers_skipped: vec!["offline".into()],
+            },
+            // The clean case, with every reviewer reachable.
+            ReviewFinished {
+                subtask: "s2".into(),
+                findings: 0,
+                blocking: 0,
+                reviewers_skipped: vec![],
+            },
             SwarmDone {
                 done: 2,
                 failed: 1,
                 all_done: false,
             },
         ]
+    }
+
+    /// A report carrying unresolved findings, as the last-retry case produces.
+    fn report_with_findings(blocking: usize) -> sc_swarm::SwarmReport {
+        let mut f = sc_swarm::Finding::new(
+            sc_swarm::Lens::Duplication,
+            sc_swarm::Severity::High,
+            sc_swarm::Anchor::file("src/report/render.rs"),
+            "reimplements the date helper",
+            sc_swarm::ModelId::new("qwen"),
+        );
+        if blocking > 0 {
+            f.corroborate("`format_date` already exists at src/utils/date.rs:41");
+        }
+        sc_swarm::SwarmReport {
+            done: 1,
+            failed: 0,
+            pending: 0,
+            all_done: true,
+            integrated_files: vec!["src/report/render.rs".into()],
+            findings: vec![("s1".to_string(), vec![f])],
+            blocking_findings: blocking,
+            stopped_at_checkpoint: false,
+        }
+    }
+
+    #[test]
+    fn a_headless_run_reports_its_findings_loudly_rather_than_dropping_them() {
+        // The spec is explicit: where no human is available to gate, the run
+        // completes and the findings are reported loudly — never dropped.
+        let text = super::review_summary(&report_with_findings(1)).expect("something to say");
+        assert!(text.contains("1 unresolved finding"), "{text}");
+        assert!(
+            text.contains("green, with reservations"),
+            "an honest stop, not a flattened pass: {text}"
+        );
+    }
+
+    #[test]
+    fn findings_that_cannot_gate_are_still_reported_but_not_called_blocking() {
+        let text = super::review_summary(&report_with_findings(0)).expect("still reported");
+        assert!(text.contains("1 unresolved finding"), "{text}");
+        assert!(
+            !text.contains("gating severity"),
+            "an opinion never reads as a blocker: {text}"
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_findings_says_nothing_extra() {
+        let clean = sc_swarm::SwarmReport {
+            done: 1,
+            failed: 0,
+            pending: 0,
+            all_done: true,
+            integrated_files: vec![],
+            findings: vec![],
+            blocking_findings: 0,
+            stopped_at_checkpoint: false,
+        };
+        assert!(super::review_summary(&clean).is_none());
     }
 
     #[test]

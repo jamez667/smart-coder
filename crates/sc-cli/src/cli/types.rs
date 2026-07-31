@@ -116,6 +116,17 @@ pub struct Cli {
     /// per-subtask scoped completion check. Empty = auto-detect test files in the
     /// workspace; an explicit list overrides the auto-detection.
     pub frozen_paths: Vec<String>,
+    /// Run post-integration review over each subtask's integrated diff (`--review`,
+    /// spec 16). **Off by default**: it is model calls a user opts into paying for.
+    /// Answers *should this code stay?* after verification answered *does it work?*
+    pub review: bool,
+    /// What happens to a finding (`--review-action report|gate|retry`). Only a
+    /// *corroborated* finding can ever gate or retry; an uncorroborated one is
+    /// reported and ranked whatever this is set to.
+    pub review_action: sc_swarm::ReviewAction,
+    /// The severity at which a corroborated finding stops the run
+    /// (`--review-gate low|medium|high`, default `high`).
+    pub review_gate: sc_swarm::Severity,
     /// `plan` per-phase thinking base: `Some(false)` = think on every phase,
     /// `Some(true)` = `/no_think` every phase, `None` = the smart default (spec 09).
     pub think_base: Option<bool>,

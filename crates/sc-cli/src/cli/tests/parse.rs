@@ -125,6 +125,57 @@ fn parses_swarm_with_orchestrator_and_workers() {
     assert_eq!(sc.max_subtask_retries, 4);
     assert_eq!(sc.frozen_paths, vec!["tests/test_a.py", "tests/test_b.py"]);
     assert_eq!(sc.verify_command.as_deref(), Some("pytest -q"));
+    // Review is off unless asked for: it costs model calls per integrated diff.
+    assert!(!cli.review);
+    assert!(!sc.review.enabled);
+}
+
+#[test]
+fn review_flags_survive_the_task_peel_and_reach_the_swarm_config() {
+    // `--review` lands AFTER the task, so it goes through the second-pass parser.
+    // Without handling there it would be an unknown token and the run would die.
+    let cli = Cli::parse([
+        "swarm",
+        "add validation",
+        "--review-action",
+        "retry",
+        "--review-gate",
+        "medium",
+    ])
+    .unwrap();
+    match &cli.command {
+        Command::Swarm { task } => assert_eq!(task, "add validation"),
+        other => panic!("expected Swarm, got {other:?}"),
+    }
+    // Naming what to do with findings implies wanting them.
+    assert!(cli.review);
+    assert_eq!(cli.review_action, sc_swarm::ReviewAction::Retry);
+    assert_eq!(cli.review_gate, sc_swarm::Severity::Medium);
+
+    let sc = cli.swarm_config();
+    assert!(sc.review.enabled);
+    assert_eq!(sc.review.action, sc_swarm::ReviewAction::Retry);
+    assert_eq!(sc.review.gate_at, sc_swarm::Severity::Medium);
+    // All four lenses by default, and small diffs skipped.
+    assert_eq!(sc.review.lenses.len(), 4);
+    assert!(sc.review.min_changed_lines > 0);
+}
+
+#[test]
+fn bare_review_enables_it_at_the_reporting_default() {
+    // The honest default: findings ride along and the run still succeeds.
+    let cli = Cli::parse(["swarm", "add validation", "--review"]).unwrap();
+    assert!(cli.review);
+    assert_eq!(cli.review_action, sc_swarm::ReviewAction::Report);
+    assert_eq!(cli.review_gate, sc_swarm::Severity::High);
+}
+
+#[test]
+fn an_unknown_review_action_is_an_error_not_a_silent_downgrade() {
+    // A user asking to gate and quietly getting report-only would believe a gate
+    // was in place that never was.
+    assert!(Cli::parse(["swarm", "t", "--review-action", "fix"]).is_err());
+    assert!(Cli::parse(["swarm", "t", "--review-gate", "urgent"]).is_err());
 }
 
 #[test]

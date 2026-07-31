@@ -216,6 +216,86 @@ pub fn swarm_rows(ev: &SwarmEvent) -> Vec<Row> {
                 vec![Row::err("✗", format!("[{subtask}] reverted"))]
             }
         }
+        ReviewStarted {
+            subtask,
+            lenses,
+            reviewers,
+        } => {
+            // Cost is lenses × reviewers, so both are named up front.
+            vec![Row::ok(
+                "◇",
+                format!(
+                    "[{subtask}] reviewing — {} lenses × {} reviewer{}",
+                    lenses.len(),
+                    reviewers.len(),
+                    if reviewers.len() == 1 { "" } else { "s" }
+                ),
+            )]
+        }
+        ReviewFinding {
+            subtask,
+            lens,
+            severity,
+            anchor,
+            corroborated,
+            summary,
+            raised_by,
+            considered_by,
+            ..
+        } => {
+            // The distinction the whole spec turns on, made visible: a checked
+            // finding can act, an opinion cannot. Never flattened into one look.
+            let mark = if *corroborated { "checked" } else { "opinion" };
+            let mut where_ = anchor.file.clone();
+            if let Some(sym) = &anchor.symbol {
+                where_.push_str(&format!(" · {sym}"));
+            }
+            if let Some(line) = anchor.line {
+                where_.push_str(&format!(":{line}"));
+            }
+            // A lone finding others reviewed and did not raise is contested — worth
+            // showing as such rather than as agreement-of-one.
+            let contested = considered_by.len() > 1 && raised_by.len() == 1;
+            let votes = if contested {
+                format!(" · contested (1 of {})", considered_by.len())
+            } else if raised_by.len() > 1 {
+                format!(" · {} reviewers agree", raised_by.len())
+            } else {
+                String::new()
+            };
+            let text =
+                format!("[{subtask}] {lens}/{severity} ({mark}){votes} — {where_}: {summary}");
+            // Only a corroborated finding is flagged as something to act on.
+            if *corroborated {
+                vec![Row::err("⚠", text)]
+            } else {
+                vec![Row::ok("·", text)]
+            }
+        }
+        ReviewFinished {
+            subtask,
+            findings,
+            blocking,
+            reviewers_skipped,
+        } => {
+            // "3 of 4 reviewers ran" — a narrower review is never reported as a
+            // complete one.
+            let skipped = if reviewers_skipped.is_empty() {
+                String::new()
+            } else {
+                format!(" ({} reviewer(s) unreachable)", reviewers_skipped.len())
+            };
+            let text = if *findings == 0 {
+                format!("[{subtask}] review clean{skipped}")
+            } else {
+                format!("[{subtask}] review — {findings} finding(s), {blocking} blocking{skipped}")
+            };
+            if *blocking > 0 {
+                vec![Row::err("■", text)]
+            } else {
+                vec![Row::ok("◈", text)]
+            }
+        }
         SwarmDone {
             done,
             failed,

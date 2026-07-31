@@ -40,6 +40,9 @@ impl Cli {
         let mut max_workers = 2usize;
         let mut max_subtask_retries = 2usize;
         let mut frozen_paths: Vec<String> = Vec::new();
+        let mut review = false;
+        let mut review_action = sc_swarm::ReviewAction::default();
+        let mut review_gate = sc_swarm::Severity::High;
         let mut json = false;
         let mut log: Option<String> = None;
         let mut yolo = false;
@@ -189,6 +192,15 @@ impl Cli {
                     if let Some(f) = parsed.frozen_paths {
                         frozen_paths = f;
                     }
+                    if parsed.review {
+                        review = true;
+                    }
+                    if let Some(a) = parsed.review_action {
+                        review_action = a;
+                    }
+                    if let Some(s) = parsed.review_gate {
+                        review_gate = s;
+                    }
                     if let Some(u) = parsed.base_url {
                         base_url = u;
                     }
@@ -297,6 +309,26 @@ impl Cli {
                     })?;
                     frozen_paths = parse_frozen_list(&list);
                 }
+                // Post-integration review (spec 16). Off unless asked for: it is
+                // model calls over every integrated diff, and a user pays for them.
+                "--review" => review = true,
+                "--review-action" => {
+                    let v = it.next().ok_or_else(|| {
+                        DcError::Eval("--review-action requires report|gate|retry".to_string())
+                    })?;
+                    review_action = parse_review_action(&v)?;
+                    // Naming what to DO with findings implies wanting them.
+                    review = true;
+                }
+                "--review-gate" => {
+                    let v = it.next().ok_or_else(|| {
+                        DcError::Eval("--review-gate requires low|medium|high".to_string())
+                    })?;
+                    review_gate = sc_swarm::Severity::parse(&v).ok_or_else(|| {
+                        DcError::Eval(format!("--review-gate: unknown severity {v:?}"))
+                    })?;
+                    review = true;
+                }
                 "--no-think" => system_suffix = Some("/no_think".to_string()),
                 "--json" => json = true,
                 "--log" => {
@@ -378,6 +410,9 @@ impl Cli {
             max_workers,
             max_subtask_retries,
             frozen_paths,
+            review,
+            review_action,
+            review_gate,
             think_base,
             think_steps,
             ceremony,
@@ -413,6 +448,12 @@ struct RunArgs {
     max_subtask_retries: Option<usize>,
     /// `--frozen a.py,b.py` — frozen contract-test paths for `swarm` (spec 08/11).
     frozen_paths: Option<Vec<String>>,
+    /// `--review` — post-integration review over each integrated diff (spec 16).
+    review: bool,
+    /// `--review-action report|gate|retry` — what happens to a finding.
+    review_action: Option<sc_swarm::ReviewAction>,
+    /// `--review-gate low|medium|high` — where a corroborated finding stops the run.
+    review_gate: Option<sc_swarm::Severity>,
     no_think: bool,
     plan: bool,
     /// Halt at each `plan` phase boundary for a human checkpoint (spec 09).
@@ -461,6 +502,9 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
     let mut max_workers = None;
     let mut max_subtask_retries = None;
     let mut frozen_paths = None;
+    let mut review = false;
+    let mut review_action = None;
+    let mut review_gate = None;
     let mut no_think = false;
     let mut plan = false;
     let mut interactive = false;
@@ -510,6 +554,22 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
                     })?);
             }
             "--frozen" => frozen_paths = Some(parse_frozen_list(&need(&mut it, "--frozen")?)),
+            // Post-integration review (spec 16). Naming an action or a gating
+            // severity implies wanting the review that produces them.
+            "--review" => review = true,
+            "--review-action" => {
+                review_action = Some(parse_review_action(&need(&mut it, "--review-action")?)?);
+                review = true;
+            }
+            "--review-gate" => {
+                let v = need(&mut it, "--review-gate")?;
+                review_gate = Some(sc_swarm::Severity::parse(&v).ok_or_else(|| {
+                    DcError::Eval(format!(
+                        "--review-gate: unknown severity {v:?} (expected low, medium or high)"
+                    ))
+                })?);
+                review = true;
+            }
             "--base-url" => base_url = Some(need(&mut it, "--base-url")?),
             "--model" => model = Some(need(&mut it, "--model")?),
             "--tool-calling" => {
@@ -566,6 +626,9 @@ fn split_run_args(args: Vec<String>) -> Result<RunArgs> {
         max_workers,
         max_subtask_retries,
         frozen_paths,
+        review,
+        review_action,
+        review_gate,
         no_think,
         plan,
         interactive,
@@ -620,9 +683,38 @@ fn parse_frozen_list(list: &str) -> Vec<String> {
         .collect()
 }
 
+/// `--review-action report|gate|retry` — what happens to a finding (spec 16), in
+/// increasing order of intervention.
+fn parse_review_action(v: &str) -> Result<sc_swarm::ReviewAction> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "report" => Ok(sc_swarm::ReviewAction::Report),
+        "gate" => Ok(sc_swarm::ReviewAction::Gate),
+        "retry" => Ok(sc_swarm::ReviewAction::Retry),
+        other => Err(DcError::Eval(format!(
+            "--review-action: unknown action {other:?} (expected report, gate or retry)"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod private_tests {
-    use super::parse_frozen_list;
+    use super::{parse_frozen_list, parse_review_action};
+
+    #[test]
+    fn review_action_parses_the_three_outcomes_and_rejects_anything_else() {
+        assert_eq!(
+            parse_review_action("retry").unwrap(),
+            sc_swarm::ReviewAction::Retry
+        );
+        assert_eq!(
+            parse_review_action(" GATE ").unwrap(),
+            sc_swarm::ReviewAction::Gate
+        );
+        // An unrecognised action must be an error, never a silent fallback to
+        // `report` — a user asking to gate and quietly getting report-only would
+        // believe a gate was in place that never was.
+        assert!(parse_review_action("fix").is_err());
+    }
 
     #[test]
     fn frozen_list_trims_normalizes_and_drops_empties() {

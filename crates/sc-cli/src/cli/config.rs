@@ -153,6 +153,12 @@ impl Cli {
             // The CLI runs on the host (the user controls their own environment); the
             // GUI defaults to the Docker sandbox.
             sandbox: sc_swarm::Sandbox::Host,
+            review: sc_swarm::ReviewConfig {
+                enabled: self.review,
+                action: self.review_action,
+                gate_at: self.review_gate,
+                ..Default::default()
+            },
         }
     }
 

@@ -20,4 +20,4 @@ pub use repomap::{build_repo_map, render_repo_map, Boosts, RankedSymbol, SourceF
 pub use symbols::{
     count_functions_named, extract_symbols, function_span, FileSymbols, Language, SymbolDef,
 };
-pub use workspace::{collect_sources, find_symbol, repo_map};
+pub use workspace::{collect_sources, find_symbol, find_symbol_hits, repo_map, SymbolHit};

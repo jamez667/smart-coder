@@ -12,5 +12,8 @@ sc-model = { path = "../sc-model" }
 sc-core = { path = "../sc-core" }
 sc-tools = { path = "../sc-tools" }
 sc-verify = { path = "../sc-verify" }
+# Post-integration review (spec 16). `sc-index` comes with it: the reviewer needs
+# the repo map the worker never had, which is the entire point of the gate.
+sc-review = { path = "../sc-review" }
 serde = { workspace = true }
 serde_json = { workspace = true }
