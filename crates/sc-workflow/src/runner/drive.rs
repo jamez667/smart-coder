@@ -138,7 +138,17 @@ pub fn run_workflow_moded_to(
     let art_dir = artifact_dir
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| crate::state::plan_dir(workspace));
-    let save_state = |state: &WorkflowState| crate::state::save_to(&art_dir, state, openspec_names);
+    // Take the artifact directory for the life of this run (spec 19). Two surfaces
+    // writing one `state.json` silently lose each other's decisions — the daemon
+    // parks at a gate, the GUI opens the same project, and the phone-side approval
+    // is clobbered by the GUI's next phase save with nothing logged.
+    //
+    // Held in a binding so it lives to the end of the function: releasing on drop
+    // means a panic or an early `?` cannot strand it, and a stranded lease locks a
+    // project until expiry with nothing running.
+    let _lease = crate::lease::acquire(&art_dir, &crate::lease::current_owner())?;
+    let save_state =
+        |state: &mut WorkflowState| crate::state::save_to(&art_dir, state, openspec_names);
     // Ground the task in reality BEFORE the first phase: a workflow phase is a direct model call
     // that otherwise sees only the task string — so with just "implement PLAN-lakes.md" the
     // orchestrator designed a generic module tree that ignored the plan AND the real files
@@ -168,6 +178,10 @@ pub fn run_workflow_moded_to(
             // blank jump to the build.
             on_phase(a.phase, &a.content);
         }
+        // Adopt the generation we resumed from, or the first save would look like a
+        // stale writer to its own predecessor and be refused (spec 19). We hold the
+        // lease, so this is a continuation of that state rather than a race with it.
+        state.adopt_generation(prior.generation());
     }
     // Detect the project's language once, so every phase prompt speaks it (a Rust cargo repo
     // gets Rust rules, not the Python/Flask default). Derived from the workspace, not stored in
@@ -189,7 +203,7 @@ pub fn run_workflow_moded_to(
             state.set(crate::state::Artifact::draft(Phase::Specs, spec_body));
             state.approve(Phase::Specs);
             on_phase(Phase::Specs, spec_body); // still surface it to the UI as the Specs artifact
-            save_state(&state)?;
+            save_state(&mut state)?;
         }
     }
 
@@ -213,7 +227,7 @@ pub fn run_workflow_moded_to(
         // Persist as a draft first, so the gate (and a human editing the file for a
         // Revise) is looking at exactly what's on disk.
         state.set(artifact);
-        save_state(&state)?;
+        save_state(&mut state)?;
 
         match gate.decide(phase, state.artifact(phase).expect("just set")) {
             Decision::Approve => {}
@@ -237,7 +251,7 @@ pub fn run_workflow_moded_to(
                 if let Some(notes) = notes {
                     state.set_feedback(target, notes);
                 }
-                save_state(&state)?;
+                save_state(&mut state)?;
                 // Test files written from a now-dropped coverage plan are stale.
                 if target.index() <= Phase::StageBreakdown.index() {
                     test_files.clear();
@@ -252,7 +266,7 @@ pub fn run_workflow_moded_to(
 
         // Accepted (Approve or Revise): freeze it as grounding for the next phase.
         state.approve(phase);
-        save_state(&state)?;
+        save_state(&mut state)?;
 
         // After the coverage plan is approved, have workers write the tests so
         // they exist on disk for the implementation phases to target. Skipped in the

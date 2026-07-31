@@ -19,6 +19,7 @@ mod compile_driven;
 mod coverage;
 mod engine;
 mod gate;
+mod lease;
 mod phase;
 mod policy;
 mod runner;
@@ -35,6 +36,8 @@ pub use compile_driven::{
 pub use coverage::{group_by_file, parse_coverage, CoverageItem};
 pub use engine::{generate_phase, phase_messages};
 pub use gate::{format_sendback_notes, AutoApprove, CeremonyGate, Decision, Gate, ReviewNote};
+// Single-writer arbitration for an artifact directory (spec 19).
+pub use lease::{acquire, current_owner, holder, Lease, LeaseGuard, EXPIRY};
 pub use phase::{Ceremony, Phase, PhaseSet};
 pub use policy::ThinkPolicy;
 pub use runner::{

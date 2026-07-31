@@ -54,6 +54,19 @@ pub struct WorkflowState {
     /// once that phase is approved again.
     #[serde(default)]
     feedback: Vec<(Phase, String)>,
+    /// How many times this state has been written, for compare-and-swap
+    /// (spec 19 — the single-writer problem).
+    ///
+    /// [`save_to`] refuses when the copy on disk has moved on from the one we
+    /// loaded, so a stale writer fails loudly instead of silently overwriting a
+    /// decision someone else made. The [`crate::lease`] is the first line of
+    /// defence and this is the second: a lease can be reclaimed after an expiry,
+    /// and a process that was merely paused must not then clobber its successor.
+    ///
+    /// `serde(default)` so every `state.json` written before this existed loads
+    /// as generation 0 — no migration, no breakage.
+    #[serde(default)]
+    generation: u64,
 }
 
 impl WorkflowState {
@@ -62,7 +75,24 @@ impl WorkflowState {
             task: task.into(),
             artifacts: Vec::new(),
             feedback: Vec::new(),
+            generation: 0,
         }
+    }
+
+    /// How many times this state has been persisted.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Continue from a generation loaded off disk.
+    ///
+    /// A resuming run rebuilds its state from the artifacts it adopted rather than
+    /// deserializing wholesale, so it starts at generation 0 and would look like a
+    /// stale writer to its own predecessor. Adopting the number says "this is that
+    /// state, continued" — which is only sound because the caller holds the lease
+    /// on the directory. Never call this to force a save past a genuine conflict.
+    pub fn adopt_generation(&mut self, generation: u64) {
+        self.generation = generation;
     }
 
     /// The artifact for `phase`, if produced.
@@ -148,27 +178,84 @@ pub fn plan_dir(workspace: &Path) -> PathBuf {
 /// Persist every artifact to `<workspace>/.smart-coder/plan/NN-phase.md` and the
 /// task + statuses to `state.json`, so the plan is a reviewable diff and the run
 /// resumes from disk.
-pub fn save(workspace: &Path, state: &WorkflowState) -> Result<()> {
+pub fn save(workspace: &Path, state: &mut WorkflowState) -> Result<()> {
     save_to(&plan_dir(workspace), state, false)
 }
 
 /// Persist to an explicit `dir` with a choice of filename style: numbered (`NN-phase.md`, the
 /// default plan-dir layout) or OpenSpec (`spec.md`/`architecture.md`/… — for the `specs/<slug>/`
 /// layout). `state.json` is always written so a run can resume.
-pub fn save_to(dir: &Path, state: &WorkflowState, openspec_names: bool) -> Result<()> {
+///
+/// **Compare-and-swap** (spec 19): fails if the `state.json` on disk has a higher
+/// generation than the one we are writing — someone else wrote while we held this
+/// copy, and overwriting would silently discard their decision. That is exactly
+/// the failure spec 19 describes: an approval made on one surface, clobbered by
+/// another surface's next phase save, with nothing logged.
+///
+/// Takes `&mut` because a successful save bumps the generation. That is the point:
+/// the counter is only meaningful if it advances with the writes.
+pub fn save_to(dir: &Path, state: &mut WorkflowState, openspec_names: bool) -> Result<()> {
     std::fs::create_dir_all(dir)?;
+
+    // Compare before writing anything, so a refused save leaves the directory
+    // untouched rather than half-updated.
+    if let Some(on_disk) = load_from(dir)? {
+        if on_disk.generation > state.generation {
+            return Err(sc_proto::DcError::Eval(format!(
+                "{} changed underneath this run (on disk: generation {}, ours: {}). \
+                 Another process wrote it — reload before saving so their work is not lost.",
+                dir.join("state.json").display(),
+                on_disk.generation,
+                state.generation,
+            )));
+        }
+    }
+
+    state.generation += 1;
     for a in &state.artifacts {
         let name = if openspec_names {
             a.phase.openspec_filename().to_string()
         } else {
             a.phase.filename()
         };
-        std::fs::write(dir.join(name), &a.content)?;
+        write_atomic(&dir.join(name), a.content.as_bytes())?;
     }
     let json =
         serde_json::to_string_pretty(state).map_err(|e| sc_proto::DcError::Eval(e.to_string()))?;
-    std::fs::write(dir.join("state.json"), json)?;
+    write_atomic(&dir.join("state.json"), json.as_bytes())?;
     Ok(())
+}
+
+/// Write `bytes` to `path` so a reader never sees a partial file.
+///
+/// Write a sibling temp file, flush it to disk, then rename over the target —
+/// rename is atomic on NTFS and POSIX alike. A plain `fs::write` truncates first,
+/// so a crash (or a full disk) mid-write leaves a truncated `state.json` and the
+/// run's whole history is gone. The phase `.md` artifacts get the same treatment:
+/// a half-written spec is as bad as a half-written state.
+///
+/// The temp name carries the pid so two processes writing the same directory
+/// cannot collide on it — which the lease should prevent, but a safety net that
+/// costs one `format!` is worth having.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        // Without this the rename can land before the contents reach disk, and a
+        // power cut leaves an intact-looking file full of zeroes.
+        f.sync_all()?;
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Never leave the temp behind to be mistaken for an artifact.
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
 }
 
 /// Load a previously-saved workflow from the default plan dir, if `state.json` exists.
@@ -195,160 +282,5 @@ pub fn load_from(dir: &Path) -> Result<Option<WorkflowState>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn temp(tag: &str) -> PathBuf {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let d = std::env::temp_dir().join(format!("dc-wf-{tag}-{n}"));
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn next_phase_walks_the_pipeline() {
-        let mut s = WorkflowState::new("do a thing");
-        assert_eq!(s.next_phase(), Some(Phase::Specs));
-        s.set(Artifact::draft(Phase::Specs, "spec body"));
-        assert_eq!(s.next_phase(), Some(Phase::Architecture));
-    }
-
-    #[test]
-    fn approved_returns_only_approved_in_order() {
-        let mut s = WorkflowState::new("t");
-        s.set(Artifact::draft(Phase::Specs, "s"));
-        s.set(Artifact::draft(Phase::Architecture, "a"));
-        s.approve(Phase::Specs);
-        let approved = s.approved();
-        assert_eq!(approved.len(), 1);
-        assert_eq!(approved[0].phase, Phase::Specs);
-    }
-
-    #[test]
-    fn invalidate_from_drops_at_and_after() {
-        let mut s = WorkflowState::new("t");
-        for p in Phase::ALL {
-            s.set(Artifact::draft(p, "x"));
-        }
-        s.invalidate_from(Phase::Layout);
-        assert!(s.artifact(Phase::Architecture).is_some());
-        assert!(s.artifact(Phase::Layout).is_none());
-        assert!(s.artifact(Phase::WorkDecomposition).is_none());
-    }
-
-    #[test]
-    fn is_complete_requires_all_approved() {
-        let mut s = WorkflowState::new("t");
-        for p in Phase::ALL {
-            s.set(Artifact::draft(p, "x"));
-            s.approve(p);
-        }
-        assert!(s.is_complete());
-        // A single un-approved phase breaks completion.
-        s.set(Artifact::draft(Phase::Layout, "redo"));
-        assert!(!s.is_complete());
-    }
-
-    #[test]
-    fn save_to_openspec_dir_uses_named_files() {
-        let ws = temp("openspec");
-        let dir = ws.join("specs").join("my-feature");
-        let mut s = WorkflowState::new("build it");
-        s.set(Artifact::draft(Phase::Specs, "# the spec"));
-        s.set(Artifact::draft(Phase::Architecture, "# the arch"));
-        save_to(&dir, &s, true).unwrap();
-        assert!(dir.join("spec.md").is_file(), "spec.md written");
-        assert!(
-            dir.join("architecture.md").is_file(),
-            "architecture.md written"
-        );
-        assert!(
-            !dir.join("01-specs.md").exists(),
-            "no numbered names in openspec mode"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("architecture.md")).unwrap(),
-            "# the arch"
-        );
-    }
-
-    #[test]
-    fn save_then_load_round_trips_and_writes_markdown() {
-        let ws = temp("persist");
-        let mut s = WorkflowState::new("build a parser");
-        s.set(Artifact::draft(Phase::Specs, "# Specs\nbuild it"));
-        s.approve(Phase::Specs);
-        save(&ws, &s).unwrap();
-
-        // The per-phase Markdown is on disk and reviewable.
-        let md = std::fs::read_to_string(plan_dir(&ws).join("01-specs.md")).unwrap();
-        assert!(md.contains("build it"));
-
-        let loaded = load(&ws).unwrap().unwrap();
-        assert_eq!(loaded, s);
-        let _ = std::fs::remove_dir_all(&ws);
-    }
-
-    #[test]
-    fn load_from_reads_state_from_a_custom_dir_for_build_resume() {
-        // The Build-resume path: a Breakdown saved its approved design into specs/<slug>/; a later
-        // Build must load THAT state.json (not the default plan dir) so the runner skips redesign.
-        let ws = temp("resume");
-        let dir = ws.join("specs").join("alt-seats");
-        let mut s = WorkflowState::new("build the seat picker");
-        for p in [
-            Phase::Specs,
-            Phase::Architecture,
-            Phase::Layout,
-            Phase::StageBreakdown,
-        ] {
-            s.set(Artifact::draft(p, format!("# {}", p.title())));
-            s.approve(p);
-        }
-        save_to(&dir, &s, true).unwrap();
-
-        // load_from finds it; the approved design phases come back, so next_phase() skips straight
-        // to WorkDecomposition (the only un-generated phase) instead of re-running Architecture.
-        let loaded = load_from(&dir).unwrap().unwrap();
-        assert_eq!(loaded.approved().len(), 4, "all four design phases reused");
-        assert_eq!(loaded.next_phase(), Some(Phase::WorkDecomposition));
-        // A missing dir is a clean None (fresh design), not an error.
-        assert!(load_from(&ws.join("nope")).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&ws);
-    }
-
-    #[test]
-    fn feedback_is_set_persisted_and_cleared_on_approve() {
-        let ws = temp("feedback");
-        let mut s = WorkflowState::new("t");
-        s.set(Artifact::draft(Phase::Architecture, "draft"));
-        s.set_feedback(Phase::Architecture, "make it event-driven");
-        assert_eq!(
-            s.feedback(Phase::Architecture),
-            Some("make it event-driven")
-        );
-
-        // Survives a save/load round-trip.
-        save(&ws, &s).unwrap();
-        let loaded = load(&ws).unwrap().unwrap();
-        assert_eq!(
-            loaded.feedback(Phase::Architecture),
-            Some("make it event-driven")
-        );
-
-        // Approving the phase clears its feedback — the note has done its job.
-        s.approve(Phase::Architecture);
-        assert_eq!(s.feedback(Phase::Architecture), None);
-        let _ = std::fs::remove_dir_all(&ws);
-    }
-
-    #[test]
-    fn load_missing_is_none() {
-        let ws = temp("missing");
-        assert!(load(&ws).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&ws);
-    }
-}
+#[path = "state_tests.rs"]
+mod tests;

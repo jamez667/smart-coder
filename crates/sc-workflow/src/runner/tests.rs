@@ -608,5 +608,78 @@ fn shared_artifact_dir_writes_openspec_files_and_resumes() {
         "no phase re-gated on resume"
     );
 
+    // The lease is released when a run returns, so the next run over the same
+    // directory is not blocked by its predecessor.
+    assert!(
+        crate::holder(&dir).is_none(),
+        "no lease left behind after the run"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn a_second_run_is_refused_while_another_holds_the_artifact_dir() {
+    // Spec 19's single-writer problem, at the runner level: the GUI and the CLI
+    // resolve the SAME `specs/<slug>/` for the same task, and before the lease
+    // both would write it — the second silently clobbering whatever decision the
+    // first had recorded.
+    //
+    // The foreign lease here stands in for a live GUI run parked at its gate. The
+    // refusal must name it, or a user has nothing to act on.
+    let backend = full_backend();
+    let ws = temp("lease-contention");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A live lease held by another process (a pid that is not ours).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        dir.join("lease.json"),
+        serde_json::to_string(&crate::Lease {
+            owner_pid: std::process::id().wrapping_add(1),
+            owner: "sc-win".into(),
+            acquired_ms: now,
+            heartbeat_ms: now,
+            run_token: 1,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let err = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .expect_err("must refuse rather than race the holder");
+
+    let msg = err.to_string();
+    assert!(msg.contains("sc-win"), "names the holder: {msg}");
+    assert!(msg.contains("held by"), "{msg}");
+    // Refused before doing anything: no artifacts, and the holder's lease intact.
+    assert!(
+        !dir.join("spec.md").exists(),
+        "a refused run writes nothing"
+    );
+    assert_eq!(
+        crate::holder(&dir).unwrap().owner,
+        "sc-win",
+        "the holder's lease is untouched"
+    );
+
     let _ = std::fs::remove_dir_all(&ws);
 }

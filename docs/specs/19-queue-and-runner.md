@@ -63,10 +63,12 @@ gate trait all exist and are reused unchanged.
 The queue is **on disk, not in memory**. A daemon that loses its queue to a power
 cut is one nobody trusts with a task filed from a train.
 
-*Not built:* the queue, the daemon and the runner are all greenfield — this whole
-spec describes machinery that does not exist. What *does* exist is everything they
-drive: the five phases, the gate trait, the artifact directories and the resume
-path, reused unchanged. The sections below are requirements, not descriptions.
+*Not built:* the queue, the daemon and the runner are all greenfield. What *does*
+exist is everything they drive: the five phases, the gate trait, the artifact
+directories and the resume path, reused unchanged — plus the single-writer
+machinery below, built ahead of the daemon because the GUI and CLI could already
+clobber each other without it. The sections below are requirements, not
+descriptions, except where marked ✅.
 
 ## The state machine
 
@@ -130,11 +132,16 @@ This is the largest unsolved design question in the spec, and it is worth statin
 plainly rather than discovering during implementation.
 
 The daemon is not the only writer of `specs/<slug>/state.json`. The desktop GUI and
-the CLI write it too, from their own in-memory copies, and the persistence layer
-offers no protection whatsoever: `save_to` is a plain `fs::write` with no temp-file
-rename, no lock, no owner, and no generation counter
-<!--@ crates/sc-workflow/src/state.rs -->. The read-modify-write window spans an
-entire workflow, including every unbounded human gate.
+the CLI write it too, from their own in-memory copies.
+
+**This section described an unsolved problem; three of its four requirements are
+now built.** `save_to` writes via temp-file → fsync → rename and compare-and-swaps
+on a `generation` counter <!--@ crates/sc-workflow/src/state.rs -->, and a lease
+arbitrates ownership of an artifact directory
+<!--@ crates/sc-workflow/src/lease.rs -->. The read-modify-write window still spans
+an entire workflow including every unbounded human gate — that is *why* the lease
+heartbeats rather than locking, since no lock held across an unbounded human wait
+survives a crash gracefully.
 
 The concrete failure: the daemon parks a run at the specs gate; the developer gets
 home, opens the same project in the GUI, and starts a plan run on the same task.
@@ -146,17 +153,52 @@ So the appealing sentence — *approve from anywhere, no handoff protocol* — i
 *is* a handoff protocol. What the shared directory actually buys is a common
 *location* and a resumable *format*, not concurrent access. Making it safe needs:
 
-- an **ownership lease** in `state.json` — owner pid, heartbeat, expiry — so a
-  second writer can detect a live first one instead of racing it;
-- **atomic writes** (temp file plus rename) so a crash mid-save cannot truncate the
-  state, which the current code can;
-- a **generation counter** for compare-and-swap, so a stale writer fails loudly
+- ✅ an **ownership lease** — owner pid, heartbeat, expiry — so a second writer
+  can detect a live first one instead of racing it;
+- ✅ **atomic writes** (temp file plus rename) so a crash mid-save cannot truncate
+  the state;
+- ✅ a **generation counter** for compare-and-swap, so a stale writer fails loudly
   rather than overwriting;
-- and a rule that the daemon **refuses to claim a project the GUI holds open**.
+- ⬚ and a rule that the daemon **refuses to claim a project the GUI holds open**.
 
-None of these exist. Until they do, the honest position is that a project is
-either the daemon's or the GUI's at any moment, and the lease is what makes that
-enforceable rather than a convention.
+The honest position remains that a project is either the daemon's or the GUI's at
+any moment, and the lease is what makes that enforceable rather than a convention.
+
+### What the lease actually protects, and what it does not
+
+The lease is scoped to an **artifact directory**, not to a project. Two runs on
+the same task contend; two runs on *different* tasks in one workspace do not. The
+fourth requirement above is therefore only half-met: the workspace-level rule
+belongs with "Serial by default" (*at most one non-terminal run per workspace*),
+which the daemon must enforce when it exists. `holder()` is exported for exactly
+that check.
+
+Three properties earned by building it:
+
+- **A lease identifies a run, not a program.** Keying on the pid alone was tried
+  and is wrong: the GUI spawns one thread per run inside a single process
+  <!--@ crates/sc-win/src/session/mod.rs -->, so two runs on one directory shared
+  a pid, both acquired, and the first to finish deleted the lease out from under
+  the second. Each run carries a token alongside the pid, and a guard may only
+  ever refresh or release the lease it was actually granted.
+- **Contention refuses loudly and names the holder.** Proceeding read-only was
+  considered and rejected: a run that silently cannot persist loses five phases of
+  work at the end rather than at the start.
+- **A lease with no heartbeat for ninety seconds is dead and is reclaimed
+  automatically** — no `--force` flag and no pid-liveness probe. Pids are
+  recycled, and an override the user has to discover is not recovery.
+
+The lease lives in a sibling `lease.json`, deliberately **not** inside
+`state.json`: the state file is an artifact a human reads and diffs, and a
+heartbeat every fifteen seconds must not rewrite it. Being runtime state rather
+than a planning artifact, it is gitignored — `specs/<slug>/` is committed, and a
+committed lease would make a long-dead process look like a live holder to whoever
+cloned it.
+
+One limit worth stating rather than discovering: the compare-and-swap is per-save,
+so the check-then-write is not itself atomic. Two writers racing one directory
+could both pass the comparison and interleave. That is safe only because the lease
+excludes them first — the two mechanisms are a pair, not alternatives.
 
 ## What resume actually recovers
 

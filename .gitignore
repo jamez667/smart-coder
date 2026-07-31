@@ -6,6 +6,12 @@ Cargo.lock
 # not source.
 .smart-coder/
 
+# Workflow ownership leases (spec 19). Unlike the artifacts beside them in
+# specs/<slug>/, a lease is *runtime* state — who is writing this directory right
+# now — and is meaningless in another checkout. Committing one would also make a
+# dead process look like a live holder to whoever cloned it.
+lease.json
+
 # Stray stdout/stderr redirect logs from launching the GUI during dev.
 sc-win-launch-*.log
 .dc/
