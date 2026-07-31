@@ -271,6 +271,108 @@ the collector rather than the pack so an author cannot route around it.
 
 ---
 
+## M10 — Remote task intake & the background runner
+**Goal:** file a task from a phone, come back to a drafted spec — without the
+code or the model ever leaving the developer's machine
+([18](18-task-intake.md), [19](19-queue-and-runner.md), [20](20-remote-review.md)).
+
+This is the concrete form of the **bounded autonomous mode** bullet that sat in
+the list below, and it resolves that idea's tension with
+[00](00-overview.md)'s human-in-the-loop non-goal — since amended to "no unattended
+**approval**" — by reading it precisely: it protects the *gate*, not the *uptime*.
+The runner
+executes phases unattended and **parks at every gate it reaches**. No
+self-approval, under any ceremony, behind any flag.
+
+- **`sc-daemon`** — a durable on-disk queue and a serial runner, the first thing
+  in the workspace that outlives its launching process. Everything today is
+  thread-scoped: `Session::spawn` dies with the GUI, `sc-web serve` exits when the
+  run drains, and the remote mirror attaches to a session it does not own.
+- **A third front-end over `sc-workflow`**, not a second pipeline. It resolves
+  artifact directories through `sc_workflow::artifact_dirs`, so a phone-filed task
+  and a desktop session land in the same `specs/<slug>/` — which is what makes a
+  run startable on a phone and finishable on the desktop with no handoff step.
+- **The trust boundary is the design** ([18](18-task-intake.md)): the web surface
+  holds no workspace, runs no model, and has no `sc-workflow` dependency at all.
+  It enqueues and it renders. Auth reuses `sc-web`'s proven token posture —
+  per-launch bearer token, `?k=` on reads, `Authorization` on writes, loopback
+  bind with `tailscale serve` terminating TLS.
+- **Agent choice is a named profile**, never a URL/model/key form
+  ([02](02-model-backends.md)). A credential field on a network-reachable page is
+  a stolen credential, and a free model field is the frontier-model escape hatch
+  [00](00-overview.md) refuses, wearing a web form.
+- **Exit criteria:** ⬚ a task filed from a phone with the desktop closed produces
+  an approved spec artifact; a parked run survives a daemon restart; a run started
+  on the phone is finishable on the desktop; budget exhaustion fails a run without
+  a human present.
+
+**Deliberately not built:** concurrent runs (one local model server is the
+bottleneck, so concurrency buys contention), cross-run scheduling or priorities,
+and inline artifact editing on mobile — send-back with a note is the phone-shaped
+corrective ([20](20-remote-review.md)).
+
+**Depends on M6**, which is not closed: the adaptive half of the ceremony work is
+still unbuilt. The runner needs the gate set, not the adaptive tier selection, so
+this is not blocked — but it builds on an open milestone rather than a finished one.
+
+---
+
+## M11 — Post-integration review (engine + CLI landed)
+**Goal:** a second gate over the integrated diff, asking what the suite cannot —
+*should this code stay?* rather than *does it work?* ([16](16-post-integration-review.md)).
+
+Green is a floor, not a finish line. A small worker can go green by duplicating a
+helper it never found, swallowing an error to make an assertion pass, or making
+tangential changes nobody asked for. Every one of those is green, and every one is
+a defect a reviewer would have caught. The bet is sharpened by M7's own shape: a
+swarm worker gets its subtask and the text of its own files and nothing else, so
+"I couldn't find the existing helper" is not a lapse but the *expected* behaviour
+of a correctly-working worker.
+
+- ✅ **`sc-review`** — engine only (no CLI, no UI), mirroring `sc-verify`/`sc-comply`.
+  Four **lenses**, each a separate call with one question, run in parallel:
+  duplication, error handling, abstraction fit, unrelated changes.
+- ✅ **Grounding is retrieved, not hoped for** — the part most easily skipped and
+  the reason the gate works at all. Every lens gets the PageRank repo map the
+  worker never had (`sc-swarm` had no `sc-index` dependency); duplication
+  additionally gets pre-retrieved lookalike symbols, so the model is asked the
+  part only it can do — *is this the same thing?* — rather than *does something
+  like this exist?*, which the index answers better.
+- ✅ **The authority constraints**, which are the design rather than a feature
+  list: review never rewrites code (a finding is evidence handed to a decision,
+  never an edit), and **only a corroborated finding may block or feed a retry**.
+  Reviewer agreement ranks a finding; it never promotes an opinion to a fact.
+- ✅ **Anchoring to hunk + symbol**, with the line as a render hint only —
+  findings are never matched or identified by line number, and a named symbol the
+  index cannot resolve drops in rank as a cheap hallucination check.
+- ✅ **Retry carries evidence, not verdicts** — "`format_date` already exists at
+  `src/utils/date.rs:41`, import it", never the model's prose summary. It shares
+  the *existing* `max_subtask_retries` budget; two independent budgets multiply
+  into a run that never terminates.
+- ✅ **Green tests + a failed review never fail a subtask.** The work is verified
+  correct; discarding it over an unfixed finding is the worse outcome. The subtask
+  is `Done` with findings attached, and the run stops at a checkpoint if any meet
+  the gating severity. Headless, it completes and reports them loudly.
+- ✅ **Events + CLI** — `ReviewStarted`/`ReviewFinding`/`ReviewFinished` on the
+  swarm stream (round-tripping like the rest, so `--json` and replay hold), and
+  `--review` / `--review-action` / `--review-gate`. Off by default, and skipped
+  below a diff-size threshold.
+- **Exit criteria:** ✅ an uncorroborated finding can never block; a corroborated
+  one produces a retry prompt naming the symbol *and* its location; two models
+  flagging different problems in one hunk stay two findings; an unreachable
+  reviewer is skipped, not fatal. All host-tested against scripted backends — no
+  test needs a live model.
+
+**Not built yet, and named as such:** the **multi-model panel** (the types carry
+`raised_by`/`considered_by` from the start so it drops in without reshaping them,
+but it needs *named connections* first — the connection model is still a fixed
+`Local`/`Gemini` pair with one provider per stage), and the **desktop surface**
+that renders findings as line comments on the subtask's diff
+([12](12-platform-clients.md)). `sc-win` therefore leaves review off rather than
+paying for calls it cannot yet show properly.
+
+---
+
 ## Post-v1 / future ideas
 - **User-defined tools** via config.
 - **Heterogeneous swarms** — specialized worker roles (searcher/editor/tester/
@@ -278,13 +380,7 @@ the collector rather than the pack so an author cannot route around it.
   ([08](08-orchestration-and-swarm.md)).
 - **Embedding-based retrieval** with a small local embedder (optional).
 - **TUI** (v2 interface).
-- **Bounded autonomous mode** — unattended runs with strong budgets/guardrails.
 - **LoRA/adapter experiments** — light task-specific tuning of the small model.
-- **Post-integration review** ([16](16-post-integration-review.md)) — a second
-  gate over the integrated diff, asking what the suite can't: did this duplicate
-  an existing helper, swallow an error, exceed its subtask's scope? Model-driven
-  lenses, ranked by deterministic corroboration, feeding the retry path that
-  already exists for failing tests.
 - **Spec traceability** ([17](17-spec-traceability.md)) — anchored spec claims
   checked deterministically in CI, so drift fails a build instead of waiting for
   someone to read two documents side by side. The `spec-guardian` agent stays as
