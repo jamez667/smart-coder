@@ -280,6 +280,15 @@ the collector rather than the pack so an author cannot route around it.
 - **TUI** (v2 interface).
 - **Bounded autonomous mode** — unattended runs with strong budgets/guardrails.
 - **LoRA/adapter experiments** — light task-specific tuning of the small model.
+- **Post-integration review** ([16](16-post-integration-review.md)) — a second
+  gate over the integrated diff, asking what the suite can't: did this duplicate
+  an existing helper, swallow an error, exceed its subtask's scope? Model-driven
+  lenses, ranked by deterministic corroboration, feeding the retry path that
+  already exists for failing tests.
+- **Spec traceability** ([17](17-spec-traceability.md)) — anchored spec claims
+  checked deterministically in CI, so drift fails a build instead of waiting for
+  someone to read two documents side by side. The `spec-guardian` agent stays as
+  the semantic layer above it.
 
 ## Cross-cutting throughout
 - **We dogfood TDD.** Every milestone lands with unit tests for its components,

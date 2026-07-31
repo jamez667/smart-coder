@@ -64,12 +64,12 @@ pub fn find_symbol(root: &Path, name: &str) -> String {
     }
     let sources = collect_sources(root);
     // Be honest about *why* a symbol can't be found: this index only parses
-    // Rust/Python. With no indexable files, find_symbol can't help — steer the
+    // Rust/Python/C#. With no indexable files, find_symbol can't help — steer the
     // model to read_file/list_dir/search_code instead of looping (spec 04 —
     // structured, actionable feedback).
     if sources.is_empty() {
         return format!(
-            "find_symbol {name:?}: this project has no Rust/Python files to index \
+            "find_symbol {name:?}: this project has no Rust/Python/C# files to index \
              (find_symbol only supports those). Use list_dir, then read_file or \
              search_code instead."
         );
@@ -158,7 +158,7 @@ mod tests {
         let root = temp_repo("noindex");
         std::fs::write(root.join("impl.sh"), "is_even() { return 1; }\n").unwrap();
         let out = find_symbol(&root, "is_even");
-        assert!(out.contains("no Rust/Python files"), "{out}");
+        assert!(out.contains("no Rust/Python/C# files"), "{out}");
         assert!(
             out.contains("list_dir") || out.contains("read_file"),
             "{out}"
