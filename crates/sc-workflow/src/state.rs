@@ -132,7 +132,7 @@ impl WorkflowState {
         self.artifacts.retain(|a| a.phase.index() < phase.index());
     }
 
-    /// Whether all six phases have an approved artifact.
+    /// Whether every phase has an approved artifact.
     pub fn is_complete(&self) -> bool {
         Phase::ALL
             .iter()

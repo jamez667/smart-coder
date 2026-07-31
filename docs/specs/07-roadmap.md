@@ -116,15 +116,37 @@ under control. Everything else builds on a working, reliable single-step loop.
 **Goal:** drive tasks through the gated pipeline ([09](09-workflow-and-checkpoints.md))
 so mistakes are caught before code is written. Runs with the single-agent core;
 its final phase becomes the swarm's input (M7).
-- Phase engine: specs → architecture → layout → test-first stage breakdown →
-  implementation plan → work decomposition.
-- Durable, versioned phase artifacts on disk (resumable across sessions).
-- Checkpoint gates in the CLI: approve / revise / send-back (incl. to earlier
-  phases) / abort ([06](06-cli-ux.md)); harness-enforced, model can't self-approve.
-- Adaptive ceremony + configurable gate set (collapse phases for trivial tasks).
-- **Exit criteria:** a real task is taken from a one-line request through all six
-  gated phases to an approved, test-defined work decomposition — with send-back
-  correctly invalidating and regenerating downstream artifacts.
+- ✅ Phase engine: specs → architecture → layout → test-first stage breakdown →
+  work decomposition. **Five phases, not six** — the separate implementation-plan
+  phase is folded into the stage breakdown, which carries the per-stage steps
+  ([09](09-workflow-and-checkpoints.md) records why, and when it's worth revisiting).
+  - *Limitation:* the breakdown is **test-first only on Python**; other stacks get
+    the ordered steps but no frozen-test contract (spec 09).
+- ✅ Durable phase artifacts on disk, resumable across sessions: one Markdown file
+  per phase plus `state.json`, in `specs/<slug>/` (OpenSpec names) or the numbered
+  `.smart-coder/plan/`. Both front-ends resolve the directory through one engine
+  helper, so a Build resumes the design a prior Breakdown approved.
+  - *Deferred:* artifact **versioning** — saves overwrite in place, so a send-back
+    discards the prior draft, and the workflow never commits. Ordinary version
+    control covers the reviewable-diff intent day to day, which is why this hasn't
+    bitten ([09](09-workflow-and-checkpoints.md) records it as not built).
+- ✅ Checkpoint gates: approve / revise / send-back (incl. to earlier phases) /
+  abort ([06](06-cli-ux.md)); harness-enforced — the runner, not the model, applies
+  each decision, and send-back invalidates downstream. Both front-ends implement
+  one `Gate` trait over the shared loop: the CLI reads stdin; the GUI resolves a
+  send-back from PR-style line comments, whose *placement* picks the target phase.
+  The GUI deliberately drops **revise** — commenting supersedes hand-editing the
+  artifact — while the CLI keeps it, where an editor is the natural surface.
+- **Adaptive ceremony + configurable gate set.** ✅ The gate set is configurable
+  (`--ceremony minimal|standard|full`, `--gates …`), applied by a `CeremonyGate`
+  the runner can't tell from any other. ⬚ Nothing *adaptive* is built: no scope
+  heuristic picks a tier (it defaults to full), and no phase ever collapses — a
+  tier changes which phases **gate**, never how many run.
+- **Exit criteria:** ✅ a real task goes from a one-line request through all five
+  gated phases to an approved, test-defined work decomposition, with send-back
+  correctly invalidating and regenerating downstream artifacts (`sc-workflow`
+  runner tests). ⬚ The adaptive half of the ceremony bullet is unbuilt, so this
+  milestone is **not** closed.
 
 ## M7 — Orchestration & the worker swarm (core landed)
 **Goal:** scale out — many tiny workers on one codebase under a larger
@@ -192,10 +214,16 @@ agent loop, unchanged; the swarm is a coordinator above it.
 ## M8 — Windows client (flexible)
 **Goal:** the capable desktop client — same Rust core, full tools, flexible
 backends ([12](12-platform-clients.md)).
-- Desktop shell (CLI per [06](06-cli-ux.md); `sc-win` GUI) for `x86_64-pc-windows-msvc`.
-- Flexible backends (Ollama / llama.cpp / OpenAI-compat) incl. up to the 12B
-  ceiling, so this client can act as the **T1 orchestrator** ([02](02-model-backends.md)).
-- Full filesystem + shell with the permission layer ([04](04-tools.md)).
+- ✅ Desktop shell (CLI per [06](06-cli-ux.md); `sc-win` GUI) for
+  `x86_64-pc-windows-msvc` — an iced app with chat, file tree, code view, git diff,
+  line comments, terminal, and the plan panel.
+- ✅ Flexible backends (Ollama / llama.cpp / OpenAI-compat) incl. up to the 12B
+  ceiling, so this client can act as the **T1 orchestrator** ([02](02-model-backends.md)):
+  plain / native-tool-calling / GBNF-constrained modes, with a separate orchestrator
+  connection wired into the staged workflow.
+- ✅ Full filesystem + shell with the permission layer ([04](04-tools.md)) — the
+  GUI surfaces the confirmation itself (Allow / Deny / remember-prefix) and
+  fails **closed**, denying rather than hanging if the UI is gone.
 - **Exit criteria:** completes a real multi-file TDD task on Windows.
 
 ---

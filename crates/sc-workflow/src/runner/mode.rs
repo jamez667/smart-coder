@@ -7,7 +7,7 @@ use crate::state::WorkflowState;
 
 /// How much of the pipeline to run, and whether to write frozen tests.
 ///
-/// The default ([`WorkflowMode::full_tdd`]) is the original behavior: all six phases, and the
+/// The default ([`WorkflowMode::full_tdd`]) is the original behavior: every phase, and the
 /// approved stage-breakdown drives worker-written frozen tests. [`WorkflowMode::plan_only`] is
 /// the "structured design, no TDD" mode the desktop app's Execute uses: run the design phases
 /// through the stage breakdown, then STOP — no test writing, no decomposition, no build — so
@@ -21,7 +21,7 @@ pub struct WorkflowMode {
 }
 
 impl WorkflowMode {
-    /// The full six-phase TDD pipeline: writes frozen tests, runs to work-decomposition.
+    /// The full TDD pipeline: writes frozen tests, runs to work-decomposition.
     pub fn full_tdd() -> Self {
         Self {
             skip_tests: false,

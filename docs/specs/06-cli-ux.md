@@ -88,7 +88,7 @@ staged workflow ([09](09-workflow-and-checkpoints.md)). At each checkpoint the
 agent presents the phase artifact and waits for a decision:
 
 ```
-⛳ checkpoint — phase 3/6: LAYOUT   (specs ✓  architecture ✓)
+⛳ checkpoint — phase 3/5: LAYOUT   (specs ✓  architecture ✓)
    artifact written to specs/alt-seats/layout.md   (review the diff)
 
    [a]pprove · [r]evise (edit the file yourself) · [s]end back · [v]iew · [q]uit ›

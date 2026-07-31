@@ -4,17 +4,22 @@
 //! answer). For the prose planning phases a small model writes the document
 //! directly, so the hidden reasoning is pure latency; for the structured (JSON)
 //! phases it can help it enumerate edge cases / dependencies. This policy holds an
-//! independent think/no-think choice **for each of the six phases**, kept
-//! configurable so a beefier setup can simply turn thinking back on per step.
+//! independent think/no-think choice **for each phase**, kept configurable so a
+//! beefier setup can simply turn thinking back on per step.
 
 use crate::phase::Phase;
+
+/// One flag per pipeline phase. Derived from [`Phase::ALL`] so adding or removing a
+/// phase can't leave a dead slot behind (it did: this was a hardcoded `6` after the
+/// implementation-plan phase was folded into the stage breakdown).
+const N: usize = Phase::ALL.len();
 
 /// Per-phase thinking control: for each phase, whether to suppress the
 /// orchestrator's chain-of-thought (append `/no_think`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThinkPolicy {
     /// One flag per phase, indexed by [`Phase::index`]: `true` = suppress thinking.
-    suppress: [bool; 6],
+    suppress: [bool; N],
 }
 
 impl Default for ThinkPolicy {
@@ -23,7 +28,7 @@ impl Default for ThinkPolicy {
     /// structured (JSON) phases that reason about edge cases / dependencies.
     fn default() -> Self {
         let mut p = ThinkPolicy {
-            suppress: [false; 6],
+            suppress: [false; N],
         };
         for phase in Phase::ALL {
             p.suppress[phase.index()] = !phase.is_reasoning();
@@ -36,14 +41,14 @@ impl ThinkPolicy {
     /// Suppress thinking on every phase (fastest).
     pub fn never_think() -> Self {
         ThinkPolicy {
-            suppress: [true; 6],
+            suppress: [true; N],
         }
     }
 
     /// Think on every phase (best when compute is plentiful / a strong reasoner).
     pub fn always_think() -> Self {
         ThinkPolicy {
-            suppress: [false; 6],
+            suppress: [false; N],
         }
     }
 

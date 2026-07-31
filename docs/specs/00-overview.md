@@ -80,7 +80,7 @@ major design decision in `smart-coder` is a direct response to one of these:
    [08 — Orchestration & the worker swarm](08-orchestration-and-swarm.md) and
    [02 — Tiered model assignment](02-model-backends.md).
 7. **Plan in phases, gate with humans.** Move through specs → architecture →
-   layout → test-first stages → implementation plan → work decomposition, with a
+   layout → test-first stages → work decomposition, with a
    human checkpoint between each. Catch mistakes where they're cheap, before code
    is written. See [09 — Workflow & human checkpoints](09-workflow-and-checkpoints.md).
 8. **Tests are the control system.** Full TDD, mandatory at the unit level: a

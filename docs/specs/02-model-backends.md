@@ -130,7 +130,7 @@ checkable ([11](11-testing-and-tdd.md)).
 | **T0 — scout** *(optional)* | tiniest / specialized | read-only search & navigation, mechanical lookups | trivial, ultra-cheap, runs constantly |
 
 This maps directly onto the workflow ([09](09-workflow-and-checkpoints.md)) and
-the swarm ([08](08-orchestration-and-swarm.md)): planning Phases 2–6 run on T1
+the swarm ([08](08-orchestration-and-swarm.md)): planning Phases 2–5 run on T1
 (the orchestrator), execution runs on a swarm of T2 workers, and T1 also does
 integration/arbitration.
 

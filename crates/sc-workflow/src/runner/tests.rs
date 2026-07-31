@@ -188,7 +188,7 @@ fn runs_all_phases_and_emits_a_board() {
     )
     .unwrap();
 
-    // All six phases ran, in order, and the workflow is complete.
+    // Every phase ran, in order, and the workflow is complete.
     assert_eq!(seen.into_inner(), Phase::ALL.to_vec());
     assert!(outcome.state.is_complete());
     // The decomposition produced a swarm board with two subtasks.
