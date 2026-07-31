@@ -206,20 +206,42 @@ excludes them first — the two mechanisms are a pair, not alternatives.
 true, and load-bearing here — but it is narrower than it sounds, and the gap lands
 squarely on the daemon's most common scenario.
 
-Resume adopts **approved** artifacts only. A `Draft` — a phase that generated
-cleanly and was saved, but whose gate was never answered because the machine
-rebooted overnight — is discarded and regenerated. The developer who approves in
-the morning is shown a *different* artifact than the one the phone showed them
-last night, which is corrosive for a component whose pitch is "come back to a
-drafted spec." A parked run must therefore restore its pending draft, not just its
-approved history.
+**All three gaps in this section are now closed** — they were bugs in the existing
+runner, not daemon work, so they were fixed ahead of it.
 
-Two related sharp edges the runner must not inherit quietly: a corrupt or truncated
-`state.json` is currently swallowed and silently restarted from the top; and
-`test_files` starts empty on resume, so a run resumed past the stage-breakdown gate
-loses the frozen-test paths that [09](09-workflow-and-checkpoints.md) calls the
-approved contract. A daemon restart silently unfreezing the contract tests is a
-correctness bug, not a papercut.
+- ✅ **The pending draft is restored, not regenerated.** Resume adopted *approved*
+  artifacts only, so a phase that generated cleanly and was saved — but whose gate
+  was never answered because the machine rebooted overnight — was discarded and
+  re-generated. The developer approving in the morning was shown a *different*
+  artifact than the one the phone showed them last night, which is corrosive for
+  something pitched as "come back to a drafted spec." The draft is restored and
+  re-**gated**: it was never signed off, and only a human may do that.
+
+  This one had a second half that the obvious implementation missed.
+  `next_phase()` returned the first phase with *no artifact*, so a restored draft
+  — which has one — was stepped straight past: displayed, never gated, left
+  `Draft` forever, and `is_complete()` never became true, poisoning the signal
+  the CLI and GUI use to decide a run finished. **A phase is advanced by its
+  gate, not by a file existing**, so `next_phase()` now keys on approval. The two
+  definitions coincide on a fresh run and diverge exactly at the case that
+  matters.
+- ✅ **The frozen contract tests survive.** `test_files` lived only in memory, so a
+  resumed run started with an empty list and nothing downstream knew which tests
+  were frozen — a worker could rewrite the very tests
+  [09](09-workflow-and-checkpoints.md) calls the approved contract. They are now
+  part of the persisted state, because they *are* part of the contract rather than
+  a by-product of the run that produced them. A daemon restart silently unfreezing
+  them is a correctness bug, not a papercut.
+- ✅ **A corrupt `state.json` is an error, not a fresh start.** It was swallowed and
+  the run silently restarted from the top, discarding an approved design and
+  re-running work a human had already signed off — a failure that reads as "the
+  tool redid everything", with nothing to point at. The run now refuses and says
+  to move the file aside deliberately.
+- ✅ **Send-back feedback notes survive a resume.** Persisted all along, they were
+  simply never copied onto the resuming state — so a phase sent back with "make it
+  event-driven" came back regenerated having never seen the note. Narrower than the
+  three above (guidance, not an approved decision) but the same class of silent
+  loss, and a two-line fix once the others were in place.
 
 ## Task identity
 
@@ -229,10 +251,27 @@ The slug is derived from the task text — truncated at the first sentence and c
 at 40 characters <!--@ sc_workflow::artifact_dirs --> — so "Fix the bug. In auth"
 and "Fix the bug. In the parser" produce the same directory. For an interactive user
 this is rare and visible. For a queue accepting free-form text typed on a phone,
-short generic first sentences are the *normal* case, and the collision is silent:
-the second run adopts the first's approved artifacts as its own and then overwrites
-them. `state.json` already records the task text, which makes mismatch detection
-cheap — it is simply never read back.
+short generic first sentences are the *normal* case, and the collision was silent:
+the second run adopted the first's approved artifacts as its own and then
+overwrote them.
+
+✅ **The collision is now detected rather than the slug made unique.** `state.json`
+always recorded the task text; it was simply never read back. A run whose task
+disagrees with the one already in the directory refuses, naming both. Assigning an
+id at intake — still the right long-term answer, and what a queue needs — makes
+the *directory* unambiguous; this makes the *silence* impossible either way, and
+it protects the GUI and CLI today rather than only the daemon later.
+
+One thing worth recording, because it was got wrong first: the comparison must be
+the **whole first line**, not the first sentence. Comparing sentences seems more
+principled — the slug is cut there — but two tasks agreeing on the sentence and
+differing after is *exactly* the collision, so that version of the check never
+fired at all.
+
+Its scope is worth stating too: the check fires only where a `state.json` already
+exists. Two colliding tasks starting at once still race for the directory, and the
+lease — not this check — is what separates them. The two are complements, one for
+sequential collisions and one for simultaneous.
 
 > **This is not the swarm.** [08](08-orchestration-and-swarm.md) parallelises
 > *workers within one task*, after the final gate, with an orchestrator and a

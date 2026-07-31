@@ -67,6 +67,17 @@ pub struct WorkflowState {
     /// as generation 0 — no migration, no breakage.
     #[serde(default)]
     generation: u64,
+    /// The frozen contract-test paths written after the stage breakdown was
+    /// approved (spec 09/11).
+    ///
+    /// Persisted because they are part of the **approved contract**, not a
+    /// by-product of the run that happened to produce them. Held only in memory,
+    /// a resumed run started with an empty list — so a daemon restart, or a
+    /// Breakdown→Build handoff, silently unfroze the tests a human had approved
+    /// and let a worker rewrite them to pass (spec 19). That is a correctness
+    /// bug, not a papercut.
+    #[serde(default)]
+    test_files: Vec<String>,
 }
 
 impl WorkflowState {
@@ -76,7 +87,19 @@ impl WorkflowState {
             artifacts: Vec::new(),
             feedback: Vec::new(),
             generation: 0,
+            test_files: Vec::new(),
         }
+    }
+
+    /// The frozen contract-test paths, if the stage breakdown has been approved.
+    pub fn test_files(&self) -> &[String] {
+        &self.test_files
+    }
+
+    /// Record the frozen contract tests — the approved contract later phases must
+    /// satisfy rather than edit (spec 11).
+    pub fn set_test_files(&mut self, files: Vec<String>) {
+        self.test_files = files;
     }
 
     /// How many times this state has been persisted.
@@ -108,13 +131,37 @@ impl WorkflowState {
         v
     }
 
-    /// The next phase to produce: the first phase with no artifact yet. `None` when
-    /// every phase has an artifact.
+    /// The next phase the loop must handle: the first that is not yet **approved**.
+    /// `None` when every phase has been signed off.
+    ///
+    /// Keyed on approval rather than mere existence. Keyed on existence, a
+    /// restored draft (spec 19) was skipped: it has an artifact, so the loop
+    /// stepped past it, the gate never saw it, the phase stayed `Draft` forever
+    /// and [`is_complete`](Self::is_complete) never became true — poisoning the
+    /// signal the CLI and GUI use to decide a run finished.
+    ///
+    /// The two definitions coincide for a fresh run, where an artifact only ever
+    /// exists once its phase has been through the gate. They diverge exactly at
+    /// the case that matters: a draft awaiting a decision.
     pub fn next_phase(&self) -> Option<Phase> {
         Phase::ALL
             .iter()
             .copied()
-            .find(|p| self.artifact(*p).is_none())
+            .find(|p| !self.artifact(*p).is_some_and(Artifact::is_approved))
+    }
+
+    /// The one un-approved artifact, if a run stopped with a draft awaiting its
+    /// gate — a phase that generated and saved, but whose checkpoint was never
+    /// answered.
+    ///
+    /// At most one can exist: the loop generates a phase, saves it as a draft,
+    /// and blocks. So this is the artifact a resuming run should show the human
+    /// again rather than regenerate (spec 19).
+    pub fn pending_draft(&self) -> Option<&Artifact> {
+        self.artifacts
+            .iter()
+            .filter(|a| !a.is_approved())
+            .min_by_key(|a| a.phase.index())
     }
 
     /// Insert or replace `phase`'s artifact.

@@ -159,29 +159,92 @@ pub fn run_workflow_moded_to(
     let mut state = WorkflowState::new(grounded);
     let mut test_files = Vec::new();
     let mut aborted = false;
+    // A draft restored from a parked run, re-offered to the gate on its phase rather
+    // than regenerated (spec 19). Taken once.
+    let mut resumed_draft: Option<crate::state::Artifact> = None;
 
-    // Resume from an approved breakdown instead of regenerating it. A **Build** reuses the same
-    // task (and thus the same `art_dir`) a prior **Breakdown** ran, so its approved design phases
-    // are already on disk in `state.json`. Adopt those approved artifacts up front: `next_phase()`
-    // then skips straight past specs/architecture/layout/stage-breakdown to the build, instead of
-    // re-designing and re-gating them (the bug where clicking Build re-did the architecture).
+    // Resume from a prior run in this directory instead of regenerating it. A **Build** reuses the
+    // same task (and thus the same `art_dir`) a prior **Breakdown** ran, so its approved design
+    // phases are already on disk in `state.json`. Adopt them up front: `next_phase()` then skips
+    // straight past specs/architecture/layout/stage-breakdown to the build, instead of re-designing
+    // and re-gating them (the bug where clicking Build re-did the architecture).
     //
-    // Only APPROVED phases are adopted — a draft/unapproved phase (e.g. an aborted breakdown)
-    // still regenerates and gates normally. We copy them onto the freshly-grounded `state` (rather
-    // than adopting the loaded state wholesale) so the current run's grounding/feedback apply to
-    // anything that does regenerate.
-    if let Ok(Some(prior)) = crate::state::load_from(&art_dir) {
-        for a in prior.approved() {
-            state.set(a.clone());
-            state.approve(a.phase);
-            // Surface the reused artifact to the UI so the chat shows the approved design, not a
-            // blank jump to the build.
-            on_phase(a.phase, &a.content);
+    // A corrupt or truncated `state.json` is an ERROR, not a fresh start (spec 19). Swallowing it
+    // silently discards an entire approved design and quietly re-runs work a human already signed
+    // off — the failure looks like "the tool redid everything", with nothing to point at.
+    match crate::state::load_from(&art_dir) {
+        Ok(Some(prior)) => {
+            // A slug is derived from the task's first sentence, capped at 40 chars, so
+            // "Fix the bug. In auth" and "Fix the bug. In the parser" collide silently
+            // (spec 19 — "Task identity"). For a human typing an interactive prompt that
+            // is rare; for free-text filed on a phone, short generic first sentences are
+            // the NORMAL case. Without this check the second run adopts the first's
+            // approved artifacts as its own and then overwrites them.
+            //
+            // `state.json` has always recorded the task text. It was simply never read back.
+            if let Some(conflict) = task_conflict(&prior.task, &state.task) {
+                return Err(sc_proto::DcError::Eval(format!(
+                    "{} already holds a different task.\n  there: {conflict}\n  here:  {}\n\
+                     Both slugify the same way. Rename one, or point this run at another \
+                     directory — continuing would overwrite the other task's approved design.",
+                    art_dir.display(),
+                    first_line_of(&state.task),
+                )));
+            }
+
+            for a in prior.approved() {
+                state.set(a.clone());
+                state.approve(a.phase);
+                // Surface the reused artifact to the UI so the chat shows the approved design, not
+                // a blank jump to the build.
+                on_phase(a.phase, &a.content);
+            }
+
+            // Restore the pending DRAFT too, not just the approved history (spec 19). A phase that
+            // generated cleanly and was saved, but whose gate was never answered because the
+            // machine rebooted overnight, would otherwise be discarded and regenerated — so the
+            // developer approving in the morning is shown a *different* artifact than the one they
+            // were looking at last night. That is corrosive for something pitched as "come back to
+            // a drafted spec", and it wastes the model call that produced it.
+            //
+            // The draft is re-gated, not adopted as approved: it was never signed off, and only a
+            // human may do that. It is held aside rather than written into `state`, because
+            // `next_phase()` would then have to decide whether an un-approved artifact counts as
+            // "done" — and the loop must both re-offer it AND still stop there.
+            if let Some(draft) = prior.pending_draft() {
+                on_phase(draft.phase, &draft.content);
+                resumed_draft = Some(draft.clone());
+            }
+
+            // Send-back notes are grounding for the regeneration they asked for, so they must
+            // outlive a restart too. Persisted all along, they were simply never copied onto the
+            // resuming state — so a phase sent back with "make it event-driven" came back
+            // regenerated without ever having seen the note.
+            for phase in Phase::ALL {
+                if let Some(notes) = prior.feedback(phase) {
+                    state.set_feedback(phase, notes);
+                }
+            }
+
+            // The frozen contract tests are part of the approved contract, so they survive a
+            // resume. Starting empty here let a resumed run rewrite the tests a human approved
+            // (spec 19 — "a correctness bug, not a papercut").
+            test_files = prior.test_files().to_vec();
+            state.set_test_files(test_files.clone());
+
+            // Adopt the generation we resumed from, or the first save would look like a
+            // stale writer to its own predecessor and be refused (spec 19). We hold the
+            // lease, so this is a continuation of that state rather than a race with it.
+            state.adopt_generation(prior.generation());
         }
-        // Adopt the generation we resumed from, or the first save would look like a
-        // stale writer to its own predecessor and be refused (spec 19). We hold the
-        // lease, so this is a continuation of that state rather than a race with it.
-        state.adopt_generation(prior.generation());
+        Ok(None) => {}
+        Err(e) => {
+            return Err(sc_proto::DcError::Eval(format!(
+                "{} could not be read: {e}. It holds this run's approved design, so starting \
+                 over would silently discard it — move it aside to begin fresh.",
+                art_dir.join("state.json").display(),
+            )))
+        }
     }
     // Detect the project's language once, so every phase prompt speaks it (a Rust cargo repo
     // gets Rust rules, not the Python/Flask default). Derived from the workspace, not stored in
@@ -208,12 +271,21 @@ pub fn run_workflow_moded_to(
     }
 
     while let Some(phase) = state.next_phase() {
-        // Forward each streamed token tagged with its phase, so the caller (the desktop chat
-        // panel) can watch the reply type live and know which phase is speaking — a slow phase
-        // used to sit frozen with no sign of life.
-        let artifact = generate_phase(orchestrator, phase, &state, think, stack, &mut |delta| {
-            on_token(phase, delta)
-        });
+        // A draft restored from a parked run is put back to the human as-is rather than
+        // regenerated (spec 19): the whole point is that they approve the artifact they were
+        // already shown, not a fresh one. Taken once — `resumed_draft` is cleared here — so a
+        // send-back to this phase regenerates normally.
+        let artifact = match resumed_draft.take().filter(|a| a.phase == phase) {
+            Some(draft) => draft,
+            None => {
+                // Forward each streamed token tagged with its phase, so the caller (the desktop
+                // chat panel) can watch the reply type live and know which phase is speaking — a
+                // slow phase used to sit frozen with no sign of life.
+                generate_phase(orchestrator, phase, &state, think, stack, &mut |delta| {
+                    on_token(phase, delta)
+                })
+            }
+        };
         // Fail loudly on an empty artifact (after the engine's retries) rather than
         // chaining a broken plan downstream — the usual cause is a dead/unreachable
         // orchestrator backend (spec 00 — fail clearly, don't corrupt silently).
@@ -251,11 +323,14 @@ pub fn run_workflow_moded_to(
                 if let Some(notes) = notes {
                     state.set_feedback(target, notes);
                 }
-                save_state(&mut state)?;
                 // Test files written from a now-dropped coverage plan are stale.
+                // Cleared BEFORE the save, or the stale contract is what a resume
+                // would pick back up.
                 if target.index() <= Phase::StageBreakdown.index() {
                     test_files.clear();
+                    state.set_test_files(Vec::new());
                 }
+                save_state(&mut state)?;
                 continue;
             }
             Decision::Abort => {
@@ -275,6 +350,11 @@ pub fn run_workflow_moded_to(
             let coverage = crate::coverage::parse_coverage(&artifact_content(&state, phase));
             let written = crate::testwriter::write_tests(worker, &coverage);
             test_files = crate::testwriter::persist_tests(workspace, &written)?;
+            // Persist the frozen contract alongside the artifacts. Held only in
+            // memory, it was lost on any resume — silently unfreezing the tests a
+            // human had just approved (spec 19).
+            state.set_test_files(test_files.clone());
+            save_state(&mut state)?;
         }
 
         // Stop-at-phase (plan-only stops once the stage breakdown is approved): the design is
@@ -292,4 +372,35 @@ pub fn run_workflow_moded_to(
         test_files,
         aborted,
     })
+}
+
+/// The first line of a task, trimmed — what a human recognises it by, and what the
+/// slug is derived from.
+///
+/// Grounding *appends* to the task (the plan body, file contents), so the original
+/// text is always the prefix and the first line survives intact. That is what makes
+/// a stored task comparable to a fresh one at all.
+fn first_line_of(task: &str) -> &str {
+    task.lines().next().unwrap_or("").trim()
+}
+
+/// Are these two tasks different enough that sharing a directory would be a
+/// collision? Returns the stored task's first line when so.
+///
+/// Compared on the **full first line**, not on the first sentence. Comparing
+/// sentences was tried and is exactly wrong: two tasks agreeing there and
+/// differing after — "Fix the bug. In auth" versus "Fix the bug. In the parser" —
+/// *is* the collision spec 19 describes, since the slug is cut at the first
+/// sentence. Treating that as legitimate defeats the entire check.
+///
+/// A stored task that is a prefix of ours, or the reverse, is the same run
+/// continuing with more grounding attached rather than a conflict — grounding
+/// appends, so the original text is always the prefix.
+pub(super) fn task_conflict<'a>(stored: &'a str, current: &str) -> Option<&'a str> {
+    let a = first_line_of(stored);
+    let b = first_line_of(current);
+    if a.is_empty() || b.is_empty() || a.starts_with(b) || b.starts_with(a) {
+        return None;
+    }
+    Some(a)
 }

@@ -683,3 +683,391 @@ fn a_second_run_is_refused_while_another_holds_the_artifact_dir() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn a_resumed_run_shows_the_pending_draft_rather_than_regenerating_it() {
+    // Spec 19's "come back to a drafted spec" case. Overnight the phone showed a
+    // drafted spec; the machine rebooted before anyone approved it. Restoring only
+    // the APPROVED history would discard that draft and regenerate a *different*
+    // artifact — so the developer approves something they never reviewed.
+    let ws = temp("resume-draft");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A parked run: a draft saved, its gate never answered.
+    let mut parked = crate::state::WorkflowState::new(task);
+    parked.set(Artifact::draft(
+        Phase::Specs,
+        "# THE DRAFT THE PHONE SHOWED",
+    ));
+    crate::state::save_to(&dir, &mut parked, true).unwrap();
+
+    // Resume. The backend would happily generate something different if asked.
+    let backend = full_backend();
+    let seen: Mutex<Vec<(Phase, String)>> = Mutex::new(Vec::new());
+    let outcome = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|p, c| seen.lock().unwrap().push((p, c.to_string())),
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+
+    // The human is shown the artifact they were already looking at.
+    let specs_shown: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| *p == Phase::Specs)
+        .map(|(_, c)| c.clone())
+        .collect();
+    assert!(
+        specs_shown
+            .iter()
+            .any(|c| c.contains("THE DRAFT THE PHONE SHOWED")),
+        "the pending draft was restored, not regenerated: {specs_shown:?}"
+    );
+    // And it is the restored draft that got gated and approved — not a fresh one.
+    assert_eq!(
+        outcome.state.artifact(Phase::Specs).unwrap().content,
+        "# THE DRAFT THE PHONE SHOWED"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn a_resumed_run_keeps_the_frozen_contract_tests() {
+    // Spec 19: "A daemon restart silently unfreezing the contract tests is a
+    // correctness bug, not a papercut." Held only in memory, `test_files` started
+    // empty on resume — so nothing downstream knew which tests were frozen, and a
+    // worker could rewrite them to pass.
+    let ws = temp("resume-frozen");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A prior run approved its design and froze two contract tests.
+    let mut prior = crate::state::WorkflowState::new(task);
+    for p in [
+        Phase::Specs,
+        Phase::Architecture,
+        Phase::Layout,
+        Phase::StageBreakdown,
+    ] {
+        prior.set(Artifact::draft(p, format!("# {}", p.title())));
+        prior.approve(p);
+    }
+    prior.set_test_files(vec!["test_a.py".into(), "test_b.py".into()]);
+    crate::state::save_to(&dir, &mut prior, true).unwrap();
+
+    let backend = full_backend();
+    let outcome = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.test_files,
+        vec!["test_a.py".to_string(), "test_b.py".to_string()],
+        "the approved contract survived the resume"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn two_different_tasks_that_slugify_alike_do_not_share_a_directory() {
+    // Spec 19's "Task identity": the slug is the first sentence capped at 40
+    // chars, so "Fix the bug. In auth" and "Fix the bug. In the parser" produce
+    // the same directory. For phone-typed free text, short generic first
+    // sentences are the NORMAL case — and the second run would silently adopt the
+    // first's approved artifacts as its own and then overwrite them.
+    let ws = temp("slug-collision");
+    let first = "Fix the bug. In auth";
+    let second = "Fix the bug. In the parser";
+
+    let (dir_a, _) = crate::artifact_dirs(first, &ws);
+    let (dir_b, _) = crate::artifact_dirs(second, &ws);
+    assert_eq!(dir_a, dir_b, "these really do collide");
+    let dir = dir_a.unwrap();
+
+    let backend = full_backend();
+    run_workflow_moded_to(
+        &backend,
+        &backend,
+        first,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+
+    let err = run_workflow_moded_to(
+        &backend,
+        &backend,
+        second,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .expect_err("a different task must not adopt this one's design");
+
+    let msg = err.to_string();
+    assert!(msg.contains("different task"), "{msg}");
+    assert!(
+        msg.contains("In auth"),
+        "names what is already there: {msg}"
+    );
+
+    // The first task's work is untouched.
+    let on_disk = crate::state::load_from(&dir).unwrap().unwrap();
+    assert!(
+        on_disk.task.starts_with("Fix the bug. In auth"),
+        "{}",
+        on_disk.task
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn the_same_task_resuming_is_not_a_collision() {
+    // The Breakdown→Build handoff runs the SAME task twice against one directory.
+    // A collision check that fired here would break the feature it protects.
+    let ws = temp("same-task-resume");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    let backend = full_backend();
+
+    for _ in 0..2 {
+        run_workflow_moded_to(
+            &backend,
+            &backend,
+            task,
+            &ws,
+            ThinkPolicy::default(),
+            WorkflowMode::full_tdd(),
+            &|_, _| {},
+            &AutoApprove,
+            Some(&dir),
+            true,
+            &mut |_, _| {},
+        )
+        .expect("the same task resumes cleanly");
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn a_corrupt_state_json_is_an_error_not_a_silent_fresh_start() {
+    // Spec 19: a corrupt or truncated state.json was "swallowed and silently
+    // restarted from the top" — discarding an entire approved design and quietly
+    // re-running work a human had signed off, with nothing to point at.
+    let ws = temp("corrupt-state");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("state.json"), "{ truncated ").unwrap();
+
+    let backend = full_backend();
+    let err = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .expect_err("a corrupt state must not be silently discarded");
+
+    let msg = err.to_string();
+    assert!(msg.contains("could not be read"), "{msg}");
+    assert!(
+        msg.contains("move it aside"),
+        "says how to proceed deliberately: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn task_conflict_compares_the_whole_first_line_not_the_first_sentence() {
+    use super::drive::task_conflict;
+
+    // THE case spec 19 names. Both slugify to `fix-the-bug`, because the slug is
+    // cut at the first sentence — so agreeing there and differing after is
+    // precisely the collision, not an exemption. An earlier cut of this check
+    // compared sentences and therefore never fired.
+    assert_eq!(
+        task_conflict("Fix the bug. In auth", "Fix the bug. In the parser"),
+        Some("Fix the bug. In auth")
+    );
+
+    // The same task resuming is not a conflict, however much grounding was
+    // appended to the stored copy — grounding appends, so the original is the
+    // prefix.
+    assert_eq!(task_conflict("Add seat types", "Add seat types"), None);
+    assert_eq!(
+        task_conflict("Add seat types\n\n=== survey ===\nfoo.rs", "Add seat types"),
+        None
+    );
+    assert_eq!(
+        task_conflict("Add seat types", "Add seat types for crew roles"),
+        None,
+        "a refined task is a continuation, not a different one"
+    );
+
+    // Nothing to compare against yields no conflict rather than a false alarm.
+    assert_eq!(task_conflict("", "anything"), None);
+    assert_eq!(task_conflict("anything", ""), None);
+}
+
+#[test]
+fn a_restored_draft_is_actually_gated_and_the_run_completes() {
+    // The bug the first cut of the draft-restore shipped with, and which its own
+    // test missed. `next_phase()` returns the first phase with NO artifact, so a
+    // restored draft — which has one — was skipped entirely: never gated, left
+    // `Draft` forever, and `is_complete()` false, which is what the CLI and GUI
+    // use to decide a run finished.
+    //
+    // The earlier test asserted only that the draft's CONTENT survived, which was
+    // true precisely *because* the phase was skipped. Assert the gate ran.
+    let ws = temp("draft-gated");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut parked = crate::state::WorkflowState::new(task);
+    parked.set(Artifact::draft(
+        Phase::Specs,
+        "# THE DRAFT THE PHONE SHOWED",
+    ));
+    crate::state::save_to(&dir, &mut parked, true).unwrap();
+
+    let backend = full_backend();
+    let gate = ScriptedGate::new(vec![
+        Decision::Approve,
+        Decision::Approve,
+        Decision::Approve,
+        Decision::Approve,
+        Decision::Approve,
+    ]);
+    let outcome = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &gate,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+
+    // The restored draft was put to the human, not silently skipped.
+    assert!(
+        gate.seen.lock().unwrap().contains(&Phase::Specs),
+        "the restored draft must be gated: {:?}",
+        gate.seen.lock().unwrap()
+    );
+    // And having been approved, it is approved — not left Draft forever.
+    assert!(
+        outcome.state.artifact(Phase::Specs).unwrap().is_approved(),
+        "a gated-and-approved draft ends approved"
+    );
+    assert_eq!(
+        outcome.state.artifact(Phase::Specs).unwrap().content,
+        "# THE DRAFT THE PHONE SHOWED",
+        "and it is still the artifact the human reviewed"
+    );
+    assert!(
+        outcome.state.is_complete(),
+        "the run completes; a skipped phase would poison is_complete() forever"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn send_back_notes_survive_a_resume() {
+    // A phase sent back with notes must regenerate WITH them, even across a
+    // restart. The notes were persisted all along; the resuming run just never
+    // copied them onto its freshly-grounded state, so the regeneration happened
+    // as if nobody had said anything.
+    let ws = temp("resume-feedback");
+    let task = "Add seat types for crew roles";
+    let (artifact_dir, _) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // A parked run whose Architecture was sent back with a note.
+    let mut parked = crate::state::WorkflowState::new(task);
+    parked.set(Artifact::draft(Phase::Specs, "# spec"));
+    parked.approve(Phase::Specs);
+    parked.set_feedback(Phase::Architecture, "make it event-driven");
+    crate::state::save_to(&dir, &mut parked, true).unwrap();
+
+    // The note has to reach the prompt of the phase that regenerates.
+    let backend = full_backend();
+    let outcome = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+
+    // Approving Architecture clears its note, so the run ending clean is the
+    // proof it was carried and consumed rather than dropped on load.
+    assert!(outcome.state.is_complete());
+    assert_eq!(
+        outcome.state.feedback(Phase::Architecture),
+        None,
+        "the note was consumed by the regeneration it asked for"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}

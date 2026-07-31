@@ -11,10 +11,23 @@ fn temp(tag: &str) -> PathBuf {
 }
 
 #[test]
-fn next_phase_walks_the_pipeline() {
+fn next_phase_walks_the_pipeline_and_waits_on_an_unapproved_draft() {
     let mut s = WorkflowState::new("do a thing");
     assert_eq!(s.next_phase(), Some(Phase::Specs));
+
+    // A DRAFT does not advance the pipeline. This assertion used to be
+    // `Some(Architecture)` — keyed on an artifact merely existing — and that is
+    // the bug spec 19's draft-restore uncovered: a restored draft was stepped
+    // past, never gated, left `Draft` forever, and `is_complete()` never became
+    // true. The gate, not the presence of a file, is what advances a phase.
     s.set(Artifact::draft(Phase::Specs, "spec body"));
+    assert_eq!(
+        s.next_phase(),
+        Some(Phase::Specs),
+        "still awaiting its gate"
+    );
+
+    s.approve(Phase::Specs);
     assert_eq!(s.next_phase(), Some(Phase::Architecture));
 }
 
@@ -354,5 +367,86 @@ fn a_reader_never_sees_a_partially_written_file() {
         load_from(&dir).unwrap().is_some(),
         "state.json parses after an overwrite"
     );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn the_pending_draft_is_the_unapproved_phase_awaiting_its_gate() {
+    // A run stops with at most one draft: the loop generates a phase, saves it,
+    // and blocks at the gate. That artifact is what a resume must show the human
+    // again rather than regenerate (spec 19).
+    let mut s = WorkflowState::new("t");
+    assert!(s.pending_draft().is_none(), "nothing generated yet");
+
+    s.set(Artifact::draft(Phase::Specs, "# spec"));
+    s.approve(Phase::Specs);
+    assert!(
+        s.pending_draft().is_none(),
+        "an approved phase is not pending"
+    );
+
+    s.set(Artifact::draft(
+        Phase::Architecture,
+        "# arch awaiting a human",
+    ));
+    let pending = s.pending_draft().expect("the draft at the gate");
+    assert_eq!(pending.phase, Phase::Architecture);
+    assert_eq!(pending.content, "# arch awaiting a human");
+}
+
+#[test]
+fn a_draft_survives_the_save_load_round_trip() {
+    // The overnight case: the phase generated, was saved as a draft, and the
+    // machine rebooted before anyone answered the gate. The artifact must still
+    // be on disk to be restored.
+    let ws = temp("draft-persist");
+    let mut s = WorkflowState::new("t");
+    s.set(Artifact::draft(Phase::Specs, "# what the phone showed"));
+    save(&ws, &mut s).unwrap();
+
+    let loaded = load(&ws).unwrap().unwrap();
+    let pending = loaded.pending_draft().expect("the draft survived");
+    assert_eq!(pending.content, "# what the phone showed");
+    assert!(!pending.is_approved(), "still awaiting its gate");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn frozen_test_files_are_part_of_the_persisted_contract() {
+    // They are the approved contract, not a by-product of the run that produced
+    // them. Held only in memory, a resume started empty and silently unfroze the
+    // tests a human had signed off (spec 19).
+    let ws = temp("test-files");
+    let mut s = WorkflowState::new("t");
+    assert!(s.test_files().is_empty());
+
+    s.set_test_files(vec!["tests/test_a.py".into(), "tests/test_b.py".into()]);
+    save(&ws, &mut s).unwrap();
+
+    let loaded = load(&ws).unwrap().unwrap();
+    assert_eq!(
+        loaded.test_files(),
+        ["tests/test_a.py".to_string(), "tests/test_b.py".to_string()],
+        "the frozen contract survives a restart"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn a_state_json_without_the_new_fields_still_loads() {
+    // Same no-migration guarantee as the generation counter: every file written
+    // before `test_files` existed must keep parsing.
+    let ws = temp("legacy-fields");
+    let dir = plan_dir(&ws);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("state.json"),
+        r#"{"task":"an old run","artifacts":[],"feedback":[]}"#,
+    )
+    .unwrap();
+
+    let loaded = load(&ws).unwrap().expect("legacy state loads");
+    assert!(loaded.test_files().is_empty());
+    assert_eq!(loaded.generation(), 0);
     let _ = std::fs::remove_dir_all(&ws);
 }
