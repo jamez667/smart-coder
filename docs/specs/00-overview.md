@@ -46,9 +46,15 @@ major design decision in `smart-coder` is a direct response to one of these:
 - **No large/frontier-model support path.** The constraints are the product. We
   will not add "just use GPT-4 for the hard parts." (A backend *could* point at
   a big model, but the harness is tuned for and tested against small ones.)
-- **No editor/IDE extension.** CLI only for v1 (see [06](06-cli-ux.md)).
-- **No autonomous, unattended operation.** v1 is human-in-the-loop. Long-running
-  background autonomy is future work.
+- **No editor/IDE extension.** No IDE plugin for v1; the shipped surfaces are the
+  CLI ([06](06-cli-ux.md)), the `sc-win` GUI ([12](12-platform-clients.md)) and the
+  local web surface ([18](18-task-intake.md)).
+- **No unattended *approval*.** v1 is human-in-the-loop at the gates
+  ([09](09-workflow-and-checkpoints.md)): the harness enforces them, and no model
+  may pass one. Unattended *execution between* gates is permitted and bounded —
+  a background runner works up to the next gate and parks
+  ([19](19-queue-and-runner.md)). What this non-goal protects is the judgement,
+  not the uptime.
 - **No multi-repo / monorepo-scale indexing.** v1 targets a single repository
   that fits a modest retrieval index.
 - **No fine-tuning or training.** We adapt to off-the-shelf models via prompting

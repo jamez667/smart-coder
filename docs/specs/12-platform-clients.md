@@ -59,3 +59,10 @@ model — that's how most of the logic is proven.
 - Portable core + shells is the architecture of [01](01-architecture.md).
 - Effects/tools are [04](04-tools.md).
 - Tiering reuses [02](02-model-backends.md) / [08](08-orchestration-and-swarm.md).
+- A further `Gate` implementation runs on the remote surface
+  ([20](20-remote-review.md)), submitting the same decisions from a phone — and
+  reaching this client's conclusion on *revise* independently, offering send-back
+  with a note instead. The distinction that matters is the trust boundary: a
+  platform client runs *beside the workspace* with full effects and the permission
+  layer; the remote surface runs *away from it* with none
+  ([18](18-task-intake.md)).

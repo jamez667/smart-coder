@@ -137,7 +137,11 @@ agent presents the phase artifact and waits for a decision:
 
 - Full-screen TUI (panes, mouse) — candidate for v2 ([07](07-roadmap.md)).
 - Editor/IDE integration.
-- Remote/daemon mode or web UI.
+- ~~Remote/daemon mode or web UI.~~ **Retired.** Overtaken when M5 shipped
+  `sc-web`, and now deliberately in scope: the remote surface, the background
+  runner and remote approval are governed by [18](18-task-intake.md),
+  [19](19-queue-and-runner.md) and [20](20-remote-review.md). This spec's scope is
+  unchanged — those are separate surfaces over the same core, not a CLI feature.
 
 ## Note: swarm rendering (later)
 

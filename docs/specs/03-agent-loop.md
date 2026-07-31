@@ -122,8 +122,10 @@ fixed model behavior.
 v1 is interactive, at two granularities: **micro** — approve/deny risky tool
 calls ([04](04-tools.md)), interrupt the loop, answer escalations; and
 **macro** — sign off at the phase checkpoints of the staged workflow
-([09](09-workflow-and-checkpoints.md)). Unattended autonomy is explicitly future
-work ([07](07-roadmap.md)).
+([09](09-workflow-and-checkpoints.md)). Unattended *approval* is out of scope at
+both granularities; unattended *execution between* gates is permitted and bounded,
+and a background run parks at a confirmation prompt exactly as it parks at a gate
+([19](19-queue-and-runner.md)).
 
 ## This loop is also the unit of the swarm
 

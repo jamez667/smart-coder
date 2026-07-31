@@ -276,8 +276,9 @@ the collector rather than the pack so an author cannot route around it.
 code or the model ever leaving the developer's machine
 ([18](18-task-intake.md), [19](19-queue-and-runner.md), [20](20-remote-review.md)).
 
-This is the concrete form of the **bounded autonomous mode** bullet that sat in
-the list below, and it resolves that idea's tension with
+This is the concrete form of the **bounded autonomous mode** idea that was carried
+in the future-ideas list until this milestone, and it resolves that idea's tension
+with
 [00](00-overview.md)'s human-in-the-loop non-goal — since amended to "no unattended
 **approval**" — by reading it precisely: it protects the *gate*, not the *uptime*.
 The runner
