@@ -111,6 +111,12 @@ Rules:
   stage breakdown can bounce the workflow back to Phase 3; downstream artifacts
   are invalidated and regenerated. The pipeline is iterative, not strictly
   one-way.
+- Where a front-end anchors feedback to artifacts, the *placement* of the notes
+  chooses the target: the send-back returns to the **earliest phase carrying a
+  note**, because invalidating from there drops every later artifact anyway, so a
+  downstream phase that was also commented regenerates from the correction. Notes
+  from all commented phases ride along on that one send-back, so the reviewer's
+  downstream observations are not lost.
 
 ## Artifacts are durable, versioned, and inspectable
 
@@ -126,6 +132,9 @@ Rules:
   engine helper (`sc_workflow::artifact_dirs`), so the CLI and the desktop GUI land
   the same task in the same place — which is what lets a later run resume from the
   `state.json` a prior approved run left there.
+- Anchored review notes are consumed by the send-back that delivers them: once
+  handed to the workflow they are cleared, because the line ranges they point at
+  describe text the regeneration is about to replace.
 - Because artifacts persist, the workflow is **resumable**: stop after the
   architecture gate today, resume at layout tomorrow — the approved artifacts are
   the state, not anything held in a model's context.

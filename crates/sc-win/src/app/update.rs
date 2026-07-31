@@ -517,27 +517,50 @@ impl App {
             // (Revise dropped from the UI — send-back-with-comments supersedes it. `Decision::Revise`
             //  stays in the workflow enum for the CLI; the GUI no longer surfaces a button for it.)
             Message::GateSendBack => {
-                // Change B: feedback comes from CODE-REVIEW line comments. Harvest every
-                // comment on the gating phase's artifact file and turn it into the send-back
-                // notes (one bullet per comment). This is the primary feedback path: the user
-                // reads the phase's `.md` in the code view, drops line comments where they want
-                // changes, and clicks Send back. Fall back to the free-text notes box when there
-                // are no line comments (so a general note still works).
-                let Some(target) = self.gating_phase() else {
+                // Feedback comes from CODE-REVIEW line comments: the user reads a phase's `.md`
+                // in the code view, drops comments where they want changes, and clicks Send back.
+                //
+                // Comments are harvested across EVERY phase artifact, not just the gating one —
+                // the file a comment sits on says which phase it's about, so noticing while
+                // reading the layout that the ARCHITECTURE is wrong is expressible: comment on
+                // architecture.md and the send-back targets Architecture (dropping layout, which
+                // regenerates from the correction). `resolve_sendback` owns that rule; without
+                // comments we fall back to the free-text box and bounce the gating phase to itself.
+                let Some(gating) = self.gating_phase() else {
                     return Task::none();
                 };
-                let file = self.plan.path_for(target);
-                let harvested = file.as_deref().and_then(|f| {
-                    let on_file: Vec<&sc_win::comments::Comment> =
-                        self.comments.on_file(f).map(|(_, c)| c).collect();
-                    sc_win::comments::format_sendback_notes(&on_file)
-                });
-                let notes = harvested.or_else(|| non_empty(&self.sendback_notes));
+                let files: Vec<(sc_workflow::Phase, Option<String>)> = sc_workflow::Phase::ALL
+                    .iter()
+                    .map(|&p| (p, self.plan.path_for(p)))
+                    .collect();
+                let rows: Vec<sc_win::comments::PhaseComments<'_>> = files
+                    .iter()
+                    .filter_map(|(phase, file)| {
+                        let file = file.as_deref()?;
+                        Some(sc_win::comments::PhaseComments {
+                            phase: *phase,
+                            file,
+                            notes: self.comments.on_file(file).map(|(_, c)| c).collect(),
+                        })
+                    })
+                    .collect();
+
+                let resolved = sc_win::comments::resolve_sendback(&rows);
+                let commented: Vec<String> = rows
+                    .iter()
+                    .filter(|r| !r.notes.is_empty())
+                    .map(|r| r.file.to_string())
+                    .collect();
+                let (target, notes) = match resolved {
+                    Some((target, notes)) => (target, notes),
+                    None => (gating, non_empty(&self.sendback_notes)),
+                };
                 self.answer_gate(Decision::SendBack { target, notes });
-                // The harvested comments have been DELIVERED as the send-back notes — drop them
-                // (and persist) so they don't re-deliver on the re-planned phase's next gate.
-                if let Some(f) = file {
-                    self.comments.items.retain(|c| c.file != f);
+                // Every harvested comment has been DELIVERED as part of the notes — drop them
+                // all (and persist) so none re-delivers at a later gate, anchored to text that
+                // has since been regenerated.
+                if !commented.is_empty() {
+                    self.comments.items.retain(|c| !commented.contains(&c.file));
                     sc_win::comments::save(&self.workspace_root(), &self.comments);
                 }
             }

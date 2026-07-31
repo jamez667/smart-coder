@@ -41,6 +41,12 @@ model — that's how most of the logic is proven.
   models up to the 12B ceiling, so the Windows client can be the **T1 architect/
   orchestrator** tier (spec 02) with full tools and filesystem.
 - Full effects: real filesystem + shell (spec 04) with the permission layer.
+- The GUI's checkpoint surface is PR-style review rather than a prompt: the
+  reviewer opens any phase artifact in the code view and leaves line comments, and
+  **Send back** turns them into the feedback *and* the target phase
+  ([09](09-workflow-and-checkpoints.md)). It surfaces no separate *revise* button —
+  editing by comment supersedes it, though `Decision::Revise` remains in the engine
+  for the CLI.
 
 ## Build & toolchain
 

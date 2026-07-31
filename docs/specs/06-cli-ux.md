@@ -100,8 +100,9 @@ agent presents the phase artifact and waits for a decision:
 - Send-back notes may be anchored to line ranges of the artifact — the engine
   formats them as one bullet per note (`- [line 3] …`, `- [lines 10-14] …`) and
   those bullets become what the workflow re-plans from. The CLI's free-text note
-  and the GUI's line comments produce identical feedback because both format
-  through the same engine helper.
+  and the GUI's line comments produce the same bullets because both format through
+  the same engine helper; the GUI additionally groups them under `## <Phase>`
+  headers when one send-back carries notes from more than one phase.
 - The current phase and which gates are passed are always shown.
 - In `run` / `--json` mode, the configured gate policy decides whether the
   workflow auto-advances or stops at the first un-approved gate and reports.
