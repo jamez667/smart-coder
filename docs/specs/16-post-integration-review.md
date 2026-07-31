@@ -13,10 +13,12 @@ reimplementing an abstraction three files away. Every one of those is green, and
 every one of those is a defect a reviewer would have caught.
 
 This spec adds a second gate over the *integrated diff*, after verification and
-before the run is reported done. It exists because the tiny-model thesis makes
-this failure mode more likely, not less: a 4B worker sees a keyhole of the
-repository ([05](05-context-management.md)), so "I couldn't find the existing
-helper, so I wrote one" is its most natural mistake, and no test will ever notice.
+before the run is reported done. It exists because the tiny-model thesis makes this
+failure mode more likely, not less: a swarm worker is handed its subtask and the
+text of its own files, and nothing else ([08](08-orchestration-and-swarm.md)) — no
+repo map, no symbol index. "I couldn't find the existing helper, so I wrote one" is
+therefore not a lapse but the *expected* behaviour of a correctly-working worker,
+and no test will ever notice.
 
 The constraint that makes this honest, and the one it would be tempting to break:
 
@@ -50,24 +52,66 @@ diff than the worker wrote, and the reviewed artifact must be the one that ships
 ```
 worker proposal ─► integration verify (spec 08) ─► integrated diff
                                                         │
+                            repo map + retrieved  ──────┤
+                            symbols (spec 05)           │
                                                         ▼
                                           ┌──────────────────────────┐
                                           │  review lenses (parallel)│
                                           │  duplication · error-    │
-                                          │  handling · scope ·      │
-                                          │  abstraction-fit         │
+                                          │  handling · abstraction- │
+                                          │  fit · unrelated changes │
+                                          │  × reviewers (panel)     │
                                           └────────────┬─────────────┘
                                                        │ findings
                                                        ▼
-                                            deterministic corroboration
+                                       corroboration + vote matching
                                                        │
                                                        ▼
-                                        Finding{ severity, file:line,
-                                                 corroborated: bool }
+                                    Finding{ severity, anchor, evidence,
+                                             corroborated, raised_by }
                                                        │
                                                        ▼
                                        report · gate · or feed a retry
 ```
+
+*anchor* = where a finding points (hunk + symbol, not a line number); *evidence* =
+what a deterministic check actually found. Both are defined below.
+
+### The reviewer needs a wider keyhole than the worker
+
+This spec's own premise is that a worker duplicates a helper because it cannot see
+the repository ([05](05-context-management.md)). Handing the reviewer *only the
+diff* would give it a strictly smaller keyhole and then ask it a harder question.
+A reviewer that cannot see `src/utils/date.rs` cannot possibly know the diff
+reimplements it, and would be reduced to guessing from naming — which is precisely
+the false-positive habit that makes review noise.
+
+So a review call is the diff **plus grounding**, and the grounding is retrieved,
+not hoped for:
+
+- **Every lens** gets the repo map (`repo_map`, [05](05-context-management.md)) —
+  the PageRank-ranked structural view of what the repository contains.
+
+  Worth being precise here, because it sharpens the premise: a **swarm worker
+  today receives no repo map at all**. Its prompt is the subtask goal, any retry
+  feedback, and the full text of its own declared files
+  ([08](08-orchestration-and-swarm.md)) — `sc-swarm` does not depend on `sc-index`.
+  The repo map goes to the single-agent loop, not the swarm. So the worker's
+  keyhole is *narrower* than this spec's premise assumed, which makes "I couldn't
+  find the existing helper" not a lapse but the expected outcome. Giving the
+  reviewer the map it never had is the cheapest place to catch the consequence.
+- **Duplication** additionally gets a pre-retrieved list of **existing symbols
+  whose names or signatures resemble those the diff adds**. The deterministic
+  lookup runs *before* the model call, and its results go into the prompt. The
+  model's job is then the part only it can do — "is this the same thing?" — rather
+  than "does something like this exist?", which the index answers better.
+- **Abstraction fit** gets the surrounding file(s) beyond the diff hunk, since
+  "does this match how the code around it solves this?" is unanswerable from
+  changed lines alone.
+
+This inverts the usual order and is the point: **retrieve first, then ask.** It
+also means the duplication lens's corroboration is nearly free, because the
+deterministic check has already run to build the prompt.
 
 ### Lenses, not one reviewer
 
@@ -79,16 +123,51 @@ answers it far better than a reviewer asked four:
 | --- | --- | --- |
 | **Duplication** | Does this reimplement something the repo already has? | The duplicate passes its own tests |
 | **Error handling** | Is a failure swallowed, or an error path untested? | A swallowed error *is* a passing test |
-| **Scope** | Does the diff do things the subtask didn't ask for? | Extra correct code is still green |
-
-Scope is listed last deliberately: it is the least corroborable of the four (see
-below), so it is the first lens to drop if review proves too expensive.
 | **Abstraction fit** | Does this match how the surrounding code solves this? | Style is invisible to the suite |
+| **Unrelated changes** | Does the diff touch things the subtask didn't ask about? | Tangential correct code is still green |
+
+The last lens is named for what it looks for. "Scope" reads as a measure of
+*volume* — how much was changed — when the concern is *tangency*: a worker asked
+to add a field that also renames a nearby struct, tidies an unrelated import, or
+refactors a function it happened to scroll past. A large diff that is entirely on
+topic is fine; three lines of drive-by refactoring are not, because nobody reviewed
+them and no test covers the change in intent.
+
+It is also listed last because it is the least corroborable (see below), making it
+the first lens to drop if review proves too expensive.
 
 Lenses are independent, run in parallel, and each returns structured findings with
-a `file:line` anchor. A lens that finds nothing is a normal outcome and must be
-cheap to express — a reviewer that always finds something is a reviewer nobody
-reads.
+an anchor. A lens that finds nothing is a normal outcome and must be cheap to
+express — a reviewer that always finds something is a reviewer nobody reads.
+
+### Anchoring: line numbers are the weakest identifier available
+
+Models cite line numbers badly. They go off by one, they name the first line of the
+enclosing function rather than the offending line, and they drift further the
+longer the diff. Any design that *matches findings by line number* — or reports one
+as though it were precise — is building on the least reliable thing a reviewer
+produces.
+
+So a finding anchors to a **hunk and a symbol**, with the line as a hint:
+
+```
+Anchor {
+  file: String,
+  hunk: HunkId,            // which diff hunk — the review was given these, so it
+                           // is a choice from a list, not a number to invent
+  symbol: Option<String>,  // enclosing fn/type, resolvable via sc-index
+  line: Option<usize>,     // a hint for rendering; never an identity
+}
+```
+
+Asking a model to *select from hunks it was shown* is a far easier task than
+asking it to count lines, and it degrades gracefully: a finding with no usable
+anchor still attaches to the file. The symbol is verifiable — if `sc-index` cannot
+find the named symbol in that file, the anchor is wrong and the finding drops in
+rank, which doubles as a cheap hallucination check.
+
+Rendering resolves an anchor to a line at display time, from the hunk and symbol,
+rather than trusting what the model said.
 
 ### Corroboration is what gives a finding teeth
 
@@ -96,17 +175,21 @@ Model findings are ranked, not trusted. Where a deterministic check *can* speak 
 a finding, it is run, and its answer outranks the model's:
 
 - **Duplication** — `sc-index`'s symbol lookup ([05](05-context-management.md))
-  answers "does a symbol by this name already exist?" A claimed duplicate is
-  corroborated by finding it; uncorroborated, it stays a suspicion. (`find_symbol`
-  returns human-readable prose today, so this needs a structured variant — the
-  index has the data, the API doesn't expose it.)
+  answers "does a symbol by this name already exist, and where?" A claimed duplicate
+  is corroborated by finding it; uncorroborated, it stays a suspicion. The check
+  must yield the **symbol and its location**, not a boolean, because that is what a
+  retry prompt needs to be actionable (see "A retry prompt carries evidence").
+  `find_symbol` returns human-readable prose today, so this needs a structured
+  variant — the index has the data, the API doesn't expose it.
 - **Error handling** — a swallowed error is often syntactically visible.
-- **Scope** — the weakest of the three, and worth stating plainly. A subtask
-  carries a `files` list, but it is a decomposer *hint*, explicitly not enforced,
-  and frequently empty on the free-text `swarm <task>` path
+- **Unrelated changes** — the weakest of the four, and worth stating plainly. A
+  subtask carries a `files` list, but it is a decomposer *hint*, explicitly not
+  enforced, and frequently empty on the free-text `swarm <task>` path
   ([08](08-orchestration-and-swarm.md)). Integration already draws its merge
-  targets from that same list, so a diff largely cannot exceed it. With an empty
-  list the lens has nothing to check and must report `Unknown`, not silently pass.
+  targets from that same list, so a diff largely cannot exceed it at *file*
+  granularity — which is why the interesting version of this lens is
+  within-file tangency, where no deterministic check speaks at all. With an empty
+  list the lens must report `Unknown`, not silently pass.
 
 A corroborated finding may gate. An uncorroborated one is reported and ranked, and
 never blocks — that asymmetry is the whole design. It is the same commitment
@@ -161,17 +244,24 @@ fails closed on a network error would make the whole gate hostage to an API outa
 
 ### What agreement means
 
-Findings from different models are matched on *what they point at* — the same
-lens, the same file, and overlapping lines — not on wording, which will never
-match. Two models describing the same duplicated helper in different words are one
+Findings from different models are matched on *what they point at* — the same lens,
+the same file, and the same hunk or symbol. Line proximity is a tiebreaker within a
+hunk, never the primary key, and matching tolerates a few lines of drift. Wording
+is ignored: two models describing the same duplicated helper differently are one
 finding with two votes.
+
+Two models flagging *different* problems in the same hunk must stay two findings.
+Over-merging is the failure mode to avoid here — it silently discards a finding
+while inflating another's vote count, which corrupts exactly the signal the panel
+exists to produce. When in doubt, keep them separate.
 
 Each finding then carries its provenance:
 
 ```
 Finding {
-  lens, severity, file, line, summary,
+  lens, severity, anchor, summary,
   corroborated: bool,          // a deterministic check agreed
+  evidence: Option<String>,    // what that check actually found
   raised_by: [ModelId],        // who saw it
   considered_by: [ModelId],    // who reviewed this diff at all
 }
@@ -224,9 +314,54 @@ Three outcomes, chosen by configuration, in increasing order of intervention:
    outcome and the reason the whole spec is worth building: the swarm already knows
    how to retry with feedback; this widens what counts as a reason to.
 
+### A retry prompt carries evidence, not a verdict
+
+The existing retry feedback is concrete — it names the still-failing tests and
+quotes their assertion messages, because "some tests failed" would tell a 4B worker
+nothing it can act on. Review feedback must clear the same bar, and it is easy to
+get wrong: *"you duplicated something"* is unactionable, and a worker handed it will
+either thrash or reword the code until the reviewer stops complaining.
+
+So the **deterministic evidence goes into the prompt, not the model's prose
+summary**. The duplication lens knows the symbol and where it lives, because the
+index found it while building the review prompt in the first place:
+
+```
+You added `format_date` in src/report/render.rs. An equivalent already exists:
+`format_date` in src/utils/date.rs:41. Import and use it instead of
+reimplementing it.
+```
+
+That is a specific instruction with a named target. It is also why a finding
+carries `evidence` alongside `summary`: the summary is for a human reading the
+report, the evidence is what a worker is given.
+
+An uncorroborated finding never feeds a retry at all. It has no evidence to inject
+by definition, so it could only produce the vague prompt above — which is exactly
+why the "corroborated may act, uncorroborated may only inform" asymmetry is load
+bearing rather than decorative.
+
+### Budgets, and the last retry
+
 Retry-on-review-finding is bounded by the *existing* `max_subtask_retries` budget.
 It never gets its own, because two independent retry budgets multiply into a run
 that never terminates.
+
+That raises the case where a subtask **passes its tests but fails review on its
+last allowed attempt**, and the honest answer is: **it gates, it does not fail.**
+
+- Failing the subtask would be wrong — the work is *verified correct*. Throwing
+  away green, integrated code over an unfixed style finding is a worse outcome than
+  keeping it.
+- Silently accepting would be wrong too, because the run would report success while
+  holding a known, corroborated defect.
+
+So the subtask is `Done` with **unresolved findings attached**, and the run stops at
+a human checkpoint if any of them meet the gating severity. Where no human is
+available (`AutoApprove`, headless), it completes and the findings are reported
+loudly in the summary and the event stream — never dropped. This mirrors the
+existing honest-stop discipline ([06](06-cli-ux.md)): report what is true, including
+"green, with reservations," rather than flattening it to pass or fail.
 
 ## Cost, and when it doesn't run
 
@@ -252,8 +387,13 @@ every renderer gets it for free — the same "one stream, many renderers" proper
 that let M5 add a second UI cheaply:
 
 - `ReviewStarted { subtask, lenses, reviewers }`
-- `ReviewFinding { subtask, lens, severity, file, line, corroborated, raised_by, considered_by, summary }`
+- `ReviewFinding { subtask, lens, severity, anchor, corroborated, evidence, raised_by, considered_by, summary }`
 - `ReviewFinished { subtask, findings, blocking, reviewers_skipped }`
+
+`blocking` is the count of findings that met the bar to stop the run — corroborated
+and at or above the configured gating severity. It is carried rather than left for a
+renderer to recompute, so every surface agrees on whether a review stopped anything.
+Zero is the normal case.
 
 `reviewers_skipped` is carried explicitly rather than inferred from a shorter
 `considered_by`: a renderer must be able to say "3 of 4 reviewers ran" instead of
@@ -281,6 +421,6 @@ building a review surface.
 - Reuses the `Gate` seam ([09](09-workflow-and-checkpoints.md)) for its blocking
   mode, and the retry-with-feedback path already built for failing tests.
 - Deliberately unlike [13](13-compliance-evidence.md): that engine bans the model
-  because its output must be reproducible and citable. Here the model is the only
-  thing that can answer the question, so the design constrains its *authority*
-  instead — findings rank, deterministic checks decide.
+  outright because its output must be reproducible and citable. Here the model is
+  the only thing that can answer the question at all, so the design constrains its
+  *authority* rather than its presence.
