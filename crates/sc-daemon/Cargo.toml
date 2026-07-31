@@ -1,0 +1,14 @@
+[package]
+name = "sc-daemon"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The task queue and spec-drafting runner: file a request from anywhere, approve a drafted spec (spec 19)."
+
+[dependencies]
+sc-proto = { path = "../sc-proto" }
+sc-model = { path = "../sc-model" }
+sc-workflow = { path = "../sc-workflow" }
+serde = { workspace = true }
+serde_json = { workspace = true }

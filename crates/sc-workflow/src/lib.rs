@@ -47,5 +47,7 @@ pub use runner::{
 pub use sequential::{build_sequential, build_sequential_with_board, SequentialReport};
 pub use stack::ProjectStack;
 pub use staged::{parse_stages, staged_build, Stage, StageResult, StagedReport};
-pub use state::{load, load_from, plan_dir, save, Artifact, Status, WorkflowState};
+// `save_to` is exported for a third front-end (the daemon), which persists into a
+// nominated repository rather than the workspace it runs in.
+pub use state::{load, load_from, plan_dir, save, save_to, Artifact, Status, WorkflowState};
 pub use testwriter::{persist_tests, write_tests, WrittenTest};

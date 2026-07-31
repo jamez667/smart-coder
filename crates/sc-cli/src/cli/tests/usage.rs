@@ -33,3 +33,15 @@ fn usage_warns_against_tunnelling_a_tokenless_run() {
         "the tunnel warning must be visible"
     );
 }
+
+#[test]
+fn usage_documents_the_queue_and_its_limits() {
+    let u = usage();
+    assert!(u.contains("queue"));
+    assert!(u.contains("--repo"), "a repo is chosen by name");
+    // The one thing a reader must not have to guess: approving does not build.
+    assert!(
+        u.contains("starts nothing"),
+        "approve must say it starts nothing: {u}"
+    );
+}

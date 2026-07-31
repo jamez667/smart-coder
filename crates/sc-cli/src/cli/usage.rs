@@ -30,6 +30,18 @@ COMMANDS:
                     Repeat --author-model to compare, e.g.
                     --author-model gemini-pro-latest@https://…/v1beta/openai
                     --author-model qwen3-coder-30b@http://localhost:11435/v1
+    queue ACTION    The task queue (spec 19): file a request against any configured
+                    repository, draft its spec, approve or send it back. Actions:
+                      file TEXT --repo NAME   file a request
+                      list                    show the queue
+                      run                     draft queued tasks (Ctrl-C is safe)
+                      show ID                 print a drafted spec
+                      approve ID              settle the spec; starts nothing
+                      send-back ID NOTES      redraft it, with a reason
+                      discard ID              drop a task
+                      repos                   what this daemon serves
+                      add-repo NAME PATH      serve another repository
+                      forget-repo NAME        stop serving one
     trace           Check the specs against the code (spec 17): anchors that no
                     longer resolve, assertions that are false, crates no spec
                     claims. Deterministic — no model runs. See --check.

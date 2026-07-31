@@ -1,6 +1,6 @@
 //! Argv parsing: subcommands, flag positions, the run-tail peel, and loud errors.
 
-use crate::{Cli, Command, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
+use crate::{Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
 
 #[test]
 fn defaults_to_chat_with_default_backend() {
@@ -471,4 +471,121 @@ fn author_model_outside_comply_eval_is_rejected() {
         format!("{err}").contains("only applies to `comply-eval`"),
         "{err}"
     );
+}
+
+#[test]
+fn queue_file_needs_a_repo_chosen_by_name() {
+    // A repository is picked from the daemon's configured set, never typed as a
+    // path — that is what makes traversal unreachable rather than mitigated
+    // (spec 18). So `--repo` is required and carries a NAME.
+    let cli = Cli::parse(["queue", "file", "add seat types", "--repo", "city"]).unwrap();
+    match &cli.command {
+        Command::Queue {
+            action: QueueAction::File { text, repo },
+        } => {
+            assert_eq!(text, "add seat types");
+            assert_eq!(repo, "city");
+        }
+        other => panic!("expected a File action, got {other:?}"),
+    }
+
+    // Without --repo the daemon would have to guess which repository, so refuse.
+    assert!(Cli::parse(["queue", "file", "add seat types"]).is_err());
+    // And a request with no text is not a request.
+    assert!(Cli::parse(["queue", "file", "--repo", "city"]).is_err());
+}
+
+#[test]
+fn queue_actions_parse() {
+    let cases: Vec<(Vec<&str>, QueueAction)> = vec![
+        (vec!["queue", "list"], QueueAction::List),
+        (vec!["queue", "run"], QueueAction::Run),
+        (vec!["queue", "repos"], QueueAction::Repos),
+        (
+            vec!["queue", "approve", "t-1"],
+            QueueAction::Approve { id: "t-1".into() },
+        ),
+        (
+            vec!["queue", "discard", "t-1"],
+            QueueAction::Discard { id: "t-1".into() },
+        ),
+        (
+            vec!["queue", "show", "t-1"],
+            QueueAction::Show { id: "t-1".into() },
+        ),
+        (
+            vec!["queue", "add-repo", "city", "../city"],
+            QueueAction::AddRepo {
+                name: "city".into(),
+                path: "../city".into(),
+            },
+        ),
+        (
+            vec!["queue", "forget-repo", "city"],
+            QueueAction::ForgetRepo {
+                name: "city".into(),
+            },
+        ),
+    ];
+    for (argv, expected) in cases {
+        let cli = Cli::parse(argv.clone()).unwrap();
+        assert_eq!(cli.command, Command::Queue { action: expected }, "{argv:?}");
+    }
+}
+
+#[test]
+fn a_send_back_carries_its_note_as_free_text() {
+    let cli = Cli::parse([
+        "queue",
+        "send-back",
+        "t-1",
+        "name",
+        "the",
+        "actual",
+        "roles",
+    ])
+    .unwrap();
+    match &cli.command {
+        Command::Queue {
+            action: QueueAction::SendBack { id, notes },
+        } => {
+            assert_eq!(id, "t-1");
+            assert_eq!(notes, "name the actual roles");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_send_back_without_a_note_is_refused() {
+    // Without one the redraft has nothing to go on and will likely produce the
+    // same spec, which reads to the developer as the tool ignoring them.
+    assert!(Cli::parse(["queue", "send-back", "t-1"]).is_err());
+}
+
+#[test]
+fn an_action_missing_its_id_says_so_rather_than_guessing() {
+    for argv in [
+        vec!["queue", "approve"],
+        vec!["queue", "discard"],
+        vec!["queue", "show"],
+    ] {
+        let err = Cli::parse(argv.clone()).expect_err("{argv:?} should fail");
+        assert!(err.to_string().contains("task id"), "{argv:?}: {err}");
+    }
+}
+
+#[test]
+fn queue_with_no_action_and_an_unknown_action_both_fail_loudly() {
+    // Spec 00 — fail loud. A silently-ignored action would look like it worked.
+    let bare = Cli::parse(["queue"]).expect_err("no action");
+    assert!(bare.to_string().contains("needs an action"), "{bare}");
+
+    let unknown = Cli::parse(["queue", "build"]).expect_err("no such action");
+    assert!(
+        unknown.to_string().contains("unknown queue action"),
+        "{unknown}"
+    );
+    // …and specifically, there is no build action on this surface.
+    assert!(!unknown.to_string().contains("build,"), "{unknown}");
 }

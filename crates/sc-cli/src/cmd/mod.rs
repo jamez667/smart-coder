@@ -5,6 +5,7 @@ pub mod chat;
 pub mod common;
 pub mod comply;
 pub mod plan;
+pub mod queue;
 pub mod replay;
 pub mod run;
 pub mod swarm;

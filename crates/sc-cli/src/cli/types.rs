@@ -62,11 +62,62 @@ pub enum Command {
     /// no model runs. With `check`, exits non-zero on a broken or stale claim,
     /// which is what makes it a CI gate.
     Trace { check: bool },
+    /// The task queue (spec 19): file a request against any configured
+    /// repository, draft its spec, approve or send it back.
+    Queue { action: QueueAction },
     /// Re-render a recorded session from its JSON-lines log (spec 06). `session`
     /// is a session id (resolved under `.smart-coder/sessions/`) or a path to a log.
     Replay { session: String },
     /// Print usage.
     Help,
+}
+
+/// What to do with the task queue (spec 19).
+///
+/// The vocabulary is deliberately small and matches what the public web surface
+/// can do: **file a request · watch it draft · read the spec · approve or send
+/// back**. There is no action that builds — approving marks a spec `Ready` and
+/// the developer picks it up in their IDE when they choose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueAction {
+    /// File a request against a configured repository.
+    File {
+        text: String,
+        repo: String,
+    },
+    /// Show the queue: what needs a human first.
+    List,
+    /// Draft queued tasks until the queue is empty or the process is stopped.
+    /// The queue is durable, so this is killable and resumable.
+    Run,
+    /// Approve a drafted spec. Settles it in the repository and marks the task
+    /// `Ready`. **Starts nothing.**
+    Approve {
+        id: String,
+    },
+    /// Send a drafted spec back to be redrafted, with a note saying why.
+    SendBack {
+        id: String,
+        notes: String,
+    },
+    /// Drop a task before it was approved.
+    Discard {
+        id: String,
+    },
+    /// Print the drafted spec for a task.
+    Show {
+        id: String,
+    },
+    /// List the repositories this daemon serves.
+    Repos,
+    /// Serve this daemon's repositories: `add <name> <path>` / `forget <name>`.
+    AddRepo {
+        name: String,
+        path: String,
+    },
+    ForgetRepo {
+        name: String,
+    },
 }
 
 /// Which tool-call enforcement to ask the backend for (spec 02). Maps onto the

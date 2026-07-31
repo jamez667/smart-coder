@@ -21,5 +21,5 @@ mod tests;
 
 pub use doctor::{doctor_report, preflight, probe};
 pub use paths::{detect_test_files, resolve_replay_path, session_log_path, sessions_dir};
-pub use types::{Cli, Command, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
+pub use types::{Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
 pub use usage::usage;

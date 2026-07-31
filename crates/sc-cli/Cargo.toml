@@ -17,6 +17,7 @@ sc-core = { path = "../sc-core" }
 sc-tools = { path = "../sc-tools" }
 sc-swarm = { path = "../sc-swarm" }
 sc-trace = { path = "../sc-trace" }
+sc-daemon = { path = "../sc-daemon" }
 sc-workflow = { path = "../sc-workflow" }
 sc-tui = { path = "../sc-tui" }
 sc-web = { path = "../sc-web" }

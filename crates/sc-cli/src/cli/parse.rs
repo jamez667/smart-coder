@@ -7,7 +7,7 @@
 
 use sc_proto::{DcError, Result};
 
-use super::types::{Cli, Command, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
+use super::types::{Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
 
 impl Cli {
     /// Parse argv (excluding the program name) into a [`Cli`].
@@ -136,6 +136,15 @@ impl Cli {
                             ))
                         }
                     }
+                }
+                // `queue <action> [args…]` — the task queue (spec 19). Its actions
+                // take the rest of argv, so it is parsed as a unit rather than
+                // leaving loose words for the top-level loop to trip over.
+                "queue" if command.is_none() => {
+                    let rest: Vec<String> = it.by_ref().collect();
+                    command = Some(Command::Queue {
+                        action: parse_queue_action(rest)?,
+                    });
                 }
                 "replay" if command.is_none() => {
                     let session = it.next().ok_or_else(|| {
@@ -711,6 +720,116 @@ fn parse_review_action(v: &str) -> Result<sc_swarm::ReviewAction> {
         other => Err(DcError::Eval(format!(
             "--review-action: unknown action {other:?} (expected report, gate or retry)"
         ))),
+    }
+}
+
+/// Parse `queue <action> [args…]`.
+///
+/// Errors name the usage rather than just refusing, because these are typed by a
+/// developer at a terminal who should not have to go and read the help text to
+/// recover from a missing argument.
+fn parse_queue_action(rest: Vec<String>) -> Result<QueueAction> {
+    let mut it = rest.into_iter();
+    let action = it.next().ok_or_else(|| {
+        DcError::Eval(
+            "queue needs an action: file | list | run | approve | send-back | \
+             discard | show | repos | add-repo | forget-repo"
+                .to_string(),
+        )
+    })?;
+
+    // `--repo <name>` may appear anywhere after the action; everything else is
+    // positional. Pulling it out first keeps `file` able to take free text.
+    let mut repo: Option<String> = None;
+    let mut words: Vec<String> = Vec::new();
+    while let Some(w) = it.next() {
+        match w.as_str() {
+            "--repo" => {
+                repo =
+                    Some(it.next().ok_or_else(|| {
+                        DcError::Eval("--repo needs a repository name".to_string())
+                    })?)
+            }
+            _ => words.push(w),
+        }
+    }
+    let joined = words.join(" ");
+    let first = words.first().cloned().unwrap_or_default();
+
+    match action.as_str() {
+        "file" => {
+            if joined.trim().is_empty() {
+                return Err(DcError::Eval(
+                    "queue file needs the request text, e.g. \
+                     `smart-coder queue file \"add seat types\" --repo city`"
+                        .to_string(),
+                ));
+            }
+            let repo = repo.ok_or_else(|| {
+                DcError::Eval(
+                    "queue file needs --repo <name>. A repository is chosen from the \
+                     daemon's configured set, never typed as a path — run \
+                     `smart-coder queue repos` to see them."
+                        .to_string(),
+                )
+            })?;
+            Ok(QueueAction::File { text: joined, repo })
+        }
+        "list" => Ok(QueueAction::List),
+        "run" => Ok(QueueAction::Run),
+        "repos" => Ok(QueueAction::Repos),
+        "approve" => Ok(QueueAction::Approve {
+            id: require_id(&first, "approve")?,
+        }),
+        "discard" => Ok(QueueAction::Discard {
+            id: require_id(&first, "discard")?,
+        }),
+        "show" => Ok(QueueAction::Show {
+            id: require_id(&first, "show")?,
+        }),
+        "send-back" => {
+            let id = require_id(&first, "send-back")?;
+            let notes = words[1..].join(" ");
+            if notes.trim().is_empty() {
+                return Err(DcError::Eval(
+                    "queue send-back needs a note saying what to change — without one \
+                     the redraft has nothing to go on and will likely produce the \
+                     same spec"
+                        .to_string(),
+                ));
+            }
+            Ok(QueueAction::SendBack { id, notes })
+        }
+        "add-repo" => {
+            let name = require_id(&first, "add-repo")?;
+            let path = words.get(1).cloned().ok_or_else(|| {
+                DcError::Eval(
+                    "queue add-repo needs a name and a path, e.g. \
+                     `smart-coder queue add-repo city ../city`"
+                        .to_string(),
+                )
+            })?;
+            Ok(QueueAction::AddRepo { name, path })
+        }
+        "forget-repo" => Ok(QueueAction::ForgetRepo {
+            name: require_id(&first, "forget-repo")?,
+        }),
+        other => Err(DcError::Eval(format!(
+            "unknown queue action {other:?} — expected file, list, run, approve, \
+             send-back, discard, show, repos, add-repo or forget-repo"
+        ))),
+    }
+}
+
+/// A required positional argument, named in the error so a bare action says what
+/// it was missing.
+fn require_id(value: &str, action: &str) -> Result<String> {
+    if value.trim().is_empty() {
+        Err(DcError::Eval(format!(
+            "queue {action} needs a task id — run `smart-coder queue list` to see them"
+        )))
+    } else {
+        Ok(value.to_string())
     }
 }
 
