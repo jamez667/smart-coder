@@ -89,7 +89,7 @@ agent presents the phase artifact and waits for a decision:
 
 ```
 ⛳ checkpoint — phase 3/6: LAYOUT   (specs ✓  architecture ✓)
-   artifact written to docs/plan/03-layout.md   (review the diff)
+   artifact written to specs/alt-seats/layout.md   (review the diff)
 
    [a]pprove · [r]evise (edit the file yourself) · [s]end back · [v]iew · [q]uit ›
 ```
@@ -97,6 +97,11 @@ agent presents the phase artifact and waits for a decision:
 - **Approve** advances to the next phase; **revise** lets you edit the artifact
   file and accept your version; **send back** regenerates with your notes (and
   may target an earlier phase); **quit** stops but keeps approved artifacts.
+- Send-back notes may be anchored to line ranges of the artifact — the engine
+  formats them as one bullet per note (`- [line 3] …`, `- [lines 10-14] …`) and
+  those bullets become what the workflow re-plans from. The CLI's free-text note
+  and the GUI's line comments produce identical feedback because both format
+  through the same engine helper.
 - The current phase and which gates are passed are always shown.
 - In `run` / `--json` mode, the configured gate policy decides whether the
   workflow auto-advances or stops at the first un-approved gate and reports.

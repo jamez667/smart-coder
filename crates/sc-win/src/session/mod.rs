@@ -14,8 +14,11 @@
 //! * [`staged`] — the design pipeline: plan-only, and plan→compiler-driven build.
 //! * [`tdd`] — the frozen-test flows: TDD and the sequential per-file build.
 //! * [`swarm`] — the decompose-and-parallelize run.
-//! * [`slug`] — task text → the `specs/<slug>/` artifact directory.
 //! * [`verify`] — verify-command assembly and its sandbox diagnostics.
+//!
+//! Task text → the `specs/<slug>/` artifact directory lives in the engine
+//! ([`sc_workflow::artifact_dirs`]), so the CLI resolves the same directory for the
+//! same task.
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -25,7 +28,6 @@ use crate::bridge::Pending;
 use crate::config::UiConfig;
 
 mod agent;
-mod slug;
 mod staged;
 mod swarm;
 mod tdd;

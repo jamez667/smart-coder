@@ -11,7 +11,6 @@ use std::sync::mpsc::Sender;
 use crate::bridge::{ChannelGate, Pending};
 use crate::config::UiConfig;
 
-use super::slug::spec_artifact_dir;
 use super::verify::sandbox_verify_hint;
 use super::UiEvent;
 
@@ -70,21 +69,6 @@ fn phase_streams(
     (on_phase, on_token)
 }
 
-/// Resolve the artifact directory and its workspace-relative form. The relative
-/// path (e.g. `specs/alt-seats`) is what the UI needs: the plan's master list opens
-/// each phase file (`<dir>/<openspec_filename>`) in the code view and harvests
-/// line-comments on it for send-back, and both use `select_file`'s workspace-
-/// relative, forward-slashed form.
-fn artifact_dirs(task: &str, workspace: &std::path::Path) -> (Option<PathBuf>, Option<String>) {
-    let dir = spec_artifact_dir(task, workspace);
-    let rel = dir.as_ref().and_then(|d| {
-        d.strip_prefix(workspace)
-            .ok()
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-    });
-    (dir, rel)
-}
-
 /// The "Execute plan" flow: run the staged workflow language-aware and TDD-free through the
 /// stage breakdown, streaming each phase to the plan panel, then STOP for review. No frozen
 /// tests, no decomposition, no build — the user reads specs → architecture → layout →
@@ -107,7 +91,7 @@ pub fn run_plan(
     // Land the artifacts in the spec's OpenSpec dir when the task references `specs/<slug>/spec.md`,
     // so each phase file (architecture.md, layout.md, …) opens in the code view for review and can
     // carry line-comments for send-back. Falls back to `.smart-coder/plan/` (numbered) otherwise.
-    let (artifact_dir, artifact_dir_rel) = artifact_dirs(&task, &workspace);
+    let (artifact_dir, artifact_dir_rel) = sc_workflow::artifact_dirs(&task, &workspace);
     let (on_phase, mut on_token) = phase_streams(&ev_tx, artifact_dir_rel.clone());
 
     let outcome = match sc_workflow::run_workflow_moded_to(
@@ -188,7 +172,7 @@ pub fn run_staged_build(
     // Land the design artifacts NEXT TO the spec in its OpenSpec dir: if the task references
     // `specs/<slug>/spec.md`, phases (architecture.md, layout.md, breakdown.md, …) go in
     // `specs/<slug>/`. Falls back to the default `.smart-coder/plan/` when there's no spec dir.
-    let (artifact_dir, artifact_dir_rel) = artifact_dirs(&task, &workspace);
+    let (artifact_dir, artifact_dir_rel) = sc_workflow::artifact_dirs(&task, &workspace);
     let (on_phase, mut on_token) = phase_streams(&ev_tx, artifact_dir_rel);
 
     // 1) Design pipeline through decomposition (no frozen tests).

@@ -114,9 +114,18 @@ Rules:
 
 ## Artifacts are durable, versioned, and inspectable
 
-- Every phase artifact is written to disk (e.g. under `docs/` and/or a
-  `.smart-coder/plan/` directory) and committed, so the plan is **reviewable as a
-  diff** and survives across sessions (important in ephemeral environments).
+- Every phase artifact is written to disk — by default `specs/<slug>/` beside the
+  feature it describes (the OpenSpec layout: `spec.md`, `architecture.md`,
+  `layout.md`, …), falling back to a numbered `.smart-coder/plan/NN-phase.md` only
+  when the task text yields no usable slug — and committed, so the plan is
+  **reviewable as a diff** and survives across sessions (important in ephemeral
+  environments).
+- The directory is derived from the task text itself: a task naming an existing
+  `specs/<slug>/spec.md` uses that feature directory verbatim, otherwise the task
+  is slugified into `specs/<slug>/`. Every front-end resolves it through the same
+  engine helper (`sc_workflow::artifact_dirs`), so the CLI and the desktop GUI land
+  the same task in the same place — which is what lets a later run resume from the
+  `state.json` a prior approved run left there.
 - Because artifacts persist, the workflow is **resumable**: stop after the
   architecture gate today, resume at layout tomorrow — the approved artifacts are
   the state, not anything held in a model's context.

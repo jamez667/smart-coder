@@ -47,7 +47,7 @@ pub enum Command {
     /// serve the swarm dashboard (spec 08).
     Swarm { task: String },
     /// Run the staged planning workflow (specs→…→work decomposition) on a task,
-    /// writing the plan artifacts to `.smart-coder/plan/` (spec 09). When
+    /// writing the plan artifacts to `specs/<slug>/` (spec 09). When
     /// `interactive` is set, halt at each phase boundary for a human
     /// approve/revise/send-back/abort decision; otherwise auto-approve every gate.
     Plan { task: String, interactive: bool },

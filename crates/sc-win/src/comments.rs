@@ -89,28 +89,20 @@ impl Comments {
 }
 
 /// Format the pending comments on a phase's artifact file into send-back notes — the
-/// code-review path to workflow feedback (Change B): a human opens a gating phase's `.md` in
-/// the code view, drops line comments on the parts they want changed, and clicks "Send back";
-/// those comments BECOME the notes the workflow re-plans from. One bullet per comment, anchored
-/// to its line range so the model knows exactly what each note is about. `comments` should
-/// already be filtered to the phase's file. Returns `None` when there are none (so the caller
-/// can fall back to a free-text note). Host-testable — no iced, no I/O.
+/// code-review path to workflow feedback: a human opens a gating phase's `.md` in the code
+/// view, drops line comments on the parts they want changed, and clicks "Send back"; those
+/// comments BECOME the notes the workflow re-plans from.
+///
+/// The formatting itself is the engine's ([`sc_workflow::format_sendback_notes`]) so the CLI
+/// can produce identical feedback; this only projects the GUI's richer [`Comment`] (which also
+/// carries resolution + undo state) onto the engine's [`sc_workflow::ReviewNote`]. `comments`
+/// should already be filtered to the phase's file.
 pub fn format_sendback_notes(comments: &[&Comment]) -> Option<String> {
-    if comments.is_empty() {
-        return None;
-    }
-    let bullets: Vec<String> = comments
+    let notes: Vec<sc_workflow::ReviewNote<'_>> = comments
         .iter()
-        .map(|c| {
-            let span = if c.start == c.end {
-                format!("line {}", c.start)
-            } else {
-                format!("lines {}-{}", c.start, c.end)
-            };
-            format!("- [{span}] {}", c.text.trim())
-        })
+        .map(|c| sc_workflow::ReviewNote::new(c.start, c.end, &c.text))
         .collect();
-    Some(bullets.join("\n"))
+    sc_workflow::format_sendback_notes(&notes)
 }
 
 /// The `.dc/comments.json` path under a project root.

@@ -1,53 +1,13 @@
-//! Session tests: the artifact-dir/slug rules, verify-command assembly, the git
-//! safety net, and the spawn/stream contract.
+//! Session tests: verify-command assembly, the git safety net, and the
+//! spawn/stream contract.
 
-use super::slug::{slugify, spec_artifact_dir};
 use super::verify::{combined_verify_command, sandbox_verify_hint};
 use super::{RunKind, Session, UiEvent};
 use crate::config::UiConfig;
 use sc_core::AgentEvent;
 
-#[test]
-fn spec_artifact_dir_uses_a_referenced_spec_path_verbatim() {
-    let ws = std::path::Path::new("/proj");
-    // A task naming specs/<slug>/spec.md → the artifact dir is exactly that feature dir.
-    let d = spec_artifact_dir("Design how to implement specs/alt-seats/spec.md.", ws);
-    assert_eq!(d, Some(ws.join("specs").join("alt-seats")));
-}
-
-#[test]
-fn spec_artifact_dir_derives_specs_slug_from_a_plain_prompt() {
-    let ws = std::path::Path::new("/proj");
-    // A plain prompt now ALSO lands in specs/<slug>/ (the OpenSpec layout is the default).
-    assert_eq!(
-        spec_artifact_dir("Add seat types for crew roles", ws),
-        Some(ws.join("specs").join("add-seat-types-for-crew-roles"))
-    );
-    // The plan_task boilerplate lead-in is stripped so the slug is the feature, not the verb.
-    assert_eq!(
-        spec_artifact_dir(
-            "Design how to implement the feature plan in seat types. Read the plan…",
-            ws
-        ),
-        Some(ws.join("specs").join("seat-types"))
-    );
-    // A truly empty/garbage task ⇒ None ⇒ the workflow's plan-dir fallback.
-    assert_eq!(spec_artifact_dir("   ", ws), None);
-    assert_eq!(spec_artifact_dir("!!! ???", ws), None);
-}
-
-#[test]
-fn slugify_is_kebab_case_and_capped() {
-    assert_eq!(slugify("Add Seat Types"), "add-seat-types");
-    assert_eq!(slugify("  spaces   and---dashes  "), "spaces-and-dashes");
-    assert_eq!(slugify("weird!!chars@@here"), "weird-chars-here");
-    assert_eq!(slugify(""), "");
-    // First sentence only (instruction boilerplate after a period is dropped).
-    assert_eq!(slugify("Seat types. Do not write code yet."), "seat-types");
-    // Length cap keeps the folder name reasonable.
-    let long = "a".repeat(80);
-    assert!(slugify(&long).len() <= 40);
-}
+// The artifact-dir/slug rules now live in the engine (`sc_workflow::artifact_dir`),
+// shared with the CLI, and are tested there.
 
 #[test]
 fn sandbox_verify_hint_flags_cargo_in_a_python_image() {

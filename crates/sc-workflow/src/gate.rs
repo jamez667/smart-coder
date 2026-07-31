@@ -35,6 +35,52 @@ pub enum Decision {
     Abort,
 }
 
+/// One reviewer note anchored to a line range of a phase's artifact file — the
+/// engine-side shape of a code-review line comment. A front-end that stores richer
+/// comments (the desktop GUI persists resolution state and undo text) borrows into
+/// this to hand them to [`format_sendback_notes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewNote<'a> {
+    /// 1-based first/last line the note covers (inclusive). Single line ⇒ `start == end`.
+    pub start: usize,
+    pub end: usize,
+    /// What the reviewer wrote.
+    pub text: &'a str,
+}
+
+impl<'a> ReviewNote<'a> {
+    pub fn new(start: usize, end: usize, text: &'a str) -> Self {
+        Self { start, end, text }
+    }
+}
+
+/// Format reviewer notes on a phase's artifact into the `notes` of a
+/// [`Decision::SendBack`] — the code-review path to workflow feedback: a human reads
+/// a gating phase's `.md`, marks the parts they want changed, and sends it back;
+/// those notes BECOME what the workflow re-plans from ([`crate::WorkflowState::set_feedback`]).
+///
+/// One bullet per note, anchored to its line range so the model knows exactly what
+/// each one is about. `notes` should already be filtered to the phase's file.
+/// Returns `None` when there are none, so the caller can fall back to a free-text
+/// note. Pure — no I/O.
+pub fn format_sendback_notes(notes: &[ReviewNote<'_>]) -> Option<String> {
+    if notes.is_empty() {
+        return None;
+    }
+    let bullets: Vec<String> = notes
+        .iter()
+        .map(|n| {
+            let span = if n.start == n.end {
+                format!("line {}", n.start)
+            } else {
+                format!("lines {}-{}", n.start, n.end)
+            };
+            format!("- [{span}] {}", n.text.trim())
+        })
+        .collect();
+    Some(bullets.join("\n"))
+}
+
 /// Decides what to do with a freshly-produced phase artifact at its checkpoint.
 ///
 /// Implementations are the *only* thing standing between a draft and approval, so
@@ -88,6 +134,23 @@ impl Gate for CeremonyGate<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_sendback_notes_bullets_each_note_with_its_range() {
+        let notes = [
+            ReviewNote::new(3, 3, "tighten the goal"),
+            ReviewNote::new(10, 14, "this section is out of scope"),
+        ];
+        assert_eq!(
+            format_sendback_notes(&notes).unwrap(),
+            "- [line 3] tighten the goal\n- [lines 10-14] this section is out of scope"
+        );
+    }
+
+    #[test]
+    fn format_sendback_notes_none_when_empty() {
+        assert_eq!(format_sendback_notes(&[]), None);
+    }
 
     #[test]
     fn auto_approve_always_approves() {

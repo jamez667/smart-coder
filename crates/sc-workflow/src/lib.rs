@@ -14,6 +14,7 @@
 //! for a headless run, or a channel-backed gate that pauses for human
 //! Approve/Send-back/Abort (the desktop GUI's staged Breakdown/Build flow).
 
+mod artifact_dir;
 mod compile_driven;
 mod coverage;
 mod engine;
@@ -27,12 +28,13 @@ mod staged;
 mod state;
 mod testwriter;
 
+pub use artifact_dir::{artifact_dirs, slugify, spec_artifact_dir};
 pub use compile_driven::{
     build_all_subtasks, build_compiler_driven, BuildEvent, BuildOutcome, BuildTask,
 };
 pub use coverage::{group_by_file, parse_coverage, CoverageItem};
 pub use engine::{generate_phase, phase_messages};
-pub use gate::{AutoApprove, CeremonyGate, Decision, Gate};
+pub use gate::{format_sendback_notes, AutoApprove, CeremonyGate, Decision, Gate, ReviewNote};
 pub use phase::{Ceremony, Phase, PhaseSet};
 pub use policy::ThinkPolicy;
 pub use runner::{

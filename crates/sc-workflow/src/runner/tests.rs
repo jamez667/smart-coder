@@ -534,3 +534,79 @@ fn send_back_regenerates_with_feedback_and_completes() {
     assert!(*saw_feedback.borrow());
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn shared_artifact_dir_writes_openspec_files_and_resumes() {
+    // The CLI and the desktop GUI both resolve their artifact dir with
+    // `sc_workflow::artifact_dirs`, so the same task lands in the same
+    // `specs/<slug>/` for both front-ends. This proves the engine-side path end to
+    // end: the OpenSpec filenames are what's written (not the numbered plan-dir
+    // layout), and a second run over the same task ADOPTS that approved design
+    // instead of regenerating it — the Breakdown→Build resume the GUI relies on and
+    // the CLI previously couldn't reach.
+    let backend = full_backend();
+    let ws = temp("shared-artifact-dir");
+    let task = "Add seat types for crew roles";
+
+    let (artifact_dir, rel) = crate::artifact_dirs(task, &ws);
+    let dir = artifact_dir.expect("a named task yields a specs/<slug>/ dir");
+    assert_eq!(rel.as_deref(), Some("specs/add-seat-types-for-crew-roles"));
+
+    let outcome = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &AutoApprove,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert!(outcome.state.is_complete());
+
+    // OpenSpec filenames, in the shared dir — not `.smart-coder/plan/NN-phase.md`.
+    assert!(
+        dir.join("spec.md").is_file(),
+        "spec.md written to specs/<slug>/"
+    );
+    assert!(
+        dir.join("architecture.md").is_file(),
+        "architecture.md written"
+    );
+    assert!(
+        !crate::plan_dir(&ws).join("01-specs.md").exists(),
+        "nothing written to the numbered plan dir"
+    );
+
+    // A second run over the same task adopts the approved design rather than
+    // re-generating and re-gating it: an Abort-everything gate would stop a fresh
+    // run at phase 1, but here every phase is already approved on disk, so the run
+    // completes without the gate ever being consulted.
+    let deny = ScriptedGate::new(vec![Decision::Abort]);
+    let resumed = run_workflow_moded_to(
+        &backend,
+        &backend,
+        task,
+        &ws,
+        ThinkPolicy::default(),
+        WorkflowMode::full_tdd(),
+        &|_, _| {},
+        &deny,
+        Some(&dir),
+        true,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert!(resumed.state.is_complete(), "prior design adopted");
+    assert!(!resumed.aborted, "the gate was never reached");
+    assert!(
+        deny.seen.lock().unwrap().is_empty(),
+        "no phase re-gated on resume"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

@@ -15,7 +15,7 @@ COMMANDS:
     run <task>      Run a coding task in the current dir with a live TUI
     serve <task>    Run a task and watch it in your browser (web dashboard)
     swarm <task>    Decompose + run with parallel workers (swarm dashboard)
-    plan <task>     Staged planning workflow → .smart-coder/plan/ (spec 09)
+    plan <task>     Staged planning workflow → specs/<slug>/ (spec 09)
     staged <task>   Plan + BUILD via the staged decomposition engine (JSON stream)
     replay <id>     Re-render a recorded session from its log (spec 06)
     comply          Audit this dir against a compliance pack; serve the evidence

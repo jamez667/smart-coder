@@ -10,7 +10,9 @@ use super::common::workspace;
 /// Run the staged planning workflow (spec 09): the orchestrator (T1) plans each
 /// phase, workers (T2) write the tests from the Phase-4 coverage plan, and — when a
 /// `--verify` command is given — the swarm implements the work decomposition against
-/// those tests until the suite is green. Plan artifacts land in `.smart-coder/plan/`.
+/// those tests until the suite is green. Plan artifacts land in `specs/<slug>/`
+/// (the OpenSpec layout, shared with the desktop GUI), falling back to the numbered
+/// `.smart-coder/plan/` when the task yields no usable slug.
 ///
 /// `interactive` toggles the human checkpoints: when set, the workflow halts at each
 /// phase boundary for an approve/revise/send-back/abort decision (the macro gate of
@@ -35,12 +37,24 @@ pub fn plan_task(cli: &Cli, task: String, interactive: bool) -> ExitCode {
         println!("\n=== {} ===\n{preview}\n…", phase.title());
     };
 
+    // Land the design in `specs/<slug>/` (spec.md, architecture.md, …) — the same OpenSpec
+    // layout the desktop GUI writes, resolved by the same engine helper — so a plan is
+    // reviewable beside the feature and a later run resumes from its approved `state.json`.
+    // Falls back to the numbered `.smart-coder/plan/` when the task yields no slug.
+    let (artifact_dir, artifact_dir_rel) = sc_workflow::artifact_dirs(&task, &workspace);
+    let where_written = artifact_dir_rel
+        .clone()
+        .unwrap_or_else(|| ".smart-coder/plan".to_string());
+    let gate_dir = artifact_dir
+        .clone()
+        .unwrap_or_else(|| sc_workflow::plan_dir(&workspace));
+
     // Autonomous by default; `--interactive`/`--gate`/`--ceremony`/`--gates` put a
     // human at the gates (spec 09). Adaptive ceremony scales *which* phases stop:
     // the resolved gate set decides which phases consult the stdin gate; the rest
     // auto-approve. The gate is fully harness-owned.
     let auto = sc_workflow::AutoApprove;
-    let stdin_gate = StdinGate::new(&workspace);
+    let stdin_gate = StdinGate::new(&gate_dir, artifact_dir.is_some());
     let gate_set = cli.ceremony_gates();
     let ceremony_gate = sc_workflow::CeremonyGate::new(gate_set, &stdin_gate);
     let gated = cli.plan_is_gated(interactive);
@@ -58,14 +72,18 @@ pub fn plan_task(cli: &Cli, task: String, interactive: bool) -> ExitCode {
         println!("ceremony: {tier} — gating {}", gated_phases.join(", "));
     }
 
-    let outcome = match sc_workflow::run_workflow_gated(
+    let outcome = match sc_workflow::run_workflow_moded_to(
         &orchestrator,
         &worker,
         &task,
         &workspace,
         cli.think_policy(),
+        sc_workflow::WorkflowMode::full_tdd(),
         &on_phase,
         gate,
+        artifact_dir.as_deref(),
+        artifact_dir.is_some(), // OpenSpec filenames when writing into specs/<slug>/
+        &mut |_p, _d| {},
     ) {
         Ok(o) => o,
         Err(e) => {
@@ -75,12 +93,13 @@ pub fn plan_task(cli: &Cli, task: String, interactive: bool) -> ExitCode {
     };
 
     if outcome.aborted {
-        println!("\nplan aborted at a checkpoint — approved artifacts kept in .smart-coder/plan/");
+        println!("\nplan aborted at a checkpoint — approved artifacts kept in {where_written}/");
         return ExitCode::SUCCESS;
     }
 
     println!(
-        "\nplan complete — 6 phase artifacts in .smart-coder/plan/\n  tests written: {}\n  subtasks for the swarm: {}",
+        "\nplan complete — {} phase artifacts in {where_written}/\n  tests written: {}\n  subtasks for the swarm: {}",
+        sc_workflow::Phase::ALL.len(),
         if outcome.test_files.is_empty() {
             "(none)".to_string()
         } else {
@@ -132,14 +151,29 @@ pub fn plan_task(cli: &Cli, task: String, interactive: bool) -> ExitCode {
 /// artifact is already persisted to disk before we're consulted, so **revise** is
 /// "edit the file, then press enter" — we re-read it (the runner picks up the edit).
 struct StdinGate {
-    workspace: std::path::PathBuf,
+    /// The directory the runner persists artifacts to — `specs/<slug>/` (OpenSpec
+    /// filenames) or the numbered `.smart-coder/plan/`. Must match what the runner
+    /// was given, or "edit the file" would name a path that doesn't exist.
+    artifact_dir: std::path::PathBuf,
+    openspec_names: bool,
 }
 
 impl StdinGate {
-    fn new(workspace: &std::path::Path) -> Self {
+    fn new(artifact_dir: &std::path::Path, openspec_names: bool) -> Self {
         Self {
-            workspace: workspace.to_path_buf(),
+            artifact_dir: artifact_dir.to_path_buf(),
+            openspec_names,
         }
+    }
+
+    /// The on-disk file for `phase`, in the layout the runner is writing.
+    fn file_for(&self, phase: sc_workflow::Phase) -> std::path::PathBuf {
+        let name = if self.openspec_names {
+            phase.openspec_filename().to_string()
+        } else {
+            phase.filename()
+        };
+        self.artifact_dir.join(name)
     }
 }
 
@@ -150,7 +184,7 @@ impl sc_workflow::Gate for StdinGate {
         artifact: &sc_workflow::Artifact,
     ) -> sc_workflow::Decision {
         use sc_workflow::Decision;
-        let file = sc_workflow::plan_dir(&self.workspace).join(phase.filename());
+        let file = self.file_for(phase);
         let stdin = io::stdin();
         loop {
             println!(
