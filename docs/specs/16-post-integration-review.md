@@ -113,6 +113,100 @@ never blocks — that asymmetry is the whole design. It is the same commitment
 [13](13-compliance-evidence.md) makes by keeping `Unknown` first-class: the tool
 says how confident it is, rather than flattening confidence into a verdict.
 
+Agreement between *reviewers* (see "A panel of reviewers") is a third, weaker tier
+of evidence: it ranks, but it never promotes an opinion to a fact, because
+correlated models can be confidently wrong together.
+
+## A panel of reviewers
+
+Lenses vary the *question*. A panel varies the *reviewer*: the same diff, the same
+lens, several models — a local Qwen, Gemini, GPT, Claude — and their findings
+compared. This is cheap to reach because the fan-out already exists; a panel is the
+same parallel call with a different backend per branch.
+
+The reason to want it is not novelty. A single reviewer has a characteristic blind
+spot and a characteristic false-positive habit, and neither is visible from inside
+its own output. Two independent models raising the same finding is evidence of a
+different kind than one model raising it twice.
+
+> **Agreement ranks a finding. It never converts an opinion into a fact.**
+
+This is the same asymmetry as deterministic corroboration, one notch weaker.
+Unanimity among three models is still three opinions — correlated ones, since they
+share training data and failure modes. So agreement raises a finding's rank and may
+change whether it is *shown first*; only a deterministic check may make it *block*.
+A panel that can gate on consensus alone is a panel that will eventually halt a run
+because three models were confidently wrong together.
+
+### Reaching the models
+
+Through the existing OpenAI-compatible seam ([02](02-model-backends.md)) — no new
+adapters and no per-vendor SDKs. Gemini already runs this way today as the planner
+connection; OpenAI is natively compatible; Anthropic is reachable through the same
+shape. A reviewer is therefore a **connection + model name**, exactly like the
+coder, planner and advisor stages, and the panel is a *list* of them.
+
+The one real change: the connection model is a fixed pair (`Local`, `Gemini`) with
+one provider per stage. A panel needs *n* connections and a stage that holds
+several at once. That generalisation — named connections rather than a closed enum
+— is the actual work in this section, and it pays for itself elsewhere the moment
+anyone wants a second local endpoint.
+
+Because reviewers are remote and paid-for, the panel is **opt-in per run**, and the
+default panel is one reviewer. Fanning a four-lens review across three hosted
+models is twelve calls per subtask; that is a deliberate choice, never a default.
+A reviewer that cannot be reached is a **skipped reviewer, not a failed review** —
+its absence is recorded, and the remaining reviewers still report. A review that
+fails closed on a network error would make the whole gate hostage to an API outage.
+
+### What agreement means
+
+Findings from different models are matched on *what they point at* — the same
+lens, the same file, and overlapping lines — not on wording, which will never
+match. Two models describing the same duplicated helper in different words are one
+finding with two votes.
+
+Each finding then carries its provenance:
+
+```
+Finding {
+  lens, severity, file, line, summary,
+  corroborated: bool,          // a deterministic check agreed
+  raised_by: [ModelId],        // who saw it
+  considered_by: [ModelId],    // who reviewed this diff at all
+}
+```
+
+`considered_by` is what makes a lone finding interpretable. One model raising
+something three others reviewed and did not raise is a *contested* finding — worth
+showing, worth ranking low. One model raising something nobody else looked at is
+simply unreviewed. Collapsing those two into "1 of 1" would be the dishonest
+shortcut, and it is the same mistake as folding `Unknown` into `Pass`
+([13](13-compliance-evidence.md)).
+
+Ranking, in order: corroborated by a deterministic check → raised by several
+reviewers → raised by one. Severity breaks ties within a band.
+
+### Disagreement is a finding about the panel
+
+When reviewers systematically diverge — one model raising four times as much as
+the others, or one never agreeing with anyone — that is worth surfacing, because it
+usually means a misconfigured model or a prompt one model reads differently.
+
+Recording `raised_by` and `considered_by` per finding also means that if findings
+are ever *confirmed or dismissed* by a human, per-model accuracy falls out of the
+existing record without new machinery. That is a natural extension and explicitly
+not built here: judging reviewers needs ground truth, ground truth needs a human
+verdict trail, and inventing one before the panel has ever run would be designing
+against a guess.
+
+**Comparing models as *producers* — which one writes better code — is a different
+question and does not belong in this spec.** That is a benchmark: same task, same
+starting repo, graded outcomes, held against the fixed task suite
+([07](07-roadmap.md), `sc-eval`). Reviewing is comparing opinions about one diff;
+benchmarking is comparing artifacts from many runs. Conflating them yields a
+number that measures neither.
+
 ## What happens to a finding
 
 Three outcomes, chosen by configuration, in increasing order of intervention:
@@ -143,6 +237,9 @@ orchestrator and workers. It must be possible to not pay for it:
   configured — reviewing with a 4B model produces 4B-quality review.
 - Skipped entirely for a diff below a size threshold. A three-line change does not
   need four lenses.
+- Cost scales as *lenses × reviewers × subtasks*, and the middle term is the one a
+  user can accidentally set to four hosted models. The panel defaults to one
+  reviewer, and the run reports what a panel cost so the next choice is informed.
 - The reviewer runs on the **advisor/T1 backend** ([02](02-model-backends.md)), not
   a worker. A worker reviewing a worker's output is two keyholes, not one review.
   As with escalation, that tier is a configured backend rather than a type in the
@@ -154,9 +251,13 @@ Review emits into the existing swarm event stream ([01](01-architecture.md)), so
 every renderer gets it for free — the same "one stream, many renderers" property
 that let M5 add a second UI cheaply:
 
-- `ReviewStarted { subtask, lenses }`
-- `ReviewFinding { subtask, lens, severity, file, line, corroborated, summary }`
-- `ReviewFinished { subtask, findings, blocking }`
+- `ReviewStarted { subtask, lenses, reviewers }`
+- `ReviewFinding { subtask, lens, severity, file, line, corroborated, raised_by, considered_by, summary }`
+- `ReviewFinished { subtask, findings, blocking, reviewers_skipped }`
+
+`reviewers_skipped` is carried explicitly rather than inferred from a shorter
+`considered_by`: a renderer must be able to say "3 of 4 reviewers ran" instead of
+quietly reporting a narrower review as a complete one.
 
 The desktop client renders findings as **line comments** on the diff
 ([12](12-platform-clients.md)), which is most of the way there already: the code
