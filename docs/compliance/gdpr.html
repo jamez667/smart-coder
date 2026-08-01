@@ -4,60 +4,145 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
 <title>GDPR (Regulation (EU) 2016/679) — compliance evidence</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 </style>
 </head>
 <body>
-<p><a href="index.html">&larr; All frameworks</a></p><h1>GDPR (Regulation (EU) 2016/679)</h1><p class="sub">European Union &middot; version 1.0.0 &middot; generated 2026-07-26T03:58:39Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">DELIBERATELY NARROW — and GDPR is the framework where that matters most.
+<input class="theme-in" type="radio" name="theme" id="theme-os" checked><input class="theme-in" type="radio" name="theme" id="theme-light"><input class="theme-in" type="radio" name="theme" id="theme-dark"><div class="masthead"><span class="wordmark">smart-coder</span><div class="theme" role="group" aria-label="Colour theme"><label for="theme-os">Auto</label><label for="theme-light">Light</label><label for="theme-dark">Dark</label></div></div>
+<main>
+<p><a href="index.html">&larr; All frameworks</a></p><h1>GDPR (Regulation (EU) 2016/679)</h1><p class="sub">European Union &middot; version 1.0.0 &middot; generated 2026-08-01T20:01:12Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">DELIBERATELY NARROW — and GDPR is the framework where that matters most.
 
 GDPR governs the lawfulness of personal data processing. This pack can evidence
 a small part of Article 32 (security of processing) as it appears in code. It
@@ -77,19 +162,20 @@ Those are the substance of GDPR. A repository holds none of them.
 Article 32 itself requires measures &quot;appropriate to the risk&quot;, which depends on
 what personal data is processed and how sensitive it is — questions this tool
 cannot answer. A passing result is engineering hygiene, not GDPR compliance, and
-must never be presented as the latter. Consult a data protection specialist.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">3</b><span>pass</span></div><div class="count"><b class="gap">0</b><span>gap</span></div><div class="count"><b class="unknown">5</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 38%</strong><br><span class="scope">3 of 8 in-scope passed</span><div class="bar"><div style="width:38%"></div></div></div><div><strong>Determinacy 38%</strong><br><span class="scope">3 of 8 could be determined</span><div class="bar"><div style="width:38%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>1 <span class="scope">(1 pass · 0 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>2 <span class="scope">(2 pass · 0 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>5 <span class="scope">(0 pass · 0 gap · 5 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>Art12-23</strong><br><span class="scope">Data subject rights</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art33-34</strong><br><span class="scope">Personal data breach notification</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art5-6</strong><br><span class="scope">Principles and lawfulness of processing</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art30-35</strong><br><span class="scope">Records of processing and data protection impact assessments</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Ch-V</strong><br><span class="scope">International transfers</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art32-1a</strong><br><span class="scope">Pseudonymisation and encryption of personal data</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>Art32-1b</strong><br><span class="scope">Ongoing confidentiality, integrity, availability and resilience</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>Art32-1d</strong><br><span class="scope">Regular testing and evaluation of security measures</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is pass</td></tr></tbody></table><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">Art5-6</span><span class="pill unknown">unknown</span><span class="scope">Principles and lawfulness of processing</span></div><p class="intent">Personal data shall be processed lawfully, fairly and transparently; collected
+must never be presented as the latter. Consult a data protection specialist.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">3</b><span>pass</span></div><div class="count"><b class="gap">0</b><span>gap</span></div><div class="count"><b class="unknown">5</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 38%</strong><br><span class="scope">3 of 8 in-scope passed</span><div class="bar"><div style="width:38%"></div></div></div><div><strong>Determinacy 38%</strong><br><span class="scope">3 of 8 could be determined</span><div class="bar"><div style="width:38%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><div class="tablewrap"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>1 <span class="scope">(1 pass · 0 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>2 <span class="scope">(2 pass · 0 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>5 <span class="scope">(0 pass · 0 gap · 5 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table></div><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><div class="tablewrap"><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>Art12-23</strong><br><span class="scope">Data subject rights</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art33-34</strong><br><span class="scope">Personal data breach notification</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art5-6</strong><br><span class="scope">Principles and lawfulness of processing</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art30-35</strong><br><span class="scope">Records of processing and data protection impact assessments</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Ch-V</strong><br><span class="scope">International transfers</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>Art32-1a</strong><br><span class="scope">Pseudonymisation and encryption of personal data</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>Art32-1b</strong><br><span class="scope">Ongoing confidentiality, integrity, availability and resilience</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>Art32-1d</strong><br><span class="scope">Regular testing and evaluation of security measures</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is pass</td></tr></tbody></table></div><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">Art5-6</span><span class="pill unknown">unknown</span><span class="scope">Principles and lawfulness of processing</span></div><p class="intent">Personal data shall be processed lawfully, fairly and transparently; collected
 for specified purposes; adequate, relevant and limited to what is necessary;
 accurate; kept no longer than necessary; and processed securely. Processing
 requires a lawful basis, and where that basis is consent it must be freely
-given, specific, informed and demonstrable.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Database logs or consent management platform (CMP) exports showing user IDs, timestamps, and the exact consent language presented</li><li>Completed Legitimate Interest Assessments (LIAs) or legal memos defining the lawful basis for each major processing activity</li><li>Data retention purge logs or DBA tickets demonstrating historical data is actively deleted per the retention schedule</li></ul><p><strong>Usually held by:</strong> Legal / Data Protection Officer (DPO)</p><p><strong>What an auditor will probe:</strong> Show me the exact database record proving a specific user consented, and the legal assessment justifying data collected without explicit consent.</p></div><p class="rem"><strong>Obtain:</strong> Provide the lawful basis analysis and, where relied on, consent records.</p></div><div class="ctl"><div class="hd"><span class="id">Art12-23</span><span class="pill unknown">unknown</span><span class="scope">Data subject rights</span></div><p class="intent">The rights of access, rectification, erasure, restriction, portability and
+given, specific, informed and demonstrable.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Database logs or consent management platform (CMP) records showing user consent timestamps, scope, and withdrawal actions</li><li>Legal assessments or memos documenting the specific lawful basis (e.g., legitimate interest, contract) for each processing activity</li><li>Data retention schedules paired with automated deletion execution logs or manual database purge tickets</li></ul><p><strong>Usually held by:</strong> Legal / Data Protection Officer (DPO)</p><p><strong>What an auditor will probe:</strong> Show me the timestamped log proving a specific user explicitly consented before their data was processed, and demonstrate how that consent can be revoked.</p></div><p class="rem"><strong>Obtain:</strong> Provide the lawful basis analysis and, where relied on, consent records.</p></div><div class="ctl"><div class="hd"><span class="id">Art12-23</span><span class="pill unknown">unknown</span><span class="scope">Data subject rights</span></div><p class="intent">The rights of access, rectification, erasure, restriction, portability and
 objection, exercisable by data subjects and answerable by the controller within
-one month.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Ticketing system (e.g., Jira, Zendesk) history showing Data Subject Access Requests (DSARs) received, processed, and closed</li><li>SLA reports or metrics proving DSARs are consistently resolved within the one-month statutory deadline</li><li>Execution logs or manual DBA tickets proving a specific user&#39;s data was purged from all systems, including third-party tools and backups</li></ul><p><strong>Usually held by:</strong> Privacy Team / Customer Support</p><p><strong>What an auditor will probe:</strong> Walk me through a recently closed erasure ticket to prove the data was actually removed from all secondary systems and backups within the 30-day window.</p></div><p class="rem"><strong>Obtain:</strong> Provide the DSAR procedure and evidence of requests handled within statutory deadlines.</p></div><div class="ctl"><div class="hd"><span class="id">Art33-34</span><span class="pill unknown">unknown</span><span class="scope">Personal data breach notification</span></div><p class="intent">Notify the supervisory authority of a personal data breach without undue delay
+one month.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Data Subject Access Request (DSAR) ticketing queue showing request receipt dates and resolution timestamps</li><li>Redacted examples of completed data exports or deletion confirmations provided to data subjects</li><li>System query logs or manual checklists proving data was purged from primary databases, third-party SaaS, and backups</li></ul><p><strong>Usually held by:</strong> Privacy Team / Customer Support</p><p><strong>What an auditor will probe:</strong> Walk me through a recently closed DSAR ticket to prove all personal data was located across all systems and the request was fulfilled within the 30-day legal deadline.</p></div><p class="rem"><strong>Obtain:</strong> Provide the DSAR procedure and evidence of requests handled within statutory deadlines.</p></div><div class="ctl"><div class="hd"><span class="id">Art33-34</span><span class="pill unknown">unknown</span><span class="scope">Personal data breach notification</span></div><p class="intent">Notify the supervisory authority of a personal data breach without undue delay
 and, where feasible, within 72 hours of becoming aware of it; communicate to
-data subjects where the breach is likely to result in high risk.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The internal breach/incident register logging all suspected data breaches, including those deemed non-reportable</li><li>Email receipts or regulatory portal submission confirmations timestamped within 72 hours of breach discovery</li><li>Post-incident review (PIR) documents detailing the exact timeline of when the team became aware of the breach versus when it was reported</li></ul><p><strong>Usually held by:</strong> Security Incident Response Team (SIRT) / DPO</p><p><strong>What an auditor will probe:</strong> For your most recent security incident, show me the timeline from the moment of discovery to the exact timestamp the supervisory authority was notified to verify the 72-hour SLA.</p></div><p class="rem"><strong>Obtain:</strong> Provide the breach response procedure and the breach register.</p></div><div class="ctl"><div class="hd"><span class="id">Art30-35</span><span class="pill unknown">unknown</span><span class="scope">Records of processing and data protection impact assessments</span></div><p class="intent">Maintain a record of processing activities, and carry out a data protection
+data subjects where the breach is likely to result in high risk.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The internal breach register documenting all security incidents, including those that did not meet the reporting threshold, and the legal rationale</li><li>Incident response tickets showing the exact time of discovery, triage steps, and DPO escalation</li><li>Copies of formal notifications sent to the Supervisory Authority or data subjects, including timestamped delivery receipts</li></ul><p><strong>Usually held by:</strong> Security Lead / DPO</p><p><strong>What an auditor will probe:</strong> Using a past incident ticket, prove that the privacy team was engaged immediately to evaluate the 72-hour regulatory reporting window.</p></div><p class="rem"><strong>Obtain:</strong> Provide the breach response procedure and the breach register.</p></div><div class="ctl"><div class="hd"><span class="id">Art30-35</span><span class="pill unknown">unknown</span><span class="scope">Records of processing and data protection impact assessments</span></div><p class="intent">Maintain a record of processing activities, and carry out a data protection
 impact assessment where processing is likely to result in a high risk to the
-rights and freedoms of natural persons.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The formal Record of Processing Activities (RoPA) document showing version history and recent review dates</li><li>Completed Data Protection Impact Assessments (DPIAs) for high-risk processing, featuring DPO sign-off signatures</li><li>Product architecture review tickets or meeting minutes demonstrating the DPO was consulted prior to launching new data-intensive features</li></ul><p><strong>Usually held by:</strong> Data Protection Officer (DPO)</p><p><strong>What an auditor will probe:</strong> How do you ensure the RoPA is updated when a new product feature launches, and can you show me the signed DPIA for your most recent major release?</p></div><p class="rem"><strong>Obtain:</strong> Provide the Art. 30 record and any DPIAs, with the DPO&#39;s advice where obtained.</p></div><div class="ctl"><div class="hd"><span class="id">Ch-V</span><span class="pill unknown">unknown</span><span class="scope">International transfers</span></div><p class="intent">Transfers of personal data to a third country or international organisation may
+rights and freedoms of natural persons.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The formal Record of Processing Activities (RoPA) document or system export detailing data categories, purposes, and recipients</li><li>Completed Data Protection Impact Assessments (DPIAs) for recent high-risk product launches or vendor onboardings</li><li>Sign-off records or meeting minutes demonstrating the DPO reviewed and approved the DPIAs prior to processing</li></ul><p><strong>Usually held by:</strong> Data Protection Officer (DPO)</p><p><strong>What an auditor will probe:</strong> Show me the operational trigger that caused you to update the RoPA and initiate a DPIA during your most recent major feature release.</p></div><p class="rem"><strong>Obtain:</strong> Provide the Art. 30 record and any DPIAs, with the DPO&#39;s advice where obtained.</p></div><div class="ctl"><div class="hd"><span class="id">Ch-V</span><span class="pill unknown">unknown</span><span class="scope">International transfers</span></div><p class="intent">Transfers of personal data to a third country or international organisation may
 take place only subject to an adequacy decision, appropriate safeguards such as
-standard contractual clauses, or a derogation.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Countersigned Data Processing Agreements (DPAs) containing Standard Contractual Clauses (SCCs) with all sub-processors located in third countries</li><li>Completed Transfer Impact Assessments (TIAs) evaluating the legal regimes of the destination countries</li><li>The published sub-processor list mapping each vendor to their specific data hosting regions</li></ul><p><strong>Usually held by:</strong> Legal / Procurement</p><p><strong>What an auditor will probe:</strong> Provide the signed DPA and Transfer Impact Assessment for this specific foreign cloud provider demonstrating how you evaluated the risks of local government access.</p></div><p class="rem"><strong>Obtain:</strong> Provide the transfer mapping, SCCs and any transfer impact assessments.</p></div>
+standard contractual clauses, or a derogation.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Executed Data Processing Agreements (DPAs) containing Standard Contractual Clauses (SCCs) with cloud providers and sub-processors</li><li>Transfer Impact Assessments (TIAs) conducted for data exported to jurisdictions without an adequacy decision</li><li>Vendor inventory or data flow maps explicitly listing the geographic locations of all sub-processors</li></ul><p><strong>Usually held by:</strong> Legal / Procurement</p><p><strong>What an auditor will probe:</strong> Trace the data flow for this specific sub-processor located outside the EU and provide the executed DPA and Transfer Impact Assessment that legalizes the transfer.</p></div><p class="rem"><strong>Obtain:</strong> Provide the transfer mapping, SCCs and any transfer impact assessments.</p></div>
+</main>
 <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
 </body>
 </html>

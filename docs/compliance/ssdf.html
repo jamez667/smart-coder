@@ -4,60 +4,145 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
 <title>NIST Secure Software Development Framework (SP 800-218 v1.1) — compliance evidence</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 </style>
 </head>
 <body>
-<p><a href="index.html">&larr; All frameworks</a></p><h1>NIST Secure Software Development Framework (SP 800-218 v1.1)</h1><p class="sub">NIST &middot; version 1.0.0 &middot; generated 2026-07-26T03:58:39Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">This pack inspects source-controlled artifacts only. It cannot observe build
+<input class="theme-in" type="radio" name="theme" id="theme-os" checked><input class="theme-in" type="radio" name="theme" id="theme-light"><input class="theme-in" type="radio" name="theme" id="theme-dark"><div class="masthead"><span class="wordmark">smart-coder</span><div class="theme" role="group" aria-label="Colour theme"><label for="theme-os">Auto</label><label for="theme-light">Light</label><label for="theme-dark">Dark</label></div></div>
+<main>
+<p><a href="index.html">&larr; All frameworks</a></p><h1>NIST Secure Software Development Framework (SP 800-218 v1.1)</h1><p class="sub">NIST &middot; version 1.0.0 &middot; generated 2026-08-01T20:01:12Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">This pack inspects source-controlled artifacts only. It cannot observe build
 infrastructure, signing key custody, developer training records, or vulnerability
 disclosure handling.
 
@@ -67,21 +152,22 @@ organizational and are declared undeterminable here rather than omitted.
 
 A passing result is evidence toward a practice, never a completed attestation.
 The CISA secure software development attestation form requires an authorised
-signatory, not a scanner.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">4</b><span>pass</span></div><div class="count"><b class="gap">2</b><span>gap</span></div><div class="count"><b class="unknown">6</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 33%</strong><br><span class="scope">4 of 12 in-scope passed</span><div class="bar"><div style="width:33%"></div></div></div><div><strong>Determinacy 50%</strong><br><span class="scope">6 of 12 could be determined</span><div class="bar"><div style="width:50%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>3 <span class="scope">(2 pass · 1 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>7 <span class="scope">(2 pass · 1 gap · 4 unknown)</span></td><td><strong>43%</strong><div class="bar"><div style="width:43%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>2 <span class="scope">(0 pass · 0 gap · 2 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>PS.2</strong><br><span class="scope">Provide a mechanism for verifying software release integrity</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is gap</td></tr><tr><td><strong>PW.4</strong><br><span class="scope">Reuse existing, well-secured software rather than duplicating functionality</span></td><td class="scope">Code</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">weighted: 2.0/7.0 observable = 29% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PS.1</strong><br><span class="scope">Protect all forms of code from unauthorized access and tampering</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 71% of evidence weight was indeterminate</td></tr><tr><td><strong>PS.3</strong><br><span class="scope">Archive and protect each software release</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>RV.1</strong><br><span class="scope">Identify and confirm vulnerabilities on an ongoing basis</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>RV.2</strong><br><span class="scope">Assess, prioritize and remediate vulnerabilities</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PO.2</strong><br><span class="scope">Implement roles and responsibilities</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PO.3</strong><br><span class="scope">Implement supporting toolchains</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PW.5</strong><br><span class="scope">Create source code by adhering to secure coding practices</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>PW.7</strong><br><span class="scope">Review and/or analyze human-readable code</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 5.0/5.0 observable = 100% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PW.8</strong><br><span class="scope">Test executable code to identify vulnerabilities and verify compliance</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 3.0/3.0 observable = 100% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PW.9</strong><br><span class="scope">Configure software to have secure settings by default</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>medium</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr></tbody></table><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">PW.4</span><span class="pill gap">gap</span><span class="scope">Reuse existing, well-secured software rather than duplicating functionality</span></div><p class="intent">Acquire and maintain well-secured software components from third-party
+signatory, not a scanner.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">4</b><span>pass</span></div><div class="count"><b class="gap">2</b><span>gap</span></div><div class="count"><b class="unknown">6</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 33%</strong><br><span class="scope">4 of 12 in-scope passed</span><div class="bar"><div style="width:33%"></div></div></div><div><strong>Determinacy 50%</strong><br><span class="scope">6 of 12 could be determined</span><div class="bar"><div style="width:50%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><div class="tablewrap"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>3 <span class="scope">(2 pass · 1 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>7 <span class="scope">(2 pass · 1 gap · 4 unknown)</span></td><td><strong>43%</strong><div class="bar"><div style="width:43%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>2 <span class="scope">(0 pass · 0 gap · 2 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table></div><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><div class="tablewrap"><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>PS.2</strong><br><span class="scope">Provide a mechanism for verifying software release integrity</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is gap</td></tr><tr><td><strong>PW.4</strong><br><span class="scope">Reuse existing, well-secured software rather than duplicating functionality</span></td><td class="scope">Code</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">weighted: 2.0/7.0 observable = 29% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PS.1</strong><br><span class="scope">Protect all forms of code from unauthorized access and tampering</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 71% of evidence weight was indeterminate</td></tr><tr><td><strong>PS.3</strong><br><span class="scope">Archive and protect each software release</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>RV.1</strong><br><span class="scope">Identify and confirm vulnerabilities on an ongoing basis</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>RV.2</strong><br><span class="scope">Assess, prioritize and remediate vulnerabilities</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PO.2</strong><br><span class="scope">Implement roles and responsibilities</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PO.3</strong><br><span class="scope">Implement supporting toolchains</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PW.5</strong><br><span class="scope">Create source code by adhering to secure coding practices</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>PW.7</strong><br><span class="scope">Review and/or analyze human-readable code</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 5.0/5.0 observable = 100% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PW.8</strong><br><span class="scope">Test executable code to identify vulnerabilities and verify compliance</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 3.0/3.0 observable = 100% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PW.9</strong><br><span class="scope">Configure software to have secure settings by default</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>medium</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr></tbody></table></div><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">PW.4</span><span class="pill gap">gap</span><span class="scope">Reuse existing, well-secured software rather than duplicating functionality</span></div><p class="intent">Acquire and maintain well-secured software components from third-party
 developers, and verify that each component remains secure over time — including
 checking for known vulnerabilities.</p><p class="why">weighted: 2.0/7.0 observable = 29% (pass&gt;=60%, gap&lt;30%)</p><p class="rem"><strong>Remediation:</strong> Add a dependency vulnerability audit to CI and adopt an automated update policy.</p></div><div class="ctl"><div class="hd"><span class="id">PS.2</span><span class="pill gap">gap</span><span class="scope">Provide a mechanism for verifying software release integrity</span></div><p class="intent">Make verification information available to software acquirers so they can
 confirm that the software they received is authentic and unmodified.</p><p class="why">all-of: worst of 2 check(s) is gap</p><p class="rem"><strong>Remediation:</strong> Sign releases (Sigstore/cosign, GPG) or publish checksums, and document how a
 consumer verifies them.</p></div><div class="ctl"><div class="hd"><span class="id">PS.1</span><span class="pill unknown">unknown</span><span class="scope">Protect all forms of code from unauthorized access and tampering</span></div><p class="intent">Store all forms of code — source, executables, configuration-as-code — based on
-the principle of least privilege, so only authorized personnel can change it.</p><p class="why">weighted: 71% of evidence weight was indeterminate</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Export of current Access Control Lists (ACLs) and branch protection rules from the VCS provider (e.g., GitHub, GitLab)</li><li>Dated ticketing records demonstrating quarterly or bi-annual user access reviews for the VCS</li><li>VCS provider configuration screenshots or API exports showing MFA and SSO enforcement</li></ul><p><strong>Usually held by:</strong> Engineering Lead / IT Admin</p><p><strong>What an auditor will probe:</strong> Show me the most recent access review ticket and demonstrate how you verified that terminated employees were promptly removed from the VCS.</p></div><p class="rem"><strong>Obtain:</strong> Enforce branch protection with required review, define code owners, and keep the
+the principle of least privilege, so only authorized personnel can change it.</p><p class="why">weighted: 71% of evidence weight was indeterminate</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Export of Version Control System (VCS) access control lists and branch protection rules</li><li>Quarterly access review sign-off sheets for repository permissions</li><li>Ticketing history showing approvals for granting and revoking developer access</li></ul><p><strong>Usually held by:</strong> IT Access Management / Engineering Leadership</p><p><strong>What an auditor will probe:</strong> Show me the access request and approval tickets for the last three developers granted write access, and the offboarding logs for the last terminated employee.</p></div><p class="rem"><strong>Obtain:</strong> Enforce branch protection with required review, define code owners, and keep the
 protection configuration as code where the provider allows it.</p></div><div class="ctl"><div class="hd"><span class="id">PS.3</span><span class="pill unknown">unknown</span><span class="scope">Archive and protect each software release</span></div><p class="intent">Preserve release artifacts and their provenance, and collect, maintain and share
-provenance data for all components of each release — including an SBOM.</p><p class="why">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Configuration settings from the artifact repository (e.g., Artifactory, AWS S3) demonstrating immutable storage and retention policies</li><li>CI/CD pipeline execution logs showing automated SBOM generation and cryptographic signing during a specific release</li><li>A sample of provenance data and the corresponding SBOM retrieved directly from the release archive</li></ul><p><strong>Usually held by:</strong> DevOps / Release Engineering</p><p><strong>What an auditor will probe:</strong> Walk me through a historical release and show me where its immutable artifact, provenance data, and SBOM are stored and protected from tampering.</p></div><p class="rem"><strong>Obtain:</strong> Generate an SBOM in CI and attach it to each release; retain build provenance
+provenance data for all components of each release — including an SBOM.</p><p class="why">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Logs from the artifact repository demonstrating immutable storage of past releases</li><li>Dynamically generated SBOMs and provenance attestations from recent CI/CD pipeline runs</li><li>Cryptographic signatures or hashes associated with archived release artifacts</li></ul><p><strong>Usually held by:</strong> Release Engineering / DevOps</p><p><strong>What an auditor will probe:</strong> Walk me through the retrieval of a historical release artifact from six months ago and demonstrate how its integrity is verified against the archived SBOM.</p></div><p class="rem"><strong>Obtain:</strong> Generate an SBOM in CI and attach it to each release; retain build provenance
 attestations.</p></div><div class="ctl"><div class="hd"><span class="id">RV.1</span><span class="pill unknown">unknown</span><span class="scope">Identify and confirm vulnerabilities on an ongoing basis</span></div><p class="intent">Gather information from acquirers, users and public sources on potential
 vulnerabilities, review and confirm them, and have a policy for receiving
-vulnerability reports.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Logs from the Vulnerability Disclosure Program (VDP) platform (e.g., HackerOne, Bugcrowd) or security inbox showing received reports</li><li>Issue tracker history demonstrating the triage, confirmation, and routing of external vulnerability reports</li><li>Subscription records or integration logs for threat intelligence feeds and CVE databases</li></ul><p><strong>Usually held by:</strong> Product Security / Security Operations</p><p><strong>What an auditor will probe:</strong> Show me a recent vulnerability report submitted by an external researcher and trace its history through your triage and confirmation process.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vulnerability disclosure policy and evidence that reports are triaged.</p></div><div class="ctl"><div class="hd"><span class="id">RV.2</span><span class="pill unknown">unknown</span><span class="scope">Assess, prioritize and remediate vulnerabilities</span></div><p class="intent">Analyze each vulnerability to gather sufficient information to plan its
-remediation, and develop and implement a remediation plan.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Export from the vulnerability management system or issue tracker showing vulnerabilities mapped to severity scores and remediation SLAs</li><li>SLA compliance reports or dashboards demonstrating the percentage of vulnerabilities remediated on time</li><li>Ticket histories showing the technical analysis, remediation plan, and final deployment verification for a sample of critical vulnerabilities</li></ul><p><strong>Usually held by:</strong> Engineering / Vulnerability Management Team</p><p><strong>What an auditor will probe:</strong> Show me the ticket history for a recent critical vulnerability to prove it was prioritized, analyzed, and remediated within your defined SLA timeframe.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vulnerability register and remediation SLA evidence.</p></div><div class="ctl"><div class="hd"><span class="id">PO.3</span><span class="pill unknown">unknown</span><span class="scope">Implement supporting toolchains</span></div><p class="intent">Specify which tools must be included in each toolchain, deploy and maintain them
+vulnerability reports.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Published Vulnerability Disclosure Program (VDP) policy or security.txt file</li><li>Export of tickets or emails from the security contact inbox or bug bounty platform showing received reports</li><li>Triage logs demonstrating the initial review and confirmation of external vulnerability submissions</li></ul><p><strong>Usually held by:</strong> Product Security / Security Operations</p><p><strong>What an auditor will probe:</strong> Trace a recently reported external vulnerability from the moment it was received to the point it was confirmed and assigned a severity.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vulnerability disclosure policy and evidence that reports are triaged.</p></div><div class="ctl"><div class="hd"><span class="id">RV.2</span><span class="pill unknown">unknown</span><span class="scope">Assess, prioritize and remediate vulnerabilities</span></div><p class="intent">Analyze each vulnerability to gather sufficient information to plan its
+remediation, and develop and implement a remediation plan.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Issue tracker export showing vulnerability tickets, assigned severities, and time-to-resolution</li><li>Root Cause Analysis (RCA) or remediation plan documents for high-severity vulnerabilities</li><li>Signed risk acceptance forms for any vulnerabilities where remediation was deferred</li></ul><p><strong>Usually held by:</strong> Engineering Management / Security Team</p><p><strong>What an auditor will probe:</strong> Select a critical vulnerability from the last quarter and show me the ticket history proving it was prioritized and remediated within your defined SLA.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vulnerability register and remediation SLA evidence.</p></div><div class="ctl"><div class="hd"><span class="id">PO.3</span><span class="pill unknown">unknown</span><span class="scope">Implement supporting toolchains</span></div><p class="intent">Specify which tools must be included in each toolchain, deploy and maintain them
 with security in mind, and configure them to generate artifacts supporting
-secure development practices.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Approved toolchain inventory document detailing permitted build and deployment tools</li><li>Infrastructure-as-Code (IaC) configurations or cloud provider settings showing network isolation and IAM least-privilege roles for CI/CD runners</li><li>Recent vulnerability scan reports and patch logs for the build servers or CI/CD infrastructure</li></ul><p><strong>Usually held by:</strong> DevOps / DevSecOps</p><p><strong>What an auditor will probe:</strong> How do you ensure the build servers and CI runners themselves are patched, hardened, and restricted from unauthorized access?</p></div><p class="rem"><strong>Obtain:</strong> Provide the toolchain specification and evidence the build system itself is hardened.</p></div><div class="ctl"><div class="hd"><span class="id">PO.2</span><span class="pill unknown">unknown</span><span class="scope">Implement roles and responsibilities</span></div><p class="intent">Create new roles and alter responsibilities for personnel to encompass all parts
-of the SSDF, and provide role-based training so personnel can perform them.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>RACI matrix or formal job descriptions mapping specific SSDF responsibilities to organizational roles</li><li>Learning Management System (LMS) export showing dated completion records for role-based secure coding training</li><li>Signed onboarding checklists for recent engineering hires acknowledging their security responsibilities</li></ul><p><strong>Usually held by:</strong> HR / Security Leadership</p><p><strong>What an auditor will probe:</strong> Provide the training completion records for these three randomly selected developers to prove they completed the required role-specific security training this year.</p></div><p class="rem"><strong>Obtain:</strong> Provide the role definitions, assignment records, and training completion evidence.</p></div>
+secure development practices.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Approved inventory document of authorized build and CI/CD tools</li><li>Vulnerability scan reports and patch logs for the build servers or CI runners</li><li>Access logs showing restricted administrative access to the CI/CD infrastructure</li></ul><p><strong>Usually held by:</strong> Platform Engineering / DevOps</p><p><strong>What an auditor will probe:</strong> How do you monitor, patch, and restrict access to the underlying infrastructure that hosts your build and deployment pipelines?</p></div><p class="rem"><strong>Obtain:</strong> Provide the toolchain specification and evidence the build system itself is hardened.</p></div><div class="ctl"><div class="hd"><span class="id">PO.2</span><span class="pill unknown">unknown</span><span class="scope">Implement roles and responsibilities</span></div><p class="intent">Create new roles and alter responsibilities for personnel to encompass all parts
+of the SSDF, and provide role-based training so personnel can perform them.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>RACI matrix or job descriptions explicitly mapping SSDF responsibilities to specific roles</li><li>Learning Management System (LMS) completion logs for role-based secure coding training</li><li>Signed employee acknowledgments of security responsibilities upon hire</li></ul><p><strong>Usually held by:</strong> HR / Security Leadership</p><p><strong>What an auditor will probe:</strong> Demonstrate that a newly hired developer completed their required secure development training before being granted permission to merge code.</p></div><p class="rem"><strong>Obtain:</strong> Provide the role definitions, assignment records, and training completion evidence.</p></div>
+</main>
 <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
 </body>
 </html>

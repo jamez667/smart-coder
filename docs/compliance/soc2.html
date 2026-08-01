@@ -4,67 +4,152 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
 <title>SOC 2 Trust Services Criteria (2017, rev. 2022) — compliance evidence</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 </style>
 </head>
 <body>
-<p><a href="index.html">&larr; All frameworks</a></p><h1>SOC 2 Trust Services Criteria (2017, rev. 2022)</h1><p class="sub">AICPA &middot; version 1.0.0 &middot; generated 2026-07-26T03:58:39Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">This pack inspects source-controlled artifacts only. It cannot observe running
+<input class="theme-in" type="radio" name="theme" id="theme-os" checked><input class="theme-in" type="radio" name="theme" id="theme-light"><input class="theme-in" type="radio" name="theme" id="theme-dark"><div class="masthead"><span class="wordmark">smart-coder</span><div class="theme" role="group" aria-label="Colour theme"><label for="theme-os">Auto</label><label for="theme-light">Light</label><label for="theme-dark">Dark</label></div></div>
+<main>
+<p><a href="index.html">&larr; All frameworks</a></p><h1>SOC 2 Trust Services Criteria (2017, rev. 2022)</h1><p class="sub">AICPA &middot; version 1.0.0 &middot; generated 2026-08-01T20:01:12Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">This pack inspects source-controlled artifacts only. It cannot observe running
 infrastructure, cloud provider configuration, identity provider settings, HR
 processes, vendor agreements, or incident records. Controls depending on those
 are reported Unknown by design and appear in the manual-evidence worklist.
 
 Roughly five of the thirty-three common-criteria points yield deterministic
 source evidence. A passing result here is evidence toward a control, never an
-attestation of compliance.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">2</b><span>pass</span></div><div class="count"><b class="gap">2</b><span>gap</span></div><div class="count"><b class="unknown">5</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 22%</strong><br><span class="scope">2 of 9 in-scope passed</span><div class="bar"><div style="width:22%"></div></div></div><div><strong>Determinacy 44%</strong><br><span class="scope">4 of 9 could be determined</span><div class="bar"><div style="width:44%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>3 <span class="scope">(1 pass · 1 gap · 1 unknown)</span></td><td><strong>67%</strong><div class="bar"><div style="width:67%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>3 <span class="scope">(1 pass · 1 gap · 1 unknown)</span></td><td><strong>67%</strong><div class="bar"><div style="width:67%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>3 <span class="scope">(0 pass · 0 gap · 3 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>CC6.1</strong><br><span class="scope">Logical access — credentials are not committed to source</span></td><td class="scope">Code</td><td><span class="pill gap">gap</span></td><td>critical</td><td class="scope">all-of: worst of 5 check(s) is gap</td></tr><tr><td><strong>CC7.2</strong><br><span class="scope">System monitoring for anomalies</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>medium</td><td class="scope">majority: 1 pass / 1 gap of 3 check(s)</td></tr><tr><td><strong>CC7.1</strong><br><span class="scope">Vulnerability detection in dependencies</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">any-of: no mechanism evidenced, and 2 of 2 check(s) were indeterminate</td></tr><tr><td><strong>CC1.1</strong><br><span class="scope">Control environment — commitment to integrity and ethical values</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC2.3</strong><br><span class="scope">Communication with external parties</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC6.1-LOCAL</strong><br><span class="scope">Local secret hygiene — untracked credentials in the working tree</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC9.2</strong><br><span class="scope">Vendor and business partner risk management</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC6.6</strong><br><span class="scope">Encryption of data in transit</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">any-of: 2 of 3 mechanism(s) evidenced</td></tr><tr><td><strong>CC8.1</strong><br><span class="scope">Change management</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 7.0/7.0 observable = 100% (pass&gt;=75%, gap&lt;40%)</td></tr></tbody></table><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">CC6.1</span><span class="pill gap">gap</span><span class="scope">Logical access — credentials are not committed to source</span></div><p class="intent">The entity implements logical access security software, infrastructure, and
+attestation of compliance.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">2</b><span>pass</span></div><div class="count"><b class="gap">2</b><span>gap</span></div><div class="count"><b class="unknown">5</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 22%</strong><br><span class="scope">2 of 9 in-scope passed</span><div class="bar"><div style="width:22%"></div></div></div><div><strong>Determinacy 44%</strong><br><span class="scope">4 of 9 could be determined</span><div class="bar"><div style="width:44%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><div class="tablewrap"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>3 <span class="scope">(1 pass · 1 gap · 1 unknown)</span></td><td><strong>67%</strong><div class="bar"><div style="width:67%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>3 <span class="scope">(1 pass · 1 gap · 1 unknown)</span></td><td><strong>67%</strong><div class="bar"><div style="width:67%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>3 <span class="scope">(0 pass · 0 gap · 3 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table></div><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><div class="tablewrap"><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>CC6.1</strong><br><span class="scope">Logical access — credentials are not committed to source</span></td><td class="scope">Code</td><td><span class="pill gap">gap</span></td><td>critical</td><td class="scope">all-of: worst of 5 check(s) is gap</td></tr><tr><td><strong>CC7.2</strong><br><span class="scope">System monitoring for anomalies</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>medium</td><td class="scope">majority: 1 pass / 1 gap of 3 check(s)</td></tr><tr><td><strong>CC7.1</strong><br><span class="scope">Vulnerability detection in dependencies</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">any-of: no mechanism evidenced, and 2 of 2 check(s) were indeterminate</td></tr><tr><td><strong>CC1.1</strong><br><span class="scope">Control environment — commitment to integrity and ethical values</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC2.3</strong><br><span class="scope">Communication with external parties</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC6.1-LOCAL</strong><br><span class="scope">Local secret hygiene — untracked credentials in the working tree</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC9.2</strong><br><span class="scope">Vendor and business partner risk management</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>CC6.6</strong><br><span class="scope">Encryption of data in transit</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">any-of: 1 of 3 mechanism(s) evidenced</td></tr><tr><td><strong>CC8.1</strong><br><span class="scope">Change management</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 7.0/7.0 observable = 100% (pass&gt;=75%, gap&lt;40%)</td></tr></tbody></table></div><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">CC6.1</span><span class="pill gap">gap</span><span class="scope">Logical access — credentials are not committed to source</span></div><p class="intent">The entity implements logical access security software, infrastructure, and
 architectures over protected information assets to protect them from security
 events. Credentials committed to version control defeat every downstream access
 control, because the repository history retains them after deletion.</p><p class="why">all-of: worst of 5 check(s) is gap</p><p class="rem"><strong>Remediation:</strong> Rotate any exposed credential immediately — deleting the file is not sufficient,
@@ -74,18 +159,19 @@ anomalies indicative of malicious acts, natural disasters, and errors affecting
 the entity&#39;s ability to meet its objectives.</p><p class="why">majority: 1 pass / 1 gap of 3 check(s)</p><p class="rem"><strong>Remediation:</strong> Adopt structured logging with a correlation id, and route alerts to an on-call
 destination. Evidence of the alert routing usually lives outside the repo.</p></div><div class="ctl"><div class="hd"><span class="id">CC7.1</span><span class="pill unknown">unknown</span><span class="scope">Vulnerability detection in dependencies</span></div><p class="intent">The entity uses detection and monitoring procedures to identify changes to
 configurations that introduce new vulnerabilities, and susceptibilities to
-newly discovered vulnerabilities.</p><p class="why">any-of: no mechanism evidenced, and 2 of 2 check(s) were indeterminate</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>CI/CD pipeline execution logs demonstrating the dependency scanner running on recent builds</li><li>Ticketing system history (e.g., Jira) showing the triage, assignment, and resolution of identified dependency vulnerabilities</li><li>Vulnerability management dashboard exports showing time-to-remediate metrics against internal SLAs</li></ul><p><strong>Usually held by:</strong> DevSecOps / Engineering Lead</p><p><strong>What an auditor will probe:</strong> Walk me through a specific ticket where a critical dependency vulnerability was detected, showing the date it was found versus the date the patch was deployed.</p></div><p class="rem"><strong>Obtain:</strong> Add a dependency audit step (cargo audit, pip-audit, npm audit, Dependabot) to CI.</p></div><div class="ctl"><div class="hd"><span class="id">CC6.1-LOCAL</span><span class="pill unknown">unknown</span><span class="scope">Local secret hygiene — untracked credentials in the working tree</span></div><p class="intent">Secrets present in a working directory but excluded from version control are not
+newly discovered vulnerabilities.</p><p class="why">any-of: no mechanism evidenced, and 2 of 2 check(s) were indeterminate</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Historical scan reports from the automated dependency scanning tool (e.g., Snyk, Dependabot)</li><li>Ticket history (e.g., Jira) showing the triage, assignment, and resolution of specific dependency vulnerabilities</li><li>CI/CD pipeline execution logs demonstrating that builds are blocked when critical vulnerabilities are detected</li></ul><p><strong>Usually held by:</strong> DevSecOps / Engineering</p><p><strong>What an auditor will probe:</strong> Trace a recently discovered critical dependency vulnerability from the initial automated alert through to the deployed patch, proving it was resolved within your policy&#39;s SLA.</p></div><p class="rem"><strong>Obtain:</strong> Add a dependency audit step (cargo audit, pip-audit, npm audit, Dependabot) to CI.</p></div><div class="ctl"><div class="hd"><span class="id">CC6.1-LOCAL</span><span class="pill unknown">unknown</span><span class="scope">Local secret hygiene — untracked credentials in the working tree</span></div><p class="intent">Secrets present in a working directory but excluded from version control are not
 committed, and are therefore outside the strict scope of CC6.1. They remain an
 exposure on developer machines and in backups, and are one forced add away from
-entering history permanently.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Mobile Device Management (MDM) configurations enforcing full disk encryption on developer workstations</li><li>Endpoint DLP (Data Loss Prevention) logs or alerts regarding local file transfers</li><li>Signed developer acceptable use policies covering local key material</li></ul><p><strong>Usually held by:</strong> IT / Security Lead</p><p><strong>What an auditor will probe:</strong> How do you verify that local secrets on developer machines are not inadvertently synced to personal cloud storage or unencrypted backups?</p></div><p class="rem"><strong>Obtain:</strong> Prefer a managed secret store or an OS keychain over a file on disk. Where a
+entering history permanently.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>MDM (Mobile Device Management) reports showing full disk encryption enabled on all developer workstations</li><li>Configuration logs of enforced pre-commit hooks or local secret scanners (e.g., GitLeaks, Talisman) on developer machines</li><li>Signed Acceptable Use Policy acknowledgments covering the handling of local cryptographic keys and secrets</li></ul><p><strong>Usually held by:</strong> IT / Engineering Lead</p><p><strong>What an auditor will probe:</strong> How do you verify that developers are not bypassing local secret scanners or syncing local keys to unapproved personal cloud backups?</p></div><p class="rem"><strong>Obtain:</strong> Prefer a managed secret store or an OS keychain over a file on disk. Where a
 local file is unavoidable, keep it gitignored (as here), restrict its
 permissions, and rotate on any suspicion of exposure.</p></div><div class="ctl"><div class="hd"><span class="id">CC1.1</span><span class="pill unknown">unknown</span><span class="scope">Control environment — commitment to integrity and ethical values</span></div><p class="intent">The entity demonstrates a commitment to integrity and ethical values. This is an
 organizational control: board oversight, tone at the top, and a code of conduct
-whose operation is tested through interview and observation, not code review.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Timestamped signature logs from the HRIS showing annual Code of Conduct acknowledgments for all active employees</li><li>Board of Directors or steering committee meeting minutes documenting discussions on ethics, compliance, or security posture</li><li>Log of reports submitted to the whistleblower hotline or ethics inbox, including resolution details</li></ul><p><strong>Usually held by:</strong> HR / Legal</p><p><strong>What an auditor will probe:</strong> Show me the tracking mechanism used to follow up with employees who fail to sign the annual ethics acknowledgment within the required timeframe.</p></div><p class="rem"><strong>Obtain:</strong> Provide the code of conduct, its acknowledgement records, and evidence of board oversight.</p></div><div class="ctl"><div class="hd"><span class="id">CC2.3</span><span class="pill unknown">unknown</span><span class="scope">Communication with external parties</span></div><p class="intent">The entity communicates with external parties regarding matters affecting the
+whose operation is tested through interview and observation, not code review.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Dated signature logs from the HR system showing all employees acknowledged the Code of Conduct upon hire and annually</li><li>Board of Directors or executive committee meeting minutes demonstrating active discussion of security, ethics, and compliance</li><li>Operating logs from the whistleblower hotline or HR incident tracking system</li></ul><p><strong>Usually held by:</strong> HR / Legal</p><p><strong>What an auditor will probe:</strong> Beyond having a Code of Conduct, how does executive management actively demonstrate and enforce these values when an ethical or security violation is actually reported?</p></div><p class="rem"><strong>Obtain:</strong> Provide the code of conduct, its acknowledgement records, and evidence of board oversight.</p></div><div class="ctl"><div class="hd"><span class="id">CC2.3</span><span class="pill unknown">unknown</span><span class="scope">Communication with external parties</span></div><p class="intent">The entity communicates with external parties regarding matters affecting the
 functioning of internal control, including a channel for reporting security
-issues.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Ticketing system logs from the external security reporting channel (e.g., security@ inbox or bug bounty platform)</li><li>Documented triage and response records for a specific external vulnerability report</li><li>Customer communication logs or templates used for security incident notifications</li></ul><p><strong>Usually held by:</strong> Security Operations</p><p><strong>What an auditor will probe:</strong> When an external researcher emails your security contact, what is the operational workflow and SLA to ensure the message is actually read, triaged, and acted upon?</p></div><p class="rem"><strong>Obtain:</strong> Provide the vulnerability disclosure policy and evidence of its use.</p></div><div class="ctl"><div class="hd"><span class="id">CC9.2</span><span class="pill unknown">unknown</span><span class="scope">Vendor and business partner risk management</span></div><p class="intent">The entity assesses and manages risks associated with vendors and business
+issues.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Ticket history from the external security reporting alias (e.g., security@ inbox or HackerOne) showing triage, internal routing, and response</li><li>Incident response logs that were explicitly triggered by an external vulnerability report</li><li>Published Vulnerability Disclosure Program (VDP) guidelines or a live security.txt file</li></ul><p><strong>Usually held by:</strong> Security Team</p><p><strong>What an auditor will probe:</strong> Show me the lifecycle of an external security report from the moment it hits your public inbox to the final communication sent back to the external researcher.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vulnerability disclosure policy and evidence of its use.</p></div><div class="ctl"><div class="hd"><span class="id">CC9.2</span><span class="pill unknown">unknown</span><span class="scope">Vendor and business partner risk management</span></div><p class="intent">The entity assesses and manages risks associated with vendors and business
 partners. Contracts, due-diligence records and subservice-organization reports
-are the evidence, none of which is source-controlled.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The centralized vendor inventory register categorizing third parties by risk level</li><li>Completed vendor security questionnaires and internal risk assessment sign-offs for new vendors</li><li>SOC 2 Type II reports obtained from critical subservice organizations (e.g., AWS, Azure) along with documented internal reviews of their CUECs</li></ul><p><strong>Usually held by:</strong> Procurement / Security Lead</p><p><strong>What an auditor will probe:</strong> Show me the documented annual review of your primary cloud provider&#39;s SOC 2 report and how you validate that their required user entity controls are operating in your environment.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vendor register, risk assessments, and subservice SOC 2 reports.</p></div>
+are the evidence, none of which is source-controlled.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The centralized vendor inventory register with assigned risk tiers and renewal dates</li><li>Completed security questionnaires or due diligence checklists for newly onboarded vendors</li><li>Recent SOC 2 Type II reports collected from critical subservice organizations (e.g., AWS, GCP) along with documented internal reviews of their Complementary User Entity Controls (CUECs)</li></ul><p><strong>Usually held by:</strong> Procurement / Security Lead</p><p><strong>What an auditor will probe:</strong> Walk me through your annual review of your cloud provider&#39;s SOC 2 report and demonstrate how you ensure their required user controls (CUECs) are actively operating in your own environment.</p></div><p class="rem"><strong>Obtain:</strong> Provide the vendor register, risk assessments, and subservice SOC 2 reports.</p></div>
+</main>
 <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
 </body>
 </html>

@@ -4,60 +4,145 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
 <title>EU regulatory cluster: NIS2, DORA, AI Act — compliance evidence</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 </style>
 </head>
 <body>
-<p><a href="index.html">&larr; All frameworks</a></p><h1>EU regulatory cluster: NIS2, DORA, AI Act</h1><p class="sub">European Union &middot; version 1.0.0 &middot; generated 2026-07-26T03:58:39Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">DELIBERATELY THIN, and covering three regulations at once because each has only
+<input class="theme-in" type="radio" name="theme" id="theme-os" checked><input class="theme-in" type="radio" name="theme" id="theme-light"><input class="theme-in" type="radio" name="theme" id="theme-dark"><div class="masthead"><span class="wordmark">smart-coder</span><div class="theme" role="group" aria-label="Colour theme"><label for="theme-os">Auto</label><label for="theme-light">Light</label><label for="theme-dark">Dark</label></div></div>
+<main>
+<p><a href="index.html">&larr; All frameworks</a></p><h1>EU regulatory cluster: NIS2, DORA, AI Act</h1><p class="sub">European Union &middot; version 1.0.0 &middot; generated 2026-08-01T20:01:12Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">DELIBERATELY THIN, and covering three regulations at once because each has only
 a handful of source-visible obligations.
 
 NIS2 (Directive (EU) 2022/2555): cybersecurity risk-management measures with
@@ -76,27 +161,31 @@ scanner can infer from code.
 
 This pack evidences the engineering hygiene these regimes assume and flags
 whether AI components are present at all. It does not assess applicability,
-which is the threshold question for all three and requires legal analysis.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">2</b><span>pass</span></div><div class="count"><b class="gap">0</b><span>gap</span></div><div class="count"><b class="unknown">8</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 20%</strong><br><span class="scope">2 of 10 in-scope passed</span><div class="bar"><div style="width:20%"></div></div></div><div><strong>Determinacy 20%</strong><br><span class="scope">2 of 10 could be determined</span><div class="bar"><div style="width:20%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>4 <span class="scope">(1 pass · 0 gap · 3 unknown)</span></td><td><strong>25%</strong><div class="bar"><div style="width:25%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>2 <span class="scope">(1 pass · 0 gap · 1 unknown)</span></td><td><strong>50%</strong><div class="bar"><div style="width:50%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>4 <span class="scope">(0 pass · 0 gap · 4 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>AIACT-9-11-14</strong><br><span class="scope">Risk management, technical documentation and human oversight</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>DORA-28</strong><br><span class="scope">Management of ICT third-party risk</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>NIS2-20</strong><br><span class="scope">Governance — management body accountability</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>NIS2-23</strong><br><span class="scope">Incident reporting obligations</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>AIACT-12</strong><br><span class="scope">Record-keeping and logging for high-risk AI systems</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>AIACT-SCOPE</strong><br><span class="scope">Applicability — are AI components present at all?</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>DORA-24</strong><br><span class="scope">Digital operational resilience testing</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>NIS2-21-2e</strong><br><span class="scope">Security in network and information systems acquisition, development and maintenance</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>NIS2-21-2h</strong><br><span class="scope">Policies and procedures regarding the use of cryptography</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr><tr><td><strong>DORA-9</strong><br><span class="scope">Protection and prevention — ICT security</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr></tbody></table><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">NIS2-20</span><span class="pill unknown">unknown</span><span class="scope">Governance — management body accountability</span></div><p class="intent">Management bodies must approve the cybersecurity risk-management measures,
+which is the threshold question for all three and requires legal analysis.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">1</b><span>pass</span></div><div class="count"><b class="gap">1</b><span>gap</span></div><div class="count"><b class="unknown">8</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 10%</strong><br><span class="scope">1 of 10 in-scope passed</span><div class="bar"><div style="width:10%"></div></div></div><div><strong>Determinacy 20%</strong><br><span class="scope">2 of 10 could be determined</span><div class="bar"><div style="width:20%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><div class="tablewrap"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>4 <span class="scope">(1 pass · 0 gap · 3 unknown)</span></td><td><strong>25%</strong><div class="bar"><div style="width:25%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>2 <span class="scope">(0 pass · 1 gap · 1 unknown)</span></td><td><strong>50%</strong><div class="bar"><div style="width:50%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>4 <span class="scope">(0 pass · 0 gap · 4 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table></div><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><div class="tablewrap"><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>DORA-9</strong><br><span class="scope">Protection and prevention — ICT security</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">all-of: worst of 2 check(s) is gap</td></tr><tr><td><strong>AIACT-9-11-14</strong><br><span class="scope">Risk management, technical documentation and human oversight</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>DORA-28</strong><br><span class="scope">Management of ICT third-party risk</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>NIS2-20</strong><br><span class="scope">Governance — management body accountability</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>NIS2-23</strong><br><span class="scope">Incident reporting obligations</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>AIACT-12</strong><br><span class="scope">Record-keeping and logging for high-risk AI systems</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>AIACT-SCOPE</strong><br><span class="scope">Applicability — are AI components present at all?</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>DORA-24</strong><br><span class="scope">Digital operational resilience testing</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>NIS2-21-2e</strong><br><span class="scope">Security in network and information systems acquisition, development and maintenance</span></td><td class="scope">Code</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>NIS2-21-2h</strong><br><span class="scope">Policies and procedures regarding the use of cryptography</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 2 check(s) is pass</td></tr></tbody></table></div><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">DORA-9</span><span class="pill gap">gap</span><span class="scope">Protection and prevention — ICT security</span></div><p class="intent">Financial entities shall continuously monitor and control the security of ICT
+systems and tools, minimise the impact of ICT risk through appropriate security
+tools, policies and procedures, and ensure data confidentiality, integrity and
+availability including during transit.</p><p class="why">all-of: worst of 2 check(s) is gap</p><p class="rem"><strong>Remediation:</strong> Enforce transport encryption and remove hardcoded credentials.</p></div><div class="ctl"><div class="hd"><span class="id">NIS2-20</span><span class="pill unknown">unknown</span><span class="scope">Governance — management body accountability</span></div><p class="intent">Management bodies must approve the cybersecurity risk-management measures,
 oversee their implementation, and can be held liable for infringements.
-Management body members must follow specific training.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Board of Directors meeting minutes documenting the presentation, debate, and approval of the cybersecurity risk-management strategy</li><li>Attendance logs and completion certificates for executive-level cybersecurity training sessions</li><li>Risk acceptance forms explicitly signed by C-level executives or board members</li></ul><p><strong>Usually held by:</strong> Board Secretary / CISO</p><p><strong>What an auditor will probe:</strong> Provide the specific board minutes where the latest major cybersecurity incident or risk assessment was discussed and formally acknowledged by the management body.</p></div><p class="rem"><strong>Obtain:</strong> Provide management approval records, oversight minutes and training attendance.</p></div><div class="ctl"><div class="hd"><span class="id">NIS2-23</span><span class="pill unknown">unknown</span><span class="scope">Incident reporting obligations</span></div><p class="intent">Early warning to the CSIRT within 24 hours of becoming aware of a significant
+Management body members must follow specific training.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Board of Directors meeting minutes documenting the review and approval of the cybersecurity risk-management strategy</li><li>Attendance logs and completion certificates for executive management cybersecurity training sessions</li><li>Quarterly CISO reporting decks actually presented to the management body</li></ul><p><strong>Usually held by:</strong> Corporate Secretary / Board of Directors / CISO</p><p><strong>What an auditor will probe:</strong> Provide the board minutes where the latest cybersecurity risk assessment was discussed and the budget for mitigations was formally approved.</p></div><p class="rem"><strong>Obtain:</strong> Provide management approval records, oversight minutes and training attendance.</p></div><div class="ctl"><div class="hd"><span class="id">NIS2-23</span><span class="pill unknown">unknown</span><span class="scope">Incident reporting obligations</span></div><p class="intent">Early warning to the CSIRT within 24 hours of becoming aware of a significant
 incident, an incident notification within 72 hours, and a final report within
-one month.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Register of actual CSIRT notifications containing timestamped submission receipts</li><li>Incident response runbooks explicitly defining the triggers for the 24-hour, 72-hour, and 1-month statutory reporting deadlines</li><li>Post-incident review (PIR) documents that match the final 1-month reports submitted to the regulator</li></ul><p><strong>Usually held by:</strong> Incident Response Lead / Legal</p><p><strong>What an auditor will probe:</strong> Show me the timestamped communication logs for a recent significant incident to prove the CSIRT was actually notified within the strict 24-hour early warning window.</p></div><p class="rem"><strong>Obtain:</strong> Provide the incident reporting procedure and the register of notifications made.</p></div><div class="ctl"><div class="hd"><span class="id">DORA-28</span><span class="pill unknown">unknown</span><span class="scope">Management of ICT third-party risk</span></div><p class="intent">Maintain a register of information on all contractual arrangements with ICT
+one month.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Register of actual incident notifications submitted to the national CSIRT (or a tabletop exercise log if no incidents occurred)</li><li>Timestamped communication logs between the incident commander and legal counsel during a past incident</li><li>Submission receipts or email timestamps from the CSIRT confirming receipt of the 24-hour early warning and 72-hour notification</li></ul><p><strong>Usually held by:</strong> Incident Response Team / Legal</p><p><strong>What an auditor will probe:</strong> Show me the timestamps on the CSIRT submission receipts for your last significant incident to prove the 24-hour early warning deadline was met.</p></div><p class="rem"><strong>Obtain:</strong> Provide the incident reporting procedure and the register of notifications made.</p></div><div class="ctl"><div class="hd"><span class="id">DORA-28</span><span class="pill unknown">unknown</span><span class="scope">Management of ICT third-party risk</span></div><p class="intent">Maintain a register of information on all contractual arrangements with ICT
 third-party service providers, ensure contracts contain mandatory provisions,
 and manage concentration risk — with critical providers subject to direct EU
-oversight.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The formal Register of Information (as specified by ESAs) detailing all contractual arrangements with ICT third-party providers</li><li>Executed vendor contracts highlighting the DORA-mandated audit, access, and termination clauses</li><li>Concentration risk assessment reports reviewed and dated by the risk committee</li></ul><p><strong>Usually held by:</strong> Vendor Management / Procurement</p><p><strong>What an auditor will probe:</strong> Select a critical ICT provider from your register and show me the executed contract clause that guarantees your right to audit their operational resilience, along with evidence of your last audit.</p></div><p class="rem"><strong>Obtain:</strong> Provide the register of information and the ICT third-party contracts.</p></div><div class="ctl"><div class="hd"><span class="id">AIACT-9-11-14</span><span class="pill unknown">unknown</span><span class="scope">Risk management, technical documentation and human oversight</span></div><p class="intent">High-risk AI systems require a risk management system across the lifecycle,
+oversight.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Register of Information (RoI) for all ICT third-party providers maintained in the DORA-prescribed format</li><li>Executed vendor contracts containing DORA&#39;s mandatory audit, access, and termination clauses</li><li>Concentration risk assessment reports presented to management regarding critical cloud providers</li></ul><p><strong>Usually held by:</strong> Vendor Management / Procurement / Legal</p><p><strong>What an auditor will probe:</strong> Select a critical ICT provider from your register and show me the executed contract clause that guarantees your right to audit their facilities.</p></div><p class="rem"><strong>Obtain:</strong> Provide the register of information and the ICT third-party contracts.</p></div><div class="ctl"><div class="hd"><span class="id">AIACT-9-11-14</span><span class="pill unknown">unknown</span><span class="scope">Risk management, technical documentation and human oversight</span></div><p class="intent">High-risk AI systems require a risk management system across the lifecycle,
 technical documentation per Annex IV, human oversight measures, and a quality
-management system — assessed through conformity assessment before market placement.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The complete Annex IV technical documentation dossier for the AI system</li><li>Signed conformity assessment declarations (CE mark equivalent) prior to market placement</li><li>System audit logs or UI workflow recordings demonstrating a human operator actively reviewing or overriding flagged AI outputs</li></ul><p><strong>Usually held by:</strong> AI Product Manager / Compliance Officer</p><p><strong>What an auditor will probe:</strong> Demonstrate how a human operator actually reviews and overrides a flagged high-risk AI output in the production environment, using a recent operational example.</p></div><p class="rem"><strong>Obtain:</strong> Provide the Annex IV technical documentation, risk management records, human
+management system — assessed through conformity assessment before market placement.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Annex IV Technical Documentation dossier compiled for the high-risk AI system</li><li>Signed Conformity Assessment report from a Notified Body (if applicable) or internal Quality Management System (QMS) sign-off</li><li>Operational procedures and audit trails demonstrating the &#39;human-in-the-loop&#39; oversight mechanism in practice</li></ul><p><strong>Usually held by:</strong> AI Product Manager / Compliance / Notified Body</p><p><strong>What an auditor will probe:</strong> Demonstrate the operational process where a human reviewer overrides the AI system&#39;s recommendation, and show me the audit trail of that override.</p></div><p class="rem"><strong>Obtain:</strong> Provide the Annex IV technical documentation, risk management records, human
 oversight design and the conformity assessment.</p></div><div class="ctl"><div class="hd"><span class="id">NIS2-21-2e</span><span class="pill unknown">unknown</span><span class="scope">Security in network and information systems acquisition, development and maintenance</span></div><p class="intent">Security in network and information systems acquisition, development and
-maintenance, including vulnerability handling and disclosure.</p><p class="why">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Completed vendor security assessment questionnaires and scoring sheets for recent ICT acquisitions</li><li>Vulnerability intake logs or ticketing queues showing external researcher submissions and triage times</li><li>Change Advisory Board (CAB) meeting minutes showing security review and approval of major system updates</li></ul><p><strong>Usually held by:</strong> Procurement / Application Security Lead</p><p><strong>What an auditor will probe:</strong> Trace a recent externally reported vulnerability from initial intake through triage, remediation, and final disclosure to prove the handling process operates within SLA.</p></div><p class="rem"><strong>Obtain:</strong> Add vulnerability scanning to CI and publish a coordinated disclosure policy.</p></div><div class="ctl"><div class="hd"><span class="id">AIACT-SCOPE</span><span class="pill unknown">unknown</span><span class="scope">Applicability — are AI components present at all?</span></div><p class="intent">The AI Act applies to AI systems as defined in Art. 3 and classifies them by
+maintenance, including vulnerability handling and disclosure.</p><p class="why">weighted: 2.0/5.0 observable = 40% (pass&gt;=60%, gap&lt;30%)</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Completed vendor security assessment questionnaires and signed risk acceptances for acquired systems</li><li>Published Vulnerability Disclosure Policy (VDP) and the corresponding inbox/portal history of received reports</li><li>Jira/ServiceNow ticket histories showing the time-to-triage and time-to-patch for externally reported vulnerabilities</li></ul><p><strong>Usually held by:</strong> Procurement / Product Security Lead</p><p><strong>What an auditor will probe:</strong> Show me the ticket history for a recently disclosed vulnerability to prove it was triaged and patched according to your stated SLAs.</p></div><p class="rem"><strong>Obtain:</strong> Add vulnerability scanning to CI and publish a coordinated disclosure policy.</p></div><div class="ctl"><div class="hd"><span class="id">AIACT-SCOPE</span><span class="pill unknown">unknown</span><span class="scope">Applicability — are AI components present at all?</span></div><p class="intent">The AI Act applies to AI systems as defined in Art. 3 and classifies them by
 risk under Art. 6. High-risk classification depends on the system&#39;s INTENDED
-PURPOSE and its deployment context, not on its implementation.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Formal AI inventory/register detailing the specific intended purpose and deployment context of each model</li><li>Legal classification memos mapping deployed systems against AI Act Article 6 criteria</li><li>Sign-off records from the Legal or Compliance team approving the final risk classification of the system</li></ul><p><strong>Usually held by:</strong> Legal / AI Governance Lead</p><p><strong>What an auditor will probe:</strong> How do you monitor the production use of this system to ensure users are not applying it to a high-risk context outside of the documented intended purpose?</p></div><p class="rem"><strong>Obtain:</strong> Determine applicability with legal advice. If AI components are present,
+PURPOSE and its deployment context, not on its implementation.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Enterprise AI inventory/register detailing the specific &#39;intended purpose&#39; of each deployed model</li><li>Legal/Compliance classification memos mapping each system to AI Act Article 6 risk categories</li><li>Dated sign-off records from Legal or the AI Ethics Board approving the classification</li></ul><p><strong>Usually held by:</strong> Legal / DPO / AI Ethics Board</p><p><strong>What an auditor will probe:</strong> How do you monitor the system in production to ensure its actual usage hasn&#39;t drifted from the &#39;intended purpose&#39; that Legal originally signed off on?</p></div><p class="rem"><strong>Obtain:</strong> Determine applicability with legal advice. If AI components are present,
 establish the intended purpose and classify accordingly before assessing
 technical obligations.</p></div><div class="ctl"><div class="hd"><span class="id">AIACT-12</span><span class="pill unknown">unknown</span><span class="scope">Record-keeping and logging for high-risk AI systems</span></div><p class="intent">High-risk AI systems shall technically allow for the automatic recording of
 events (logs) over their lifetime, to a degree appropriate to the intended
-purpose, ensuring traceability of functioning.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Sample log exports from the production environment showing inputs, outputs, and system state for specific AI inferences</li><li>Data retention configuration settings from the centralized logging platform</li><li>System architecture diagrams specifically detailing the event logging pipeline for AI decisions</li></ul><p><strong>Usually held by:</strong> AI Engineering Lead / Data Protection Officer</p><p><strong>What an auditor will probe:</strong> Walk me through a historical log entry and demonstrate how it allows you to trace back the exact model version and input data that led to a specific high-risk decision.</p></div><p class="rem"><strong>Obtain:</strong> Implement lifecycle logging appropriate to the system&#39;s intended purpose.</p></div><div class="ctl"><div class="hd"><span class="id">DORA-24</span><span class="pill unknown">unknown</span><span class="scope">Digital operational resilience testing</span></div><p class="intent">Establish a sound and comprehensive digital operational resilience testing
+purpose, ensuring traceability of functioning.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>System architecture diagrams explicitly mapping log generation points for AI decisions</li><li>Sample log exports from the SIEM/logging platform showing inputs, outputs, and metadata for specific AI inferences</li><li>Configuration settings in the logging platform demonstrating the enforced retention period for AI event logs</li></ul><p><strong>Usually held by:</strong> AI Engineering Lead / Data Engineering</p><p><strong>What an auditor will probe:</strong> Walk me through a specific AI decision in the production logs to demonstrate that you can trace exactly which model version and input data produced that output.</p></div><p class="rem"><strong>Obtain:</strong> Implement lifecycle logging appropriate to the system&#39;s intended purpose.</p></div><div class="ctl"><div class="hd"><span class="id">DORA-24</span><span class="pill unknown">unknown</span><span class="scope">Digital operational resilience testing</span></div><p class="intent">Establish a sound and comprehensive digital operational resilience testing
 programme, including vulnerability assessments, scenario-based tests, and — for
 significant entities — threat-led penetration testing (TLPT) at least every
-three years.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Threat-Led Penetration Testing (TLPT) report provided by an accredited external red team (e.g., under TIBER-EU)</li><li>Remediation tracking tickets (e.g., Jira) showing the resolution of findings from the latest scenario-based resilience test</li><li>Formal multi-year resilience testing schedule signed by the management body</li></ul><p><strong>Usually held by:</strong> Security Operations / External Assessor</p><p><strong>What an auditor will probe:</strong> Show me the remediation evidence and closed tickets for the critical findings identified in your most recent external threat-led penetration test.</p></div><p class="rem"><strong>Obtain:</strong> Provide the testing programme, results, and TLPT reports where applicable.</p></div>
+three years.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Threat-Led Penetration Testing (TLPT) report from an accredited external TIBER-EU tester</li><li>Annual digital operational resilience testing schedule approved by the management body</li><li>Remediation tracking board showing the closure of findings from the latest scenario-based resilience test</li></ul><p><strong>Usually held by:</strong> CISO / External Penetration Testing Firm</p><p><strong>What an auditor will probe:</strong> Show me the remediation evidence and closed tickets for the critical findings identified in your last external threat-led penetration test.</p></div><p class="rem"><strong>Obtain:</strong> Provide the testing programme, results, and TLPT reports where applicable.</p></div>
+</main>
 <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
 </body>
 </html>

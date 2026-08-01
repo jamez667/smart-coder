@@ -4,60 +4,145 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
 <title>PCI DSS v4.0 — compliance evidence</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 </style>
 </head>
 <body>
-<p><a href="index.html">&larr; All frameworks</a></p><h1>PCI DSS v4.0</h1><p class="sub">PCI Security Standards Council &middot; version 1.0.0 &middot; generated 2026-07-26T03:58:39Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">PCI DSS governs the Cardholder Data Environment. This pack inspects a source
+<input class="theme-in" type="radio" name="theme" id="theme-os" checked><input class="theme-in" type="radio" name="theme" id="theme-light"><input class="theme-in" type="radio" name="theme" id="theme-dark"><div class="masthead"><span class="wordmark">smart-coder</span><div class="theme" role="group" aria-label="Colour theme"><label for="theme-os">Auto</label><label for="theme-light">Light</label><label for="theme-dark">Dark</label></div></div>
+<main>
+<p><a href="index.html">&larr; All frameworks</a></p><h1>PCI DSS v4.0</h1><p class="sub">PCI Security Standards Council &middot; version 1.0.0 &middot; generated 2026-08-01T20:01:12Z</p><div class="note"><strong>This is not a compliance attestation.</strong> It is the output of an automated scan of source code, showing what could and could not be evidenced from a repository. Most of any framework is organizational and cannot be assessed this way — those controls are reported as <em>unknown</em>, which is a statement about the tool's visibility, not about the organization. Certification requires an accredited auditor. <br><br>File paths, line numbers and evidence excerpts are <strong>withheld</strong> from this published version.</div><h2>Scope and limitations</h2><p class="scope">PCI DSS governs the Cardholder Data Environment. This pack inspects a source
 repository, which is at most one component of that environment and frequently
 sits entirely outside it.
 
@@ -74,23 +159,24 @@ CDE (Req 10), penetration testing and ASV scans (Req 11), and policy/programme
 governance (Req 12).
 
 Scope determination is a QSA&#39;s first question and this tool cannot answer it. A
-clean result here says nothing about PCI compliance overall.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">6</b><span>pass</span></div><div class="count"><b class="gap">1</b><span>gap</span></div><div class="count"><b class="unknown">6</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 46%</strong><br><span class="scope">6 of 13 in-scope passed</span><div class="bar"><div style="width:46%"></div></div></div><div><strong>Determinacy 54%</strong><br><span class="scope">7 of 13 could be determined</span><div class="bar"><div style="width:54%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>5 <span class="scope">(5 pass · 0 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>3 <span class="scope">(1 pass · 1 gap · 1 unknown)</span></td><td><strong>67%</strong><div class="bar"><div style="width:67%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>5 <span class="scope">(0 pass · 0 gap · 5 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>PCI-6.3.1</strong><br><span class="scope">Security vulnerabilities are identified and managed</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">weighted: 2.0/7.0 observable = 29% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PCI-1</strong><br><span class="scope">Install and maintain network security controls</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-4</strong><br><span class="scope">Protect cardholder data with strong cryptography during transmission</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-11.3</strong><br><span class="scope">External and internal vulnerability scans and penetration testing</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-12</strong><br><span class="scope">Support information security with organizational policies and programs</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-6.2.3</strong><br><span class="scope">Bespoke and custom software is reviewed prior to release</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 67% of evidence weight was indeterminate</td></tr><tr><td><strong>PCI-6.2.2</strong><br><span class="scope">Software development personnel are trained in secure coding</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-3.3.1</strong><br><span class="scope">Sensitive authentication data is not retained after authorization</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is pass</td></tr><tr><td><strong>PCI-6.2.4</strong><br><span class="scope">Software engineering techniques prevent common attacks</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 4 check(s) is pass</td></tr><tr><td><strong>PCI-6.4.3</strong><br><span class="scope">Payment page scripts are managed and their integrity assured</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">any-of: 1 of 2 mechanism(s) evidenced</td></tr><tr><td><strong>PCI-8.6.1</strong><br><span class="scope">Accounts used by systems are managed; credentials are not hardcoded</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 3 check(s) is pass</td></tr><tr><td><strong>PCI-6.2.1</strong><br><span class="scope">Bespoke and custom software is developed securely</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 5.0/5.0 observable = 100% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PCI-6.5.1</strong><br><span class="scope">Changes are managed through a formal change control process</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 5.0/5.0 observable = 100% (pass&gt;=70%, gap&lt;35%)</td></tr></tbody></table><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">PCI-6.3.1</span><span class="pill gap">gap</span><span class="scope">Security vulnerabilities are identified and managed</span></div><p class="intent">Security vulnerabilities are identified and managed: new vulnerabilities are
+clean result here says nothing about PCI compliance overall.</p><h2>Summary</h2><div class="counts"><div class="count"><b class="pass">6</b><span>pass</span></div><div class="count"><b class="gap">1</b><span>gap</span></div><div class="count"><b class="unknown">6</b><span>unknown</span></div><div class="count"><b class="error">0</b><span>error</span></div><div class="count"><b class="na">0</b><span>n/a</span></div></div><div class="ratios"><div><strong>Coverage 46%</strong><br><span class="scope">6 of 13 in-scope passed</span><div class="bar"><div style="width:46%"></div></div></div><div><strong>Determinacy 54%</strong><br><span class="scope">7 of 13 could be determined</span><div class="bar"><div style="width:54%"></div></div></div></div><p class="scope">Coverage without determinacy is meaningless: a high coverage figure at low determinacy means little was verified and what was happened to pass.</p><h3>By evidence domain</h3><div class="tablewrap"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th><th>Determinacy</th></tr></thead><tbody><tr><td><strong>Code</strong><br><span class="scope">owned by engineers</span></td><td class="scope">source files in this repository</td><td>5 <span class="scope">(5 pass · 0 gap · 0 unknown)</span></td><td><strong>100%</strong><div class="bar"><div style="width:100%"></div></div></td></tr><tr><td><strong>Infrastructure</strong><br><span class="scope">owned by the platform team</span></td><td class="scope">infrastructure-as-code, CI configuration and cloud settings</td><td>3 <span class="scope">(1 pass · 1 gap · 1 unknown)</span></td><td><strong>67%</strong><div class="bar"><div style="width:67%"></div></div></td></tr><tr><td><strong>Organizational</strong><br><span class="scope">owned by HR, Legal or an executive sponsor</span></td><td class="scope">systems outside this repository — HR records, contracts, board minutes</td><td>5 <span class="scope">(0 pass · 0 gap · 5 unknown)</span></td><td><strong>0%</strong><div class="bar"><div style="width:0%"></div></div></td></tr></tbody></table></div><p class="scope">These are deliberately not combined into a single figure. A framework is completed mostly by declaring organizational controls, which a repository can never settle — blending them in would make an honest pack look worse than a selective one, and would let a large governance section hide a poor result in code.</p><p class="scope">Capabilities disabled for this run: <code>command-exit-code</code>.</p><h2>Controls</h2><div class="tablewrap"><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th><th>Severity</th><th>Determination</th></tr></thead><tbody><tr><td><strong>PCI-6.3.1</strong><br><span class="scope">Security vulnerabilities are identified and managed</span></td><td class="scope">Infrastructure</td><td><span class="pill gap">gap</span></td><td>high</td><td class="scope">weighted: 2.0/7.0 observable = 29% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PCI-1</strong><br><span class="scope">Install and maintain network security controls</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-4</strong><br><span class="scope">Protect cardholder data with strong cryptography during transmission</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-11.3</strong><br><span class="scope">External and internal vulnerability scans and penetration testing</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-12</strong><br><span class="scope">Support information security with organizational policies and programs</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-6.2.3</strong><br><span class="scope">Bespoke and custom software is reviewed prior to release</span></td><td class="scope">Infrastructure</td><td><span class="pill unknown">unknown</span></td><td>high</td><td class="scope">weighted: 67% of evidence weight was indeterminate</td></tr><tr><td><strong>PCI-6.2.2</strong><br><span class="scope">Software development personnel are trained in secure coding</span></td><td class="scope">Organizational</td><td><span class="pill unknown">unknown</span></td><td>medium</td><td class="scope">all-of: worst of 1 check(s) is unknown</td></tr><tr><td><strong>PCI-3.3.1</strong><br><span class="scope">Sensitive authentication data is not retained after authorization</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 1 check(s) is pass</td></tr><tr><td><strong>PCI-6.2.4</strong><br><span class="scope">Software engineering techniques prevent common attacks</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 4 check(s) is pass</td></tr><tr><td><strong>PCI-6.4.3</strong><br><span class="scope">Payment page scripts are managed and their integrity assured</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">any-of: 1 of 2 mechanism(s) evidenced</td></tr><tr><td><strong>PCI-8.6.1</strong><br><span class="scope">Accounts used by systems are managed; credentials are not hardcoded</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>critical</td><td class="scope">all-of: worst of 3 check(s) is pass</td></tr><tr><td><strong>PCI-6.2.1</strong><br><span class="scope">Bespoke and custom software is developed securely</span></td><td class="scope">Code</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 5.0/5.0 observable = 100% (pass&gt;=60%, gap&lt;30%)</td></tr><tr><td><strong>PCI-6.5.1</strong><br><span class="scope">Changes are managed through a formal change control process</span></td><td class="scope">Infrastructure</td><td><span class="pill pass">pass</span></td><td>high</td><td class="scope">weighted: 5.0/5.0 observable = 100% (pass&gt;=70%, gap&lt;35%)</td></tr></tbody></table></div><h2>Gaps and manual evidence</h2><p class="scope">Controls that did not pass. <em>Unknown</em> means the tool could not determine the answer from source — these are tasks for an auditor, not findings against the codebase.</p><div class="ctl"><div class="hd"><span class="id">PCI-6.3.1</span><span class="pill gap">gap</span><span class="scope">Security vulnerabilities are identified and managed</span></div><p class="intent">Security vulnerabilities are identified and managed: new vulnerabilities are
 identified from industry sources, assigned a risk ranking, and system components
 are protected from known vulnerabilities by installing applicable security
 patches.</p><p class="why">weighted: 2.0/7.0 observable = 29% (pass&gt;=60%, gap&lt;30%)</p><p class="rem"><strong>Remediation:</strong> Add dependency vulnerability scanning to CI and adopt an automated patch policy.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-1</span><span class="pill unknown">unknown</span><span class="scope">Install and maintain network security controls</span></div><p class="intent">Network security controls such as firewalls and other network security
 technologies are installed and maintained between trusted and untrusted
-networks, and CDE segmentation is enforced.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Current network and data flow diagrams detailing the Cardholder Data Environment (CDE) boundaries</li><li>Exported firewall or cloud security group rule sets from the live production environment</li><li>Results and remediation logs from the most recent CDE segmentation test</li></ul><p><strong>Usually held by:</strong> Network Engineering / Cloud Infrastructure Team</p><p><strong>What an auditor will probe:</strong> Walk me through the live firewall configurations and the latest segmentation test results to prove that untrusted networks are actively blocked from reaching the CDE.</p></div><p class="rem"><strong>Obtain:</strong> Provide network diagrams, firewall rule sets, and segmentation test results.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-4</span><span class="pill unknown">unknown</span><span class="scope">Protect cardholder data with strong cryptography during transmission</span></div><p class="intent">Strong cryptography and security protocols are implemented to safeguard PAN
-during transmission over open, public networks.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Live SSL/TLS scan results (e.g., SSL Labs, Nmap) of all public-facing CDE endpoints</li><li>Certificate inventory tracking expiration dates and issuing CAs</li><li>Production load balancer or web server configuration files defining the allowed cipher suites</li></ul><p><strong>Usually held by:</strong> IT Operations / Cloud Infrastructure Team</p><p><strong>What an auditor will probe:</strong> Run a live query against your public CDE endpoints to demonstrate that they actively reject connections attempting to use deprecated protocols like TLS 1.0 or 1.1.</p></div><p class="rem"><strong>Obtain:</strong> Provide the TLS configuration of every CDE endpoint and the certificate inventory.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-6.2.3</span><span class="pill unknown">unknown</span><span class="scope">Bespoke and custom software is reviewed prior to release</span></div><p class="intent">Bespoke and custom software is reviewed prior to being released into production
+networks, and CDE segmentation is enforced.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Current network and data flow diagrams explicitly defining the CDE boundary</li><li>Exported firewall or cloud security group rule sets from the live environment</li><li>Change management tickets showing business justification and management approval for all allowed inbound/outbound ports</li></ul><p><strong>Usually held by:</strong> Network Engineering / Cloud Infrastructure Lead</p><p><strong>What an auditor will probe:</strong> Walk me through the firewall rule review process and demonstrate that any rule allowing traffic into the CDE has a documented, approved business justification that is reviewed every six months.</p></div><p class="rem"><strong>Obtain:</strong> Provide network diagrams, firewall rule sets, and segmentation test results.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-4</span><span class="pill unknown">unknown</span><span class="scope">Protect cardholder data with strong cryptography during transmission</span></div><p class="intent">Strong cryptography and security protocols are implemented to safeguard PAN
+during transmission over open, public networks.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Output from an external SSL/TLS scanning tool (e.g., SSL Labs, Nmap) against live CDE endpoints</li><li>Certificate inventory tracking issuing CAs and expiration dates</li><li>Load balancer or web server configuration files showing weak ciphers and early TLS versions are disabled</li></ul><p><strong>Usually held by:</strong> IT Operations / Cloud Infrastructure Lead</p><p><strong>What an auditor will probe:</strong> Demonstrate via a live test that a connection attempt using an outdated protocol like TLS 1.0 or a weak cipher suite is actively rejected by the load balancer.</p></div><p class="rem"><strong>Obtain:</strong> Provide the TLS configuration of every CDE endpoint and the certificate inventory.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-6.2.3</span><span class="pill unknown">unknown</span><span class="scope">Bespoke and custom software is reviewed prior to release</span></div><p class="intent">Bespoke and custom software is reviewed prior to being released into production
 to identify and correct potential coding vulnerabilities. Reviews are performed
 by individuals other than the originating author, and either manually or via
-automated code review tools.</p><p class="why">weighted: 67% of evidence weight was indeterminate</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Version control system (VCS) branch protection configuration showing mandatory approvals</li><li>Exported pull request history demonstrating sign-off by a non-author prior to merge</li><li>Change management tickets linking specific code deployments to their reviewed PRs</li></ul><p><strong>Usually held by:</strong> Engineering Lead / DevOps</p><p><strong>What an auditor will probe:</strong> Trace a sample of recent production releases back to the version control system to prove that a second, independent reviewer actually approved the code before it was merged.</p></div><p class="rem"><strong>Obtain:</strong> Require pull-request review by someone other than the author, and retain the
+automated code review tools.</p><p class="why">weighted: 67% of evidence weight was indeterminate</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>VCS (e.g., GitHub/GitLab) branch protection configuration showing mandatory approvals</li><li>A sample of 5-10 recently merged pull requests showing the author and approver are different authenticated users</li><li>CI/CD pipeline execution logs demonstrating automated SAST/DAST checks passed prior to merge</li></ul><p><strong>Usually held by:</strong> Engineering Lead</p><p><strong>What an auditor will probe:</strong> Show me a recent pull request for a critical component to prove that the person who wrote the code is not the person who approved it, and demonstrate that administrators cannot bypass this rule.</p></div><p class="rem"><strong>Obtain:</strong> Require pull-request review by someone other than the author, and retain the
 branch protection configuration as code where the provider allows it.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-11.3</span><span class="pill unknown">unknown</span><span class="scope">External and internal vulnerability scans and penetration testing</span></div><p class="intent">External vulnerability scans are performed quarterly by an Approved Scanning
 Vendor (ASV), internal scans are performed quarterly, and penetration testing is
-performed at least annually and after significant change.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The four most recent quarterly Approved Scanning Vendor (ASV) scan reports</li><li>The most recent annual and post-significant-change penetration test reports from a qualified third party</li><li>Jira or ticketing system records showing the timely remediation and re-testing of identified vulnerabilities</li></ul><p><strong>Usually held by:</strong> Security Lead / External ASV and Penetration Testers</p><p><strong>What an auditor will probe:</strong> Show me the internal tickets and subsequent re-scan reports proving that critical findings from the last penetration test were actually fixed within the required timeframe.</p></div><p class="rem"><strong>Obtain:</strong> Provide ASV scan reports and the annual penetration test report.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-12</span><span class="pill unknown">unknown</span><span class="scope">Support information security with organizational policies and programs</span></div><p class="intent">An overall information security policy is established, published, maintained and
+performed at least annually and after significant change.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The four most recent quarterly ASV scan reports showing a passing status or remediated findings</li><li>The most recent annual penetration test report from a qualified third party</li><li>Jira or ticketing system records showing the remediation and re-testing of high-risk vulnerabilities found during these tests</li></ul><p><strong>Usually held by:</strong> Security Lead / External ASV</p><p><strong>What an auditor will probe:</strong> Show me the remediation tickets proving that critical findings from the last penetration test were fixed and re-tested within the required timeframe.</p></div><p class="rem"><strong>Obtain:</strong> Provide ASV scan reports and the annual penetration test report.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-12</span><span class="pill unknown">unknown</span><span class="scope">Support information security with organizational policies and programs</span></div><p class="intent">An overall information security policy is established, published, maintained and
 disseminated; acceptable use, risk assessment, security awareness, personnel
-screening and incident response are all governed.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Timestamped HR or compliance platform logs showing annual employee acknowledgements of the InfoSec and Acceptable Use policies</li><li>Background check completion records for personnel granted access to the CDE</li><li>Meeting minutes and attendance logs from the most recent annual risk assessment and incident response tabletop exercise</li></ul><p><strong>Usually held by:</strong> HR / Compliance / CISO</p><p><strong>What an auditor will probe:</strong> Provide the system logs proving that all current employees with CDE access have formally acknowledged the security policies within the past 12 months.</p></div><p class="rem"><strong>Obtain:</strong> Provide the information security policy set, acknowledgements and the incident response plan.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-6.2.2</span><span class="pill unknown">unknown</span><span class="scope">Software development personnel are trained in secure coding</span></div><p class="intent">Software development personnel working on bespoke and custom software are
+screening and incident response are all governed.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>The formally approved Information Security Policy document with a recent management sign-off date</li><li>Compliance platform logs or HR records showing timestamped annual employee acknowledgements of the acceptable use policy</li><li>Background check completion records for a sample of personnel with CDE access</li></ul><p><strong>Usually held by:</strong> CISO / HR</p><p><strong>What an auditor will probe:</strong> Show me the timestamped logs confirming that all employees with access to the CDE have read and acknowledged the security policies within the last 12 months, and show me the incident response plan&#39;s latest tabletop exercise results.</p></div><p class="rem"><strong>Obtain:</strong> Provide the information security policy set, acknowledgements and the incident response plan.</p></div><div class="ctl"><div class="hd"><span class="id">PCI-6.2.2</span><span class="pill unknown">unknown</span><span class="scope">Software development personnel are trained in secure coding</span></div><p class="intent">Software development personnel working on bespoke and custom software are
 trained at least once every 12 months in software security relevant to their job
-function and development languages, including secure design and coding.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>Learning Management System (LMS) completion logs with timestamps for all active developers</li><li>Course syllabus or training materials proving coverage of secure coding principles specific to the languages used</li><li>HR roster of current software development personnel mapped against training dates</li></ul><p><strong>Usually held by:</strong> HR / Security Training Coordinator</p><p><strong>What an auditor will probe:</strong> Provide the current developer roster and the corresponding LMS logs to prove every individual completed role-specific secure coding training within the last 12 months.</p></div><p class="rem"><strong>Obtain:</strong> Provide annual secure-coding training records for all developers.</p></div>
+function and development languages, including secure design and coding.</p><p class="why">all-of: worst of 1 check(s) is unknown</p><div class="guide"><strong>Evidence to obtain</strong><ul><li>LMS (Learning Management System) completion reports for the past 12 months, cross-referenced with the current developer roster</li><li>Training syllabus or course materials proving the content covers secure coding specific to the languages used by the team (e.g., OWASP Top 10 for Java/Python)</li></ul><p><strong>Usually held by:</strong> HR / Security Training Coordinator</p><p><strong>What an auditor will probe:</strong> How do you ensure that new developers cannot commit code to production before completing this training, and how do you track and enforce annual renewals?</p></div><p class="rem"><strong>Obtain:</strong> Provide annual secure-coding training records for all developers.</p></div>
+</main>
 <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
 </body>
 </html>

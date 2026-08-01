@@ -4,60 +4,146 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="color-scheme" content="light dark">
 <title>smart-coder — documentation</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 </style>
 </head>
 <body>
-<h1>smart-coder</h1><p class="sub">An agentic coding tool built for small models — and a deterministic compliance evidence engine built on the same core.</p><h2>Compliance evidence</h2><p>This repository audits <em>itself</em> against ten compliance frameworks and publishes the result. It is a live demonstration rather than a claim: most of any framework is organizational and cannot be assessed from source, and the report says so control by control.</p><p><a href="compliance/index.html"><strong>Read the evidence packs →</strong></a> — SOC 2, ISO 27001, NIST SSDF, SLSA, CIS v8, PCI DSS, NIST 800-53, HIPAA, GDPR, and the EU NIS2/DORA/AI Act cluster.</p><div class="note"><strong>File paths, line numbers and evidence excerpts are withheld</strong> from the published packs. They show what was assessed and what the verdict was, not where to look.</div><h2>Design specs</h2><p class="scope">Rendered on GitHub, where Markdown displays natively.</p><table><thead><tr><th>Spec</th><th>Covers</th></tr></thead><tbody><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/00-overview.md">00 — Overview, goals &amp; non-goals</a></td><td class="scope">smart-coder is a terminal-based agentic coding assistant whose defining constraint is that it runs on small language models — never larger than 12B parameters, and ideally on a model as small as Gemma 4 E4B.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/01-architecture.md">01 — Architecture</a></td><td class="scope">smart-coder is a single Rust binary that runs an agent loop in the terminal.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/02-model-backends.md">02 — Model backends &amp; abstraction</a></td><td class="scope">One agent, many runtimes.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/03-agent-loop.md">03 — The agent loop</a></td><td class="scope">A small model cannot be trusted to hold a long plan, reason many steps ahead, or recover from its own mistakes.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/04-tools.md">04 — Tools</a></td><td class="scope">Tools are how the model affects the world.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/05-context-management.md">05 — Context management</a></td><td class="scope">A frontier model with a 200k window can absorb sloppy context.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/06-cli-ux.md">06 — CLI &amp; UX</a></td><td class="scope">v1 is terminal-only.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/07-roadmap.md">07 — Roadmap &amp; milestones</a></td><td class="scope">Goal: prove the plumbing end-to-end with the dumbest possible loop.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/08-orchestration-and-swarm.md">08 — Orchestration &amp; the worker swarm</a></td><td class="scope">A single tiny model is a weak agent.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/09-workflow-and-checkpoints.md">09 — Workflow &amp; human checkpoints</a></td><td class="scope">smart-coder does not jump from a one-line request straight to editing code.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/10-prior-art.md">10 — Prior art &amp; references</a></td><td class="scope">Worth pinning down, since the whole project is sized around it:</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/11-testing-and-tdd.md">11 — Testing &amp; TDD</a></td><td class="scope">Testing is not a phase in smart-coder — it is the control system for the whole agent.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/12-platform-clients.md">12 — Platform clients (Windows)</a></td><td class="scope">smart-coder is a portable Rust core wrapped in thin, per-platform shells.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/13-compliance-evidence.md">13 — Compliance evidence</a></td><td class="scope">An evidence pack is an argument, not a verdict.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/14-pack-authoring.md">14 — Pack authoring</a></td><td class="scope">A deterministic lint beats a model opinion every time.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/15-compliance-eval.md">15 — Compliance drafting eval</a></td><td class="scope">Measure honesty under temptation, not fluency.</td></tr></tbody></table><h2>Source</h2><p><a href="https://github.com/jamez667/smart-coder">https://github.com/jamez667/smart-coder</a></p>
+<input class="theme-in" type="radio" name="theme" id="theme-os" checked><input class="theme-in" type="radio" name="theme" id="theme-light"><input class="theme-in" type="radio" name="theme" id="theme-dark"><div class="masthead"><span class="wordmark">smart-coder</span><div class="theme" role="group" aria-label="Colour theme"><label for="theme-os">Auto</label><label for="theme-light">Light</label><label for="theme-dark">Dark</label></div></div>
+<main>
+<h1>smart-coder</h1><p class="sub">An agentic coding tool built for small models — and a deterministic compliance evidence engine built on the same core.</p><h2>Compliance evidence</h2><p>This repository audits <em>itself</em> against ten compliance frameworks and publishes the result. It is a live demonstration rather than a claim: most of any framework is organizational and cannot be assessed from source, and the report says so control by control.</p><p><a href="compliance/index.html"><strong>Read the evidence packs →</strong></a> — SOC 2, ISO 27001, NIST SSDF, SLSA, CIS v8, PCI DSS, NIST 800-53, HIPAA, GDPR, and the EU NIS2/DORA/AI Act cluster.</p><div class="note"><strong>File paths, line numbers and evidence excerpts are withheld</strong> from the published packs. They show what was assessed and what the verdict was, not where to look.</div><h2>Design specs</h2><p class="scope">Rendered on GitHub, where Markdown displays natively.</p><div class="tablewrap"><table><thead><tr><th>Spec</th><th>Covers</th></tr></thead><tbody><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/00-overview.md">00 — Overview, goals &amp; non-goals</a></td><td class="scope">smart-coder is a terminal-based agentic coding assistant whose defining constraint is that it runs on small language models — never larger than 12B parameters, and ideally on a model as small as Gemma 4 E4B.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/01-architecture.md">01 — Architecture</a></td><td class="scope">smart-coder is a single Rust binary that runs an agent loop in the terminal.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/02-model-backends.md">02 — Model backends &amp; abstraction</a></td><td class="scope">One agent, many runtimes.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/03-agent-loop.md">03 — The agent loop</a></td><td class="scope">A small model cannot be trusted to hold a long plan, reason many steps ahead, or recover from its own mistakes.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/04-tools.md">04 — Tools</a></td><td class="scope">Tools are how the model affects the world.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/05-context-management.md">05 — Context management</a></td><td class="scope">A frontier model with a 200k window can absorb sloppy context.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/06-cli-ux.md">06 — CLI &amp; UX</a></td><td class="scope">v1 is terminal-only.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/07-roadmap.md">07 — Roadmap &amp; milestones</a></td><td class="scope">Goal: prove the plumbing end-to-end with the dumbest possible loop.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/08-orchestration-and-swarm.md">08 — Orchestration &amp; the worker swarm</a></td><td class="scope">A single tiny model is a weak agent.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/09-workflow-and-checkpoints.md">09 — Workflow &amp; human checkpoints</a></td><td class="scope">smart-coder does not jump from a one-line request straight to editing code.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/10-prior-art.md">10 — Prior art &amp; references</a></td><td class="scope">Worth pinning down, since the whole project is sized around it:</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/11-testing-and-tdd.md">11 — Testing &amp; TDD</a></td><td class="scope">Testing is not a phase in smart-coder — it is the control system for the whole agent.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/12-platform-clients.md">12 — Platform clients (Windows)</a></td><td class="scope">smart-coder is a portable Rust core wrapped in thin, per-platform shells.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/13-compliance-evidence.md">13 — Compliance evidence</a></td><td class="scope">An evidence pack is an argument, not a verdict.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/14-pack-authoring.md">14 — Pack authoring</a></td><td class="scope">A deterministic lint beats a model opinion every time.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/15-compliance-eval.md">15 — Compliance drafting eval</a></td><td class="scope">Measure honesty under temptation, not fluency.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/16-post-integration-review.md">16 — Post-integration review</a></td><td class="scope">Green is a floor, not a finish line.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/17-spec-traceability.md">17 — Spec traceability &amp; drift</a></td><td class="scope">A spec that cannot be checked will drift, and the drift will be silent.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/18-task-intake.md">18 — Task intake &amp; the public surface</a></td><td class="scope">A task can be filed from anywhere.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/19-queue-and-runner.md">19 — The queue &amp; the background runner</a></td><td class="scope">Autonomy is in the scheduling, never in the approval.</td></tr><tr><td><a href="https://github.com/jamez667/smart-coder/blob/main/docs/specs/20-remote-review.md">20 — Remote review &amp; approval</a></td><td class="scope">A gate reached from a phone is the same gate.</td></tr></tbody></table></div><h2>Source</h2><p><a href="https://github.com/jamez667/smart-coder">https://github.com/jamez667/smart-coder</a></p>
+</main>
 <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, not a verdict.</footer>
 </body>
 </html>

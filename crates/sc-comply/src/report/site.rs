@@ -19,56 +19,159 @@ use std::fmt::Write as _;
 use crate::evidence::EvidencePack;
 use crate::status::ControlStatus;
 
-/// Shared stylesheet. Light, printable, and readable without JS.
+/// Shared stylesheet. Printable, readable without JS, and identical in shape to
+/// the one `sc-server` serves — the two surfaces are the same project and should
+/// not look like strangers.
+///
+/// ## The theme toggle is CSS only
+///
+/// Three states — follow the OS, force light, force dark — driven by a hidden
+/// radio group and `:has()`, with **no JavaScript at all**. That is not
+/// asceticism: these pages are published to GitHub Pages and read from
+/// `file://` and offline, and a script is one more thing that can fail to load
+/// on the least reliable connection somebody reads them over.
+///
+/// It degrades honestly. Where `:has()` is unsupported the radios simply do
+/// nothing and the page follows the OS — the same behaviour as before the
+/// toggle existed. Nothing is hidden behind a technique, so nothing becomes
+/// unreachable when the technique is missing.
+///
+/// ## Logical properties throughout
+///
+/// `margin-inline`, `border-inline-start` and friends rather than `left`/`right`,
+/// so a right-to-left language costs a translation rather than a stylesheet
+/// rewrite. Free to do now, expensive to retrofit.
 const STYLE: &str = r#"
-:root{--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;--panel:#f6f8fa;
---pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;--link:#0969da}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;
---line:#3d444d;--panel:#151b23;--pass:#3fb950;--gap:#f85149;--unknown:#d29922;
---error:#d2a8ff;--na:#9198a1;--link:#4493f8}}
+:root{
+--bg:#fbfbfd;--surface:#fff;--surface-2:#f4f4f7;
+--fg:#16181d;--dim:#5b6270;--faint:#878e9c;
+--line:#e3e5ea;--line-2:#cdd1d9;
+--link:#2f5fd8;--accent-ink:#fff;
+--pass:#1a7f37;--gap:#cf222e;--unknown:#9a6700;--error:#8250df;--na:#59636e;
+--shadow:0 1px 2px rgba(16,18,24,.06),0 4px 12px rgba(16,18,24,.05);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.75rem;
+color-scheme:light}
+/* Following the OS is the default, and stays the default when nothing is
+   chosen. `:not(:has(...))` keeps an explicit light choice from being
+   overridden by a dark OS. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* An explicit choice wins over the OS, in both directions. */
+:root:has(#theme-dark:checked){
+--bg:#0e1014;--surface:#161920;--surface-2:#1d212a;
+--fg:#e8eaef;--dim:#a2aab8;--faint:#6f7789;
+--line:#262b35;--line-2:#333a47;
+--link:#7ea2ff;--accent-ink:#0e1014;
+--pass:#3fb950;--gap:#f85149;--unknown:#d29922;--error:#d2a8ff;--na:#9198a1;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 4rem;max-width:60rem;background:var(--bg);color:var(--fg);
-font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-h1{font-size:1.7rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2.2rem 0 .8rem;
-padding-bottom:.3rem;border-bottom:1px solid var(--line)}
-h3{font-size:1rem;margin:1.4rem 0 .4rem}
-a{color:var(--link)}code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--panel);padding:.1em .35em;border-radius:4px}
-.sub{color:var(--dim);margin:0 0 1.5rem}
-.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--unknown);
-border-radius:6px;padding:.85rem 1rem;margin:1.2rem 0}
+/* The radios themselves are off-screen rather than `display:none`, so they stay
+   reachable by keyboard and to a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.theme{display:flex;gap:var(--s1);align-items:center}
+.theme label{font-size:.78rem;color:var(--dim);cursor:pointer;
+padding:var(--s1) var(--s2);border-radius:.4rem;border:1px solid transparent;
+min-height:1.9rem;display:inline-flex;align-items:center;
+transition:background .12s,border-color .12s,color .12s}
+.theme label:hover{background:var(--surface-2);color:var(--fg)}
+/* The radios are siblings of the masthead, and the labels live inside it — so
+   the highlight reaches through a descendant step rather than a direct one. */
+#theme-os:checked~.masthead label[for=theme-os],
+#theme-light:checked~.masthead label[for=theme-light],
+#theme-dark:checked~.masthead label[for=theme-dark]{
+background:var(--surface-2);border-color:var(--line-2);color:var(--fg);font-weight:600}
+.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;gap:var(--s4);
+flex-wrap:wrap;padding-bottom:var(--s4);margin-bottom:var(--s5);
+border-bottom:1px solid var(--line)}
+.masthead .wordmark{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+main{display:block}
+body{margin:0 auto;padding:var(--s6) var(--s4) 4rem;max-width:62rem;
+background:var(--bg);color:var(--fg);
+font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+h1{font-size:clamp(1.5rem,1.3rem + .9vw,2rem);margin:0 0 var(--s2);letter-spacing:-.02em}
+h2{font-size:clamp(1.1rem,1rem + .35vw,1.3rem);margin:var(--s6) 0 var(--s3);
+padding-bottom:var(--s2);border-bottom:1px solid var(--line);letter-spacing:-.01em}
+h3{font-size:1rem;margin:var(--s5) 0 var(--s2)}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--surface-2);padding:.1em .35em;border-radius:4px}
+.sub{color:var(--dim);margin:0 0 var(--s5);font-size:1.02rem;max-width:46rem}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--unknown);
+border-radius:var(--radius);padding:var(--s3) var(--s4);margin:var(--s5) 0;
+box-shadow:var(--shadow)}
 .note strong{color:var(--unknown)}
-.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem}
-table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.93rem}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
-tr:hover td{background:var(--panel)}
-.pill{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:.8rem;font-weight:600;
-white-space:nowrap}
+.scope{white-space:pre-wrap;color:var(--dim);font-size:.92rem;overflow-wrap:anywhere}
+/* Wide content scrolls inside its own box; the page body never scrolls
+   sideways, which on a phone is the difference between readable and not. */
+.tablewrap{overflow-x:auto;margin:var(--s4) 0;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%;font-size:.93rem}
+th,td{text-align:start;padding:var(--s3);border-bottom:1px solid var(--line);
+vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{color:var(--dim);font-weight:600;font-size:.78rem;text-transform:uppercase;
+letter-spacing:.05em;background:var(--surface-2)}
+tr:hover td{background:var(--surface-2)}
+.pill{display:inline-block;padding:.15em .6em;border-radius:10px;font-size:.8rem;
+font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .pass{color:var(--pass);background:color-mix(in srgb,var(--pass) 12%,transparent)}
 .gap{color:var(--gap);background:color-mix(in srgb,var(--gap) 12%,transparent)}
 .unknown{color:var(--unknown);background:color-mix(in srgb,var(--unknown) 12%,transparent)}
 .error{color:var(--error);background:color-mix(in srgb,var(--error) 12%,transparent)}
 .na{color:var(--na);background:color-mix(in srgb,var(--na) 12%,transparent)}
-.counts{display:flex;gap:.6rem;flex-wrap:wrap;margin:1rem 0}
-.count{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:.55rem .9rem;min-width:5.5rem}
-.count b{display:block;font-size:1.45rem;line-height:1.2}
-.count span{color:var(--dim);font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
-.ratios{display:flex;gap:2rem;flex-wrap:wrap;margin:.6rem 0 0}
-.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;margin-top:.3rem}
+.counts{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));
+gap:var(--s3);margin:var(--s4) 0}
+.count{background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);padding:var(--s3) var(--s4);box-shadow:var(--shadow)}
+.count b{display:block;font-size:1.6rem;line-height:1.15;letter-spacing:-.02em}
+.count span{color:var(--dim);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+.ratios{display:flex;gap:var(--s6);flex-wrap:wrap;margin:var(--s3) 0 0}
+.bar{height:6px;background:var(--line);border-radius:3px;width:9rem;overflow:hidden;
+margin-top:var(--s1)}
 .bar>div{height:100%;background:var(--link)}
-.ctl{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:.9rem 0}
-.ctl .hd{display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap}
-.ctl .id{font-weight:700}.ctl .why{color:var(--dim);font-size:.9rem;margin:.5rem 0 0}
-.ctl .intent{font-size:.93rem;margin:.5rem 0 0}
-.ctl .rem{font-size:.9rem;margin:.6rem 0 0;padding:.5rem .7rem;background:var(--panel);border-radius:6px}
-.exec{font-size:1.02rem;margin:1.2rem 0}.exec p{margin:0 0 .9rem}
-.guide{margin:.7rem 0 0;padding:.6rem .85rem;background:var(--panel);border-radius:6px;
-border-left:3px solid var(--link);font-size:.92rem}
-.guide strong{color:var(--link)}.guide ul{margin:.35rem 0;padding-left:1.2rem}
-.guide p{margin:.35rem 0 0}
-footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+.ctl{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);
+margin:var(--s3) 0;background:var(--surface);
+transition:border-color .12s,box-shadow .12s}
+.ctl:hover{border-color:var(--line-2);box-shadow:var(--shadow)}
+.ctl .hd{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.ctl .id{font-weight:700;overflow-wrap:anywhere}
+.ctl .why{color:var(--dim);font-size:.9rem;margin:var(--s2) 0 0}
+.ctl .intent{font-size:.93rem;margin:var(--s2) 0 0}
+.ctl .rem{font-size:.9rem;margin:var(--s2) 0 0;padding:var(--s2) var(--s3);
+background:var(--surface-2);border-radius:.5rem}
+.exec{font-size:1.02rem;margin:var(--s5) 0;max-width:46rem}
+.exec p{margin:0 0 var(--s3)}
+.guide{margin:var(--s3) 0 0;padding:var(--s3);background:var(--surface-2);
+border-radius:.5rem;border-inline-start:3px solid var(--link);font-size:.92rem}
+.guide strong{color:var(--link)}
+.guide ul{margin:var(--s1) 0;padding-inline-start:1.2rem}
+.guide p{margin:var(--s1) 0 0}
+footer{margin-top:var(--s6);padding-top:var(--s4);border-top:1px solid var(--line);
+color:var(--dim);font-size:.85rem}
+@media(prefers-reduced-motion:reduce){
+*,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}}
+/* The toggle is a screen affordance; on paper the OS theme is meaningless and
+   the ink should be black. */
+@media print{
+:root{--bg:#fff;--surface:#fff;--surface-2:#fff;--fg:#000;--dim:#333;
+--line:#bbb;--shadow:none}
+.theme,.theme-in{display:none}
+.ctl,.count,.note,.tablewrap{box-shadow:none}}
 "#;
 
 /// HTML-escape.
@@ -129,15 +232,61 @@ fn disclaimer(redacted: bool) -> String {
     s
 }
 
+/// The page header: the wordmark and the theme control.
+///
+/// Emitted **before** everything it styles, because the sibling selectors that
+/// highlight the chosen option (`#theme-dark:checked ~ .theme label`) can only
+/// look forwards. `:has()` on `:root` handles the colour tokens and does not
+/// care about order, but the highlight does.
+///
+/// No JavaScript, and nothing hidden behind a technique: where `:has()` is
+/// unsupported the radios do nothing and the page follows the OS, which is
+/// exactly what it did before the toggle existed.
+fn masthead() -> String {
+    // One list, walked twice: the inputs must come first for the sibling
+    // selectors to reach the labels, but naming the options once means the two
+    // halves cannot drift apart.
+    const OPTIONS: [(&str, &str); 3] = [
+        ("theme-os", "Auto"),
+        ("theme-light", "Light"),
+        ("theme-dark", "Dark"),
+    ];
+
+    let mut s = String::new();
+    for (i, (id, _)) in OPTIONS.iter().enumerate() {
+        // "Auto" is checked, so an untouched page follows the OS exactly as it
+        // did before this control existed.
+        let checked = if i == 0 { " checked" } else { "" };
+        s.push_str(&format!(
+            "<input class=\"theme-in\" type=\"radio\" name=\"theme\" id=\"{id}\"{checked}>"
+        ));
+    }
+    // The masthead is a sibling of the radios rather than a parent, because the
+    // `#theme-dark:checked ~ .theme label` highlight can only look forwards.
+    s.push_str(
+        "<div class=\"masthead\"><span class=\"wordmark\">smart-coder</span>\
+         <div class=\"theme\" role=\"group\" aria-label=\"Colour theme\">",
+    );
+    for (id, label) in OPTIONS {
+        s.push_str(&format!("<label for=\"{id}\">{label}</label>"));
+    }
+    s.push_str("</div></div>");
+    s
+}
+
 fn page_shell(title: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
          <meta name=\"robots\" content=\"noindex\">\n\
-         <title>{}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n{body}\n\
+         <meta name=\"color-scheme\" content=\"light dark\">\n\
+         <title>{title_esc}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
+         {theme}\n\
+         <main>\n{body}\n</main>\n\
          <footer>Generated by <code>sc-comply</code> — an evidence pack is an argument, \
          not a verdict.</footer>\n</body>\n</html>\n",
-        esc(title)
+        title_esc = esc(title),
+        theme = masthead(),
     )
 }
 
@@ -203,7 +352,7 @@ fn by_section(pack: &EvidencePack) -> String {
     let mut b = String::with_capacity(2 * 1024);
     b.push_str(
         "<h3>By evidence domain</h3>\
-         <table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th>\
+         <div class=\"tablewrap\"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th>\
          <th>Determinacy</th></tr></thead><tbody>",
     );
     for (section, sc) in &sections {
@@ -224,7 +373,7 @@ fn by_section(pack: &EvidencePack) -> String {
             pct(sc.determinacy()),
         );
     }
-    b.push_str("</tbody></table>");
+    b.push_str("</tbody></table></div>");
     b.push_str(
         "<p class=\"scope\">These are deliberately not combined into a single figure. A framework \
          is completed mostly by declaring organizational controls, which a repository can never \
@@ -324,7 +473,7 @@ fn framework_page_inner(
 
     // Controls, problems first.
     b.push_str(
-        "<h2>Controls</h2><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th>\
+        "<h2>Controls</h2><div class=\"tablewrap\"><table><thead><tr><th>Control</th><th>Domain</th><th>Status</th>\
                 <th>Severity</th><th>Determination</th></tr></thead><tbody>",
     );
     for c in pack.controls_for_report() {
@@ -340,7 +489,7 @@ fn framework_page_inner(
             esc(&c.rationale)
         );
     }
-    b.push_str("</tbody></table>");
+    b.push_str("</tbody></table></div>");
 
     // Detail for anything not passing — the worklist.
     let notable: Vec<_> = pack
@@ -460,7 +609,7 @@ fn executive_summary(rollup: &crate::rollup::Rollup, narrative: Option<&str>) ->
         b.push_str(
             "<h3>Outstanding items affecting several frameworks</h3>\
              <p class=\"scope\">One change here resolves the same finding in every framework \
-             listed.</p><table><thead><tr><th>Item</th><th>Frameworks</th><th>Severity</th>\
+             listed.</p><div class=\"tablewrap\"><table><thead><tr><th>Item</th><th>Frameworks</th><th>Severity</th>\
              </tr></thead><tbody>",
         );
         for f in shared.iter().take(6) {
@@ -474,7 +623,7 @@ fn executive_summary(rollup: &crate::rollup::Rollup, narrative: Option<&str>) ->
                 esc(f.severity.label())
             );
         }
-        b.push_str("</tbody></table>");
+        b.push_str("</tbody></table></div>");
     } else if rollup.has_gaps() {
         b.push_str(
             "<p class=\"scope\">No single finding recurs across frameworks — the outstanding \
@@ -540,7 +689,7 @@ pub fn landing_page(repo_url: &str, specs: &[SpecLink]) -> String {
         b.push_str(
             "<h2>Design specs</h2>\
              <p class=\"scope\">Rendered on GitHub, where Markdown displays natively.</p>\
-             <table><thead><tr><th>Spec</th><th>Covers</th></tr></thead><tbody>",
+             <div class=\"tablewrap\"><table><thead><tr><th>Spec</th><th>Covers</th></tr></thead><tbody>",
         );
         for s in specs {
             let _ = write!(
@@ -551,7 +700,7 @@ pub fn landing_page(repo_url: &str, specs: &[SpecLink]) -> String {
                 esc(&s.summary)
             );
         }
-        b.push_str("</tbody></table>");
+        b.push_str("</tbody></table></div>");
     }
 
     let _ = write!(
@@ -601,7 +750,7 @@ fn rollup_by_section(rollup: &crate::rollup::Rollup) -> String {
          about the evidence, not about the project.</p>",
     );
     b.push_str(
-        "<table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th>\
+        "<div class=\"tablewrap\"><table><thead><tr><th>Domain</th><th>Evidence lives in</th><th>Controls</th>\
          <th>Determinacy</th></tr></thead><tbody>",
     );
     for (section, sc) in &rollup.by_section {
@@ -622,7 +771,7 @@ fn rollup_by_section(rollup: &crate::rollup::Rollup) -> String {
             pct(sc.determinacy()),
         );
     }
-    b.push_str("</tbody></table>");
+    b.push_str("</tbody></table></div>");
     b.push_str(
         "<p class=\"scope\">These are deliberately not combined into a single figure. A framework \
          is completed mostly by declaring organizational controls, which a repository can never \
@@ -656,7 +805,7 @@ pub fn index_page(
     b.push_str(&rollup_by_section(rollup));
 
     b.push_str(
-        "<h2>Frameworks</h2><table><thead><tr><th>Framework</th><th>Pass</th><th>Gap</th>\
+        "<h2>Frameworks</h2><div class=\"tablewrap\"><table><thead><tr><th>Framework</th><th>Pass</th><th>Gap</th>\
          <th>Unknown</th><th>Coverage</th><th>Determinacy</th></tr></thead><tbody>",
     );
     for e in entries {
@@ -676,7 +825,7 @@ pub fn index_page(
             pct(s.determinacy())
         );
     }
-    b.push_str("</tbody></table>");
+    b.push_str("</tbody></table></div>");
 
     b.push_str(
         "<h2>How to read this</h2>\
@@ -890,6 +1039,123 @@ mod tests {
         assert!(!html.contains("http://"));
         assert!(!html.contains("https://"));
         assert!(html.contains("<style>"));
+    }
+
+    #[test]
+    fn the_theme_toggle_needs_no_javascript() {
+        // These pages are read from file://, offline, and over whatever
+        // connection somebody has. A script is one more thing that can fail to
+        // load, and the toggle does not need one.
+        let html = framework_page(&pack(false).redacted(), None);
+        assert!(!html.contains("<script"), "no script anywhere");
+        assert!(html.contains("id=\"theme-dark\""), "{html}");
+        assert!(html.contains(":has(#theme-dark:checked)"), "CSS drives it");
+    }
+
+    #[test]
+    fn an_untouched_page_still_follows_the_operating_system() {
+        // The toggle is an override, not a replacement. Before it existed the
+        // page followed `prefers-color-scheme`, and with nothing chosen it
+        // still does — so the default behaviour is unchanged.
+        let html = framework_page(&pack(false).redacted(), None);
+        assert!(
+            html.contains("id=\"theme-os\" checked"),
+            "auto is the default"
+        );
+        assert!(html.contains("prefers-color-scheme:dark"), "{html}");
+    }
+
+    /// CSS with `/* … */` comments removed.
+    ///
+    /// So a rule check reads rules. This stylesheet explains its own decisions
+    /// in comments — including why the radios avoid `display:none` — and a
+    /// substring check would otherwise fail on the sentence saying the thing is
+    /// not done.
+    fn strip_comments(css: &str) -> String {
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(open) = rest.find("/*") {
+            out.push_str(&rest[..open]);
+            match rest[open..].find("*/") {
+                Some(close) => rest = &rest[open + close + 2..],
+                // Unterminated: drop the remainder rather than loop forever.
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn no_content_is_hidden_behind_a_technique() {
+        // Where `:has()` is unsupported the radios do nothing and the page
+        // follows the OS — the same behaviour as before. A control hidden until
+        // a technique fires would instead be permanently unreachable there.
+        //
+        // Checked over the *screen* rules only: the print block deliberately
+        // hides the theme toggle, because a colour control means nothing on
+        // paper. Asserting over the whole sheet would either fail on that or
+        // have to be loosened until it proved nothing.
+        // Comments are stripped first: this file *discusses* `display:none` in
+        // the comment explaining why the radios do not use it, and a substring
+        // check cannot tell prose from a rule.
+        let screen = strip_comments(
+            STYLE
+                .split("@media print")
+                .next()
+                .expect("the print block is last"),
+        );
+
+        for hazard in ["display:none", "visibility:hidden", "opacity:0"] {
+            assert!(!screen.contains(hazard), "{hazard} in the screen rules");
+        }
+        // And the print block hides only the toggle, never content.
+        let print = STYLE.split("@media print").nth(1).unwrap_or("");
+        assert!(print.contains(".theme,.theme-in{display:none}"), "{print}");
+    }
+
+    #[test]
+    fn the_radios_stay_reachable_by_keyboard() {
+        // Off-screen rather than `display:none`, which would remove them from
+        // the tab order and from a screen reader.
+        let html = framework_page(&pack(false).redacted(), None);
+        assert!(html.contains("clip-path:inset(50%)"), "{html}");
+        assert!(html.contains("aria-label=\"Colour theme\""), "{html}");
+    }
+
+    #[test]
+    fn the_stylesheet_uses_logical_properties() {
+        // So a right-to-left language costs a translation rather than a
+        // stylesheet rewrite. Fifteen seconds now, a full rewrite later.
+        for physical in [
+            "margin-left:",
+            "margin-right:",
+            "padding-left:",
+            "padding-right:",
+            "border-left:",
+            "border-right:",
+            "text-align:left",
+        ] {
+            assert!(!STYLE.contains(physical), "{physical} in the stylesheet");
+        }
+    }
+
+    #[test]
+    fn a_wide_table_scrolls_inside_its_own_box() {
+        // The page body must never scroll sideways — on a phone that is the
+        // difference between readable and not.
+        let html = framework_page(&pack(false).redacted(), None);
+        assert!(html.contains("class=\"tablewrap\""), "{html}");
+        assert!(STYLE.contains("overflow-x:auto"), "{STYLE}");
+    }
+
+    #[test]
+    fn the_stylesheet_references_nothing_remote() {
+        // The page-level test catches `https://`, but a remote font sneaks in
+        // as a protocol-relative `url(//…)` or an `@import`, which it would not.
+        for remote in ["@import", "url(http", "url(//", "//fonts"] {
+            assert!(!STYLE.contains(remote), "{remote} in the stylesheet");
+        }
     }
 
     fn sample_rollup() -> crate::rollup::Rollup {
