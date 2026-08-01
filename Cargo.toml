@@ -16,6 +16,7 @@ members = [
     "crates/sc-iterate",
     "crates/sc-swarm",
     "crates/sc-daemon",
+    "crates/sc-server",
     "crates/sc-workflow",
     "crates/sc-tui",
     "crates/sc-win",

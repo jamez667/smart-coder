@@ -155,10 +155,53 @@ minted for anything longer. **No credential on this path is written to that file
 > away, not a theoretical chain. The surface must send `Referrer-Policy:
 > no-referrer`, `Cache-Control: no-store`, and a CSP that forbids remote
 > subresources. None of these headers exist in `sc-web` today.
+>
+> ✅ **Built** <!--@ crates/sc-server/src/routes.rs -->. All three are returned
+> from one function and written on **every** response, because a header added per
+> route is a header eventually missing from one. Beyond them, a drafted spec is
+> rendered as escaped text in a `<pre>` — never as Markdown and never as HTML —
+> which removes the class rather than filtering it.
 
-*Not built:* none of the credential handling exists. `DaemonConfig` does, but
-carries only `repos`, so the key is a new field on an existing file rather than
-a new file.
+✅ **Built** <!--@ crates/sc-server/src/auth.rs -->, with two deviations recorded
+below.
+
+Credentials are **hashed at rest** — SHA-256 of each device token, never the
+token. The data volume is the thing a Portainer user backs up and copies around,
+so it contains nothing that grants access. That also removes the length leak in
+`sc-web`'s `ct_eq`, which returns early on a length mismatch: comparing
+fixed-width hashes makes every comparison the same work.
+
+Enrolment is a **single-use** code, spent on the device it enrols. Each device
+gets its own credential and can be revoked alone, and a revoked device is *kept*
+rather than deleted so a list can say it was revoked.
+
+**Deviation — CSRF.** This spec asks for a required header on write routes. The
+surface is server-rendered HTML forms with no script at all (the CSP is
+`default-src 'none'`), and a form cannot set a header — so requiring one would
+mean requiring script, which is the thing that makes a rendered model-authored
+spec dangerous. The defence is `SameSite=Strict` plus `form-action 'self'`
+instead. That is a genuinely weaker guarantee on very old browsers, and it is the
+trade this pass took deliberately rather than by omission.
+
+**Deviation — no `?k=` bootstrap.** The spec permits a query parameter to
+bootstrap, exchanged immediately. None is implemented: the enrolment code is
+typed into a form. The QR-code ergonomics are lost; the credential is never in a
+URL at all, so there is nothing to exchange and nothing to leak into a log.
+
+*Not built:* the daemon-side key is still absent from `DaemonConfig`, which
+carries only `repos`.
+
+*Not built:* **revocation has primitives but no surface.** `revoke` and the device
+list exist <!--@ crates/sc-server/src/auth.rs --> and are tested, but no route
+reaches them — so the lost-phone case that *justifies* per-device credentials
+cannot yet be acted on without editing `credentials.json` on the volume by hand.
+The argument for per-device credentials is only half-delivered until that route
+exists, and this is the most valuable outstanding piece of the auth work.
+
+*Not built:* **there is no way to arm a second enrolment code.** One is minted at
+first start and printed to the container log; once spent, enrolling a second
+device means an operator with access to the data volume. A `smart-coder enrol`
+subcommand is the obvious home for this and does not exist in any crate.
 
 > **On TLS.** A hosted server terminates TLS the ordinary way, at the edge, with
 > whatever its deployment already uses. The *daemon* holds no certificate and
@@ -173,10 +216,16 @@ A request is a small, deliberately boring record:
 | --- | --- |
 | **Text** | The request, free-form. The same string an interactive user would type. |
 | **Kind** | `bug` / `feature` / `improvement` / `feedback` (below). |
-| **Repository** | Chosen from the daemon's configured set — never a free path. |
+| **Repository** | A name the daemon resolves against its configured set — never a free path. Typed, not picked: the server holds no copy of that set. |
 | **Agent profile** | Chosen from a named list (below). |
 
 Three of these are closed sets, and that is the security-relevant part.
+
+A filed request can also be **discarded** from the surface
+<!--@ crates/sc-server/src/routes.rs -->, which drops it before approval. That is
+a queue operation on the request, not a fifth gate decision — [19](19-queue-and-runner.md)
+already separates the two — so [20](20-remote-review.md)'s four review decisions
+are unchanged by it.
 
 ### Four kinds, and only three become specs
 
@@ -207,13 +256,27 @@ left with no litter in it — and acknowledging
 it keeps the note rather than deleting it — a list that silently shrinks cannot
 show what has already been considered, so the same point gets raised again.
 
-### A repository is chosen, never typed
+### A repository is named, never pathed
 
-✅ **Built** <!--@ crates/sc-daemon/src/config.rs -->. The surface offers the
-names the daemon serves; an arbitrary path in a request body is rejected outright
-rather than canonicalised-and-checked. That is the difference between a
-path-traversal bug being *mitigated* and being *unreachable* — there is no
-path-handling code on the request path at all, because a request carries no path.
+✅ **Built** <!--@ crates/sc-daemon/src/config.rs -->, *on the daemon side*. An
+arbitrary path in a request body is rejected outright rather than
+canonicalised-and-checked. That is the difference between a path-traversal bug
+being *mitigated* and being *unreachable* — there is no path-handling code on the
+request path at all, because a request carries no path.
+
+**The heading used to say "chosen, never typed", and the hosted architecture
+broke the first half of that.** The server holds no configuration and no copy of
+the repository set — that is the property that makes it safe to expose — so it
+cannot render a picker. Its form asks for a free-text **name**
+<!--@ crates/sc-server/src/page.rs -->, and the closed set is enforced one hop
+later, when the daemon resolves it.
+
+The security claim survives intact, because it never rested on the picker: a name
+is not a path, whether it was chosen or typed. What is lost is ergonomic — a
+mistyped name is filed and fails at the daemon rather than being impossible to
+enter. A future pass could have the daemon publish its names on poll, which is
+the right way to get the picker back; inventing a server-side repository list
+would not be.
 
 Canonicalisation happens at *configuration* time, by the developer at their own
 keyboard. By the time a network request is handled there is only a name to look up.
@@ -299,6 +362,28 @@ describing itself as SSE; the SSE frame helper is dead relative to the pages tha
 ship. A phone on a train loses its connection constantly, and polling reconnects by
 asking again, which is the failure mode that needs no code.
 
+✅ **Built** <!--@ crates/sc-server/src/page.rs -->, **with the transport
+deviating**: the page is server-rendered HTML with **no script and no polling at
+all** — forms and links, refreshed by the developer pulling down.
+
+That went further than this section asked, and the reason is the section above
+it. Forbidding remote subresources is only half the exfiltration defence; the
+other half is forbidding *script*, and a CSP can only say `default-src 'none'` if
+nothing on the page needs script. Polling with a cursor needs script. So the
+choice was between a live-updating page with a weaker CSP and a static page with
+the strongest one, and on the surface that renders model-authored text the static
+page wins.
+
+What is lost is live updates: a spec that finishes drafting while the developer
+is looking at the list does not appear until they reload. On a phone on a train
+that is a pull-to-refresh, which is the gesture people already make. It also
+means the page renders on one round trip with nothing else to fetch, which is the
+better behaviour on the connection this feature was designed for.
+
+The single-file rule is honoured in spirit rather than by `include_str!`: the
+markup is generated in Rust because it renders per-request state, and the CSS is
+one inlined constant. No build step, no bundler, no `node_modules`.
+
 **Daemon transport is long-polling.** The daemon asks "is there work for me?" and
 the server holds the request open until there is, or until a timeout of about
 thirty seconds. That gives near-instant pickup with almost no idle traffic, and it
@@ -311,10 +396,43 @@ wasted requests: a request filed on the train would wait an interval for no reas
 WebSockets and SSE were rejected for the machinery they add to solve a problem
 long-polling already solves at this scale.
 
+✅ **Built** <!--@ crates/sc-server/src/serve.rs -->. The server holds an idle
+poll open for `POLL_TIMEOUT`, re-checking every 250ms so a request filed
+mid-poll is picked up in well under a second rather than waiting out the window.
+The protocol constants are shared with the daemon <!--@ crates/sc-daemon/src/wire.rs -->
+rather than restated, so the two ends cannot drift.
+
 The server cannot reuse the existing `Hub`. It is an in-memory, monotonically
 growing event vector scoped to **one run** — the wrong shape for a durable queue of
 many requests that outlives any process, and an unbounded allocation in something
 meant to run for weeks.
+
+## Deployment
+
+**A separate Docker image, installed in Portainer on its own.**
+<!--@ deploy/sc-server.stack.yml --> It shares a repository with the rest of this
+workspace and nothing else: no dependency on the desktop client, the daemon, or a
+model, and no reason for a change to any of them to redeploy it.
+
+- **One port, one volume.** All state — requests, drafted specs, credentials —
+  lives under a single directory <!--@ crates/sc-server/src/store.rs -->. State
+  split across paths is a footgun, because the backup that misses one looks like
+  it worked.
+- **Configured entirely from environment variables**
+  <!--@ crates/sc-server/src/config.rs -->, because a Portainer stack editor is
+  where a user configures a container. A config file baked into an image cannot
+  be edited without rebuilding, and mounting one to override it makes two sources
+  of truth.
+- **It refuses to start without a daemon key**, and refuses one shorter than 32
+  characters. Running open is not a degraded mode; it is the failure this whole
+  design exists to prevent, and a short key looks configured while being
+  guessable. `sc-web`'s `--no-token` has no equivalent here.
+- **Non-root, fixed uid.** The uid is pinned so a volume written by one image tag
+  stays readable by the next — an image that changes it on upgrade greets the
+  developer with permission errors on data that was fine yesterday.
+- **A fresh install is usable but never open.** With no enrolment code
+  configured, one is minted at first start and printed to the container log. It
+  is stored hashed, so that log line is the only place it ever appears.
 
 ## Anti-goals
 
@@ -322,6 +440,11 @@ meant to run for weeks.
   route that builds, and no parameter that could reach one — the daemon
   constructs a spec-only pipeline, so the later phases are *unreachable* rather
   than declined ([19](19-queue-and-runner.md)).
+
+  ✅ **Held** <!--@ crates/sc-server/src/routes.rs -->. The server holds text: it
+  has no repository, no path to one, no model, and no way to reach the daemon —
+  the daemon dials *out*. The record has no path field, so traversal is
+  unreachable rather than mitigated, and a test asserts the build-ish routes 404.
 - **No widening for the private surface.** A private surface with the full agent
   is a separate, later thing. It may share the queue and the credential
   primitives, but it gets its own routes and its own trust boundary. Adding
