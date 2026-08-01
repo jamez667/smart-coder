@@ -67,33 +67,18 @@ steps:
     # The plugin wraps the same executor with an entrypoint that works, and
     # takes its configuration as settings rather than a shell script — so there
     # is no `$$VAR` quoting to get wrong either.
-    image: woodpeckerci/plugin-kaniko:1.6.1
+    image: woodpeckerci/plugin-kaniko:2.3.2
     settings:
       registry: ghcr.io
       repo: ghcr.io/${CI_REPO_OWNER}/sc-server
       dockerfile: Dockerfile
-      # A tag build publishes the version *and* `latest`; a push to main
-      # publishes only `main`, so `latest` never silently moves to an untagged
-      # commit nobody chose to release.
-      tags: ${CI_COMMIT_TAG:-main}
-      auto_tag: false
-      username: ${CI_REPO_OWNER}
-      password:
-        from_secret: jcnash-woodpecker
-
-  # `latest` is a second push of the same build rather than a second build, so
-  # the two tags can never point at different bits.
-  - name: latest
-    image: woodpeckerci/plugin-kaniko:1.6.1
-    when:
-      - event: tag
-        ref: refs/tags/v*
-    settings:
-      registry: ghcr.io
-      repo: ghcr.io/${CI_REPO_OWNER}/sc-server
-      dockerfile: Dockerfile
-      tags: latest
-      auto_tag: false
+      # On a `v*` tag, `auto-tag` expands to Major, Major.Minor,
+      # Major.Minor.Patch **and** `latest` from one build — so those tags cannot
+      # point at different bits, which a second build would allow. On a push to
+      # main there is no tag to expand, and `tags` names `main` explicitly, so
+      # `latest` never silently moves to a commit nobody chose to release.
+      auto-tag: true
+      tags: main
       username: ${CI_REPO_OWNER}
       password:
         from_secret: jcnash-woodpecker
