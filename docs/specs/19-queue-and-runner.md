@@ -325,6 +325,31 @@ leaving the task `Queued` with the reason recorded. A merely *dirty* tree is fin
 and must not block: phases 1–5 write only under `specs/<slug>/`, and refusing on
 uncommitted work would make the daemon useless on any real working repository.
 
+### "Only under `specs/<slug>/`" was not true, and is now
+
+✅ **Fixed** <!--@ crates/sc-workflow/src/artifact_dir.rs -->. That claim was load
+bearing for this whole design and it did not hold.
+
+`spec_artifact_dir` scans the task text for a token starting `specs/` and ending
+`/spec.md` — so a **Build** can resume a design a prior run wrote — and returned
+`workspace.join(dir_rel)` with no containment check. Task text of the form
+`specs/../../../../etc/cron.d/x/spec.md` therefore resolved *outside* the
+repository, and the workflow went on to `create_dir_all` it and write
+model-authored content there.
+
+The reach is whatever the running user can write: shell profiles, autostart
+entries, CI configuration. It was latent rather than harmless — the CLI and the
+GUI both pass user-typed text straight through — and it becomes remote the moment
+task text arrives from anywhere but the developer's own keyboard, which is
+precisely what [18](18-task-intake.md) exists to enable.
+
+Containment is checked **lexically, on the relative form, before the join**.
+Deliberately not `canonicalize`: that requires the path to exist, so it would pass
+a hostile path simply because the target directory had not been created yet. The
+escape has to be impossible to *construct*, not merely impossible to resolve. A
+climbing path falls back to the derived slug rather than erroring, so a hostile
+string cannot deny service to a legitimate run.
+
 ## Reusing the workflow engine
 
 The runner is a **third front-end over `sc-workflow`**, not a second pipeline. It

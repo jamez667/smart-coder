@@ -34,7 +34,17 @@ pub fn spec_artifact_dir(task: &str, workspace: &Path) -> Option<PathBuf> {
                 .or_else(|| token.strip_suffix("/SPEC.MD"))
                 .map(|d| d.to_string())
         });
-    if let Some(dir_rel) = referenced {
+    // A referenced path is used only if it stays *inside* the workspace. The token
+    // came from free task text, and task text is not always the developer's — a
+    // request filed from the intake surface reaches here verbatim. Without this,
+    // `specs/../../../../etc/cron.d/x/spec.md` resolves outside the tree and the
+    // workflow then does `create_dir_all` + writes model-authored content there,
+    // which is an arbitrary write on the machine running the daemon.
+    //
+    // Escaping falls back to the derived slug rather than erroring: the caller
+    // asked for a spec directory, and refusing outright would turn a hostile
+    // string into a denial of service for a legitimate run.
+    if let Some(dir_rel) = referenced.filter(|d| is_contained(d)) {
         return Some(workspace.join(dir_rel));
     }
 
@@ -46,6 +56,34 @@ pub fn spec_artifact_dir(task: &str, workspace: &Path) -> Option<PathBuf> {
         return None; // truly empty/garbage task ⇒ let the workflow use its plan-dir fallback.
     }
     Some(workspace.join("specs").join(slug))
+}
+
+/// Does this workspace-relative directory stay inside the workspace?
+///
+/// Checked **lexically**, on the relative form, before any `join` — deliberately
+/// not with `canonicalize`, which requires the path to exist and would therefore
+/// pass a hostile path simply because the target directory has not been created
+/// yet. The escape has to be impossible to *construct*, not merely impossible to
+/// resolve.
+///
+/// The token has already had `\` folded to `/` by the caller, so Windows
+/// separators are covered by the same check.
+fn is_contained(dir_rel: &str) -> bool {
+    // Absolute, in either flavour: `join` on an absolute path *replaces* the base
+    // rather than extending it, so this is an escape even without a `..`.
+    if dir_rel.starts_with('/') {
+        return false;
+    }
+    // A drive letter or a UNC share is absolute on Windows and would replace the
+    // base the same way.
+    let bytes = dir_rel.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic() {
+        return false;
+    }
+
+    // No component may climb. Checked per component rather than by substring, so
+    // a legitimate name that merely *contains* two dots (`specs/v1..v2/`) is kept.
+    !dir_rel.split('/').any(|part| part == "..")
 }
 
 /// Turn free task text into a short kebab-case folder name for `specs/<slug>/`. Lower-cases,
@@ -98,6 +136,67 @@ pub fn artifact_dirs(task: &str, workspace: &Path) -> (Option<PathBuf>, Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_referenced_spec_path_cannot_escape_the_workspace() {
+        // Task text is not always the developer's: a request filed from the
+        // intake surface reaches here verbatim. Without containment, this
+        // resolves outside the tree and the workflow then does `create_dir_all`
+        // and writes model-authored content there — an arbitrary write on the
+        // machine running the daemon.
+        let ws = Path::new("/proj");
+        for hostile in [
+            "specs/../../../../etc/cron.d/x/spec.md",
+            "specs/../.ssh/spec.md",
+            "specs/a/../../../b/spec.md",
+            // Windows separators are folded to `/` before the check, so they are
+            // covered by the same rule rather than a second one.
+            "specs\\..\\..\\Windows\\System32\\spec.md",
+        ] {
+            let d = spec_artifact_dir(&format!("Design {hostile}."), ws)
+                .expect("falls back to a slug rather than failing");
+            assert!(
+                d.starts_with(ws.join("specs")),
+                "{hostile} escaped to {}",
+                d.display()
+            );
+            let shown = d.to_string_lossy().replace('\\', "/");
+            assert!(!shown.contains(".."), "{hostile} left a climb in {shown}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_referenced_path_is_refused_because_join_would_replace_the_base() {
+        // `join` on an absolute path discards the workspace entirely, so this is
+        // an escape with no `..` in it at all.
+        let ws = Path::new("/proj");
+        for hostile in ["/etc/specs/x/spec.md", "specs/x/spec.md"] {
+            let d = spec_artifact_dir(&format!("Design {hostile}."), ws).unwrap();
+            assert!(d.starts_with(ws), "{hostile} -> {}", d.display());
+        }
+    }
+
+    #[test]
+    fn containment_is_lexical_so_a_path_that_does_not_exist_yet_is_still_checked() {
+        // `canonicalize` would pass a hostile path simply because the target has
+        // not been created — the escape must be impossible to construct, not
+        // merely impossible to resolve.
+        assert!(!is_contained("specs/../x"));
+        assert!(!is_contained("/absolute/x"));
+        assert!(!is_contained("C:/Windows/x"));
+        assert!(!is_contained("c:/windows/x"));
+        assert!(is_contained("specs/a-normal-slug"));
+        assert!(is_contained("specs/nested/deeper"));
+    }
+
+    #[test]
+    fn a_name_that_merely_contains_dots_is_not_mistaken_for_a_climb() {
+        // Checked per component, so a legitimate directory keeps working. A
+        // substring check on ".." would break this.
+        assert!(is_contained("specs/v1..v2"));
+        assert!(is_contained("specs/a.b.c"));
+        assert!(is_contained("specs/..hidden-but-not-a-climb"));
+    }
 
     #[test]
     fn spec_artifact_dir_uses_a_referenced_spec_path_verbatim() {
