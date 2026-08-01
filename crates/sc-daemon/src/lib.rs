@@ -25,24 +25,31 @@ pub mod atomic;
 pub mod client;
 pub mod config;
 pub mod feedback;
-pub mod intake;
 pub mod park;
 pub mod preflight;
 pub mod queue;
 pub mod runner;
 pub mod task;
-pub mod wire;
 
 #[cfg(test)]
 mod test_support;
 
+/// The intake protocol, re-exported from where it actually lives.
+///
+/// `wire` and `IntakeKind` moved to `sc-proto` so the hosted server — which is a
+/// separate repository — can obtain them without depending on this crate and,
+/// through it, on the whole local model stack. Re-exported here so every call
+/// site in this workspace is unchanged, and so `sc_daemon::wire` keeps meaning
+/// what it always did.
+pub use sc_proto::{intake, wire};
+
 pub use client::{one_turn, run_loop, HttpTransport, Transport, Turn};
 pub use config::{DaemonConfig, Repo};
 pub use feedback::{Feedback, FeedbackStore};
-pub use intake::IntakeKind;
 pub use park::ParkingGate;
 pub use preflight::NotReady;
 pub use queue::Queue;
 pub use runner::{approve, discard, draft, draft_next, send_back, Drafted};
+pub use sc_proto::wire::{DraftFailed, DraftedSpec, PollResponse, WorkItem, PROTOCOL_VERSION};
+pub use sc_proto::IntakeKind;
 pub use task::{Task, TaskState};
-pub use wire::{DraftFailed, DraftedSpec, PollResponse, WorkItem, PROTOCOL_VERSION};

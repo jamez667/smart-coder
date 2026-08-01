@@ -108,8 +108,14 @@ pub struct Device {
 pub enum Caller {
     /// The developer's daemon, holding the API key.
     Daemon,
-    /// An enrolled browser.
+    /// An enrolled browser. **The only caller that may review.**
     Device { id: String },
+    /// A signed-in member of the public.
+    ///
+    /// May file and read their own requests, and nothing else. Kept a separate
+    /// variant rather than a flag on `Device` so the review routes can be
+    /// unreachable by *type* rather than by remembering to check a boolean.
+    Account { id: String },
 }
 
 /// Why a request was refused.

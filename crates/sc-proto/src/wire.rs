@@ -38,7 +38,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::intake::IntakeKind;
+use crate::IntakeKind;
 
 /// The protocol this build speaks.
 ///

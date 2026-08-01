@@ -16,8 +16,9 @@
 //! remote image reference in a rendered spec is an exfiltration path, and a
 //! filter that has to be right every time eventually is not.
 
-use sc_daemon::IntakeKind;
+use sc_proto::IntakeKind;
 
+use crate::account::Accounts;
 use crate::store::{Request, RequestState};
 
 /// Escape for HTML text content and attributes.
@@ -144,7 +145,8 @@ pub fn index(all: &[Request]) -> String {
              placeholder=\"Describe it the way you would to a colleague.\"></textarea>\
              {kind}{repo}\
              <button type=\"submit\">File it</button></form>\
-             <h2>Filed</h2>{items}",
+             <h2>Filed</h2>{items}\
+             <p class=\"meta\"><a href=\"/accounts\">Who can file</a></p>",
             kind = kind_field(),
             repo = repo_field(),
         ),
@@ -230,7 +232,23 @@ pub fn detail(r: &Request) -> String {
         (None, RequestState::Claimed) => {
             body.push_str("<p class=\"meta\">Being drafted now.</p>");
         }
-        _ => {}
+        (None, RequestState::Screening) => {
+            body.push_str("<p class=\"meta\">Being screened before it is queued.</p>");
+        }
+        (None, RequestState::Quarantined) => {
+            body.push_str(&format!(
+                "<p class=\"note\">Held before reaching the queue. Nothing has run \
+                 on your machine. Read it and decide.</p>{}",
+                release_action(&r.id)
+            ));
+        }
+        // Explicit rather than a `_` arm: a state added later must be a compile
+        // error here, not a page that renders its header and then silently
+        // stops. That is exactly how the two states above were nearly missed.
+        (None, RequestState::AwaitingReview)
+        | (None, RequestState::Ready)
+        | (None, RequestState::Discarded)
+        | (None, RequestState::Failed) => {}
     }
 
     if r.state == RequestState::Ready {
@@ -337,6 +355,23 @@ fn review_actions(id: &str) -> String {
     )
 }
 
+/// Release a quarantined request into the queue.
+///
+/// The developer overruling the screener, which is the reason quarantine is not
+/// deletion. Deliberately a plain button with no "looks fine to me" framing: the
+/// screener held it for a reason, and the point is that a human reads the text
+/// and decides rather than clearing a nag.
+fn release_action(id: &str) -> String {
+    let id = esc(id);
+    format!(
+        "<div class=\"decide\"><form method=\"post\" action=\"/request/{id}/release\">\
+         <button type=\"submit\">Release it — this is not spam</button></form>\
+         <form method=\"post\" action=\"/request/{id}/discard\">\
+         <button type=\"submit\">Discard</button></form>\
+         <p class=\"meta\">Leaving it here decides nothing.</p></div>"
+    )
+}
+
 /// A timestamp, as something a human reads.
 ///
 /// Deliberately coarse. The reviewer's question is "is this fresh, or did it sit
@@ -350,6 +385,253 @@ fn ago(then_ms: u64, now_ms: u64) -> String {
         3600..=86_399 => format!("{} hr ago", secs / 3600),
         _ => format!("{} days ago", secs / 86_400),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The public surface
+//
+// Rendered by functions of their own rather than by reusing the private pages
+// with fields hidden. Hoping every future edit remembers which fields are
+// public is the mistake `security_headers` was factored out to avoid — and the
+// fields that must never appear here are exactly the ones a careless edit would
+// add: `artifact_dir` is a path on the developer's machine, `note` carries
+// daemon failure text that names repositories, and `id` is enumerable.
+// ---------------------------------------------------------------------------
+
+/// Ask for a sign-in link.
+pub fn signin_page() -> String {
+    shell(
+        "Sign in",
+        "<h1>Sign in</h1>\
+         <p>Filing a request needs an email address — it is how you find your \
+         way back to what you filed, and it keeps this form from being a \
+         free-for-all.</p>\
+         <form method=\"post\" action=\"/public/signin\">\
+         <label for=\"email\">Email</label>\
+         <input id=\"email\" name=\"email\" type=\"email\" required \
+         autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
+         placeholder=\"you@example.com\">\
+         <button type=\"submit\">Email me a link</button></form>\
+         <p class=\"meta\">No password. We send a link that works once, for \
+         fifteen minutes.</p>",
+    )
+}
+
+/// Shown after asking for a link — **identical whatever actually happened**.
+///
+/// New address, existing account, revoked account, malformed input, over the
+/// outstanding cap: all land here. Only what gets *sent* differs, so the page
+/// cannot be used to discover whether an address has an account.
+pub fn signin_sent_page() -> String {
+    shell(
+        "Check your email",
+        "<h1>Check your email</h1>\
+         <p>If that address can receive mail, a sign-in link is on its way. It \
+         expires in fifteen minutes.</p>\
+         <p class=\"meta\">Nothing else has happened yet — the link is what \
+         signs you in.</p>",
+    )
+}
+
+/// The landing page a sign-in link opens. **Changes nothing.**
+///
+/// A GET here must be inert: mail scanners (Outlook Safe Links and friends)
+/// fetch every URL in a message, often within seconds, so a GET that spent the
+/// token would burn it before the human opened their inbox.
+///
+/// It renders the same form whether the token is valid, expired or fabricated.
+/// A 404 on an invalid one would be a free validity oracle — an attacker could
+/// test candidate tokens with a GET, which costs less budget than the POST.
+pub fn signin_confirm_page(token: &str) -> String {
+    shell(
+        "Confirm sign-in",
+        &format!(
+            "<h1>Confirm sign-in</h1>\
+             <p>Press the button to finish signing in on this device.</p>\
+             <form method=\"post\" action=\"/public/signin/{}\">\
+             <button type=\"submit\">Sign me in</button></form>\
+             <p class=\"meta\">If you did not ask for this, close the page — \
+             nothing happens until you press it.</p>",
+            esc(token)
+        ),
+    )
+}
+
+/// A link that could not be spent.
+pub fn signin_failed_page(already_used: bool) -> String {
+    // "Invalid link" to somebody whose sign-in just worked reads as a bug, so a
+    // second click is told apart from a forgery. That leaks only that a token
+    // once existed — and it was theirs.
+    let body = if already_used {
+        "<p class=\"note\">That link has already been used. You are probably \
+         signed in already — <a href=\"/public\">try filing something</a>.</p>"
+    } else {
+        "<p class=\"note\">That link is not valid any more. They expire after \
+         fifteen minutes.</p>"
+    };
+    shell(
+        "That link did not work",
+        &format!(
+            "<h1>That link did not work</h1>{body}\
+             <p><a href=\"/public/signin\">Ask for a new one</a></p>"
+        ),
+    )
+}
+
+/// The public filing form, plus what this filer has already sent.
+///
+/// **No repository field.** Public filings go to the repository the operator
+/// configured, so a stranger cannot aim work at one that was never nominated for
+/// public intake. Absent from the form *and* ignored in the body.
+pub fn public_file_page(mine: &[Request], show_spec: bool) -> String {
+    let mut items = String::new();
+    for r in crate::routes::listing_order(mine.to_vec()) {
+        items.push_str(&format!(
+            "<a class=\"item\" href=\"/public/request/{id}\">{summary}\
+             <div class=\"meta\"><span class=\"tag\">{state}</span> {kind}</div></a>",
+            id = esc(&r.id),
+            summary = esc(r.summary()),
+            state = esc(public_state_label(r.state)),
+            kind = esc(r.kind.slug()),
+        ));
+    }
+    if mine.is_empty() {
+        items.push_str("<p class=\"meta\">You have not filed anything yet.</p>");
+    }
+
+    shell(
+        "File a request",
+        &format!(
+            "<h1>File a request</h1>\
+             <form method=\"post\" action=\"/public\">\
+             <label for=\"text\">What needs doing?</label>\
+             <textarea id=\"text\" name=\"text\" required maxlength=\"{bytes}\" \
+             placeholder=\"Describe it the way you would to a colleague.\"></textarea>\
+             {kind}\
+             <button type=\"submit\">File it</button></form>\
+             <p class=\"meta\">Up to {words} words. Short is better — a spec is \
+             drafted from what you write, not copied from it.{spec_note}</p>\
+             <h2>What you have filed</h2>{items}\
+             <p class=\"meta\"><a href=\"/public/signout\">Sign out</a></p>",
+            bytes = crate::routes::MAX_BYTES,
+            words = crate::routes::MAX_WORDS,
+            kind = kind_field(),
+            spec_note = if show_spec {
+                " You will be able to read the spec that comes back."
+            } else {
+                ""
+            },
+            items = items,
+        ),
+    )
+}
+
+/// What a filer is told about a state.
+///
+/// Deliberately coarser than [`RequestState::label`]. A filer does not need to
+/// know that their request is being screened for spam — saying so invites
+/// gaming, and "queued" is true in the sense they care about. `Quarantined`
+/// likewise reads as waiting rather than as an accusation, since a human may yet
+/// release it.
+fn public_state_label(state: RequestState) -> &'static str {
+    match state {
+        RequestState::Screening | RequestState::Quarantined | RequestState::Queued => "received",
+        RequestState::Claimed => "being written up",
+        RequestState::AwaitingReview => "with a reviewer",
+        RequestState::Ready => "accepted",
+        RequestState::Discarded | RequestState::Failed => "closed",
+    }
+}
+
+/// One of a filer's own requests.
+///
+/// Renders **only** what is theirs to see: their own text, a coarse state, and —
+/// when the operator allows it — the drafted spec. Never `artifact_dir` (a path
+/// on the developer's machine), never `note` (daemon failure text naming
+/// repositories), never the repository name.
+pub fn public_detail(r: &Request, show_spec: bool) -> String {
+    let mut body = format!(
+        "<h1>{summary}</h1>\
+         <p class=\"meta\"><span class=\"tag\">{state}</span> {kind} · filed {when}</p>\
+         <h2>What you asked for</h2><pre>{text}</pre>",
+        summary = esc(r.summary()),
+        state = esc(public_state_label(r.state)),
+        kind = esc(r.kind.slug()),
+        when = esc(&ago(r.filed_ms, crate::store::now_ms())),
+        text = esc(&r.text),
+    );
+
+    match (&r.spec, show_spec) {
+        (Some(spec), true) => body.push_str(&format!(
+            "<h2>The spec that came back</h2><pre>{}</pre>",
+            esc(spec)
+        )),
+        (Some(_), false) => {
+            body.push_str("<p class=\"meta\">A spec has been written and is with a reviewer.</p>")
+        }
+        (None, _) => {}
+    }
+
+    body.push_str("<p><a href=\"/public\">Back</a></p>");
+    shell(r.summary(), &body)
+}
+
+/// Confirmation that a public request was filed.
+pub fn public_filed(r: &Request) -> String {
+    let body = if r.kind == IntakeKind::Feedback {
+        "<p>Thanks — that is recorded. Feedback is kept for the developer to \
+         read; it does not become a spec.</p>"
+            .to_string()
+    } else {
+        "<p>Filed. Come back to this page to see what happens to it.</p>".to_string()
+    };
+    shell(
+        "Filed",
+        &format!("<h1>Filed</h1>{body}<p><a href=\"/public\">Back</a></p>"),
+    )
+}
+
+/// Who can file, and the switch that stops them.
+///
+/// Revoked accounts are **listed, not hidden** — a list that silently shrinks
+/// cannot answer "did I already deal with that?", so the developer revokes twice
+/// or worries they never did.
+pub fn accounts_page(accounts: &Accounts) -> String {
+    let mut rows = String::new();
+    for a in &accounts.accounts {
+        let action = if a.revoked {
+            "<span class=\"meta\">revoked</span>".to_string()
+        } else {
+            format!(
+                "<form method=\"post\" action=\"/accounts/{}/revoke\">\
+                 <button type=\"submit\">Revoke</button></form>",
+                esc(&a.id)
+            )
+        };
+        rows.push_str(&format!(
+            "<div class=\"item\"><strong>{hint}</strong>\
+             <div class=\"meta\">{id} · joined {when}</div>{action}</div>",
+            // The hint, never the address: this page is the reason it exists.
+            hint = esc(&a.email_hint),
+            id = esc(&a.id),
+            when = esc(&ago(a.created_ms, crate::store::now_ms())),
+            action = action,
+        ));
+    }
+    if accounts.accounts.is_empty() {
+        rows.push_str("<p class=\"meta\">Nobody has signed up.</p>");
+    }
+
+    shell(
+        "Accounts",
+        &format!(
+            "<h1>Accounts</h1>\
+             <p class=\"meta\">Anyone with a working email address can sign up and \
+             file requests. Revoking one stops it filing immediately and ends every \
+             session it has open.</p>{rows}\
+             <p><a href=\"/\">Back to the queue</a></p>"
+        ),
+    )
 }
 
 /// The enrolment page, shown to a browser that is not enrolled.
@@ -424,6 +706,10 @@ mod tests {
     fn a_page_references_nothing_remote() {
         // The CSP forbids remote subresources; a page that needed one would be a
         // page that does not render, which is worse than one that never asks.
+        //
+        // Every page belongs in this list. The public ones especially: they are
+        // the surface strangers see, and an omission here means the check
+        // silently stops covering the newest thing.
         let pages = [
             index(&[req("a thing")]),
             detail(&req("a thing")),
@@ -431,6 +717,15 @@ mod tests {
             enrolled_page(),
             not_found(),
             message("nope"),
+            signin_page(),
+            signin_sent_page(),
+            signin_confirm_page("abc123"),
+            signin_failed_page(true),
+            signin_failed_page(false),
+            public_file_page(&[req("a thing")], true),
+            public_detail(&req("a thing"), true),
+            public_filed(&req("a thing")),
+            accounts_page(&Accounts::default()),
         ];
         for p in pages {
             assert!(!p.contains("http://"), "{p}");
@@ -814,6 +1109,116 @@ mod tests {
             !html.contains("smart-coder enrol"),
             "no such subcommand exists yet: {html}"
         );
+    }
+
+    #[test]
+    fn the_accounts_page_shows_a_hint_never_an_address() {
+        // This page is the reason `email_hint` exists: enough to recognise the
+        // account you meant to revoke, not enough to be a contact list.
+        let mut accounts = Accounts::default();
+        let a = accounts.create(
+            &crate::auth::hash("jonathan.smith@example.com"),
+            "jo***@example.com",
+            crate::store::now_ms(),
+        );
+
+        let html = accounts_page(&accounts);
+        assert!(html.contains("jo***@example.com"), "{html}");
+        assert!(!html.contains("jonathan.smith"), "{html}");
+        assert!(
+            html.contains(&format!("/accounts/{}/revoke", a.id)),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_revoked_account_is_still_listed_and_offers_no_second_revoke() {
+        // A list that silently shrinks cannot answer "did I already deal with
+        // that?", so the developer revokes twice or worries they never did.
+        let mut accounts = Accounts::default();
+        let a = accounts.create(&crate::auth::hash("jo@x.com"), "jo***@x.com", 1);
+        accounts.revoke(&a.id);
+
+        let html = accounts_page(&accounts);
+        assert!(html.contains("jo***@x.com"), "still listed: {html}");
+        assert!(html.contains("revoked"), "{html}");
+        assert!(!html.contains("/revoke\">"), "no button for it: {html}");
+    }
+
+    #[test]
+    fn the_public_form_offers_no_repository_field() {
+        // A stranger must not be able to aim work at a repository the operator
+        // did not nominate. Absent from the form, and ignored in the body.
+        let html = public_file_page(&[], true);
+        for path_ish in ["name=\"repo\"", "name=\"path\"", "name=\"workspace\""] {
+            assert!(!html.contains(path_ish), "{path_ish}: {html}");
+        }
+        assert!(html.contains("name=\"text\""), "{html}");
+        assert!(html.contains("name=\"kind\""), "{html}");
+    }
+
+    #[test]
+    fn a_filers_page_shows_nothing_about_the_developers_machine() {
+        // `artifact_dir` is a path on their machine; `note` carries daemon
+        // failure text that names repositories. Neither is the filer's business,
+        // and a shared renderer would eventually leak one.
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# The spec".to_string());
+        r.artifact_dir = Some("specs/a-thing".to_string());
+        r.note = Some("could not draft: /home/dev/secret-repo is mid-rebase".to_string());
+
+        let html = public_detail(&r, true);
+        assert!(html.contains("# The spec"), "the spec is shown");
+        assert!(!html.contains("specs/a-thing"), "{html}");
+        assert!(!html.contains("secret-repo"), "{html}");
+        assert!(!html.contains("alpha"), "not even the repo name: {html}");
+    }
+
+    #[test]
+    fn a_filer_sees_no_spec_when_the_operator_turns_it_off() {
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# Private details".to_string());
+
+        let html = public_detail(&r, false);
+        assert!(!html.contains("Private details"), "{html}");
+        assert!(html.contains("with a reviewer"), "but they know it moved");
+    }
+
+    #[test]
+    fn a_filer_is_not_told_their_request_was_screened_for_spam() {
+        // Saying so invites gaming, and "received" is true in the sense the
+        // filer cares about — a human may yet release it.
+        for state in [RequestState::Screening, RequestState::Quarantined] {
+            let mut r = req("a thing");
+            r.state = state;
+            let html = public_detail(&r, true);
+            assert!(!html.to_lowercase().contains("spam"), "{state:?}: {html}");
+            assert!(!html.contains("quarantin"), "{state:?}: {html}");
+            assert!(html.contains("received"), "{state:?}: {html}");
+        }
+    }
+
+    #[test]
+    fn a_quarantined_request_offers_release_to_the_reviewer() {
+        // The developer overruling the screener — the reason quarantine is not
+        // deletion.
+        let mut r = req("a thing");
+        r.state = RequestState::Quarantined;
+        let html = detail(&r);
+        assert!(html.contains("/request/r-1/release"), "{html}");
+        assert!(html.contains("Nothing has run on your machine"), "{html}");
+    }
+
+    #[test]
+    fn a_screening_request_says_what_it_is_waiting_for() {
+        // The state that used to render nothing at all, because `detail` had a
+        // catch-all arm.
+        let mut r = req("a thing");
+        r.state = RequestState::Screening;
+        let html = detail(&r);
+        assert!(html.contains("screened"), "{html}");
     }
 
     #[test]

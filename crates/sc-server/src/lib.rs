@@ -26,11 +26,15 @@
 //! Approving marks a spec `Ready` and **starts nothing**: the developer picks it
 //! up in their IDE when they choose to.
 
+pub mod account;
 pub mod auth;
 pub mod config;
+pub mod mail;
 pub mod page;
 pub mod ratelimit;
 pub mod routes;
+pub mod screen;
+pub mod screen_eval;
 pub mod serve;
 pub mod store;
 

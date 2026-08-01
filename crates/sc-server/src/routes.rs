@@ -14,15 +14,56 @@
 //! [`Store`] has no field for a path and the server has no model and no repository,
 //! so there is nothing here that *could* grow into an execution path (spec 18).
 
-use sc_daemon::wire::{self, DraftFailed, DraftedSpec, PollResponse, WireError, WorkItem};
-use sc_daemon::IntakeKind;
+use sc_proto::wire::{self, DraftFailed, DraftedSpec, PollResponse, WireError, WorkItem};
+use sc_proto::IntakeKind;
 
+use std::sync::Mutex;
+
+use crate::account;
 use crate::auth::{self, Caller, Credentials};
+use crate::config::PublicConfig;
+use crate::mail::Mailer;
 use crate::ratelimit::{Bucket, RateLimiter};
 use crate::store::{new_id, Request, RequestState, Store};
 
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
+
+/// The public, unauthenticated surface's paths.
+///
+/// Held as constants in one place so the rate-limit classifier and the route
+/// matcher cannot disagree about which paths are public — a path public to one
+/// and private to the other is either a leak or a lockout.
+///
+/// **Matched by exact equality, never by prefix.** `starts_with("/public")` would
+/// also match `/publicXYZ`, and on the private surface a loose prefix fails
+/// *closed* (401) while here it fails *open*.
+pub mod public_route {
+    /// The filing form (`GET`) and the POST that files.
+    pub const FILE: &str = "/public";
+    /// Ask for a sign-in link.
+    pub const SIGNIN: &str = "/public/signin";
+    /// `/public/signin/<token>` — `GET` renders and **changes nothing**;
+    /// `POST` spends the link.
+    pub const SIGNIN_PREFIX: &str = "/public/signin/";
+    /// End a session.
+    pub const SIGNOUT: &str = "/public/signout";
+    /// `/public/request/<id>` — one of the filer's own requests.
+    pub const REQUEST_PREFIX: &str = "/public/request/";
+}
+
+/// The verbs that decide a request's fate.
+///
+/// Named once so the test proving an account cannot reach any of them iterates
+/// this list rather than a hand-written copy that goes stale the moment a verb
+/// is added.
+pub const REVIEW_VERBS: [&str; 5] = [
+    "approve",
+    "approve/confirm",
+    "send-back",
+    "discard",
+    "release",
+];
 
 /// A request, reduced to what the routes actually use.
 #[derive(Debug, Clone)]
@@ -151,6 +192,20 @@ pub struct Ctx<'a> {
     pub daemon_key: &'a str,
     pub limiter: &'a mut RateLimiter,
     pub now_ms: u64,
+    /// The public surface, when one is configured. `None` makes every public
+    /// route **404** — the surface does not exist rather than existing and
+    /// refusing, so a half-configured server cannot leak one.
+    pub public: Option<&'a PublicConfig>,
+    /// How sign-in links are sent.
+    pub mailer: &'a dyn Mailer,
+    /// Guards read-modify-write on `accounts.json` and `links.json`.
+    ///
+    /// `write_atomic` prevents a *torn* file but not a lost update: two
+    /// concurrent signups both read, both append, and one silently vanishes.
+    /// `credentials.json` has always had this and it never mattered — the
+    /// developer enrolling two devices at once is not a real event. Self-serve
+    /// public signup makes it one.
+    pub write_lock: &'a Mutex<()>,
 }
 
 /// Route one request.
@@ -159,21 +214,25 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         Ok(c) => c,
         Err(e) => return error(500, &format!("the credential store is unreadable: {e}")),
     };
-    let caller = identify(req, ctx.daemon_key, &creds);
-
-    // Rate limit before anything else touches the store, so a guessing loop costs
-    // one hash rather than a disk read per attempt.
-    let bucket = match &caller {
-        Some(Caller::Daemon) => Bucket::Credential(auth::hash(ctx.daemon_key)),
-        Some(Caller::Device { id }) => Bucket::Credential(auth::hash(id)),
-        None => Bucket::Anonymous,
-    };
-    if !ctx.limiter.allow(bucket, ctx.now_ms) {
-        return error(429, "too many requests — wait a minute and try again");
-    }
+    let caller = identify(ctx, req, &creds);
 
     let path = req.path.split('?').next().unwrap_or("").to_string();
     let method = req.method.as_str();
+
+    // Rate limit before anything reads a *request record*, so a guessing or
+    // filing loop costs one hash rather than a disk scan per attempt. The
+    // credential store above is the one unavoidable read.
+    //
+    // The bucket depends on the path, which is why this sits after the split
+    // rather than at the top: an anonymous caller on the public surface must not
+    // share a budget with one guessing enrolment codes, or either can lock the
+    // other out.
+    if !ctx
+        .limiter
+        .allow(bucket_for(&caller, &path, ctx), ctx.now_ms)
+    {
+        return error(429, "too many requests — wait a minute and try again");
+    }
 
     // The daemon-facing API. Its routes are shared constants, so the two ends
     // cannot disagree about the strings.
@@ -190,6 +249,19 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         return enrol(ctx, req, creds);
     }
 
+    // The public surface, matched **before** the device gate below — that gate is
+    // what makes everything past it private, so anything reachable without a
+    // device must be handled here or not at all.
+    //
+    // Skipped entirely when no public surface is configured, so the routes do not
+    // exist rather than existing and refusing.
+    if is_public_path(&path) {
+        return match ctx.public {
+            Some(_) => public_route(ctx, req, method, &path, &caller),
+            None => Res::html(404, crate::page::not_found()),
+        };
+    }
+
     // Everything else is the browser surface.
     let Some(Caller::Device { .. }) = caller else {
         // An un-enrolled browser gets the enrolment page rather than a bare 401,
@@ -203,21 +275,77 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     browser_route(ctx, req, method, &path)
 }
 
+/// Which budget this request is counted against.
+///
+/// An authenticated caller is keyed on its credential's *hash*. An anonymous one
+/// is keyed on the **route class** — never on anything the caller chooses, since
+/// a per-email or per-`X-Forwarded-For` bucket lets an attacker mint a fresh
+/// budget per value, which is no limit at all.
+fn bucket_for(caller: &Option<Caller>, path: &str, ctx: &Ctx<'_>) -> Bucket {
+    match caller {
+        Some(Caller::Daemon) => Bucket::Credential(auth::hash(ctx.daemon_key)),
+        Some(Caller::Device { id }) => Bucket::Credential(auth::hash(id)),
+        // A signed-in filer gets their own budget. Safe to key on, unlike an
+        // email or a forwarded header, because an account id is minted by this
+        // server and costs a confirmed mailbox to obtain — the caller cannot vary
+        // it to mint fresh budgets.
+        Some(Caller::Account { id }) => Bucket::Credential(auth::hash(id)),
+        None if is_public_path(path) => {
+            // Asking for a link costs an email; spending one costs a disk write.
+            // Everything else on the public surface is a page render, and
+            // starving those would itself be the denial of service.
+            if path == public_route::SIGNIN || path.starts_with(public_route::SIGNIN_PREFIX) {
+                Bucket::PublicWrite
+            } else {
+                Bucket::PublicRead
+            }
+        }
+        None => Bucket::Enrol,
+    }
+}
+
+/// Is this one of the public surface's paths?
+///
+/// Exact equality for fixed paths and `starts_with` only on prefixes ending in
+/// `/`, so `/publicXYZ` cannot match — on the private surface a loose prefix
+/// fails *closed* (401), but here it fails **open**.
+fn is_public_path(path: &str) -> bool {
+    path == public_route::FILE
+        || path == public_route::SIGNIN
+        || path == public_route::SIGNOUT
+        || path.starts_with(public_route::SIGNIN_PREFIX)
+        || path.starts_with(public_route::REQUEST_PREFIX)
+}
+
 /// Who is calling, if anyone.
-fn identify(req: &Req, daemon_key: &str, creds: &Credentials) -> Option<Caller> {
+///
+/// One cookie name serves both a device and an account. Two names would force a
+/// choice when both were present — and "both present" is what an attacker
+/// constructs. Which thing a token authenticates is decided by which store it
+/// matches, and the **device store is checked first**, so the developer's own
+/// browser never pays for reading the account file.
+fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
     if let Some(bearer) = &req.bearer {
-        if auth::matches(bearer, &auth::hash(daemon_key)) {
+        if auth::matches(bearer, &auth::hash(ctx.daemon_key)) {
             return Some(Caller::Daemon);
         }
     }
-    if let Some(token) = &req.cookie_token {
-        if let Some(device) = creds.device_for(token) {
-            return Some(Caller::Device {
-                id: device.id.clone(),
-            });
-        }
+    let token = req.cookie_token.as_deref()?;
+
+    if let Some(device) = creds.device_for(token) {
+        return Some(Caller::Device {
+            id: device.id.clone(),
+        });
     }
-    None
+
+    // Only now is the account store read — lazily, and only when a public
+    // surface exists at all. It is unbounded and attacker-sized, so parsing it
+    // on every request would let a stranger choose how much work each one costs.
+    ctx.public?;
+    let accounts = ctx.store.accounts().ok()?;
+    accounts
+        .session_for(token)
+        .map(|a| Caller::Account { id: a.id.clone() })
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +470,20 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             file_request(ctx, &text, &repo, kind)
         }
 
+        // Who can file, and the switch that stops them. Device-only by virtue of
+        // living past the gate.
+        ("GET", "/accounts") => match ctx.store.accounts() {
+            Ok(a) => Res::html(200, crate::page::accounts_page(&a)),
+            Err(e) => error(500, &e.to_string()),
+        },
+
+        ("POST", p) if p.starts_with("/accounts/") && p.ends_with("/revoke") => {
+            let id = p
+                .trim_start_matches("/accounts/")
+                .trim_end_matches("/revoke");
+            revoke_account(ctx, id)
+        }
+
         ("GET", p) if p.starts_with("/request/") => {
             let id = p.trim_start_matches("/request/");
             match ctx.store.get(id) {
@@ -377,6 +519,9 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
                     ctx.store.send_back(id, &notes)
                 }
                 "discard" => ctx.store.discard(id),
+                // The developer overruling the screener. Device-only by virtue
+                // of living here, past the gate.
+                "release" => ctx.store.release(id),
                 _ => return error(404, "no such route"),
             };
             match outcome {
@@ -386,6 +531,305 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
         }
 
         _ => Res::html(404, crate::page::not_found()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The public surface
+//
+// A sibling of `browser_route`, not a caller of it. The review verbs live in
+// that function and this one never reaches them — unreachable by structure
+// rather than by a check somebody has to remember.
+// ---------------------------------------------------------------------------
+
+fn public_route(
+    ctx: &mut Ctx<'_>,
+    req: &Req,
+    method: &str,
+    path: &str,
+    caller: &Option<Caller>,
+) -> Res {
+    // A device is the developer, who has their own surface; an account is a
+    // filer. Anyone else is signed out.
+    let account_id = match caller {
+        Some(Caller::Account { id }) => Some(id.clone()),
+        _ => None,
+    };
+
+    match (method, path) {
+        // Ask for a link. Reachable signed-out — it is how one signs in.
+        ("GET", public_route::SIGNIN) => Res::html(200, crate::page::signin_page()),
+        ("POST", public_route::SIGNIN) => request_sign_in(ctx, req),
+
+        ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
+
+        // The landing page a link opens. **Changes nothing** — mail scanners
+        // fetch every URL in a message, and a GET that spent the token would
+        // burn it before the human saw it.
+        ("GET", p) if p.starts_with(public_route::SIGNIN_PREFIX) => {
+            let token = p.trim_start_matches(public_route::SIGNIN_PREFIX);
+            // Rendered whether or not the token is real: a 404 on an invalid one
+            // would be a free validity oracle, cheaper than the POST it guards.
+            Res::html(200, crate::page::signin_confirm_page(token))
+        }
+        ("POST", p) if p.starts_with(public_route::SIGNIN_PREFIX) => {
+            complete_sign_in(ctx, p.trim_start_matches(public_route::SIGNIN_PREFIX))
+        }
+
+        // Everything below needs a signed-in filer.
+        _ => match account_id {
+            Some(id) => signed_in_route(ctx, req, method, path, &id),
+            None => Res::html(200, crate::page::signin_page()),
+        },
+    }
+}
+
+fn signed_in_route(
+    ctx: &mut Ctx<'_>,
+    req: &Req,
+    method: &str,
+    path: &str,
+    account_id: &str,
+) -> Res {
+    let show_spec = ctx.public.map(|p| p.show_spec).unwrap_or(false);
+
+    match (method, path) {
+        ("GET", public_route::FILE) => match mine(ctx, account_id) {
+            Ok(list) => Res::html(200, crate::page::public_file_page(&list, show_spec)),
+            Err(e) => error(500, &e.to_string()),
+        },
+        ("POST", public_route::FILE) => file_publicly(ctx, req, account_id),
+
+        ("GET", p) if p.starts_with(public_route::REQUEST_PREFIX) => {
+            let id = p.trim_start_matches(public_route::REQUEST_PREFIX);
+            match ctx.store.get(id) {
+                // `filed_by`, never the id alone: ids are time-ordered and
+                // enumerable in seconds, so keying on one would let any signed-in
+                // filer read every other filer's requests — and the developer's.
+                Ok(Some(r)) if r.filed_by(account_id) => {
+                    Res::html(200, crate::page::public_detail(&r, show_spec))
+                }
+                // Somebody else's request is *not found*, not forbidden:
+                // "forbidden" would confirm the id exists.
+                Ok(_) => Res::html(404, crate::page::not_found()),
+                Err(e) => error(500, &e.to_string()),
+            }
+        }
+
+        _ => Res::html(404, crate::page::not_found()),
+    }
+}
+
+/// Stop an account filing.
+///
+/// **The lever that makes self-serve signup acceptable.** Without a route it
+/// would mean editing `accounts.json` on the volume by hand, which is not a
+/// backstop anyone reaches for at the moment they need it.
+///
+/// Every session dies at once, because liveness is derived from the account
+/// rather than copied onto each session.
+fn revoke_account(ctx: &mut Ctx<'_>, id: &str) -> Res {
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut accounts = match ctx.store.accounts() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if !accounts.revoke(id) {
+        // Already revoked, or never existed. Not an error worth a page: the
+        // caller asked for a state that now holds.
+        return match ctx.store.accounts() {
+            Ok(a) => Res::html(200, crate::page::accounts_page(&a)),
+            Err(e) => error(500, &e.to_string()),
+        };
+    }
+    if let Err(e) = ctx.store.put_accounts(&accounts) {
+        return error(500, &e.to_string());
+    }
+    Res::html(200, crate::page::accounts_page(&accounts))
+}
+
+/// This filer's own requests, newest first.
+fn mine(ctx: &Ctx<'_>, account_id: &str) -> sc_proto::Result<Vec<Request>> {
+    Ok(ctx
+        .store
+        .all()?
+        .into_iter()
+        .filter(|r| r.filed_by(account_id))
+        .collect())
+}
+
+/// Send a sign-in link, or quietly do nothing.
+///
+/// **The response is identical in every case** — unknown address, existing
+/// account, revoked account, malformed input, over the outstanding cap. Only
+/// what gets *sent* differs, so this cannot be used to discover whether an
+/// address has an account.
+fn request_sign_in(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    let form = form_fields(&req.body);
+    let raw = form.get("email").cloned().unwrap_or_default();
+    let sent = try_send_link(ctx, &raw);
+    if let Err(e) = sent {
+        // Logged for the operator, never shown: the page must look the same
+        // whether or not mail went out.
+        eprintln!("sign-in link not sent: {e}");
+    }
+    Res::html(200, crate::page::signin_sent_page())
+}
+
+/// Everything that might refuse, kept apart from the response so the response
+/// cannot accidentally depend on it.
+fn try_send_link(ctx: &mut Ctx<'_>, raw_email: &str) -> sc_proto::Result<()> {
+    let Some(public) = ctx.public else {
+        return Ok(());
+    };
+    if !account::valid_email(raw_email) {
+        return Ok(());
+    }
+    let email = account::normalize_email(raw_email);
+    let email_hash = auth::hash(&email);
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    // A revoked account is sent **nothing at all**. A "your account was revoked"
+    // mail is one an attacker can trigger at a victim's address, and the
+    // revocation was a decision that does not need re-litigating by email.
+    let accounts = ctx.store.accounts()?;
+    if let Some(existing) = accounts.any_by_email(&email_hash) {
+        if existing.revoked {
+            return Ok(());
+        }
+    }
+
+    let mut links = ctx.store.links()?;
+    links.sweep(ctx.now_ms);
+    // The real ceiling on mail spend: refused *before* the mailer is called.
+    if links.outstanding(ctx.now_ms) >= public.max_outstanding_links {
+        return Err(sc_proto::DcError::Eval(
+            "too many sign-in links are outstanding".to_string(),
+        ));
+    }
+
+    let token = links.issue(&email_hash, &account::email_hint(&email), ctx.now_ms);
+    ctx.store.put_links(&links)?;
+    drop(_guard);
+
+    let url = format!(
+        "{}{}{}",
+        public.base_url,
+        public_route::SIGNIN_PREFIX,
+        token
+    );
+    ctx.mailer.send(
+        &email,
+        crate::mail::SUBJECT,
+        &crate::mail::sign_in_body(&url),
+    )
+}
+
+/// Spend a link: create the account if new, and open a session.
+fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    let mut links = match ctx.store.links() {
+        Ok(l) => l,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let (email_hash, email_hint) = match links.consume(token, ctx.now_ms) {
+        Ok(v) => v,
+        Err(account::LinkError::AlreadyUsed) => {
+            return Res::html(200, crate::page::signin_failed_page(true))
+        }
+        Err(account::LinkError::Invalid) => {
+            return Res::html(200, crate::page::signin_failed_page(false))
+        }
+    };
+    if let Err(e) = ctx.store.put_links(&links) {
+        return error(500, &e.to_string());
+    }
+
+    let mut accounts = match ctx.store.accounts() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    // A revoked account must not be handed back by signing in again, or
+    // revocation would mean nothing. The link was already spent, so this is not
+    // a retry loop.
+    if let Some(existing) = accounts.any_by_email(&email_hash) {
+        if existing.revoked {
+            return Res::html(200, crate::page::signin_failed_page(false));
+        }
+    }
+    let id = match accounts.by_email(&email_hash) {
+        Some(a) => a.id.clone(),
+        None => accounts.create(&email_hash, &email_hint, ctx.now_ms).id,
+    };
+    let session = accounts.open_session(&id, ctx.now_ms);
+    if let Err(e) = ctx.store.put_accounts(&accounts) {
+        return error(500, &e.to_string());
+    }
+
+    let mut res = Res::html(200, crate::page::public_file_page(&[], false));
+    res.set_cookie = Some(format!(
+        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=31536000"
+    ));
+    res
+}
+
+/// End this session.
+fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    if let Some(token) = &req.cookie_token {
+        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Ok(mut accounts) = ctx.store.accounts() {
+            let hashed = auth::hash(token);
+            if let Some(s) = accounts
+                .sessions
+                .iter_mut()
+                .find(|s| s.token_hash == hashed)
+            {
+                s.revoked = true;
+                let _ = ctx.store.put_accounts(&accounts);
+            }
+        }
+    }
+    let mut res = Res::html(200, crate::page::signin_page());
+    // Max-Age=0 so the browser drops it rather than carrying a dead token.
+    res.set_cookie = Some(format!(
+        "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0"
+    ));
+    res
+}
+
+/// File a request from the public surface.
+///
+/// The repository comes from **configuration**, never the body — so a stranger
+/// cannot aim work at a repository the operator did not nominate for public
+/// intake. The form has no such field, and one submitted anyway is ignored.
+fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
+    let Some(public) = ctx.public else {
+        return Res::html(404, crate::page::not_found());
+    };
+    let repo = public.repo.clone();
+    let screened = public.screen.is_some();
+
+    let form = form_fields(&req.body);
+    let text = form.get("text").cloned().unwrap_or_default();
+    let text = text.trim();
+    let kind = form
+        .get("kind")
+        .and_then(|k| IntakeKind::parse(k))
+        .unwrap_or_default();
+
+    if text.is_empty() {
+        return Res::html(400, crate::page::message("A request needs some text."));
+    }
+    if let Err(msg) = check_length(text) {
+        return Res::html(400, crate::page::message(&msg));
+    }
+
+    let request = Request::public(new_id(), text, &repo, kind, account_id, screened);
+    match ctx.store.put(&request) {
+        Ok(()) => Res::html(200, crate::page::public_filed(&request)),
+        Err(e) => error(500, &e.to_string()),
     }
 }
 
@@ -420,6 +864,48 @@ fn ask_to_approve(ctx: &mut Ctx<'_>, id: &str) -> Res {
     Res::html(200, crate::page::confirm_approve(&req, &spec, &digest))
 }
 
+/// The longest a request may be.
+///
+/// Words rather than bytes, because it is a limit a person can hold in their head
+/// while typing — "500 words" means something, "16 KB" does not.
+///
+/// Deliberately short. Three things fall out of it beyond the obvious volume cap:
+/// the screener sees the **whole** request rather than a truncation, so spam
+/// cannot be hidden past the cut; the text stays readable on a phone, which is
+/// the review surface's whole premise; and a request this size is a *request*
+/// rather than a specification — the spec is drafted from it, not copied from it.
+pub const MAX_WORDS: usize = 500;
+
+/// A hard byte ceiling behind the word count.
+///
+/// 500 "words" of pathological input — one enormous token with no whitespace —
+/// is unbounded otherwise. Generous enough that no honest 500-word request hits
+/// it first.
+pub const MAX_BYTES: usize = 8 * 1024;
+
+/// Is this request text within the limits?
+///
+/// Shared by every filing path so the public and enrolled surfaces cannot drift
+/// to different limits — which would make the screener's "sees the whole text"
+/// property true on one and false on the other.
+pub fn check_length(text: &str) -> std::result::Result<(), String> {
+    let words = text.split_whitespace().count();
+    if words > MAX_WORDS {
+        return Err(format!(
+            "That is {words} words; the limit is {MAX_WORDS}. Say the essential \
+             part — a spec is drafted from your request, not copied from it."
+        ));
+    }
+    if text.len() > MAX_BYTES {
+        return Err(format!(
+            "That is {} characters, which is over the {MAX_BYTES} limit even \
+             though it is under {MAX_WORDS} words.",
+            text.len()
+        ));
+    }
+    Ok(())
+}
+
 /// File a request.
 ///
 /// The repository is a **name**, taken from a fixed list the page renders. There
@@ -437,18 +923,8 @@ fn file_request(ctx: &mut Ctx<'_>, text: &str, repo: &str, kind: IntakeKind) -> 
             crate::page::message("Choose which repository this is about."),
         );
     }
-    // A cap, because the body is stored verbatim and rendered: without one, a
-    // single request can fill the volume.
-    const MAX: usize = 16 * 1024;
-    if text.len() > MAX {
-        return Res::html(
-            400,
-            crate::page::message(&format!(
-                "That is {} characters; the limit is {MAX}. Say the essential part \
-                 — the spec is drafted from it, not copied from it.",
-                text.len()
-            )),
-        );
+    if let Err(msg) = check_length(text) {
+        return Res::html(400, crate::page::message(&msg));
     }
 
     let req = Request::new(new_id(), text, repo.trim(), kind);
@@ -518,7 +994,6 @@ pub fn listing_order(mut all: Vec<Request>) -> Vec<Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::now_ms;
     use std::path::PathBuf;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
@@ -527,6 +1002,13 @@ mod tests {
         store: Store,
         limiter: RateLimiter,
         dir: PathBuf,
+        /// `None` unless a test turns the public surface on, so every existing
+        /// test keeps exercising a private-only server.
+        public: Option<PublicConfig>,
+        mailer: crate::mail::testing::Recording,
+        write_lock: Mutex<()>,
+        /// Advanced by tests that need a link to expire.
+        now_ms: u64,
     }
 
     impl Drop for Fixture {
@@ -537,17 +1019,47 @@ mod tests {
 
     impl Fixture {
         fn new(tag: &str) -> Fixture {
+            // A random suffix, not a timestamp: tests run in parallel and two
+            // starting in the same millisecond would otherwise share a directory
+            // and delete each other's files — a flake that only shows up under
+            // load, which is the worst kind.
             let dir = std::env::temp_dir().join(format!(
                 "sc-routes-{tag}-{}-{}",
                 std::process::id(),
-                now_ms()
+                &crate::auth::mint_secret()[..12]
             ));
             let store = Store::open(&dir).unwrap();
             Fixture {
                 store,
                 limiter: RateLimiter::new(),
                 dir,
+                public: None,
+                mailer: crate::mail::testing::Recording::default(),
+                write_lock: Mutex::new(()),
+                now_ms: 1_000,
             }
+        }
+
+        /// Turn the public surface on, as a configured deployment would.
+        fn with_public(mut self, screened: bool) -> Fixture {
+            self.public = Some(PublicConfig {
+                repo: "intake".into(),
+                base_url: "https://specs.example.test".into(),
+                mail: crate::config::MailConfig {
+                    provider: crate::mail::Provider::Brevo,
+                    api_key: KEY.into(),
+                    from: "noreply@example.test".into(),
+                    from_name: "Smart Coder".into(),
+                },
+                screen: screened.then(|| crate::config::ScreenConfig {
+                    api_key: KEY.into(),
+                    url: "https://screen.example.test".into(),
+                    model: "test-model".into(),
+                }),
+                max_outstanding_links: 200,
+                show_spec: true,
+            });
+            self
         }
 
         fn go(&mut self, req: &Req) -> Res {
@@ -555,11 +1067,52 @@ mod tests {
                 store: &self.store,
                 daemon_key: KEY,
                 limiter: &mut self.limiter,
-                now_ms: 1_000,
+                now_ms: self.now_ms,
+                public: self.public.as_ref(),
+                mailer: &self.mailer,
+                write_lock: &self.write_lock,
             };
             handle(&mut ctx, req)
         }
 
+        /// Sign in as a filer, returning the session cookie.
+        fn signed_in(&mut self, email: &str) -> String {
+            let asked = self.go(&Req::post(
+                public_route::SIGNIN,
+                &format!("email={}", email.replace('@', "%40")),
+            ));
+            assert_eq!(asked.status, 200, "{}", asked.body);
+
+            // The token only ever exists in the emailed body — it is stored
+            // hashed, exactly as a credential should be.
+            let body = self.mailer.last_body().expect("a link was emailed");
+            let token = body
+                .split(public_route::SIGNIN_PREFIX)
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .expect("the body carries a link")
+                .to_string();
+
+            let res = self.go(&Req::post(
+                &format!("{}{token}", public_route::SIGNIN_PREFIX),
+                "",
+            ));
+            assert_eq!(res.status, 200, "{}", res.body);
+            cookie_token(&res).expect("a session was opened")
+        }
+    }
+
+    /// Pull the session token out of a `Set-Cookie`.
+    fn cookie_token(res: &Res) -> Option<String> {
+        let raw = res.set_cookie.as_ref()?;
+        let value = raw
+            .trim_start_matches(&format!("{COOKIE}="))
+            .split(';')
+            .next()?;
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
+    impl Fixture {
         /// Enrol a browser and return its cookie token.
         fn enrolled(&mut self) -> String {
             let mut creds = Credentials::default();
@@ -789,10 +1342,38 @@ mod tests {
         let empty = f.go(&Req::post("/file", "text=+++&repo=alpha").with_cookie(&token));
         assert_eq!(empty.status, 400);
 
-        let huge = format!("text={}&repo=alpha", "x".repeat(20_000));
+        // Too many words, each of them tiny.
+        let wordy = format!("text={}&repo=alpha", "word+".repeat(MAX_WORDS + 10));
+        let over = f.go(&Req::post("/file", &wordy).with_cookie(&token));
+        assert_eq!(over.status, 400);
+        assert!(over.body.contains("words"), "{}", over.body);
+
+        // And one enormous token, which the word count alone would wave through.
+        let huge = format!("text={}&repo=alpha", "x".repeat(MAX_BYTES + 1));
         let over = f.go(&Req::post("/file", &huge).with_cookie(&token));
         assert_eq!(over.status, 400);
-        assert!(over.body.contains("limit"), "{}", over.body);
+        assert!(over.body.contains("characters"), "{}", over.body);
+    }
+
+    #[test]
+    fn the_length_limit_is_the_same_on_every_filing_path() {
+        // The public and enrolled surfaces must not drift to different limits:
+        // the screener's "sees the whole request" property is only true if the
+        // text it screens is the text that was accepted.
+        assert!(check_length("a short request").is_ok());
+        assert!(check_length(&"word ".repeat(MAX_WORDS)).is_ok());
+        assert!(check_length(&"word ".repeat(MAX_WORDS + 1)).is_err());
+        assert!(check_length(&"x".repeat(MAX_BYTES + 1)).is_err());
+
+        // 500 words is comfortably under the byte ceiling for real prose, so an
+        // honest request never hits the second limit first.
+        let realistic =
+            "the health check returns 200 while the database is down ".repeat(MAX_WORDS / 10);
+        assert!(
+            check_length(&realistic).is_ok(),
+            "{} bytes",
+            realistic.len()
+        );
     }
 
     #[test]
@@ -1029,6 +1610,426 @@ mod tests {
             last = f.go(&Req::post("/enrol", "code=GUESS&label=x")).status;
         }
         assert_eq!(last, 429, "the guessing loop is cut off");
+    }
+
+    // -- the public surface -------------------------------------------------
+
+    #[test]
+    fn the_public_routes_do_not_exist_when_the_surface_is_off() {
+        // Absent rather than present-and-refusing: a server nobody configured for
+        // public intake should look like one that has none.
+        let mut f = Fixture::new("public-off");
+        for path in [
+            public_route::FILE,
+            public_route::SIGNIN,
+            "/public/signin/abc",
+            "/public/request/abc",
+        ] {
+            assert_eq!(f.go(&Req::get(path)).status, 404, "{path}");
+        }
+        assert_eq!(
+            f.go(&Req::post(public_route::SIGNIN, "email=a%40x.com"))
+                .status,
+            404
+        );
+        assert_eq!(f.mailer.count(), 0, "and nothing was emailed");
+    }
+
+    #[test]
+    fn asking_for_a_link_says_the_same_thing_whatever_happened() {
+        // The response must not reveal whether an address has an account.
+        let mut f = Fixture::new("signin-uniform").with_public(false);
+
+        let fresh = f.go(&Req::post(public_route::SIGNIN, "email=new%40x.com"));
+        let malformed = f.go(&Req::post(public_route::SIGNIN, "email=not-an-email"));
+        let empty = f.go(&Req::post(public_route::SIGNIN, "email="));
+
+        assert_eq!(fresh.status, 200);
+        assert_eq!(fresh.body, malformed.body, "malformed looks identical");
+        assert_eq!(fresh.body, empty.body, "so does empty");
+        // Only what was *sent* differs.
+        assert_eq!(f.mailer.count(), 1, "only the real address got mail");
+    }
+
+    #[test]
+    fn a_revoked_account_is_sent_no_mail_and_cannot_sign_back_in() {
+        // Revocation that a fresh sign-in undoes is not revocation. And a "your
+        // account was revoked" mail is one an attacker can trigger at a victim's
+        // address, so nothing is sent at all.
+        let mut f = Fixture::new("revoked").with_public(false);
+        f.signed_in("jo@x.com");
+
+        let mut accounts = f.store.accounts().unwrap();
+        let id = accounts.live()[0].id.clone();
+        assert!(accounts.revoke(&id));
+        f.store.put_accounts(&accounts).unwrap();
+
+        let before = f.mailer.count();
+        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        assert_eq!(f.mailer.count(), before, "silence, not a notification");
+    }
+
+    #[test]
+    fn a_get_on_a_sign_in_link_consumes_nothing() {
+        // Mail scanners fetch every URL in a message within seconds. A GET that
+        // spent the token would burn it before the human opened their inbox.
+        let mut f = Fixture::new("prefetch").with_public(false);
+        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        let body = f.mailer.last_body().unwrap();
+        let token = body
+            .split(public_route::SIGNIN_PREFIX)
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        let path = format!("{}{token}", public_route::SIGNIN_PREFIX);
+
+        // Three scanner prefetches.
+        for _ in 0..3 {
+            let res = f.go(&Req::get(&path));
+            assert_eq!(res.status, 200);
+            assert!(res.set_cookie.is_none(), "a GET signs nobody in");
+        }
+        // And the human's click still works.
+        let res = f.go(&Req::post(&path, ""));
+        assert!(cookie_token(&res).is_some(), "still spendable");
+    }
+
+    #[test]
+    fn a_get_on_a_fabricated_link_looks_exactly_like_a_real_one() {
+        // A 404 on an invalid token is a free validity oracle — cheaper than the
+        // POST it would be guarding.
+        let mut f = Fixture::new("oracle").with_public(false);
+        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        let body = f.mailer.last_body().unwrap();
+        let real = body
+            .split(public_route::SIGNIN_PREFIX)
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap()
+            .to_string();
+
+        // A forged token of the *same shape*, so any difference in the response
+        // is about validity rather than about length.
+        let forged = "0".repeat(real.len());
+
+        let genuine = f.go(&Req::get(&format!("{}{real}", public_route::SIGNIN_PREFIX)));
+        let fake = f.go(&Req::get(&format!(
+            "{}{forged}",
+            public_route::SIGNIN_PREFIX
+        )));
+
+        assert_eq!(genuine.status, fake.status);
+        assert_eq!(
+            genuine.body.replace(&real, "T"),
+            fake.body.replace(&forged, "T"),
+            "the pages differ only by the token echoed into the form"
+        );
+        // And the real one is still unspent — the GET checked nothing.
+        assert!(f.store.links().unwrap().peek(&real, f.now_ms).is_some());
+    }
+
+    #[test]
+    fn a_link_is_single_use() {
+        let mut f = Fixture::new("single-use").with_public(false);
+        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        let body = f.mailer.last_body().unwrap();
+        let token = body
+            .split(public_route::SIGNIN_PREFIX)
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        let path = format!("{}{token}", public_route::SIGNIN_PREFIX);
+
+        assert!(cookie_token(&f.go(&Req::post(&path, ""))).is_some());
+        let again = f.go(&Req::post(&path, ""));
+        assert!(cookie_token(&again).is_none(), "spent");
+        assert!(again.body.contains("already been used"), "{}", again.body);
+    }
+
+    #[test]
+    fn filing_publicly_requires_being_signed_in() {
+        let mut f = Fixture::new("public-anon").with_public(false);
+        let res = f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug"));
+        assert!(res.body.contains("Sign in"), "{}", res.body);
+        assert!(f.store.all().unwrap().is_empty(), "nothing was filed");
+    }
+
+    #[test]
+    fn a_public_filing_uses_the_configured_repo_whatever_the_body_says() {
+        // Proves the repository field is *ignored*, not merely hidden — a
+        // stranger must not be able to aim work at a repo nobody nominated.
+        let mut f = Fixture::new("public-repo").with_public(false);
+        let session = f.signed_in("jo@x.com");
+
+        let res = f.go(
+            &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=secret-repo")
+                .with_cookie(&session),
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        let filed = f.store.all().unwrap();
+        assert_eq!(filed.len(), 1);
+        assert_eq!(
+            filed[0].repo, "intake",
+            "the configured repo, not the body's"
+        );
+    }
+
+    #[test]
+    fn a_public_filing_is_not_claimable_until_it_has_been_screened() {
+        // The core guarantee: nothing unscreened reaches the developer's machine.
+        let mut f = Fixture::new("public-screened").with_public(true);
+        let session = f.signed_in("jo@x.com");
+        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+
+        let filed = f.store.all().unwrap();
+        assert_eq!(filed[0].state, RequestState::Screening);
+        assert!(
+            f.store.claim_next().unwrap().is_none(),
+            "no daemon may claim it yet"
+        );
+    }
+
+    #[test]
+    fn with_screening_off_a_filing_queues_honestly_rather_than_pretending() {
+        // A server that parks filings in `Screening` forever because nothing
+        // screens them would be worse than one that plainly does not screen.
+        let mut f = Fixture::new("public-unscreened").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+
+        assert_eq!(f.store.all().unwrap()[0].state, RequestState::Queued);
+        assert!(f.store.claim_next().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_filer_cannot_read_another_filers_request() {
+        // Request ids are time-ordered and enumerable in seconds, so keying on an
+        // id alone would expose every filing — including the developer's own.
+        let mut f = Fixture::new("public-isolation").with_public(false);
+
+        let alice = f.signed_in("alice@x.com");
+        f.go(&Req::post(public_route::FILE, "text=alice+thing&kind=bug").with_cookie(&alice));
+        let alice_id = f.store.all().unwrap()[0].id.clone();
+
+        let bob = f.signed_in("bob@x.com");
+        let res = f.go(
+            &Req::get(&format!("{}{alice_id}", public_route::REQUEST_PREFIX)).with_cookie(&bob),
+        );
+        // Not found, not forbidden: "forbidden" would confirm the id exists.
+        assert_eq!(res.status, 404, "{}", res.body);
+        assert!(!res.body.contains("alice thing"), "{}", res.body);
+    }
+
+    #[test]
+    fn a_filer_cannot_reach_any_review_verb() {
+        // Iterates the shared constant, so a verb added later is covered without
+        // anyone remembering to extend this list.
+        let mut f = Fixture::new("public-no-review").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        let id = f.store.all().unwrap()[0].id.clone();
+
+        for verb in REVIEW_VERBS {
+            let res = f.go(&Req::post(&format!("/request/{id}/{verb}"), "").with_cookie(&session));
+            assert_eq!(res.status, 401, "an account reached {verb}: {}", res.body);
+        }
+        // And the private list and detail pages are closed to them too.
+        assert_eq!(f.go(&Req::get("/").with_cookie(&session)).status, 401);
+        assert_eq!(
+            f.go(&Req::get(&format!("/request/{id}")).with_cookie(&session))
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn a_filer_cannot_reach_the_daemon_api() {
+        let mut f = Fixture::new("public-no-daemon").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_cookie(&session))
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn signing_out_stops_the_session_working() {
+        let mut f = Fixture::new("public-signout").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
+                .status,
+            200
+        );
+
+        f.go(&Req::post(public_route::SIGNOUT, "").with_cookie(&session));
+        let after = f.go(&Req::get(public_route::FILE).with_cookie(&session));
+        assert!(after.body.contains("Sign in"), "signed out: {}", after.body);
+    }
+
+    #[test]
+    fn a_revoked_account_stops_filing_immediately() {
+        // The developer's kill switch, which is the whole reason self-serve
+        // signup is acceptable.
+        let mut f = Fixture::new("public-revoke-live").with_public(false);
+        let session = f.signed_in("jo@x.com");
+
+        let mut accounts = f.store.accounts().unwrap();
+        let id = accounts.live()[0].id.clone();
+        accounts.revoke(&id);
+        f.store.put_accounts(&accounts).unwrap();
+
+        let res =
+            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        assert!(res.body.contains("Sign in"), "{}", res.body);
+        assert!(f.store.all().unwrap().is_empty(), "nothing was filed");
+    }
+
+    #[test]
+    fn the_developer_can_revoke_an_account_from_a_route() {
+        // The lever that makes self-serve signup acceptable. Without a route it
+        // means hand-editing accounts.json on the volume, which is not a
+        // backstop anyone reaches for at the moment they need it.
+        let mut f = Fixture::new("revoke-route").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        let device = f.enrolled();
+
+        let id = f.store.accounts().unwrap().live()[0].id.clone();
+        let listed = f.go(&Req::get("/accounts").with_cookie(&device));
+        assert_eq!(listed.status, 200);
+        assert!(listed.body.contains("jo***@x.com"), "{}", listed.body);
+
+        let res = f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&device));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(f.store.accounts().unwrap().live().is_empty());
+
+        // And the filer's session dies with it, without anyone walking sessions.
+        let after = f.go(&Req::get(public_route::FILE).with_cookie(&session));
+        assert!(after.body.contains("Sign in"), "{}", after.body);
+    }
+
+    #[test]
+    fn a_filer_cannot_reach_the_accounts_surface() {
+        // Otherwise anyone who signed up could revoke everyone else.
+        let mut f = Fixture::new("accounts-closed").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        let id = f.store.accounts().unwrap().live()[0].id.clone();
+
+        assert_eq!(
+            f.go(&Req::get("/accounts").with_cookie(&session)).status,
+            401
+        );
+        assert_eq!(
+            f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&session))
+                .status,
+            401
+        );
+        assert!(!f.store.accounts().unwrap().live().is_empty(), "still live");
+    }
+
+    #[test]
+    fn revoking_twice_is_not_an_error() {
+        // The caller asked for a state that now holds.
+        let mut f = Fixture::new("revoke-twice").with_public(false);
+        f.signed_in("jo@x.com");
+        let device = f.enrolled();
+        let id = f.store.accounts().unwrap().live()[0].id.clone();
+
+        let path = format!("/accounts/{id}/revoke");
+        assert_eq!(f.go(&Req::post(&path, "").with_cookie(&device)).status, 200);
+        assert_eq!(f.go(&Req::post(&path, "").with_cookie(&device)).status, 200);
+        assert_eq!(
+            f.go(&Req::post("/accounts/never-existed/revoke", "").with_cookie(&device))
+                .status,
+            200
+        );
+    }
+
+    #[test]
+    fn the_public_pages_carry_the_same_security_headers() {
+        // The headers are returned from one function for every response, so this
+        // holds by construction — asserted anyway, since the public surface is
+        // the one that renders model-authored text to strangers.
+        let named: Vec<&str> = security_headers().iter().map(|(k, _)| *k).collect();
+        for required in [
+            "Referrer-Policy",
+            "Cache-Control",
+            "Content-Security-Policy",
+        ] {
+            assert!(named.contains(&required));
+        }
+    }
+
+    #[test]
+    fn a_public_filing_is_length_capped_like_any_other() {
+        let mut f = Fixture::new("public-length").with_public(false);
+        let session = f.signed_in("jo@x.com");
+
+        let wordy = format!("text={}&kind=bug", "word+".repeat(MAX_WORDS + 10));
+        let res = f.go(&Req::post(public_route::FILE, &wordy).with_cookie(&session));
+        assert_eq!(res.status, 400);
+        assert!(f.store.all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_public_path_is_matched_exactly_and_not_by_prefix() {
+        // On the private surface a loose prefix fails closed (401). Here it fails
+        // OPEN, so `/publicXYZ` matching would hand an unauthenticated caller a
+        // route nobody meant to expose.
+        assert!(is_public_path(public_route::FILE));
+        assert!(is_public_path(public_route::SIGNIN));
+        assert!(is_public_path(public_route::SIGNOUT));
+        assert!(is_public_path("/public/signin/abc"));
+        assert!(is_public_path("/public/request/abc"));
+
+        for near_miss in [
+            "/publicXYZ",
+            "/public-admin",
+            "/publicsignin/abc",
+            "/publi",
+            "/",
+            "/enrol",
+            // The private surface's own request route must not become public by
+            // resembling one.
+            "/request/abc",
+        ] {
+            assert!(!is_public_path(near_miss), "{near_miss} must not be public");
+        }
+    }
+
+    #[test]
+    fn public_traffic_and_enrolment_are_counted_separately() {
+        // The property the bucket split exists for, asserted where the
+        // classification actually happens rather than only in the limiter.
+        let mut f = Fixture::new("bucket-split").with_public(false);
+        let probe = |f: &mut Fixture, path: &str| -> Bucket {
+            let mut limiter = RateLimiter::new();
+            let ctx = Ctx {
+                store: &f.store,
+                daemon_key: KEY,
+                limiter: &mut limiter,
+                now_ms: f.now_ms,
+                public: f.public.as_ref(),
+                mailer: &f.mailer,
+                write_lock: &f.write_lock,
+            };
+            bucket_for(&None, path, &ctx)
+        };
+
+        // Sending mail and spending a link cost something; reading a page does
+        // not, and starving reads would itself be the denial of service.
+        assert_eq!(probe(&mut f, public_route::SIGNIN), Bucket::PublicWrite);
+        assert_eq!(probe(&mut f, "/public/signin/abc"), Bucket::PublicWrite);
+        assert_eq!(probe(&mut f, public_route::FILE), Bucket::PublicRead);
+        assert_eq!(probe(&mut f, "/public/request/abc"), Bucket::PublicRead);
+
+        // And nothing public shares a budget with enrolment.
+        assert_eq!(probe(&mut f, "/enrol"), Bucket::Enrol);
+        assert_eq!(probe(&mut f, "/"), Bucket::Enrol);
     }
 
     #[test]

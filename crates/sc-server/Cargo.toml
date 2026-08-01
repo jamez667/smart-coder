@@ -11,12 +11,25 @@ name = "sc-server"
 path = "src/main.rs"
 
 [dependencies]
+# The ONLY workspace dependency, and deliberately so. `sc-proto` carries the
+# daemon protocol and nothing else, so this server links no model stack, no
+# workflow engine, and no filesystem access to a repository — which is what makes
+# "no model is anywhere near the public server" literally true rather than true
+# in spirit.
+#
+# The two ends share one definition rather than restating it, so the protocol
+# cannot drift (spec 17's failure, prevented by construction). In the
+# `smart-coder-web` repository this same crate is vendored as a submodule.
 sc-proto = { path = "../sc-proto" }
-# The wire types live in sc-daemon and are shared, not restated — the two ends
-# cannot drift if there is only one definition (spec 17's failure, prevented).
-sc-daemon = { path = "../sc-daemon" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The screener's eval corpus, compiled in via `include_str!` so it travels with
+# the binary and runs inside the container.
+toml = { workspace = true }
 tiny_http = "0.12"
 getrandom = "0.3"
 sha2 = "0.10"
+# Outbound HTTP for the spam screener and the mailer. Synchronous, matching the
+# rest of the workspace — there is no async runtime outside the GUI. Declared
+# explicitly rather than relied on transitively via sc-daemon.
+ureq = { version = "3", features = ["json"] }

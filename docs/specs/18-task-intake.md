@@ -90,13 +90,26 @@ The mirror is still worth contrasting, because the two are easily conflated:
 
 ## Authentication
 
-**No model is anywhere near this path** (principle 9, [00](00-overview.md)).
-Admission, authentication and rate limiting are decidable by code, so they are
-decided by code.
+**No model decides admission** (principle 9, [00](00-overview.md)). Authentication
+and rate limiting are decidable by code, so they are decided by code.
 
-There are **two parties**, and conflating them is the mistake to avoid. They
-authenticate differently because they are different things: a browser is a person
-who might lose their phone, and a daemon is a long-lived machine credential.
+⚠️ **This previously read "No model is anywhere near this path", and the spam
+screener makes that false.** Amended rather than left standing, because a
+traceability marker that lies is worse than an honest widening.
+
+What survives is the substance, and it is a real property rather than a wording
+dodge: **a model may only *withhold* work from the queue, never introduce it.**
+The screener's verdict type has two variants and the parser's fallback is
+*admit*, so unreachable, timed out, garbled, wrong shape, no key configured —
+every unexpected outcome is indistinguishable from approval, by construction
+<!--@ crates/sc-server/src/screen.rs -->. Code admits; the model subtracts. And
+what it withholds is **quarantined, not deleted**: visible to the developer and
+released in one click.
+
+There are **three parties** now, and conflating them is the mistake to avoid.
+They authenticate differently because they are different things: a daemon is a
+long-lived machine credential, a *device* is the developer, and an *account* is a
+member of the public who may file and read their own requests and nothing else.
 
 ### The daemon → server
 
@@ -132,6 +145,91 @@ who might lose their phone, and a daemon is a long-lived machine credential.
   rejected for the reason this spec rejects in-process TLS generally — cert
   issuance, renewal, and a private key on disk are three failure modes bought for
   one threat.
+
+### The public → server
+
+✅ **Built** <!--@ crates/sc-server/src/account.rs -->. The filing form is
+reachable **with no credential at all**; reviewing stays behind device
+enrolment. This is a real move of the trust boundary, so what makes it
+defensible is worth stating rather than assuming.
+
+**An account is the gate, not per-request verification.** An earlier design
+emailed a verification link for every *request*, which made each filing an
+unauthenticated mail send — structurally an open relay — and left rate limiting
+nothing trustworthy to key on, since an address is chosen by whoever is typing.
+Moving the mail to **once per person** fixes all three: the budget keys on an
+account id the filer cannot mint more of, and abuse becomes *revocable* rather
+than merely rate-limited.
+
+**Magic links, no passwords.** No password storage, no reset flow, no hashing
+choice to get wrong — and the session machinery is the one devices already use.
+The link is single-use, expires in fifteen minutes, and is stored hashed like
+every other credential here.
+
+**A `GET` on a link changes nothing.** Mail scanners fetch every URL in a
+message, often within seconds, so a `GET` that spent the token would burn it
+before the human opened their inbox. The landing page renders a form; the `POST`
+signs in. It renders identically for a valid, expired or fabricated token — a
+404 on an invalid one would be a free validity oracle, cheaper than the `POST`
+it guards.
+
+**Asking for a link says the same thing every time** — unknown address, existing
+account, revoked account, malformed input, over the outstanding-link cap. Only
+what is *sent* differs, so the surface cannot be used to discover who has an
+account. A revoked account is sent **nothing at all**: a "your account was
+revoked" mail is one an attacker can trigger at a victim's address.
+
+**The email body is fixed text with one URL in it** <!--@ crates/sc-server/src/mail.rs -->.
+No request text, no name, nothing a stranger typed. That is what separates a
+bounded notification mailer from a usable relay, and it costs nothing — the
+person who asked for the link knows why. The **outstanding-link cap** is the real
+ceiling on mail spend, refusing before the mailer is called.
+
+**Emails are stored hashed**, with a `jo***@example.com` hint for the revoke
+list. Honestly: this is *not* anonymisation — the address space is small enough
+to brute-force. It means a copied volume is not a mailing list.
+
+**A filer can read the spec drafted from their request**, and
+`SC_SERVER_PUBLIC_SHOW_SPEC` defaults **on**. Worth understanding rather than
+inheriting: that spec is model output produced by reading the developer's
+repository, and the filer wrote the prompt that produced it — so the default
+hands a stranger a description of code they cannot otherwise see, and steer.
+The filer's page withholds `artifact_dir` (a path on the developer's machine),
+`note` (daemon failure text naming repositories) and the repository name, but
+**not the spec body**. Turn it off for a repository whose contents should not be
+described to strangers.
+
+✅ **Revocation has a surface** <!--@ crates/sc-server/src/routes.rs -->:
+`/accounts` lists who can file and one POST stops an account, ending every
+session it holds at once. Revoked accounts stay listed rather than vanishing —
+a list that silently shrinks cannot answer "did I already deal with that?".
+Built rather than documented as a gap, because the amendment above leans on
+revocation being *the* lever, and a lever reachable only by hand-editing
+`accounts.json` on the volume is not one anybody pulls at the moment they need
+it.
+
+⬚ **Two exposures, named in the order they actually bite.**
+
+**Nothing bounds how many accounts exist.** No allowlist, no domain restriction,
+no ceiling on the count. A confirmed mailbox is the whole cost, and disposable
+address services make that near zero. So the per-account budget is weaker than it
+looks: the id an attacker cannot *vary* is one they can *re-mint*, and a script
+with a hundred addresses holds a hundred budgets. The outstanding-link cap
+throttles the signup *rate* but does not bound the total, and revocation is
+per-account rather than per-person. **This is the deeper of the two** — a filing
+cap built on top of an unbounded account count does not close it.
+
+**There is no per-account filing cap.** A filing that clears the screener spends
+a full drafting run on the developer's machine, and the per-credential limit
+(240/min for a signed-in account; the anonymous buckets are split 600/min read
+and 30/min write) is no defence against that. One account with a script could
+saturate the daemon with plausible-looking requests a spam filter has no reason
+to block.
+
+Both are deliberate for this pass: the developer chose to watch first, with
+revocation as the backstop. Recording them plainly so that is a decision rather
+than an oversight — and revocation is *reactive*, so the signal will be a model
+bill or a stalled queue rather than an alert.
 
 ### The browser → server
 
@@ -248,7 +346,7 @@ are unchanged by it.
 
 ### Four kinds, and only three become specs
 
-✅ **Built** <!--@ crates/sc-daemon/src/intake.rs -->. A bug and a feature are not
+✅ **Built** <!--@ crates/sc-proto/src/intake.rs -->. A bug and a feature are not
 the same request wearing different labels, so each shapes the drafting prompt:
 
 - **bug** — what happens now, what should happen, how to reproduce, what else the
@@ -286,9 +384,13 @@ request path at all, because a request carries no path.
 **The heading used to say "chosen, never typed", and the hosted architecture
 broke the first half of that.** The server holds no configuration and no copy of
 the repository set — that is the property that makes it safe to expose — so it
-cannot render a picker. Its form asks for a free-text **name**
+cannot render a picker. The *device* form asks for a free-text **name**
 <!--@ crates/sc-server/src/page.rs -->, and the closed set is enforced one hop
-later, when the daemon resolves it.
+later, when the daemon resolves it. The **public** form has no repository field
+at all: a public filing takes `PUBLIC_REPO` from the server's own configuration
+<!--@ crates/sc-server/src/config.rs -->, so a stranger cannot name a repository
+and the public surface serves exactly one. Asserted as *ignored*, not merely
+hidden — a repo submitted in the body is discarded.
 
 The security claim survives intact, because it never rested on the picker: a name
 is not a path, whether it was chosen or typed. What is lost is ergonomic — a
@@ -418,8 +520,26 @@ long-polling already solves at this scale.
 ✅ **Built** <!--@ crates/sc-server/src/serve.rs -->. The server holds an idle
 poll open for `POLL_TIMEOUT`, re-checking every 250ms so a request filed
 mid-poll is picked up in well under a second rather than waiting out the window.
-The protocol constants are shared with the daemon <!--@ crates/sc-daemon/src/wire.rs -->
+The protocol constants are shared with the daemon <!--@ crates/sc-proto/src/wire.rs -->
 rather than restated, so the two ends cannot drift.
+
+### The protocol lives in `sc-proto`, and the server ships from its own repository
+
+✅ **Built.** `wire` and `IntakeKind` sit in `sc-proto` — a crate whose only
+dependency is `serde` — and `sc-daemon` re-exports them, so nothing in this
+workspace changed at its call sites.
+
+The move earns its keep twice. **`sc-server` now depends on `sc-proto` and
+nothing else** <!--@ crates/sc-server/Cargo.toml -->: no `sc-daemon`, and through
+it no `sc-model`, no `sc-workflow`, no `sc-core`. The claim that no model is
+anywhere near the public server becomes *literally* true rather than true in
+spirit, and the image build stops compiling the entire local agent to obtain two
+type definitions.
+
+And it is what makes the split viable: **the web system ships from
+`smart-coder-web`**, which vendors `sc-proto` as a submodule. One definition of
+the protocol, two repositories, no drift — the failure [17](17-spec-traceability.md)
+exists to catch, prevented rather than detected.
 
 The server cannot reuse the existing `Hub`. It is an in-memory, monotonically
 growing event vector scoped to **one run** — the wrong shape for a durable queue of
@@ -469,11 +589,19 @@ model, and no reason for a change to any of them to redeploy it.
   primitives, but it gets its own routes and its own trust boundary. Adding
   capability *here* on the grounds that the private one will need it is exactly
   how the boundary erodes.
-- **No multi-user, for now.** One developer, several devices. Accounts, roles and
-  sharing are absent by design. Note this is a weaker claim than it was when the
-  surface bound loopback: a hosted server *does* hold an identity, so "no
-  multi-user" is a scope decision to revisit deliberately rather than a property
-  the architecture enforces.
+- ~~**No multi-user, for now.**~~ **Revisited, deliberately.** This paragraph said
+  the claim was "a scope decision to revisit deliberately rather than a property
+  the architecture enforces" — and that revisit has happened: the public surface
+  is self-serve, so anyone with a mailbox can hold an account.
+
+  What it bought is worth naming, because "multi-user" sounds like a widening and
+  the useful part is a *narrowing*: filing is now attributable and **revocable**.
+  Before, the only lever against abuse was a rate limit that punished everyone.
+
+  The boundary that did *not* move: **there is still one developer.** Roles do not
+  exist, sharing does not exist, and an account holder can file and read their own
+  requests and nothing else — every review verb is 401 for them, asserted against
+  a shared constant so a verb added later is covered without anyone remembering.
 - **No workspace browsing.** The surface shows *specs from requests it took*, not
   the repository. It is not a code host, and a read-any-file route is exactly how
   it would become one. The server has no filesystem access to a repository at all,

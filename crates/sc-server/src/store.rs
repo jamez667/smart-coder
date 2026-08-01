@@ -21,21 +21,30 @@
 
 use std::path::{Path, PathBuf};
 
-use sc_daemon::IntakeKind;
+use sc_proto::IntakeKind;
 use sc_proto::{DcError, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::account::{Accounts, Links};
 use crate::auth::Credentials;
 
 /// Where a request stands, from the server's point of view.
 ///
-/// Deliberately close to the daemon's [`TaskState`](sc_daemon::TaskState) but not
-/// the same type: the server observes a *lifecycle*, while the daemon owns a
-/// *run*. Sharing one enum would force the server to model states it cannot
-/// observe (`Drafting` starts and ends on a machine it never sees).
+/// Deliberately close to the daemon's own `TaskState` but not the same type: the
+/// server observes a *lifecycle*, while the daemon owns a *run*. Sharing one enum
+/// would force the server to model states it cannot observe (`Drafting` starts
+/// and ends on a machine it never sees) — and would drag the daemon's crate into
+/// this one, which is the dependency the public server most needs not to have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RequestState {
+    /// Filed publicly, waiting to be screened. **Not claimable.**
+    ///
+    /// Screening runs on a background sweep rather than inline on the filing
+    /// request: the server is thread-per-request, so a hung third-party call on
+    /// the request path converts directly into thread exhaustion, and the filer
+    /// would be left waiting on someone else's API.
+    Screening,
     /// Filed, waiting for a daemon to claim it.
     Queued,
     /// A daemon is drafting. Claimed, so no second daemon takes it.
@@ -44,6 +53,14 @@ pub enum RequestState {
     AwaitingReview,
     /// Approved. The spec is settled in the repository; nothing was built.
     Ready,
+    /// The screener judged it spam. **Not claimable** — but kept, visible, and
+    /// releasable in one click.
+    ///
+    /// Quarantine rather than deletion is the whole point: a model's opinion may
+    /// *withhold* work from the queue, and a human decides whether that was
+    /// right. Silently dropping a filing would make the screener the final word
+    /// on admission, which is exactly what it must not be.
+    Quarantined,
     /// Dropped before approval.
     Discarded,
     /// A daemon reported it could not be drafted.
@@ -53,25 +70,43 @@ pub enum RequestState {
 impl RequestState {
     pub fn label(self) -> &'static str {
         match self {
+            RequestState::Screening => "screening",
             RequestState::Queued => "queued",
             RequestState::Claimed => "drafting",
             RequestState::AwaitingReview => "awaiting review",
             RequestState::Ready => "ready",
+            RequestState::Quarantined => "quarantined",
             RequestState::Discarded => "discarded",
             RequestState::Failed => "failed",
         }
     }
 
     /// What needs a human first, then what is in flight, then the settled.
+    ///
+    /// `Quarantined` sits above `Failed` because it is the one the developer
+    /// actually needs to look at — a wrongly-quarantined request is invisible
+    /// work, and the whole reason quarantine is not deletion.
     pub fn list_order(self) -> u8 {
         match self {
             RequestState::AwaitingReview => 0,
             RequestState::Claimed => 1,
             RequestState::Queued => 2,
-            RequestState::Failed => 3,
-            RequestState::Ready => 4,
-            RequestState::Discarded => 5,
+            RequestState::Screening => 3,
+            RequestState::Quarantined => 4,
+            RequestState::Failed => 5,
+            RequestState::Ready => 6,
+            RequestState::Discarded => 7,
         }
+    }
+
+    /// Can a daemon claim work in this state?
+    ///
+    /// **`Queued` and nothing else.** Stated here as a named guarantee rather
+    /// than left as an accident of [`Store::claim_next`] happening to filter on
+    /// an allowlist — it is what makes "nothing unscreened reaches the
+    /// developer's machine" structural.
+    pub fn is_claimable(self) -> bool {
+        matches!(self, RequestState::Queued)
     }
 }
 
@@ -110,6 +145,13 @@ pub struct Request {
     /// an upgrade must not make a developer's filed requests unreadable.
     #[serde(default)]
     pub drafted_ms: Option<u64>,
+    /// Which public account filed this, if it came from the public surface.
+    ///
+    /// `None` means the developer filed it from an enrolled device. This is what
+    /// a filer's "my requests" page keys on — never the request id, which is
+    /// time-ordered and enumerable in seconds.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 impl Request {
@@ -131,7 +173,42 @@ impl Request {
             note: None,
             send_back_note: None,
             drafted_ms: None,
+            account_id: None,
         }
+    }
+
+    /// A request filed from the public surface by a signed-in account.
+    ///
+    /// A **separate constructor**, not a `state` argument on [`Request::new`]:
+    /// an argument is one an edit eventually passes wrongly, whereas this cannot
+    /// produce a claimable record at all. Public filings start in
+    /// [`RequestState::Screening`], so nothing unscreened can reach the
+    /// developer's machine even if every later check were removed.
+    pub fn public(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        repo: impl Into<String>,
+        kind: IntakeKind,
+        account_id: &str,
+        screened: bool,
+    ) -> Self {
+        Self {
+            // When screening is switched off there is nothing to wait for, and a
+            // request parked in `Screening` forever would be worse than one
+            // queued honestly.
+            state: if screened {
+                RequestState::Screening
+            } else {
+                RequestState::Queued
+            },
+            account_id: Some(account_id.to_string()),
+            ..Request::new(id, text, repo, kind)
+        }
+    }
+
+    /// Was this filed by `account_id`?
+    pub fn filed_by(&self, account_id: &str) -> bool {
+        self.account_id.as_deref() == Some(account_id)
     }
 
     /// The first line, for a list.
@@ -170,6 +247,14 @@ impl Store {
 
     fn credentials_path(&self) -> PathBuf {
         self.root.join("credentials.json")
+    }
+
+    fn accounts_path(&self) -> PathBuf {
+        self.root.join("accounts.json")
+    }
+
+    fn links_path(&self) -> PathBuf {
+        self.root.join("links.json")
     }
 
     /// Write a request.
@@ -224,9 +309,12 @@ impl Store {
             .filter(|r| r.state == RequestState::Claimed)
             .map(|r| r.repo.clone())
             .collect();
+        // `is_claimable` rather than `== Queued`, so the guarantee lives in one
+        // named place: a state added later is excluded unless someone
+        // deliberately opts it in.
         let Some(mut next) = all
             .into_iter()
-            .find(|r| r.state == RequestState::Queued && !busy.contains(&r.repo))
+            .find(|r| r.state.is_claimable() && !busy.contains(&r.repo))
         else {
             return Ok(None);
         };
@@ -296,6 +384,63 @@ impl Store {
         Ok(req)
     }
 
+    /// Every request still waiting to be screened.
+    pub fn pending_screening(&self) -> Result<Vec<Request>> {
+        Ok(self
+            .all()?
+            .into_iter()
+            .filter(|r| r.state == RequestState::Screening)
+            .collect())
+    }
+
+    /// Record a screening verdict: `Screening` → `Queued` or `Quarantined`.
+    ///
+    /// **This is the only writer of that transition, and the only power the
+    /// screener has.** It cannot reach any other state, so a model's verdict can
+    /// *withhold* work from the queue but never introduce it — admission stays a
+    /// decision made by code.
+    ///
+    /// Refuses anything not currently `Screening`, so a verdict arriving late —
+    /// after a human already released the request by hand — cannot re-quarantine
+    /// work someone has already looked at.
+    pub fn finish_screening(&self, id: &str, quarantine: Option<&str>) -> Result<Request> {
+        let mut req = self.require(id)?;
+        if req.state != RequestState::Screening {
+            return Err(DcError::Eval(format!(
+                "request {id} is {} — only one being screened can take a verdict",
+                req.state.label()
+            )));
+        }
+        match quarantine {
+            Some(reason) => {
+                req.state = RequestState::Quarantined;
+                req.note = Some(reason.to_string());
+            }
+            None => req.state = RequestState::Queued,
+        }
+        self.put(&req)?;
+        Ok(req)
+    }
+
+    /// Release a quarantined request into the queue.
+    ///
+    /// Reachable only from a route the gate restricts to an enrolled device, so
+    /// the human overrules the screener rather than the other way round. The
+    /// note is kept: a released request should still show *why* it was held, or
+    /// the developer cannot tell a false positive from a real one next time.
+    pub fn release(&self, id: &str) -> Result<Request> {
+        let mut req = self.require(id)?;
+        if req.state != RequestState::Quarantined {
+            return Err(DcError::Eval(format!(
+                "request {id} is {} — only a quarantined one can be released",
+                req.state.label()
+            )));
+        }
+        req.state = RequestState::Queued;
+        self.put(&req)?;
+        Ok(req)
+    }
+
     /// Send a drafted spec back to be redrafted, with a reason.
     pub fn send_back(&self, id: &str, notes: &str) -> Result<Request> {
         let mut req = self.require(id)?;
@@ -359,6 +504,47 @@ impl Store {
         let json = serde_json::to_string_pretty(creds).map_err(|e| DcError::Eval(e.to_string()))?;
         write_atomic(&self.credentials_path(), json.as_bytes())
     }
+
+    /// Read the public account store.
+    ///
+    /// Read **lazily**, only on paths that need it — unlike
+    /// [`credentials`](Store::credentials), which is on the hot path. Accounts
+    /// are self-serve and unbounded, so parsing them per request would let a
+    /// stranger choose how much work every request does.
+    pub fn accounts(&self) -> Result<Accounts> {
+        read_json(&self.accounts_path())
+    }
+
+    pub fn put_accounts(&self, accounts: &Accounts) -> Result<()> {
+        let json =
+            serde_json::to_string_pretty(accounts).map_err(|e| DcError::Eval(e.to_string()))?;
+        write_atomic(&self.accounts_path(), json.as_bytes())
+    }
+
+    /// Read outstanding sign-in links.
+    pub fn links(&self) -> Result<Links> {
+        read_json(&self.links_path())
+    }
+
+    pub fn put_links(&self, links: &Links) -> Result<()> {
+        let json = serde_json::to_string_pretty(links).map_err(|e| DcError::Eval(e.to_string()))?;
+        write_atomic(&self.links_path(), json.as_bytes())
+    }
+}
+
+/// Read a JSON file, treating "not there yet" as the default.
+///
+/// A missing file is the resting state of a fresh install, not an error — but a
+/// *malformed* one is loud, because silently returning an empty set would look
+/// identical to having been configured with nothing, and the developer would be
+/// left wondering where their accounts went.
+fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| DcError::Eval(format!("{} is unreadable: {e}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Unix milliseconds.
@@ -405,10 +591,13 @@ mod tests {
     use super::*;
 
     fn temp(tag: &str) -> PathBuf {
+        // Random rather than a timestamp: tests run in parallel, and two
+        // starting in the same millisecond would share a directory and delete
+        // each other's files.
         let d = std::env::temp_dir().join(format!(
             "sc-server-{tag}-{}-{}",
             std::process::id(),
-            now_ms()
+            &crate::auth::mint_secret()[..12]
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -657,6 +846,137 @@ mod tests {
         let req = s.record_drafted("r-1", "# v2", "specs/x").unwrap();
         assert!(req.send_back_note.is_none(), "the note is spent");
         assert_eq!(req.spec.as_deref(), Some("# v2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// File a request already in `state`, the way a public filing or a screener
+    /// verdict would leave it.
+    fn file_in(s: &Store, id: &str, repo: &str, state: RequestState) -> Request {
+        let mut r = Request::new(id, format!("request {id}"), repo, IntakeKind::Feature);
+        r.state = state;
+        s.put(&r).unwrap();
+        r
+    }
+
+    #[test]
+    fn nothing_unscreened_is_ever_claimable() {
+        // The core guarantee of the public surface: a filing reaches the
+        // developer's machine only after it has been screened and only via
+        // `Queued`. Asserted over every state, so a variant added later that
+        // forgets this fails here rather than silently queueing.
+        let (s, dir) = store("claimable");
+        for (i, state) in [
+            RequestState::Screening,
+            RequestState::Quarantined,
+            RequestState::Claimed,
+            RequestState::AwaitingReview,
+            RequestState::Ready,
+            RequestState::Discarded,
+            RequestState::Failed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // A repo each, so one cannot mask another by looking busy.
+            file_in(&s, &format!("r-{i}"), &format!("repo-{i}"), state);
+            assert!(!state.is_claimable(), "{state:?}");
+        }
+        assert!(
+            s.claim_next().unwrap().is_none(),
+            "no daemon may claim any of these"
+        );
+
+        // And the one state that is claimable still is.
+        file_in(&s, "r-ok", "repo-ok", RequestState::Queued);
+        assert_eq!(s.claim_next().unwrap().unwrap().id, "r-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_screening_verdict_can_only_withhold_never_admit_something_else() {
+        // The screener's entire power. It moves Screening -> Queued or
+        // Quarantined and can reach nothing else, so a model's opinion may
+        // subtract from the queue but never introduce work.
+        let (s, dir) = store("verdict");
+        file_in(&s, "r-1", "alpha", RequestState::Screening);
+        file_in(&s, "r-2", "beta", RequestState::Screening);
+
+        assert_eq!(
+            s.finish_screening("r-1", None).unwrap().state,
+            RequestState::Queued
+        );
+        let held = s.finish_screening("r-2", Some("screened as spam")).unwrap();
+        assert_eq!(held.state, RequestState::Quarantined);
+        assert_eq!(held.note.as_deref(), Some("screened as spam"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_late_verdict_cannot_requarantine_what_a_human_already_released() {
+        // Screening is a background sweep, so a verdict can land after the
+        // developer has looked at the request and released it by hand. The human
+        // decision must win.
+        let (s, dir) = store("late-verdict");
+        file_in(&s, "r-1", "alpha", RequestState::Quarantined);
+        s.release("r-1").unwrap();
+
+        let err = s
+            .finish_screening("r-1", Some("spam"))
+            .expect_err("already decided")
+            .to_string();
+        assert!(err.contains("only one being screened"), "{err}");
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Queued);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_quarantined_request_can_be_released() {
+        // Release is the human overruling the screener. Pointing it at anything
+        // else would be a second, unguarded way into the claimable queue.
+        let (s, dir) = store("release-guard");
+        for (i, state) in [
+            RequestState::Screening,
+            RequestState::Queued,
+            RequestState::Claimed,
+            RequestState::AwaitingReview,
+            RequestState::Ready,
+            RequestState::Discarded,
+            RequestState::Failed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("r-{i}");
+            file_in(&s, &id, "alpha", state);
+            assert!(s.release(&id).is_err(), "{state:?} must not be releasable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn releasing_keeps_the_reason_it_was_held() {
+        // Without it the developer cannot tell a false positive from a real one
+        // the next time the screener fires on something similar.
+        let (s, dir) = store("release-note");
+        file_in(&s, "r-1", "alpha", RequestState::Screening);
+        s.finish_screening("r-1", Some("screened as spam")).unwrap();
+
+        let released = s.release("r-1").unwrap();
+        assert_eq!(released.state, RequestState::Queued);
+        assert_eq!(released.note.as_deref(), Some("screened as spam"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_screening_finds_exactly_what_the_sweep_should_look_at() {
+        let (s, dir) = store("pending");
+        file_in(&s, "r-1", "alpha", RequestState::Screening);
+        file_in(&s, "r-2", "beta", RequestState::Queued);
+        file_in(&s, "r-3", "gamma", RequestState::Quarantined);
+
+        let pending = s.pending_screening().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "r-1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

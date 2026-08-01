@@ -24,23 +24,46 @@ const WINDOW_MS: u64 = 60_000;
 /// raised until it does nothing.
 const LIMIT: u32 = 240;
 
-/// Unauthenticated attempts get a much tighter budget: enrolment and login are
-/// exactly where guessing happens, and no honest caller needs many tries.
-const ANON_LIMIT: u32 = 20;
+/// Enrolment gets a tight budget: it is exactly where credential guessing
+/// happens, and no honest caller needs many tries.
+const ENROL_LIMIT: u32 = 20;
+
+/// Reading a public page.
+///
+/// Generous, because **starving this is itself the denial of service** — a
+/// search-engine crawler on the front page must not take the filing form offline.
+/// It is one page render off a directory the server already has open.
+const PUBLIC_READ_LIMIT: u32 = 600;
+
+/// Filing publicly, or spending a verification.
+///
+/// Tighter, because each one costs an email and a disk write. But note this is
+/// traffic *shaping*: the real ceiling is the pending cap, which refuses before
+/// the mailer is ever called.
+const PUBLIC_WRITE_LIMIT: u32 = 30;
 
 /// The bucket a caller is counted in.
 ///
-/// Unauthenticated callers share one bucket deliberately: they have presented no
-/// identity, so there is nothing to key on, and letting each *claimed* identity
-/// have its own budget would let a guesser mint unlimited budgets by varying what
-/// they claim.
+/// Unauthenticated callers are split **by route class, not by claimed identity**.
+/// Letting each claimed identity have its own budget would let a guesser mint
+/// unlimited budgets by varying what they claim — which is why there is no
+/// per-email or per-`X-Forwarded-For` bucket here.
+///
+/// Splitting by class buys the property that matters: **public traffic cannot
+/// starve enrolment**. One shared anonymous bucket meant 21 requests a minute
+/// from anywhere — a crawler would do it accidentally — locked the developer out
+/// of their own server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Bucket {
     /// A known credential, keyed by its hash — never the credential itself, so a
     /// memory dump or a debug print leaks nothing.
     Credential(String),
-    /// Everyone who has not authenticated.
-    Anonymous,
+    /// Anonymous attempts to enrol a device.
+    Enrol,
+    /// Anonymous reads of the public surface.
+    PublicRead,
+    /// Anonymous writes: filing, and spending a verification.
+    PublicWrite,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +86,9 @@ impl RateLimiter {
     /// Record a request. `false` means it should be refused.
     pub fn allow(&mut self, bucket: Bucket, now_ms: u64) -> bool {
         let limit = match bucket {
-            Bucket::Anonymous => ANON_LIMIT,
+            Bucket::Enrol => ENROL_LIMIT,
+            Bucket::PublicRead => PUBLIC_READ_LIMIT,
+            Bucket::PublicWrite => PUBLIC_WRITE_LIMIT,
             Bucket::Credential(_) => LIMIT,
         };
         let w = self.windows.entry(bucket).or_insert(Window {
@@ -134,28 +159,72 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_callers_get_a_much_tighter_budget() {
-        // Enrolment and login are where guessing happens, and no honest caller
-        // needs many tries.
+    fn public_traffic_cannot_starve_enrolment() {
+        // The headline property of splitting the anonymous bucket. One shared
+        // bucket meant 21 requests a minute from anywhere — a crawler would do it
+        // accidentally — locked the developer out of their own server. Whatever
+        // the public surface is enduring, enrolment keeps working.
         let mut rl = RateLimiter::new();
-        for _ in 0..ANON_LIMIT {
-            assert!(rl.allow(Bucket::Anonymous, 1000));
+        for _ in 0..(PUBLIC_READ_LIMIT * 2) {
+            rl.allow(Bucket::PublicRead, 1000);
         }
-        assert!(!rl.allow(Bucket::Anonymous, 1000));
-        const { assert!(ANON_LIMIT < LIMIT) };
+        for _ in 0..(PUBLIC_WRITE_LIMIT * 2) {
+            rl.allow(Bucket::PublicWrite, 1000);
+        }
+        assert!(
+            !rl.allow(Bucket::PublicRead, 1000),
+            "public reads are capped"
+        );
+        assert!(
+            !rl.allow(Bucket::PublicWrite, 1000),
+            "public writes are capped"
+        );
+
+        assert!(
+            rl.allow(Bucket::Enrol, 1000),
+            "the developer can still enrol a device"
+        );
+        assert!(
+            rl.allow(cred("phone"), 1000),
+            "and an enrolled device still works"
+        );
     }
 
     #[test]
-    fn everyone_unauthenticated_shares_one_bucket() {
-        // Otherwise a guesser mints an unlimited budget by varying what they
-        // claim to be — a per-claimed-identity limit is no limit at all.
+    fn enrolment_keeps_its_tight_budget() {
+        // Guessing an enrolment code is the attack this bucket exists for, and
+        // no honest caller needs many tries.
         let mut rl = RateLimiter::new();
-        for _ in 0..=ANON_LIMIT {
-            rl.allow(Bucket::Anonymous, 1000);
+        for _ in 0..ENROL_LIMIT {
+            assert!(rl.allow(Bucket::Enrol, 1000));
+        }
+        assert!(!rl.allow(Bucket::Enrol, 1000));
+        const { assert!(ENROL_LIMIT < LIMIT) };
+    }
+
+    #[test]
+    fn a_public_write_costs_more_than_a_public_read() {
+        // A read is a page render; a write costs an email and a disk write.
+        // Starving reads would itself be the denial of service, so they are
+        // generous — the write ceiling is the one that matters.
+        const {
+            assert!(PUBLIC_WRITE_LIMIT < PUBLIC_READ_LIMIT);
+            assert!(PUBLIC_READ_LIMIT > LIMIT, "a crawler must not trip it");
+        }
+    }
+
+    #[test]
+    fn no_bucket_is_keyed_on_anything_a_caller_chooses() {
+        // A per-email or per-`X-Forwarded-For` bucket is no limit at all: the
+        // attacker mints a fresh budget per value. The anonymous buckets are
+        // therefore unit variants with nothing to vary.
+        let mut rl = RateLimiter::new();
+        for _ in 0..=PUBLIC_WRITE_LIMIT {
+            rl.allow(Bucket::PublicWrite, 1000);
         }
         assert!(
-            !rl.allow(Bucket::Anonymous, 1000),
-            "a second guesser is already over budget"
+            !rl.allow(Bucket::PublicWrite, 1000),
+            "a second filer is already over the same budget"
         );
     }
 
