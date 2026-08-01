@@ -603,7 +603,7 @@ script on the private surface reaches every filer's specs at once, which is a
 cross-tenant leak with no equivalent on the other side. The blanket ban was
 buying nothing on the public half that the reader could not already do to
 themselves, and it was the reason a filer could not have a theme toggle or a
-language they can read.
+language they can read — both of which the section below now builds.
 
 Three things this does **not** relax, and they are what keep the deviation
 narrow:
@@ -627,6 +627,66 @@ better behaviour on the connection this feature was designed for.
 The single-file rule is honoured in spirit rather than by `include_str!`: the
 markup is generated in Rust because it renders per-request state, and the CSS is
 one inlined constant. No build step, no bundler, no `node_modules`.
+
+### The public surface is designed, themed and translated
+
+<!--@ crates/sc-server/src/page/public.rs -->
+
+What the relaxed CSP was *for*. Three things the filer gets, and the reasoning
+that decided each:
+
+**A shared look with the GitHub Pages site**
+<!--@ crates/sc-comply/src/report/site.rs -->. The same token names and values,
+so a reader arriving from the docs meets one product rather than two. Copied
+rather than factored into a shared crate: the alternative couples the compliance
+reporter to the intake server, which have nothing else to do with each other, and
+the drift it risks is cosmetic and visible.
+
+**A theme control that is three radios and CSS, with no script.** Script is
+permitted here now, but a theme that *needs* script flashes the wrong colours
+before it runs, and the CSS-only form has no flash by construction. Three options
+rather than two, because a radio cannot be un-checked: light/dark alone is a
+one-way door out of following the system. The choice does not survive a page
+load, which is the honest limit of doing this without a cookie, and the right
+trade on a surface a reader passes through two or three pages at a time.
+
+**A language switcher, and the catalogue behind it**
+<!--@ sc_server::i18n::Strings -->.
+The catalogue is a `struct` with one field per string, not a map keyed on a name.
+That is the design and not a style choice: a map's missing key is a runtime
+`None`, and the fallback renders English into the middle of a French page, which
+nobody notices until a user says so. A missing *field* is a compile error naming
+the language and the string.
+
+Three properties the compiler cannot see, so three tests hold them instead: no
+empty string, no string still identical to its English outside a named exception
+list, and no markup or format placeholder anywhere in a catalogue. Strings that
+need a value in the middle are split into two fields — a translator reordering
+`{0}` and `{1}` is a runtime panic, and it is a mistake translation invites.
+
+**Only the public half is translated.** The private review pages have exactly one
+reader, and a catalogue for them is weight paid for nobody. The intake *kinds*
+are untranslated too, and deliberately: the slug is what the form submits and
+what the developer reads on the review page, so translating the visible text
+would have a filer and a reviewer naming the same kind differently. Only the
+field's label translates.
+
+`POST /public/language` is reachable **signed out**, since somebody who cannot
+read the sign-in page is precisely who needs it. It carries no `next=` parameter
+and performs no redirect — a "return to where you were" field on a route anyone
+can reach is an open redirect waiting to be found, and this surface is small
+enough that landing on the sign-in page in the chosen language costs nothing.
+
+The `sc_lang` cookie is **not** `HttpOnly` and is `SameSite=Lax`, both departing
+from the session cookie: it holds a preference rather than a credential, nothing
+authenticates on it, and arriving from an external link should still show the
+language the reader chose. Its value is parsed against the catalogues that exist,
+so nothing a caller writes there reaches a page except by selecting among them.
+
+Looking at any of this without standing up a mail provider is
+`cargo run -p sc-server --example render-public -- <dir>`
+<!--@ crates/sc-server/examples/render-public.rs -->, which writes every public
+page in every language through the real renderers.
 
 **Daemon transport is long-polling.** The daemon asks "is there work for me?" and
 the server holds the request open until there is, or until a timeout of about

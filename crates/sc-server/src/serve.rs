@@ -245,6 +245,8 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
 
     let mut bearer = None;
     let mut cookie_token = None;
+    let mut cookie_lang = None;
+    let mut accept_language = None;
     for h in request.headers() {
         let name = h.field.as_str().as_str().to_ascii_lowercase();
         let value = h.value.as_str();
@@ -255,7 +257,14 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
                     .or_else(|| value.strip_prefix("bearer "))
                     .map(|t| t.trim().to_string());
             }
-            "cookie" => cookie_token = cookie_value(value, routes::COOKIE),
+            "cookie" => {
+                cookie_token = cookie_value(value, routes::COOKIE);
+                cookie_lang = cookie_value(value, routes::LANG_COOKIE);
+            }
+            // Taken as sent and parsed in `i18n`, which knows what a valid one
+            // looks like. Anything unrecognised there falls back to the default,
+            // so no validation is owed here.
+            "accept-language" => accept_language = Some(value.to_string()),
             _ => {}
         }
     }
@@ -268,6 +277,8 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             path,
             bearer,
             cookie_token,
+            cookie_lang,
+            accept_language,
             body: String::new(),
         });
     }
@@ -286,6 +297,8 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
         path,
         bearer,
         cookie_token,
+        cookie_lang,
+        accept_language,
         body,
     })
 }

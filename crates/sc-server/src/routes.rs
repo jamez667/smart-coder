@@ -22,12 +22,22 @@ use std::sync::Mutex;
 use crate::account;
 use crate::auth::{self, Caller, Credentials};
 use crate::config::PublicConfig;
+use crate::i18n::Locale;
 use crate::mail::Mailer;
 use crate::ratelimit::{Bucket, RateLimiter};
 use crate::store::{new_id, Request, RequestState, Store};
 
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
+
+/// The cookie remembering the reader's chosen language.
+///
+/// Separate from [`COOKIE`] and **not** `HttpOnly`: it holds a preference, not a
+/// credential, and the public surface's script may want to read it. Nothing
+/// authenticates on it, and its value is parsed by
+/// [`Locale::parse`](crate::i18n::Locale::parse), which accepts only codes this
+/// server has a catalogue for — so a hostile value selects nothing.
+pub const LANG_COOKIE: &str = "sc_lang";
 
 /// The public, unauthenticated surface's paths.
 ///
@@ -50,6 +60,10 @@ pub mod public_route {
     pub const SIGNOUT: &str = "/public/signout";
     /// `/public/request/<id>` — one of the filer's own requests.
     pub const REQUEST_PREFIX: &str = "/public/request/";
+    /// Choose a language. `POST`, because it sets a cookie — and reachable
+    /// **signed out**, since somebody who cannot read the sign-in page is
+    /// precisely who needs it.
+    pub const LANGUAGE: &str = "/public/language";
 }
 
 /// The verbs that decide a request's fate.
@@ -74,6 +88,14 @@ pub struct Req {
     pub bearer: Option<String>,
     /// The device token from the cookie, if any — how a browser authenticates.
     pub cookie_token: Option<String>,
+    /// The reader's chosen language, from the `lang` cookie.
+    ///
+    /// Named fields rather than a header map, so `Req` keeps its property of
+    /// being **only what the routes actually use** — a bag invites reading
+    /// whatever happens to be in it.
+    pub cookie_lang: Option<String>,
+    /// The `Accept-Language` header, as sent.
+    pub accept_language: Option<String>,
     pub body: String,
 }
 
@@ -84,6 +106,8 @@ impl Req {
             path: path.into(),
             bearer: None,
             cookie_token: None,
+            cookie_lang: None,
+            accept_language: None,
             body: String::new(),
         }
     }
@@ -94,8 +118,25 @@ impl Req {
             path: path.into(),
             bearer: None,
             cookie_token: None,
+            cookie_lang: None,
+            accept_language: None,
             body: body.into(),
         }
+    }
+
+    /// The language this request is rendered in.
+    ///
+    /// Computed rather than stored, so there is no way to have a `Req` whose
+    /// locale disagrees with the signals it was built from.
+    pub fn locale(&self) -> Locale {
+        crate::i18n::negotiate(self.cookie_lang.as_deref(), self.accept_language.as_deref())
+    }
+
+    #[cfg(test)]
+    pub fn with_lang(mut self, cookie: Option<&str>, accept: Option<&str>) -> Req {
+        self.cookie_lang = cookie.map(str::to_string);
+        self.accept_language = accept.map(str::to_string);
+        self
     }
 
     pub fn with_bearer(mut self, token: &str) -> Req {
@@ -386,6 +427,7 @@ fn is_public_path(path: &str) -> bool {
     path == public_route::FILE
         || path == public_route::SIGNIN
         || path == public_route::SIGNOUT
+        || path == public_route::LANGUAGE
         || path.starts_with(public_route::SIGNIN_PREFIX)
         || path.starts_with(public_route::REQUEST_PREFIX)
 }
@@ -629,12 +671,22 @@ fn public_route(
         _ => None,
     };
 
+    // Decided once here and passed down, rather than re-derived per page. Every
+    // response from this surface is in the same language as every other, which
+    // is not true if each renderer negotiates for itself.
+    let locale = req.locale();
+
     match (method, path) {
         // Ask for a link. Reachable signed-out — it is how one signs in.
-        ("GET", public_route::SIGNIN) => Res::html(200, crate::page::signin_page()),
+        ("GET", public_route::SIGNIN) => Res::html(200, crate::page::signin_page_in(locale)),
         ("POST", public_route::SIGNIN) => request_sign_in(ctx, req),
 
         ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
+
+        // Choosing a language. Signed out on purpose: somebody who cannot read
+        // the sign-in page is exactly who needs this, and requiring an account
+        // first would mean reading a page in a language they do not have.
+        ("POST", public_route::LANGUAGE) => set_language(req),
 
         // The landing page a link opens. **Changes nothing** — mail scanners
         // fetch every URL in a message, and a GET that spent the token would
@@ -643,16 +695,17 @@ fn public_route(
             let token = p.trim_start_matches(public_route::SIGNIN_PREFIX);
             // Rendered whether or not the token is real: a 404 on an invalid one
             // would be a free validity oracle, cheaper than the POST it guards.
-            Res::html(200, crate::page::signin_confirm_page(token))
+            Res::html(200, crate::page::signin_confirm_page(token, locale))
         }
         ("POST", p) if p.starts_with(public_route::SIGNIN_PREFIX) => {
-            complete_sign_in(ctx, p.trim_start_matches(public_route::SIGNIN_PREFIX))
+            let token = p.trim_start_matches(public_route::SIGNIN_PREFIX);
+            complete_sign_in(ctx, token, locale)
         }
 
         // Everything below needs a signed-in filer.
         _ => match account_id {
-            Some(id) => signed_in_route(ctx, req, method, path, &id),
-            None => Res::html(200, crate::page::signin_page()),
+            Some(id) => signed_in_route(ctx, req, method, path, &id, locale),
+            None => Res::html(200, crate::page::signin_page_in(locale)),
         },
     }
 }
@@ -663,12 +716,13 @@ fn signed_in_route(
     method: &str,
     path: &str,
     account_id: &str,
+    locale: Locale,
 ) -> Res {
     let show_spec = ctx.public.map(|p| p.show_spec).unwrap_or(false);
 
     match (method, path) {
         ("GET", public_route::FILE) => match mine(ctx, account_id) {
-            Ok(list) => Res::html(200, crate::page::public_file_page(&list, show_spec)),
+            Ok(list) => Res::html(200, crate::page::public_file_page(&list, show_spec, locale)),
             Err(e) => error(500, &e.to_string()),
         },
         ("POST", public_route::FILE) => file_publicly(ctx, req, account_id),
@@ -680,16 +734,16 @@ fn signed_in_route(
                 // enumerable in seconds, so keying on one would let any signed-in
                 // filer read every other filer's requests — and the developer's.
                 Ok(Some(r)) if r.filed_by(account_id) => {
-                    Res::html(200, crate::page::public_detail(&r, show_spec))
+                    Res::html(200, crate::page::public_detail(&r, show_spec, locale))
                 }
                 // Somebody else's request is *not found*, not forbidden:
                 // "forbidden" would confirm the id exists.
-                Ok(_) => Res::html(404, crate::page::not_found()),
+                Ok(_) => Res::html(404, crate::page::public_not_found(locale)),
                 Err(e) => error(500, &e.to_string()),
             }
         }
 
-        _ => Res::html(404, crate::page::not_found()),
+        _ => Res::html(404, crate::page::public_not_found(locale)),
     }
 }
 
@@ -746,7 +800,7 @@ fn request_sign_in(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         // whether or not mail went out.
         eprintln!("sign-in link not sent: {e}");
     }
-    Res::html(200, crate::page::signin_sent_page())
+    Res::html(200, crate::page::signin_sent_page(req.locale()))
 }
 
 /// Everything that might refuse, kept apart from the response so the response
@@ -800,7 +854,7 @@ fn try_send_link(ctx: &mut Ctx<'_>, raw_email: &str) -> sc_proto::Result<()> {
 }
 
 /// Spend a link: create the account if new, and open a session.
-fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
+fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
 
     let mut links = match ctx.store.links() {
@@ -810,10 +864,10 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
     let (email_hash, email_hint) = match links.consume(token, ctx.now_ms) {
         Ok(v) => v,
         Err(account::LinkError::AlreadyUsed) => {
-            return Res::html(200, crate::page::signin_failed_page(true))
+            return Res::html(200, crate::page::signin_failed_page(true, locale))
         }
         Err(account::LinkError::Invalid) => {
-            return Res::html(200, crate::page::signin_failed_page(false))
+            return Res::html(200, crate::page::signin_failed_page(false, locale))
         }
     };
     if let Err(e) = ctx.store.put_links(&links) {
@@ -829,7 +883,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
     // a retry loop.
     if let Some(existing) = accounts.any_by_email(&email_hash) {
         if existing.revoked {
-            return Res::html(200, crate::page::signin_failed_page(false));
+            return Res::html(200, crate::page::signin_failed_page(false, locale));
         }
     }
     let id = match accounts.by_email(&email_hash) {
@@ -849,7 +903,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
                     "signup refused: {} accounts exist, the limit is {cap}",
                     accounts.accounts.len()
                 );
-                return Res::html(200, crate::page::signin_failed_page(false));
+                return Res::html(200, crate::page::signin_failed_page(false, locale));
             }
             accounts.create(&email_hash, &email_hint, ctx.now_ms).id
         }
@@ -859,7 +913,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
         return error(500, &e.to_string());
     }
 
-    let mut res = Res::html(200, crate::page::public_file_page(&[], false));
+    let mut res = Res::html(200, crate::page::public_file_page(&[], false, locale));
     res.set_cookie = Some(format!(
         "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=31536000"
     ));
@@ -882,10 +936,42 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
             }
         }
     }
-    let mut res = Res::html(200, crate::page::signin_page());
+    let mut res = Res::html(200, crate::page::signin_page_in(req.locale()));
     // Max-Age=0 so the browser drops it rather than carrying a dead token.
     res.set_cookie = Some(format!(
         "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0"
+    ));
+    res
+}
+
+/// Remember the reader's language.
+///
+/// Takes no session and touches no store: this sets a preference cookie and
+/// re-renders. It is the one public write that costs nothing to serve, which is
+/// why it is safe to leave reachable signed out.
+///
+/// **There is no `next=` parameter and no redirect.** A "return to where you
+/// were" field on a route reachable by anyone is an open redirect waiting to be
+/// found, and this surface is small enough that landing on the sign-in page —
+/// now in the chosen language — is no real loss.
+fn set_language(req: &Req) -> Res {
+    let fields = form_fields(&req.body);
+    // An unknown code selects the default rather than erroring. The value is
+    // matched against the catalogues this server actually has, so nothing a
+    // caller writes here reaches a page except by choosing among them.
+    let locale = fields
+        .get("lang")
+        .and_then(|v| Locale::parse(v))
+        .unwrap_or_default();
+
+    let mut res = Res::html(200, crate::page::signin_page_in(locale));
+    // Not `HttpOnly`: this is a preference, not a credential, and the public
+    // surface's script may read it. `SameSite=Lax` rather than `Strict` so that
+    // arriving from an external link — which is how somebody reaches a filing
+    // page — still shows the language they chose.
+    res.set_cookie = Some(format!(
+        "{LANG_COOKIE}={}; Path=/; SameSite=Lax; Secure; Max-Age=31536000",
+        locale.code()
     ));
     res
 }
@@ -896,8 +982,9 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 /// cannot aim work at a repository the operator did not nominate for public
 /// intake. The form has no such field, and one submitted anyway is ignored.
 fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
+    let locale = req.locale();
     let Some(public) = ctx.public else {
-        return Res::html(404, crate::page::not_found());
+        return Res::html(404, crate::page::public_not_found(locale));
     };
     let repo = public.repo.clone();
     let screened = public.screen.is_some();
@@ -911,10 +998,13 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
         .unwrap_or_default();
 
     if text.is_empty() {
-        return Res::html(400, crate::page::message("A request needs some text."));
+        return Res::html(
+            400,
+            crate::page::public_message(locale.strings().error_empty, locale),
+        );
     }
     if let Err(msg) = check_length(text) {
-        return Res::html(400, crate::page::message(&msg));
+        return Res::html(400, crate::page::public_message(&msg, locale));
     }
 
     // The ceiling on model spend. Every filing that clears the screener costs a
@@ -936,12 +1026,15 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
         Ok(n) if n >= public.max_daily_filings => {
             return Res::html(
                 429,
-                crate::page::message(&format!(
-                    "That is {n} requests in a day, which is the limit. Each one is \
+                crate::page::public_message(
+                    &format!(
+                        "That is {n} requests in a day, which is the limit. Each one is \
                      written up by hand on someone's machine, so the cap is there to \
                      keep that manageable — try again tomorrow, or say the rest in a \
                      request you have already filed."
-                )),
+                    ),
+                    locale,
+                ),
             );
         }
         Ok(_) => {}
@@ -961,7 +1054,7 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
         ctx.now_ms,
     );
     match ctx.store.put(&request) {
-        Ok(()) => Res::html(200, crate::page::public_filed(&request)),
+        Ok(()) => Res::html(200, crate::page::public_filed(&request, locale)),
         Err(e) => error(500, &e.to_string()),
     }
 }
@@ -2197,6 +2290,98 @@ mod tests {
             f.go(&Req::get("/api/v1/work").with_bearer(KEY)).policy,
             Policy::Strict
         );
+    }
+
+    // -- language -----------------------------------------------------------
+
+    #[test]
+    fn choosing_a_language_sets_a_cookie_and_renders_in_it() {
+        let mut f = Fixture::new("lang-set").with_public(false);
+        let res = f.go(&Req::post(public_route::LANGUAGE, "lang=fr"));
+
+        assert_eq!(res.status, 200);
+        let cookie = res.set_cookie.expect("a language cookie is set");
+        assert!(cookie.starts_with(&format!("{LANG_COOKIE}=fr")), "{cookie}");
+        // A preference, not a credential: readable by the page's own script, and
+        // `Lax` so arriving from an external link still shows the chosen
+        // language. Both are departures from the session cookie and both are
+        // deliberate, so both are pinned.
+        assert!(!cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+        assert!(cookie.contains("Secure"), "{cookie}");
+        assert!(res.body.contains("<html lang=\"fr\""), "{}", res.body);
+    }
+
+    #[test]
+    fn the_language_route_is_reachable_signed_out() {
+        // The whole point. Somebody who cannot read the sign-in page is exactly
+        // who needs this, so requiring an account first would mean reading a
+        // page in a language they do not have.
+        let mut f = Fixture::new("lang-anon").with_public(false);
+        let res = f.go(&Req::post(public_route::LANGUAGE, "lang=fr"));
+        assert_eq!(res.status, 200);
+        assert!(res.body.contains("<html lang=\"fr\""));
+    }
+
+    #[test]
+    fn an_unknown_language_falls_back_rather_than_reaching_the_page() {
+        // The value is matched against the catalogues that exist, so nothing a
+        // caller writes here reaches a page except by choosing among them.
+        let mut f = Fixture::new("lang-unknown").with_public(false);
+        for hostile in [
+            "lang=de",
+            "lang=",
+            "lang=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+            "lang=../../etc/passwd",
+            "",
+        ] {
+            let res = f.go(&Req::post(public_route::LANGUAGE, hostile));
+            assert_eq!(res.status, 200, "{hostile}");
+            assert!(res.body.contains("<html lang=\"en\""), "{hostile}");
+            assert!(!res.body.contains("<script"), "{hostile}: {}", res.body);
+            assert!(!res.body.contains("passwd"), "{hostile}: {}", res.body);
+            let cookie = res.set_cookie.unwrap_or_default();
+            assert!(
+                cookie.starts_with(&format!("{LANG_COOKIE}=en")),
+                "{hostile}: {cookie}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signed_in_filers_pages_follow_their_chosen_language() {
+        // The property that matters beyond the switcher itself: the locale is
+        // decided once per request and reaches every page, not only the one the
+        // switcher happens to re-render.
+        let mut f = Fixture::new("lang-through").with_public(false);
+        let account = f.signed_in("filer@example.test");
+
+        let filing = f.go(&Req::get(public_route::FILE)
+            .with_cookie(&account)
+            .with_lang(Some("fr"), None));
+        assert_eq!(filing.status, 200);
+        assert!(filing.body.contains("<html lang=\"fr\""), "{}", filing.body);
+        assert!(filing.body.contains("Déposer"), "{}", filing.body);
+
+        // And the browser's header is honoured when nothing was chosen.
+        let by_header = f.go(&Req::get(public_route::FILE)
+            .with_cookie(&account)
+            .with_lang(None, Some("fr-CA,fr;q=0.9,en;q=0.5")));
+        assert!(by_header.body.contains("<html lang=\"fr\""));
+    }
+
+    #[test]
+    fn the_private_surface_is_not_translated() {
+        // One reader, who is the developer. Translating it would be catalogue
+        // weight paid for nobody — asserted so that "the whole server is
+        // localised" does not creep in later without the decision being retaken.
+        let mut f = Fixture::new("lang-private").with_public(false);
+        let device = f.enrolled();
+        let res = f.go(&Req::get("/")
+            .with_cookie(&device)
+            .with_lang(Some("fr"), None));
+        assert_eq!(res.status, 200);
+        assert!(res.body.contains("<html lang=\"en\""), "{}", res.body);
     }
 
     #[test]

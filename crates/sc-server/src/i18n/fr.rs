@@ -15,6 +15,7 @@ pub static STRINGS: Strings = Strings {
     // A product name, not a word. Left as it is, deliberately.
     brand: "Smart Coder",
     theme_label: "Thème",
+    theme_auto: "Système",
     theme_light: "Clair",
     theme_dark: "Sombre",
     language_label: "Langue",
