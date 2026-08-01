@@ -25,9 +25,22 @@
 # and 1 August the fmt/clippy/test gate silently did not run either. A build that
 # needs privilege is a build that stops running.
 #
-# REQUIRED SECRET: `jcnash-woodpecker` — a GitHub token with `write:packages`;
-# a classic token with `write:packages` and `repo`, or a fine-grained PAT with
-# package write on this repo.
+# REQUIRED SECRET: `jcnash-woodpecker` — a **classic** GitHub token with
+# `write:packages`.
+#
+# **A fine-grained token cannot work, whatever permissions it is given.**
+# GitHub's own documentation is explicit: "GitHub Packages only supports
+# authentication using a personal access token (classic)." A fine-grained token
+# authenticates fine and then fails the push with
+#
+#     DENIED: permission_denied: The token provided does not match expected scopes
+#
+# which reads like a missing permission and is not one — there is no permission
+# to add. Package write is not among a fine-grained token's repository
+# permissions at all. Cost us three round trips before reading the docs.
+#
+# `repo` is worth adding to the same token: `release.yml` uses this secret for
+# GitHub Releases.
 
 when:
   - event: tag
