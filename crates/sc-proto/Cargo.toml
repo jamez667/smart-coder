@@ -8,9 +8,8 @@ description = "Shared types and errors for smart-coder."
 
 [dependencies]
 # The only dependency, and only because the wire types cross a network. Kept
-# deliberately small: `smart-coder-web` vendors this crate as a submodule to
-# obtain the daemon protocol, and every dependency added here is one that lands
-# in the public server's build.
+# deliberately small: `sc-server` takes this crate and nothing else from the
+# workspace, so every dependency added here lands in the public server's build.
 serde = { workspace = true }
 
 [dev-dependencies]

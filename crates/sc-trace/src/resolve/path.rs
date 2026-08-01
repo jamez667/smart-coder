@@ -7,16 +7,19 @@
 //!
 //! ## Claims about another repository
 //!
-//! An anchor may name a sibling repository: `<!--@ smart-coder-web:crates/… -->`.
-//! Some of this project's specs govern code that ships from elsewhere — the
-//! hosted intake surface is its own repo — and the alternatives were both worse
-//! than admitting it. Deleting those anchors loses the claim; pointing them at a
-//! path that is not here reports `Broken`, and twenty false alarms is how a
-//! check gets switched off.
+//! An anchor may name a sibling repository — a `<repo>:<path>` target — and
+//! resolves [`Unknown`](crate::status::ClaimStatus::Unknown): **"we could not
+//! look", never "we looked and it was fine"**. It does not gate, and it is never
+//! counted as passing.
 //!
-//! Such an anchor resolves [`Unknown`](crate::status::ClaimStatus::Unknown):
-//! **"we could not look", never "we looked and it was fine"**. It does not gate,
-//! and it is never counted as passing.
+//! **Currently unused**, and kept deliberately. It was written when the hosted
+//! intake surface briefly shipped from its own repository; that split was
+//! reverted, but the reasoning outlives the occasion. When a spec governs code
+//! this checker cannot read, both alternatives are worse than admitting it:
+//! deleting the anchor loses the claim — the drift this crate exists to catch,
+//! arrived at by tidying — and leaving it pointing at an absent path reports a
+//! `Broken` that is not one. Twenty false alarms is how a check gets switched
+//! off.
 
 use std::path::Path;
 

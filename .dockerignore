@@ -1,6 +1,22 @@
 # Keep the Docker build context small: the Rust build stage compiles from source,
 # so the host's build artifacts and VCS metadata must not be shipped in.
+#
+# This matters more in a monorepo than it looks. `docker build` uploads the whole
+# context to the daemon *before the first instruction runs*, so without this the
+# image build spends a minute shipping a multi-gigabyte `target/` it will never
+# use — the container compiles from scratch against a different libc anyway.
+# `cargo build -p sc-server` then touches only that crate's tree, so the image is
+# small because of `sc-server`'s dependencies rather than because of where the
+# code lives.
 target/
 .git/
 .smart-coder/
 **/*.log
+
+# Read by people, not by the compiler.
+docs/
+notes/
+
+# The desktop client's assets are the largest non-source tree in the repo, and
+# `sc-server` has no relationship to them.
+crates/sc-win/assets/

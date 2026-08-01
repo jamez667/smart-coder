@@ -6,19 +6,23 @@
 //! ## Why the intake protocol lives here
 //!
 //! [`wire`] and [`intake`] describe the conversation between the developer's
-//! daemon and the hosted intake server (spec 18). The server lives in a separate
-//! repository — `smart-coder-web` — which vendors *this* crate as a submodule to
-//! obtain them.
+//! daemon and the hosted intake server (spec 18), and `sc-daemon` re-exports
+//! them so nothing in the workspace changed at its call sites.
 //!
 //! They sit here rather than in `sc-daemon` for one reason worth stating: the
-//! public server would otherwise have to depend on `sc-daemon`, and through it
-//! on `sc-model` and the whole local model stack, to obtain two type
-//! definitions. Moving them makes "no model is anywhere near the public server"
-//! literally true rather than true in spirit, and keeps its image build small.
+//! public server would otherwise depend on `sc-daemon`, and through it on
+//! `sc-model` and the whole local model stack, to obtain two type definitions.
+//! Moving them makes "no model is anywhere near the public server" literally
+//! true rather than true in spirit, and keeps its image build small.
 //!
-//! **One definition, two repositories.** Restating the protocol on the other
-//! side is exactly the drift spec 17 exists to catch, so it is prevented by
-//! construction instead of detected later.
+//! **That dependency line is the separation that matters** — not any repository
+//! boundary. `sc-server` and the desktop agent share a workspace and are still
+//! strangers in the build graph, because `cargo build -p sc-server` compiles
+//! this crate and no other.
+//!
+//! **One definition, both ends.** Restating the protocol on the other side is
+//! exactly the drift spec 17 exists to catch, so it is prevented by construction
+//! instead of detected later.
 
 pub mod intake;
 pub mod wire;

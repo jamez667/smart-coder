@@ -238,25 +238,36 @@ and was hard-won: **a check that cannot determine something must say so, not gue
 
 ### A claim about another repository
 
-✅ **Built** <!--@ crates/sc-trace/src/resolve/path.rs -->. An anchor may name a
-sibling repo — `<!--@ smart-coder-web:crates/… -->` — and resolves `UNKNOWN`.
+✅ **Built** <!--@ crates/sc-trace/src/resolve/path.rs -->, and currently unused.
+An anchor may name a sibling repo — a `<repo>:<path>` target — and resolves
+`UNKNOWN`. (Written in prose rather than shown verbatim, because a real example
+is itself an anchor and this document would then contain a permanent `UNKNOWN`
+about a repository that does not exist.)
 
-Not a special case invented for convenience: the hosted intake surface ships from
-its own repository ([18](18-task-intake.md)), and specs 18 and 20 still govern it.
-The alternatives were both worse than admitting the limit. **Deleting those
-anchors** loses the claim entirely, which is the drift this spec exists to catch,
-arrived at by tidying. **Leaving them pointing at paths that are not here**
-reports twenty-one `BROKEN`s — and a check that cries wolf twenty-one times is a
-check somebody switches off, which is the failure mode
-[13](13-compliance-evidence.md) warns about in its own domain.
+Built when the hosted intake surface briefly shipped from its own repository, and
+kept after that split was reverted ([18](18-task-intake.md)) because the
+reasoning outlives the occasion. When a spec governs code this checker cannot
+read, the alternatives are both worse than admitting it: **deleting the anchor**
+loses the claim entirely — the drift this spec exists to catch, arrived at by
+tidying — and **leaving it pointing at an absent path** reports a `BROKEN` that
+is not one. Twenty-one false alarms is how a check gets switched off, which is
+the failure [13](13-compliance-evidence.md) warns about in its own domain.
 
 `UNKNOWN` is the honest answer because it is *literally* true: this checker reads
 one working tree. It does not gate, it is never counted as passing, and the
 report says so in the same line — "the checker could not look … not a pass".
 
 A cross-repo anchor stays `UNKNOWN` **even when a path of that name happens to
-exist here**, so the answer cannot depend on a coincidence of local layout. The
-claim is verified by running the check in the repository that owns the code.
+exist here**, so the answer cannot depend on a coincidence of local layout.
+
+**The monorepo is what makes this unnecessary**, and that is the point worth
+keeping: one repository means every anchor is verifiable in one pass, and the 21
+claims that were `UNKNOWN` under the split resolve against the working tree
+again — so `sc-trace` *gates* on them. That is the whole value of restoring them,
+and it only holds if the check is actually run over them.
+
+A capability for answering honestly when you cannot check is worth having;
+needing it routinely is a smell.
 
 There is no single headline score. A "94% traceable" number invites exactly the
 misreading [13](13-compliance-evidence.md) refuses — the 6% is where the drift is.

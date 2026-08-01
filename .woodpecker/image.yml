@@ -1,0 +1,101 @@
+# Builds the sc-server Docker image and publishes it to GHCR.
+#
+# Separate from release.yml on purpose: that pipeline publishes the desktop
+# client as a tarball for a human to download, this one publishes a container for
+# Portainer to pull. Coupling them would mean a failure in one blocks the other.
+#
+# Fires on a version tag, and on a push to main (as `:main`, so a change can be
+# tried without cutting a release):
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# **Path-filtered.** This is a monorepo, so a change to the desktop client must
+# not rebuild and republish the server's image — and vice versa. The filter is
+# what keeps living in one repository from meaning "every push runs everything".
+#
+# REQUIRED SECRET: `jcnash-woodpecker` — a GitHub token with `write:packages`;
+# a classic token with `write:packages` and `repo`, or a fine-grained PAT with
+# package write on this repo.
+
+when:
+  - event: tag
+    ref: refs/tags/v*
+  - event: push
+    branch: main
+    # The filter must list every input the server's build actually reads. One
+    # narrower than that ships a *stale image* — which is silent, and worse than
+    # an extra rebuild.
+    path:
+      include:
+        - "crates/sc-server/**"
+        # The protocol crate: a wire change alters what the server accepts.
+        - "crates/sc-proto/**"
+        - "Dockerfile"
+        - ".dockerignore"
+        - "deploy/**"
+        - ".woodpecker/image.yml"
+        # A workspace-level change can alter the build for any crate.
+        - "Cargo.toml"
+        # A dependency bump changes what the server *links* without touching a
+        # line of its source — a `ureq` or `tiny_http` patch, or a bare
+        # `cargo update`. Omitting this was a silent staleness bug.
+        - "Cargo.lock"
+        # The Dockerfile pins its own Rust image, so these two can drift apart.
+        # A toolchain change should rebuild and surface that.
+        - "rust-toolchain.toml"
+
+steps:
+  - name: image
+    image: docker:27-cli
+    environment:
+      GITHUB_TOKEN:
+        from_secret: jcnash-woodpecker
+    volumes:
+      # The agent's Docker socket. This box already runs Portainer, so a
+      # docker-in-docker service would be a second daemon for no reason.
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      # Woodpecker's envsubst preprocessor does not understand shell parameter
+      # expansion, so this uses only bare doubled refs ($$VAR) and plain `if`
+      # checks — see the long note in release.yml.
+      - |
+        set -eu
+        REPO="$$CI_REPO"
+        OWNER="$${REPO%%/*}"
+        IMAGE="ghcr.io/$$OWNER/sc-server"
+
+        if [ -z "$$GITHUB_TOKEN" ]; then
+          echo "the jcnash-woodpecker secret is not set in Woodpecker" >&2
+          exit 1
+        fi
+
+        # A tag build publishes both the version and :latest; a main build
+        # publishes only :main, so `latest` never silently moves to an untagged
+        # commit that nobody chose to release.
+        if [ -n "$$CI_COMMIT_TAG" ]; then
+          TAGS="$$CI_COMMIT_TAG latest"
+        else
+          TAGS="main"
+        fi
+
+        echo "$$GITHUB_TOKEN" | docker login ghcr.io -u "$$OWNER" --password-stdin
+
+        BUILD_ARGS=""
+        for t in $$TAGS; do
+          BUILD_ARGS="$$BUILD_ARGS -t $$IMAGE:$$t"
+        done
+        docker build $$BUILD_ARGS .
+
+        for t in $$TAGS; do
+          docker push "$$IMAGE:$$t"
+        done
+
+        # Prove the published image actually starts, rather than discovering it
+        # does not when Portainer pulls it. It must refuse to run without a key,
+        # and run with one.
+        FIRST=$$(echo $$TAGS | cut -d' ' -f1)
+        if docker run --rm "$$IMAGE:$$FIRST" 2>/dev/null; then
+          echo "the image started without SC_SERVER_DAEMON_KEY - it must refuse" >&2
+          exit 1
+        fi
+        echo "verified: refuses to start unconfigured"

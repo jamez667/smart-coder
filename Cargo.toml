@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
+# One repository, one workspace. A crate here builds only its own dependency
+# tree — `cargo build -p sc-server` does not compile the desktop client — so
+# living together costs the server nothing it would gain by living apart, and it
+# keeps every spec anchor verifiable by `sc-trace` in one pass.
 members = [
     "crates/sc-proto",
     "crates/sc-model",
@@ -16,6 +20,7 @@ members = [
     "crates/sc-iterate",
     "crates/sc-swarm",
     "crates/sc-daemon",
+    "crates/sc-server",
     "crates/sc-workflow",
     "crates/sc-tui",
     "crates/sc-win",
@@ -34,3 +39,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 regex = "1"
+
+[profile.release]
+# Both release artifacts are things people download or pull: the desktop client
+# as a tarball and `sc-server` as a container layer. A slower build is worth a
+# few megabytes off each.
+lto = true
+codegen-units = 1
+strip = true
