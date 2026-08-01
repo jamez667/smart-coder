@@ -99,6 +99,17 @@ pub struct Request {
     /// redraft grounds on the reason rather than repeating itself.
     #[serde(default)]
     pub send_back_note: Option<String>,
+    /// When the current draft came back.
+    ///
+    /// Recorded by the *server*, on receipt — the wire carries no timestamp, and
+    /// a clock the daemon controls is one this server cannot check. Reset on each
+    /// redraft, because it describes the spec now on the page rather than the
+    /// first attempt.
+    ///
+    /// `Option` because records written before this field existed have none, and
+    /// an upgrade must not make a developer's filed requests unreadable.
+    #[serde(default)]
+    pub drafted_ms: Option<u64>,
 }
 
 impl Request {
@@ -119,12 +130,23 @@ impl Request {
             artifact_dir: None,
             note: None,
             send_back_note: None,
+            drafted_ms: None,
         }
     }
 
     /// The first line, for a list.
     pub fn summary(&self) -> &str {
         self.text.lines().next().unwrap_or("").trim()
+    }
+
+    /// A digest of the drafted spec, or `None` if there is no draft.
+    ///
+    /// What an approval is *bound to*. Without this, approving settles whatever
+    /// text happens to be on disk when the POST lands — so a redraft arriving
+    /// while the reviewer reads is approved on the strength of reading the
+    /// previous one.
+    pub fn spec_digest(&self) -> Option<String> {
+        self.spec.as_deref().map(crate::auth::hash)
     }
 }
 
@@ -219,6 +241,7 @@ impl Store {
         req.state = RequestState::AwaitingReview;
         req.spec = Some(spec.to_string());
         req.artifact_dir = Some(artifact_dir.to_string());
+        req.drafted_ms = Some(now_ms());
         // The note is spent: it grounded the redraft that just happened.
         req.send_back_note = None;
         req.note = None;
@@ -235,18 +258,38 @@ impl Store {
         Ok(req)
     }
 
-    /// Approve a drafted spec.
+    /// Approve a drafted spec, **bound to the exact text the reviewer was shown**.
     ///
     /// The spec is already settled in the repository by the daemon; this records
     /// the decision. **It starts nothing** — `Ready` means the developer picks it
     /// up in their IDE when they choose.
-    pub fn approve(&self, id: &str) -> Result<Request> {
+    ///
+    /// `expected_digest` is [`Request::spec_digest`] as of the page the reviewer
+    /// read. It is **required, not optional**: without it an approval means "settle
+    /// whatever is on disk when this POST lands", and a redraft arriving while the
+    /// reviewer reads on a train would be approved on the strength of reading the
+    /// previous one. Consent has to attach to bytes, not to an id.
+    ///
+    /// The check lives here rather than in the route so the CLI and desktop gates
+    /// inherit the same guarantee rather than each re-deriving it.
+    pub fn approve(&self, id: &str, expected_digest: &str) -> Result<Request> {
         let mut req = self.require(id)?;
         if req.state != RequestState::AwaitingReview {
             return Err(DcError::Eval(format!(
                 "request {id} is {} — only one awaiting review can be approved",
                 req.state.label()
             )));
+        }
+        let current = req
+            .spec_digest()
+            .ok_or_else(|| DcError::Eval(format!("request {id} has no drafted spec to approve")))?;
+        if current != expected_digest {
+            return Err(DcError::Eval(
+                "the spec changed after you opened it — a redraft arrived while \
+                 you were reading. Read it again before approving; approving now \
+                 would sign off text you have not seen."
+                    .to_string(),
+            ));
         }
         req.state = RequestState::Ready;
         self.put(&req)?;
@@ -279,9 +322,24 @@ impl Store {
         Ok(req)
     }
 
-    /// Drop a request before approval.
+    /// Drop a request **before** it is approved.
+    ///
+    /// Refuses a settled one. `Ready` means a human read the spec and signed it
+    /// off, and it is in the repository — letting a stray tap flip that to
+    /// `Discarded` would erase a recorded decision and make the surface disagree
+    /// with the working tree. Spec 09's table has no such transition.
+    ///
+    /// Re-discarding something already discarded is allowed and does nothing: it
+    /// is the state the caller asked for, and erroring would be pedantry.
     pub fn discard(&self, id: &str) -> Result<Request> {
         let mut req = self.require(id)?;
+        if matches!(req.state, RequestState::Ready) {
+            return Err(DcError::Eval(format!(
+                "request {id} was approved — its spec is settled in the \
+                 repository. Discarding here would erase the decision without \
+                 touching the file. Delete the spec in your IDE instead."
+            )));
+        }
         req.state = RequestState::Discarded;
         self.put(&req)?;
         Ok(req)
@@ -449,7 +507,8 @@ mod tests {
         s.claim_next().unwrap();
         s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
 
-        let req = s.approve("r-1").unwrap();
+        let digest = s.require("r-1").unwrap().spec_digest().unwrap();
+        let req = s.approve("r-1", &digest).unwrap();
         assert_eq!(req.state, RequestState::Ready);
         // The spec is still readable after approval — it is the record of what
         // was agreed.
@@ -458,13 +517,97 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_of_text_that_has_since_changed_is_refused() {
+        // The reviewer opens v1 on a train; a redraft lands while they read.
+        // Approving must not settle v2 on the strength of having read v1 —
+        // consent attaches to bytes, not to an id.
+        let (s, dir) = store("stale-digest");
+        file(&s, "r-1", "alpha");
+        s.claim_next().unwrap();
+        s.record_drafted("r-1", "# Version one", "specs/x").unwrap();
+        let read_this = s.require("r-1").unwrap().spec_digest().unwrap();
+
+        // The daemon pushes a redraft under the reviewer.
+        s.record_drafted("r-1", "# Version two", "specs/x").unwrap();
+
+        let err = s
+            .approve("r-1", &read_this)
+            .expect_err("the text changed")
+            .to_string();
+        assert!(err.contains("changed after you opened it"), "{err}");
+        assert!(err.contains("have not seen"), "{err}");
+        // And it is left reviewable rather than half-decided.
+        assert_eq!(
+            s.require("r-1").unwrap().state,
+            RequestState::AwaitingReview
+        );
+        // Reading the new one and approving that works.
+        let now = s.require("r-1").unwrap().spec_digest().unwrap();
+        assert_eq!(s.approve("r-1", &now).unwrap().state, RequestState::Ready);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_digest_is_over_the_spec_text_so_an_identical_redraft_still_approves() {
+        // The binding is to *content*, not to a draft attempt. A redraft that
+        // produces byte-identical text is the same artifact, and refusing it
+        // would make the reviewer re-read something that did not change.
+        let (s, dir) = store("same-digest");
+        file(&s, "r-1", "alpha");
+        s.claim_next().unwrap();
+        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        let digest = s.require("r-1").unwrap().spec_digest().unwrap();
+
+        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        assert!(s.approve("r-1", &digest).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn only_a_request_awaiting_review_can_be_approved_or_sent_back() {
         // Approving a queued request would sign off a spec that does not exist.
         let (s, dir) = store("guards");
         file(&s, "r-1", "alpha");
-        assert!(s.approve("r-1").is_err());
+        assert!(s.approve("r-1", "any-digest").is_err());
         assert!(s.send_back("r-1", "change it").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_draft_is_timestamped_on_receipt_and_restamped_on_redraft() {
+        // The server timestamps rather than trusting the wire: a clock the daemon
+        // controls is one this server cannot check. And it describes the spec now
+        // on the page, not the first attempt.
+        let (s, dir) = store("drafted-ms");
+        file(&s, "r-1", "alpha");
+        assert!(s.require("r-1").unwrap().drafted_ms.is_none());
+
+        s.claim_next().unwrap();
+        let first = s
+            .record_drafted("r-1", "# v1", "specs/x")
+            .unwrap()
+            .drafted_ms
+            .expect("stamped on receipt");
+        s.send_back("r-1", "more detail").unwrap();
+        s.claim_next().unwrap();
+        let second = s
+            .record_drafted("r-1", "# v2", "specs/x")
+            .unwrap()
+            .drafted_ms
+            .expect("restamped");
+        assert!(second >= first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_written_before_drafted_ms_existed_still_loads() {
+        // The data volume outlives any one image tag; an upgrade must not make
+        // a developer's filed requests unreadable.
+        let json = r#"{"id":"r-1","text":"t","repo":"alpha","kind":"bug",
+                       "state":"queued","filed_ms":1}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        assert!(req.drafted_ms.is_none());
+        assert!(req.spec_digest().is_none(), "no spec, no digest");
     }
 
     #[test]
@@ -514,6 +657,47 @@ mod tests {
         let req = s.record_drafted("r-1", "# v2", "specs/x").unwrap();
         assert!(req.send_back_note.is_none(), "the note is spent");
         assert_eq!(req.spec.as_deref(), Some("# v2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_approved_request_cannot_be_discarded_out_from_under_its_spec() {
+        // `Ready` means a human read it and signed it off, and the spec is in
+        // the repository. A stray tap flipping that to `Discarded` would erase a
+        // recorded decision without touching the file, leaving the surface
+        // disagreeing with the working tree. Spec 09 has no such transition.
+        let (s, dir) = store("discard-ready");
+        file(&s, "r-1", "alpha");
+        s.claim_next().unwrap();
+        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        let digest = s.require("r-1").unwrap().spec_digest().unwrap();
+        s.approve("r-1", &digest).unwrap();
+
+        let err = s.discard("r-1").expect_err("already settled").to_string();
+        assert!(err.contains("was approved"), "{err}");
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Ready);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn anything_not_yet_approved_can_be_discarded() {
+        // Including a failed one — dropping a request that could not be drafted
+        // is exactly what the developer wants, and it signs nothing off.
+        let (s, dir) = store("discard-ok");
+        for (id, prepare) in [("r-1", false), ("r-2", true)] {
+            file(&s, id, id); // one repo each, so neither blocks the other
+            if prepare {
+                s.claim_next().unwrap();
+                s.record_drafted(id, "# Spec", "specs/x").unwrap();
+            }
+            assert_eq!(
+                s.discard(id).unwrap().state,
+                RequestState::Discarded,
+                "{id}"
+            );
+        }
+        // And discarding twice is not an error: it is already the asked-for state.
+        assert!(s.discard("r-1").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

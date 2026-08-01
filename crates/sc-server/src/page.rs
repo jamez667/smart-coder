@@ -69,6 +69,11 @@ pre { white-space: pre-wrap; word-wrap: break-word; padding: .8rem;
       font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .note { padding: .7rem; border-left: 3px solid currentColor; opacity: .85;
         font-size: .9rem; }
+.decide { margin-top: 1.5rem; padding-top: 1rem;
+          border-top: 1px solid rgba(128,128,128,.35); }
+.skip { display: block; font-size: .85rem; opacity: .7; margin: .5rem 0; }
+.elided { text-align: center; opacity: .6; font-size: .85rem;
+          padding: .4rem; font-style: italic; }
 ";
 
 fn shell(title: &str, body: &str) -> String {
@@ -169,14 +174,26 @@ pub fn filed(r: &Request) -> String {
 
 /// One request, and its spec if there is one.
 pub fn detail(r: &Request) -> String {
+    // Half of spec 20's "provenance": *when*. The other half — which agent
+    // profile produced it — has nothing to read from yet, and is recorded as
+    // unbuilt rather than approximated with a backend name that reads
+    // "openai-compat" for every model alike.
+    let now = crate::store::now_ms();
+    let mut when = format!("filed {}", ago(r.filed_ms, now));
+    if let Some(drafted) = r.drafted_ms {
+        when.push_str(&format!(" · drafted {}", ago(drafted, now)));
+    }
+
     let mut body = format!(
         "<h1>{summary}</h1>\
-         <p class=\"meta\"><span class=\"tag\">{state}</span> {repo} · {kind}</p>\
+         <p class=\"meta\"><span class=\"tag\">{state}</span> {repo} · {kind}<br>\
+         {when}</p>\
          <h2>The request</h2><pre>{text}</pre>",
         summary = esc(r.summary()),
         state = esc(r.state.label()),
         repo = esc(&r.repo),
         kind = esc(r.kind.slug()),
+        when = esc(&when),
         text = esc(&r.text),
     );
 
@@ -186,8 +203,14 @@ pub fn detail(r: &Request) -> String {
 
     match (&r.spec, r.state) {
         (Some(spec), RequestState::AwaitingReview) => {
+            // The skip link is deliberately visible. Hiding the bypass does not
+            // remove it — flicking to the bottom is the bypass and is always
+            // available — it only lets the system believe nobody used one. Naming
+            // the fast path makes taking it a small act of self-awareness.
             body.push_str(&format!(
-                "<h2>The drafted spec</h2><pre>{}</pre>{}",
+                "<h2>The drafted spec</h2>\
+                 <a class=\"skip\" href=\"#decide\">Skip to the decision ↓</a>\
+                 <pre>{}</pre>{}",
                 esc(spec),
                 review_actions(&r.id)
             ));
@@ -222,6 +245,73 @@ pub fn detail(r: &Request) -> String {
     shell(r.summary(), &body)
 }
 
+/// How many lines of a long spec the confirmation restates at each end.
+const EXTRACT_LINES: usize = 40;
+
+/// Split a spec into its opening and closing lines, and how many were elided.
+///
+/// The confirmation restates *both* ends rather than a summary: a summary of an
+/// artifact is a second artifact nobody verified, and approving it means
+/// approving something the developer did not read (spec 20).
+///
+/// The tail matters most. It is the part a flick-to-the-bottom reviewer nominally
+/// "reached", so reprinting it puts the end of the document in front of them a
+/// second time, in a different context.
+fn head_and_tail(spec: &str, n: usize) -> (String, String, usize) {
+    let lines: Vec<&str> = spec.lines().collect();
+    if lines.len() <= n * 2 {
+        return (spec.to_string(), String::new(), 0);
+    }
+    (
+        lines[..n].join("\n"),
+        lines[lines.len() - n..].join("\n"),
+        lines.len() - n * 2,
+    )
+}
+
+/// The confirmation page: restate what is being approved, and bind to its bytes.
+///
+/// The `digest` is carried in a hidden field and re-checked on submit by
+/// [`Store::approve`](crate::store::Store::approve). That is what turns a second
+/// tap from ceremony into a real guarantee: the approval attaches to the exact
+/// text shown here, so a redraft landing mid-review is refused rather than
+/// silently approved on the strength of reading the previous one.
+pub fn confirm_approve(r: &Request, spec: &str, digest: &str) -> String {
+    let (head, tail, elided) = head_and_tail(spec, EXTRACT_LINES);
+    let mut extract = format!("<pre>{}</pre>", esc(&head));
+    if elided > 0 {
+        extract.push_str(&format!(
+            "<p class=\"elided\">… {elided} lines not shown — they are in full on \
+             the page you came from …</p><pre>{}</pre>",
+            esc(&tail)
+        ));
+    }
+
+    shell(
+        "Confirm approval",
+        &format!(
+            "<h1>Approve this spec?</h1>\
+             <p>Approving settles <strong>{summary}</strong> for \
+             <strong>{repo}</strong>. The spec stays in the repository as the \
+             record of what was agreed. <strong>Nothing is built</strong> — you \
+             pick it up in your IDE when you choose to.</p>\
+             <h2>What you are approving</h2>{extract}\
+             <div class=\"decide\">\
+             <form method=\"post\" action=\"/request/{id}/approve/confirm\">\
+             <input type=\"hidden\" name=\"digest\" value=\"{digest}\">\
+             <button type=\"submit\">Yes — approve this spec</button></form>\
+             <form method=\"get\" action=\"/request/{id}\">\
+             <button type=\"submit\">No — take me back to read it</button></form>\
+             </div>\
+             <p class=\"meta\">Closing this page decides nothing.</p>",
+            summary = esc(r.summary()),
+            repo = esc(&r.repo),
+            id = esc(&r.id),
+            digest = esc(digest),
+        ),
+    )
+}
+
 /// Approve and send-back, as visually equal actions.
 ///
 /// Spec 20: a phone UI whose easiest action is a big green button, on an artifact
@@ -232,7 +322,7 @@ pub fn detail(r: &Request) -> String {
 fn review_actions(id: &str) -> String {
     let id = esc(id);
     format!(
-        "<h2>Your call</h2>\
+        "<div class=\"decide\" id=\"decide\"><h2>Your call</h2>\
          <form method=\"post\" action=\"/request/{id}/send-back\">\
          <label for=\"notes\">Send it back — what should change?</label>\
          <textarea id=\"notes\" name=\"notes\" required \
@@ -243,8 +333,23 @@ fn review_actions(id: &str) -> String {
          <form method=\"post\" action=\"/request/{id}/discard\">\
          <button type=\"submit\">Discard</button></form>\
          <p class=\"meta\">Leaving this page decides nothing — it will still be \
-         here.</p>"
+         here.</p></div>"
     )
+}
+
+/// A timestamp, as something a human reads.
+///
+/// Deliberately coarse. The reviewer's question is "is this fresh, or did it sit
+/// overnight?", which a relative age answers and a wall-clock time does not —
+/// the server has no idea what timezone the phone is in.
+fn ago(then_ms: u64, now_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(then_ms) / 1000;
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86_399 => format!("{} hr ago", secs / 3600),
+        _ => format!("{} days ago", secs / 86_400),
+    }
 }
 
 /// The enrolment page, shown to a browser that is not enrolled.
@@ -411,6 +516,209 @@ mod tests {
         r.spec = Some("# Spec".to_string());
         let html = detail(&r);
         assert!(html.contains("name=\"notes\" required"), "{html}");
+    }
+
+    #[test]
+    fn the_decision_comes_after_the_whole_artifact() {
+        // The one property document order actually gives: on a phone the
+        // controls are physically below the spec. Anchored on the *close* of the
+        // spec block — "after the opening tag" would pass with the buttons
+        // sitting in the middle of the document.
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# Spec\nline\nline".to_string());
+        let html = detail(&r);
+
+        let spec_ends = html.rfind("</pre>").unwrap();
+        assert!(spec_ends < html.find("/send-back").unwrap(), "{html}");
+        assert!(spec_ends < html.find("/approve").unwrap(), "{html}");
+    }
+
+    #[test]
+    fn the_detail_pages_approve_button_asks_rather_than_decides() {
+        // The mechanism is that /approve renders a confirmation. If the detail
+        // page ever posted straight to the committing route, the second step is
+        // gone and nothing in the routing tests would notice.
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# Spec".to_string());
+        let html = detail(&r);
+
+        assert!(html.contains("action=\"/request/r-1/approve\""), "{html}");
+        assert!(!html.contains("/approve/confirm"), "{html}");
+    }
+
+    #[test]
+    fn the_confirmation_restates_the_artifact_rather_than_only_asking_again() {
+        // A confirm page that says just "are you sure?" is ceremony: it adds a
+        // tap and no evidence. It has to put the text back in front of the
+        // reviewer.
+        let r = req("a thing");
+        let spec = "# Spec\nthe first line\nthe last line";
+        let html = confirm_approve(&r, spec, "deadbeef");
+
+        assert!(html.contains("the first line"), "{html}");
+        assert!(html.contains("the last line"), "{html}");
+        assert!(html.contains("a thing"), "names what is approved: {html}");
+        assert!(html.contains("alpha"), "names the repository: {html}");
+        assert!(html.contains("Nothing is built"), "{html}");
+    }
+
+    #[test]
+    fn the_confirmation_binds_the_approval_to_the_text_it_showed() {
+        // Without the digest the reviewer consents to "whatever is on disk when
+        // the POST lands", which a redraft arriving mid-review silently changes.
+        let r = req("a thing");
+        let html = confirm_approve(&r, "# Spec", "deadbeef");
+        assert!(
+            html.contains("name=\"digest\" value=\"deadbeef\""),
+            "{html}"
+        );
+        assert!(html.contains("/request/r-1/approve/confirm"), "{html}");
+    }
+
+    #[test]
+    fn the_confirmation_offers_a_way_out_that_weighs_the_same() {
+        // If "yes" is a button and "no" is a text link, the confirm page is a
+        // funnel rather than a decision.
+        let r = req("a thing");
+        let html = confirm_approve(&r, "# Spec", "deadbeef");
+
+        let buttons: Vec<&str> = html
+            .match_indices("<button")
+            .map(|(i, _)| &html[i..])
+            .collect();
+        assert_eq!(buttons.len(), 2, "confirm and go back: {html}");
+        for b in buttons {
+            let tag = &b[..b.find('>').unwrap()];
+            assert_eq!(tag, "<button type=\"submit\"", "styled differently: {tag}");
+        }
+        assert!(html.contains("decides nothing"), "{html}");
+    }
+
+    #[test]
+    fn a_long_spec_is_restated_at_both_ends_with_the_gap_named() {
+        // The tail matters most: it is what a flick-to-the-bottom reviewer
+        // nominally reached, so reprinting it is the point. And the elision is
+        // stated rather than silent — a truncation nobody mentions reads as the
+        // whole document.
+        let spec: String = (1..=200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let r = req("a thing");
+        let html = confirm_approve(&r, &spec, "d");
+
+        assert!(html.contains("line 1\n"), "the head: {html}");
+        assert!(html.contains("line 200"), "the tail: {html}");
+        assert!(!html.contains("line 100"), "the middle IS elided");
+        assert!(html.contains("120 lines not shown"), "{html}");
+        // And the elision points at where the whole text still is, so the
+        // reviewer is not left thinking this extract was all there was.
+        assert!(html.contains("page you came from"), "{html}");
+    }
+
+    #[test]
+    fn a_short_spec_is_shown_whole_with_no_elision_marker() {
+        let r = req("a thing");
+        let html = confirm_approve(&r, "# Spec\nshort", "d");
+        assert!(html.contains("short"), "{html}");
+        assert!(!html.contains("not shown"), "nothing was elided: {html}");
+    }
+
+    #[test]
+    fn head_and_tail_never_drops_or_duplicates_a_line() {
+        // An off-by-one here would either hide a line the reviewer needs or show
+        // one twice, and the elided count would lie about which.
+        for len in [0usize, 1, 5, 79, 80, 81, 200] {
+            let spec: String = (0..len)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (head, tail, elided) = head_and_tail(&spec, EXTRACT_LINES);
+            let shown = head.lines().count() + tail.lines().count();
+            assert_eq!(shown + elided, len, "len {len}");
+        }
+    }
+
+    #[test]
+    fn nothing_in_the_review_path_can_fail_closed() {
+        // Why a CSS scroll-reveal was rejected: a control hidden until some
+        // technique fires is a control that is permanently unreachable where the
+        // technique is unsupported — `animation-timeline` is Chromium-only, so on
+        // every iOS Safari the gate would be bricked and the run parked forever.
+        // Unreachable is strictly worse than reachable-without-ceremony.
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# Spec".to_string());
+
+        for html in [detail(&r), confirm_approve(&r, "# Spec", "d")] {
+            for hazard in [
+                "animation-timeline",
+                "scroll-timeline",
+                "pointer-events: none",
+                "opacity: 0",
+                "opacity:0",
+                "display: none",
+                "visibility: hidden",
+                ":target",
+            ] {
+                assert!(
+                    !html.contains(hazard),
+                    "{hazard}: a control depending on this is unreachable where \
+                     it is unsupported"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_page_says_when_it_was_filed_and_drafted() {
+        // Half of spec 20's provenance. The reviewer's question is "is this
+        // fresh, or did it sit overnight?" — which a relative age answers and a
+        // wall-clock time does not, since the server has no idea what timezone
+        // the phone is in.
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# Spec".to_string());
+        r.filed_ms = crate::store::now_ms() - 7_200_000;
+        r.drafted_ms = Some(crate::store::now_ms() - 120_000);
+
+        let html = detail(&r);
+        assert!(html.contains("filed 2 hr ago"), "{html}");
+        assert!(html.contains("drafted 2 min ago"), "{html}");
+    }
+
+    #[test]
+    fn an_undrafted_request_shows_no_drafted_time() {
+        let r = req("a thing");
+        let html = detail(&r);
+        assert!(html.contains("filed "), "{html}");
+        assert!(!html.contains("drafted "), "there is no draft yet: {html}");
+    }
+
+    #[test]
+    fn ages_read_the_way_a_human_would_say_them() {
+        let now = 10_000_000_000u64;
+        assert_eq!(ago(now, now), "just now");
+        assert_eq!(ago(now - 59_000, now), "just now");
+        assert_eq!(ago(now - 60_000, now), "1 min ago");
+        assert_eq!(ago(now - 3_600_000, now), "1 hr ago");
+        assert_eq!(ago(now - 172_800_000, now), "2 days ago");
+        // A clock that went backwards must not underflow into "584 million years".
+        assert_eq!(ago(now + 5_000, now), "just now");
+    }
+
+    #[test]
+    fn the_skip_link_is_visible_rather_than_hidden() {
+        // Hiding the bypass does not remove it — flicking to the bottom is the
+        // bypass — it only lets the system believe nobody used one.
+        let mut r = req("a thing");
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# Spec".to_string());
+        let html = detail(&r);
+        assert!(html.contains("href=\"#decide\""), "{html}");
+        assert!(html.contains("id=\"decide\""), "the anchor exists: {html}");
     }
 
     #[test]

@@ -33,7 +33,7 @@ no fifth and removes none:
 | --- | --- | --- |
 | **Approve** | Artifact accepted; the run returns to `Queued` for the next phase. | Yes |
 | **Send back** | Return to this or an earlier phase with feedback; the agent regenerates. | Yes — the primary corrective |
-| **Abort** | Stop the workflow; approved artifacts are kept. | Yes |
+| **Abort** | Stop the workflow; approved artifacts are kept. | As **Discard** — this surface drops the *request*, it does not stop a workflow |
 | **Revise** | The human edits the artifact text directly. | **No** — see below |
 
 `Revise` stays in the engine and is not offered here, which is not a mobile
@@ -67,12 +67,46 @@ that neither this spec nor [19](19-queue-and-runner.md) can wave through.
 Four concrete commitments, each aimed at the failure above:
 
 - **The artifact is the page.** Not a summary, not a model-written précis of the
-  model's own output, with approval below it. A summary of an artifact is a second
-  artifact nobody verified, and approving it means approving something the
-  developer did not read.
-- **Approve is not reachable without scrolling to the end.** Not a dark pattern —
-  the artifact is short by construction (each phase produces one compact document)
-  and reaching the bottom is the minimum evidence that the page was seen.
+  model's own output. A summary of an artifact is a second artifact nobody
+  verified, and approving it means approving something the developer did not read.
+
+  ✅ **Held**, and it survives the two-step below: the confirmation restates the
+  artifact's opening and closing lines **verbatim**, naming how many it omitted —
+  it never paraphrases. The decision now completes on a second page, so "approval
+  below it" is true of the first step; the artifact is still the only thing the
+  reviewer is shown.
+- **Approve is a deliberate two-step action, taken below the full artifact.**
+
+  ⚠️ **This bullet previously read "Approve is not reachable without scrolling to
+  the end … reaching the bottom is the minimum evidence that the page was seen."
+  That was false, and it is corrected here rather than implemented.** Reaching the
+  bottom is evidence that *a scroll gesture terminated at the bottom* — one flick,
+  under 300ms, nothing read.
+
+  This is not a limitation of building without JavaScript. An
+  `IntersectionObserver` on a sentinel element proves exactly the same thing and
+  no more. The gap between "the bottom was reached" and "the page was seen" is a
+  category gap, not a capability gap, and **no client-side mechanism closes it.**
+
+  What is built instead <!--@ crates/sc-server/src/page.rs -->:
+
+  - The decision controls sit after the *close* of the artifact block, so on a
+    phone they are physically below it. Asserted as an invariant, anchored on the
+    closing tag — "after the opening tag" would pass with the buttons mid-document.
+  - Approving requires confirming against a page that **restates** what is being
+    approved — the artifact's opening and closing lines verbatim, never a summary,
+    because a summary is a second artifact nobody verified.
+  - The confirmation **binds the approval to the exact bytes displayed**, by
+    carrying a digest that [`Store::approve`](../../crates/sc-server/src/store.rs)
+    re-checks. This is the part that earns the second step: it is not ceremony but
+    a real guarantee, and it closes a race described below.
+  - A **visible** "skip to the decision" link. Counter-intuitive and deliberate:
+    hiding the bypass does not remove it — flicking is the bypass, always
+    available — it only lets the system believe nobody took one.
+
+  **What the system may report is "a human confirmed this specific text", never
+  "a human read it."** That distinction is the whole point. A gate that overclaims
+  is the same failure as a gate that is skipped, and harder to notice.
 - **No bulk approve.** No "approve all remaining gates," no "approve and continue
   to done." Each gate is one decision. A control that clears four gates at once is
   a control that exists to skip reading four artifacts.
@@ -81,6 +115,78 @@ Four concrete commitments, each aimed at the failure above:
   a valid resting state ([19](19-queue-and-runner.md)); when the honest answer is
   "not on a phone, I'll read this properly later," the surface should make that the
   path of least resistance rather than making approval the easy way out.
+
+### What this does not achieve
+
+Stated plainly, because each one is a claim that would otherwise be made falsely:
+
+1. **Evidence of deliberate action, not evidence of reading.** See above. This is
+   the ceiling for any surface, not a shortfall of this one.
+2. **Approve remains cheaper than send-back.** Send-back requires typing a
+   non-empty note, enforced server-side; approve requires two taps. The asymmetry
+   runs the *wrong way* relative to this spec's aim. It is accepted because
+   send-back's friction is **productive** — the note grounds the redraft — whereas
+   manufactured approve-friction would be pure tax, and a tax people learn to pay
+   without thinking is exactly the reflex this spec exists to prevent.
+3. **A long artifact's elided middle is never re-shown.** The confirmation restates
+   both ends and names how many lines it omitted. The defence is this spec's own
+   premise — "short by construction" — which is an *assumption about model output,
+   not an enforced bound*. If drafted specs start running long, that premise should
+   be revisited rather than quietly relied upon.
+4. **Nothing prevents approving without loading the page at all.** The committing
+   route is reachable directly with a credential; the two-step makes that two
+   requests instead of one. **The gate is against thoughtlessness, never against
+   intent** — a developer determined to rubber-stamp their own queue can, and no
+   design here should pretend otherwise.
+
+### The race this closed
+
+Before the digest binding, `approve` settled whatever text was on disk when the
+request landed. A reviewer reading a spec on a train, while the daemon pushed a
+redraft, would approve the *new* text on the strength of having read the *old*.
+Consent was attached to an id rather than to bytes.
+
+This was a live defect in the shipped server, found while implementing this spec
+and fixed by the same mechanism — which is the argument for the second step being
+worth its cost.
+
+The check lives in the store rather than the route, so every caller of *this
+server's* store gets it. **The CLI and desktop gates do not inherit it**: they
+approve through `sc-workflow`'s `state.approve(Phase)`
+<!--@ crates/sc-workflow/src/state.rs -->, a different code path with no digest
+binding at all. The same race is therefore still open on those surfaces, and
+closing it there is separate work — worth doing, because a desktop reviewer
+reading while `queue serve` redrafts is in exactly the same position.
+
+**The binding covers approve alone.** Send-back and discard carry no digest and
+act on whatever is current. That asymmetry is deliberate rather than an oversight:
+neither one signs off text, and a note aimed at a superseded draft still grounds
+the redraft usefully. But it means the race is closed for *consent*, not for every
+decision on this surface.
+
+### On JavaScript and the CSP
+
+The surface is server-rendered HTML with **no script at all**, and the
+Content-Security-Policy is `default-src 'none'` <!--@ crates/sc-server/src/routes.rs -->.
+
+The reason to record is not "the trade was unfavourable" but **"the capability
+JavaScript would buy does not exist"**. Scroll detection proves nothing more than
+document order proves. There is no security cost worth paying for a capability
+that is not real, and stating it this way is what stops the question being
+reopened every time someone rediscovers `IntersectionObserver`.
+
+Two further reasons the line holds:
+
+- **Script and escaping are multiplicative defences today.** The artifact is
+  rendered as escaped text in a `<pre>`, and no script runs. If script ever ran, a
+  bug in the escaper would upgrade from "some angle brackets render wrong" to
+  "model-authored text influences a live script context" ([18](18-task-intake.md)).
+- **A CSS scroll-reveal is worse than either.** `animation-timeline: scroll()` is
+  Chromium-only and unsupported on every iOS Safari, where the un-animated state
+  *is* the initial state — so a control hidden until the technique fires becomes
+  **permanently unreachable**, bricking the gate on the platform this feature was
+  built for. A test asserts no control in the review path depends on it, or on
+  `opacity: 0`, `display: none`, `pointer-events: none`, or `:target`.
 
 > **On revise from a phone.** Editing a Markdown artifact on a touch keyboard is
 > miserable, and pretending otherwise produces worse artifacts. The mobile surface
@@ -132,10 +238,39 @@ submitted without it is refused, not merged.
   about a surprising artifact is "what did it read," and
   [19](19-queue-and-runner.md) guarantees the log exists to answer it.
 
-*Not built:* none of this exists. Rendering an artifact is the easy half; the
-work this spec actually implies is the send-back targeting lifted out of the
-desktop crate, the lease-aware arbitration, and the header and CSP hardening that
-rendering model-authored Markdown demands ([18](18-task-intake.md)).
+✅ **The queue and the artifact are built** <!--@ crates/sc-server/src/page.rs -->,
+along with the header and CSP hardening ([18](18-task-intake.md)).
+
+**Provenance is half built, and the half that is missing is the one this section
+argues for.**
+
+- ✅ *When* — the request's filing and drafting times, shown as relative ages
+  ("filed 2 hr ago · drafted 2 min ago"). Relative rather than wall-clock because
+  the server has no idea what timezone the phone is in, and the reviewer's actual
+  question is "is this fresh, or did it sit overnight?". The **server** stamps the
+  draft on receipt; the wire carries no timestamp, and a clock the daemon controls
+  is one this server cannot check.
+- ⬚ *Which agent profile* — **not built, and not approximable.** The daemon holds a
+  `&dyn ModelBackend` whose `name()` returns the constant `"openai-compat"` for a
+  local 4B and a Gemini planner alike, so it cannot make the very distinction this
+  section asks for; the real model string is private to the backend with no
+  accessor. Named profiles do not exist in any config or record —
+  [18](18-task-intake.md) already scopes that as separate work. Showing `name()`
+  here would be worse than showing nothing, because it would *look* like
+  provenance while telling the reviewer nothing.
+
+⬚ **The event log is not built, and there is nothing to expose.** There is no
+per-drafting-run log anywhere: `sc-workflow`'s event sinks sit on the *build*
+paths the daemon is structurally forbidden to reach ([19](19-queue-and-runner.md)),
+and the only place a real model name is persisted is `sc-model`'s transcript —
+one file per *process*, carrying no request id, written outside the repository.
+[19](19-queue-and-runner.md)'s promise that the drafting stream is teed to
+`.smart-coder/sessions/<id>.jsonl` is **aspirational for the daemon and not
+honoured today**. Delivering this bullet is new plumbing, not exposure of existing
+data, and it should not be scoped as if it were the latter.
+
+*Also not built:* the send-back targeting lifted out of the desktop crate, and the
+lease-aware arbitration.
 
 ## Anti-goals
 
@@ -162,9 +297,15 @@ rendering model-authored Markdown demands ([18](18-task-intake.md)).
   — not a new gating model.
 - Completes the loop opened by [18](18-task-intake.md) (intake) and
   [19](19-queue-and-runner.md) (execution): file, run, park, review, resume.
-- Inherits its entire security posture from [18](18-task-intake.md) — same token,
-  same bearer-on-write rule. Approval is a `POST`, so it is a bearer route, never
-  a link someone can be induced to follow.
+- Inherits its entire security posture from [18](18-task-intake.md). Approval is a
+  `POST`, never a link someone can be induced to follow — and now **two** POSTs,
+  the second bound to a content digest.
+
+  *Correction:* the "bearer-on-write" rule this line assumed is not what shipped.
+  A page with no script cannot set a header, and requiring one would mean
+  requiring script — the thing that makes rendering model-authored text
+  dangerous. The CSRF defence is `SameSite=Strict` plus `form-action 'self'`
+  instead, recorded as a deviation in [18](18-task-intake.md) rather than glossed.
 - Deliberately narrower than [12](12-platform-clients.md)'s desktop review: that
   surface has the screen for line-anchored comments on any artifact and full inline
   editing. This one optimises for the decision a phone can honestly support, and

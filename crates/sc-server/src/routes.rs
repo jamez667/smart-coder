@@ -19,7 +19,7 @@ use sc_daemon::IntakeKind;
 
 use crate::auth::{self, Caller, Credentials};
 use crate::ratelimit::{Bucket, RateLimiter};
-use crate::store::{new_id, Request, Store};
+use crate::store::{new_id, Request, RequestState, Store};
 
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
@@ -353,12 +353,25 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
 
         ("POST", p) if p.starts_with("/request/") => {
             let rest = p.trim_start_matches("/request/");
+            // `splitn(2, …)` leaves the remainder whole, so a two-segment verb
+            // like `approve/confirm` arrives intact.
             let mut parts = rest.splitn(2, '/');
             let id = parts.next().unwrap_or("");
             let verb = parts.next().unwrap_or("");
             let form = form_fields(&req.body);
+
+            // Asking is not deciding: this renders the confirmation and changes
+            // nothing. Handled apart from the others because it alone returns a
+            // page rather than a settled request.
+            if verb == "approve" {
+                return ask_to_approve(ctx, id);
+            }
+
             let outcome = match verb {
-                "approve" => ctx.store.approve(id),
+                "approve/confirm" => {
+                    let digest = form.get("digest").cloned().unwrap_or_default();
+                    ctx.store.approve(id, &digest)
+                }
                 "send-back" => {
                     let notes = form.get("notes").cloned().unwrap_or_default();
                     ctx.store.send_back(id, &notes)
@@ -374,6 +387,37 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
 
         _ => Res::html(404, crate::page::not_found()),
     }
+}
+
+/// Render the confirmation for an approval. **Changes nothing.**
+///
+/// The first of two deliberate steps (spec 20). It restates what is being
+/// approved and carries a digest of the exact text shown, which
+/// [`Store::approve`](crate::store::Store::approve) re-checks on submit — so the
+/// approval binds to bytes the reviewer saw rather than to whatever is on disk
+/// when the second POST lands.
+fn ask_to_approve(ctx: &mut Ctx<'_>, id: &str) -> Res {
+    let req = match ctx.store.get(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Res::html(404, crate::page::not_found()),
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if req.state != RequestState::AwaitingReview {
+        return Res::html(
+            400,
+            crate::page::message(&format!(
+                "This request is {} — only one awaiting review can be approved.",
+                req.state.label()
+            )),
+        );
+    }
+    let (Some(spec), Some(digest)) = (req.spec.clone(), req.spec_digest()) else {
+        return Res::html(
+            400,
+            crate::page::message("There is no drafted spec to approve yet."),
+        );
+    };
+    Res::html(200, crate::page::confirm_approve(&req, &spec, &digest))
 }
 
 /// File a request.
@@ -474,7 +518,7 @@ pub fn listing_order(mut all: Vec<Request>) -> Vec<Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{now_ms, RequestState};
+    use crate::store::now_ms;
     use std::path::PathBuf;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
@@ -769,10 +813,19 @@ mod tests {
         }
     }
 
+    /// Pull the digest out of a confirmation page's hidden field.
+    fn digest_from(html: &str) -> String {
+        let at = html
+            .find("name=\"digest\" value=\"")
+            .expect("the confirmation carries a digest");
+        let rest = &html[at + "name=\"digest\" value=\"".len()..];
+        rest[..rest.find('"').unwrap()].to_string()
+    }
+
     #[test]
-    fn approving_marks_it_ready_and_starts_nothing() {
-        // `Ready` is not `Done`: nothing was built, and the developer picks it up
-        // in their IDE on their own schedule.
+    fn approving_takes_two_deliberate_posts_and_the_first_decides_nothing() {
+        // Spec 20: approve is a deliberate action taken below the full artifact.
+        // The first POST asks; only the second settles.
         let mut f = Fixture::new("approve");
         let token = f.enrolled();
         let id = f.file(&token, "a+thing", "alpha");
@@ -780,9 +833,96 @@ mod tests {
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
 
-        let res = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
-        assert_eq!(res.status, 200, "{}", res.body);
+        let asked = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
+        assert_eq!(asked.status, 200, "{}", asked.body);
+        assert_eq!(
+            f.store.require(&id).unwrap().state,
+            RequestState::AwaitingReview,
+            "the first post asks, it does not decide"
+        );
+        assert!(asked.body.contains("/approve/confirm"), "{}", asked.body);
+
+        let digest = digest_from(&asked.body);
+        let settled = f.go(&Req::post(
+            &format!("/request/{id}/approve/confirm"),
+            &format!("digest={digest}"),
+        )
+        .with_cookie(&token));
+        assert_eq!(settled.status, 200, "{}", settled.body);
+        // `Ready` is not `Done`: nothing was built, and the developer picks it up
+        // in their IDE on their own schedule.
         assert_eq!(f.store.require(&id).unwrap().state, RequestState::Ready);
+    }
+
+    #[test]
+    fn an_approval_of_text_that_changed_under_the_reviewer_is_refused() {
+        // The reviewer opens v1 on a train; `queue serve` pushes a redraft while
+        // they read. Confirming must not settle v2 on the strength of having read
+        // v1 — consent attaches to bytes, not to an id.
+        let mut f = Fixture::new("stale");
+        let token = f.enrolled();
+        let id = f.file(&token, "a+thing", "alpha");
+        f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+        let v1 = serde_json::to_string(&DraftedSpec::new(&id, "# Version one", "specs/x")).unwrap();
+        f.go(&Req::post(&wire::route::drafted(&id), &v1).with_bearer(KEY));
+
+        let asked = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
+        let stale = digest_from(&asked.body);
+
+        // The daemon redrafts under them.
+        let v2 = serde_json::to_string(&DraftedSpec::new(&id, "# Version two", "specs/x")).unwrap();
+        f.go(&Req::post(&wire::route::drafted(&id), &v2).with_bearer(KEY));
+
+        let refused = f.go(&Req::post(
+            &format!("/request/{id}/approve/confirm"),
+            &format!("digest={stale}"),
+        )
+        .with_cookie(&token));
+        assert_eq!(refused.status, 400, "{}", refused.body);
+        assert!(refused.body.contains("changed"), "{}", refused.body);
+        assert_eq!(
+            f.store.require(&id).unwrap().state,
+            RequestState::AwaitingReview,
+            "left reviewable rather than half-decided"
+        );
+    }
+
+    #[test]
+    fn a_confirm_with_no_digest_at_all_is_refused() {
+        // The obvious bypass: skip the confirmation page and POST the committing
+        // route directly. It must not succeed by omission.
+        let mut f = Fixture::new("no-digest");
+        let token = f.enrolled();
+        let id = f.file(&token, "a+thing", "alpha");
+        f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+        let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
+        f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
+
+        for body in ["", "digest=", "digest=nonsense"] {
+            let res =
+                f.go(
+                    &Req::post(&format!("/request/{id}/approve/confirm"), body).with_cookie(&token)
+                );
+            assert_eq!(res.status, 400, "{body:?}: {}", res.body);
+        }
+        assert_eq!(
+            f.store.require(&id).unwrap().state,
+            RequestState::AwaitingReview
+        );
+    }
+
+    #[test]
+    fn asking_to_approve_something_with_no_draft_is_refused() {
+        // Approving a queued request would be signing off a spec that does not
+        // exist yet.
+        let mut f = Fixture::new("ask-nodraft");
+        let token = f.enrolled();
+        let id = f.file(&token, "a+thing", "alpha");
+
+        let res = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
+        assert_eq!(res.status, 400, "{}", res.body);
+        let missing = f.go(&Req::post("/request/nope/approve", "").with_cookie(&token));
+        assert_eq!(missing.status, 404);
     }
 
     #[test]
