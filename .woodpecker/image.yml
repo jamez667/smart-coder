@@ -13,6 +13,18 @@
 # not rebuild and republish the server's image — and vice versa. The filter is
 # what keeps living in one repository from meaning "every push runs everything".
 #
+# **Built with kaniko, not the host Docker daemon.** Mounting
+# `/var/run/docker.sock` needs `trusted.volumes` on the repository, and a
+# pipeline that can talk to the host daemon can start a privileged container and
+# own the machine — a large grant for building one small image, and one that
+# would extend to pull-request builds too. kaniko builds and pushes from
+# userspace with no daemon at all, so the pipeline needs no elevated trust.
+#
+# That was not a theoretical preference: with `volumes:` present, Woodpecker's
+# linter rejected **the whole push** before running anything, so between 31 July
+# and 1 August the fmt/clippy/test gate silently did not run either. A build that
+# needs privilege is a build that stops running.
+#
 # REQUIRED SECRET: `jcnash-woodpecker` — a GitHub token with `write:packages`;
 # a classic token with `write:packages` and `repo`, or a fine-grained PAT with
 # package write on this repo.
@@ -46,14 +58,10 @@ when:
 
 steps:
   - name: image
-    image: docker:27-cli
+    image: gcr.io/kaniko-project/executor:v1.23.2-debug
     environment:
       GITHUB_TOKEN:
         from_secret: jcnash-woodpecker
-    volumes:
-      # The agent's Docker socket. This box already runs Portainer, so a
-      # docker-in-docker service would be a second daemon for no reason.
-      - /var/run/docker.sock:/var/run/docker.sock
     commands:
       # Woodpecker's envsubst preprocessor does not understand shell parameter
       # expansion, so this uses only bare doubled refs ($$VAR) and plain `if`
@@ -78,24 +86,41 @@ steps:
           TAGS="main"
         fi
 
-        echo "$$GITHUB_TOKEN" | docker login ghcr.io -u "$$OWNER" --password-stdin
+        # kaniko authenticates from a Docker config file rather than a `login`
+        # subcommand — there is no daemon to log in to. The token is written to
+        # a file the executor reads and nothing else; it is not echoed.
+        mkdir -p /kaniko/.docker
+        AUTH=$$(printf '%s:%s' "$$OWNER" "$$GITHUB_TOKEN" | base64 | tr -d '\n')
+        printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$$AUTH" > /kaniko/.docker/config.json
 
-        BUILD_ARGS=""
+        DESTS=""
         for t in $$TAGS; do
-          BUILD_ARGS="$$BUILD_ARGS -t $$IMAGE:$$t"
-        done
-        docker build $$BUILD_ARGS .
-
-        for t in $$TAGS; do
-          docker push "$$IMAGE:$$t"
+          DESTS="$$DESTS --destination=$$IMAGE:$$t"
         done
 
-        # Prove the published image actually starts, rather than discovering it
-        # does not when Portainer pulls it. It must refuse to run without a key,
-        # and run with one.
-        FIRST=$$(echo $$TAGS | cut -d' ' -f1)
-        if docker run --rm "$$IMAGE:$$FIRST" 2>/dev/null; then
-          echo "the image started without SC_SERVER_DAEMON_KEY - it must refuse" >&2
-          exit 1
-        fi
-        echo "verified: refuses to start unconfigured"
+        # `--context` is the checkout Woodpecker already made, so .dockerignore
+        # applies exactly as it does locally. `--reproducible` strips timestamps
+        # so an unchanged source produces an unchanged digest.
+        /kaniko/executor \
+          --context="$$CI_WORKSPACE" \
+          --dockerfile="$$CI_WORKSPACE/Dockerfile" \
+          --reproducible \
+          --single-snapshot \
+          $$DESTS
+
+
+# **The smoke test moved out of CI, and that is a real loss worth naming.**
+#
+# The old pipeline ran the built image and asserted it refuses to start without
+# `SC_SERVER_DAEMON_KEY`. kaniko cannot do that — it has no daemon to run
+# anything — and a step that needs one would reintroduce the socket mount this
+# file exists to avoid.
+#
+# So the check now lives where the image is deployed rather than where it is
+# built. `crates/sc-server` has a unit test asserting the same refusal, which
+# catches the regression; what is no longer caught is a *packaging* fault that
+# leaves a correct binary unable to start. Run this after pulling a new tag:
+#
+#     docker run --rm ghcr.io/jamez667/sc-server:latest   # must print and exit 2
+#
+# A disabled step that looks like a gate would be worse than an absent one.
