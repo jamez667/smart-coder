@@ -1,90 +1,20 @@
-//! The browser surface: server-rendered HTML, no script at all.
+//! The private surface: the developer's own review pages.
 //!
-//! **Forms, not fetch.** The CSP forbids script outright (`default-src 'none'`),
-//! which is only possible because nothing here needs it. A page that needs script
-//! needs a CSP that permits script, and permitting script is what makes a rendered
+//! **Forms, not fetch, and no script at all.** These pages render drafted specs
+//! from *every* filer, so the argument that permits script on the public half —
+//! that a filer only ever sees their own — does not reach here. The CSP stays
+//! `default-src 'none'`, and permitting script is what would make a rendered
 //! model-authored spec dangerous.
 //!
 //! It also makes the surface work on a phone with a bad connection on a train,
 //! which is the situation this whole feature exists for.
-//!
-//! ## Everything model-authored is escaped
-//!
-//! A drafted spec is untrusted text: a model wrote it, and it may contain
-//! anything. It is rendered as **escaped text in a `<pre>`**, never as Markdown
-//! and never as HTML. That removes the whole class rather than filtering it — one
-//! remote image reference in a rendered spec is an exfiltration path, and a
-//! filter that has to be right every time eventually is not.
 
 use sc_proto::IntakeKind;
 
+use super::{ago, esc, kind_field, shell};
+
 use crate::account::Accounts;
 use crate::store::{Request, RequestState};
-
-/// Escape for HTML text content and attributes.
-///
-/// Applied to **everything** that did not come from this file. There is no
-/// "trusted" path: the request text was typed by a person on the internet and the
-/// spec was written by a model.
-pub fn esc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// The stylesheet. Inline, because the CSP allows no remote subresource and a
-/// separate file would be one more request on a bad connection.
-const STYLE: &str = "\
-:root { color-scheme: light dark; }
-* { box-sizing: border-box; }
-body { font: 16px/1.55 system-ui, -apple-system, 'Segoe UI', sans-serif;
-       margin: 0; padding: 1rem; max-width: 46rem; margin-inline: auto; }
-h1 { font-size: 1.3rem; margin: 0 0 1rem; }
-h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
-a { color: inherit; }
-form { margin: 0; }
-label { display: block; margin: .75rem 0 .25rem; font-weight: 600; font-size: .9rem; }
-textarea, input, select, button {
-  font: inherit; width: 100%; padding: .6rem; border-radius: .4rem;
-  border: 1px solid rgba(128,128,128,.5); background: transparent; color: inherit; }
-textarea { min-height: 7rem; resize: vertical; }
-button { cursor: pointer; margin-top: .75rem; font-weight: 600; }
-.row { display: flex; gap: .5rem; }
-.row > form { flex: 1; }
-.item { display: block; padding: .7rem; margin: .4rem 0; text-decoration: none;
-        border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; }
-.meta { font-size: .8rem; opacity: .7; }
-.tag { display: inline-block; font-size: .72rem; padding: .1rem .45rem;
-       border-radius: .8rem; border: 1px solid currentColor; opacity: .85; }
-pre { white-space: pre-wrap; word-wrap: break-word; padding: .8rem;
-      border: 1px solid rgba(128,128,128,.35); border-radius: .5rem;
-      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.note { padding: .7rem; border-left: 3px solid currentColor; opacity: .85;
-        font-size: .9rem; }
-.decide { margin-top: 1.5rem; padding-top: 1rem;
-          border-top: 1px solid rgba(128,128,128,.35); }
-.skip { display: block; font-size: .85rem; opacity: .7; margin: .5rem 0; }
-.elided { text-align: center; opacity: .6; font-size: .85rem;
-          padding: .4rem; font-style: italic; }
-";
-
-fn shell(title: &str, body: &str) -> String {
-    format!(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>{}</title><style>{STYLE}</style></head><body>{body}</body></html>",
-        esc(title)
-    )
-}
 
 /// The repositories offered in the form.
 ///
@@ -97,22 +27,6 @@ fn repo_field() -> String {
      <input id=\"repo\" name=\"repo\" required autocapitalize=\"off\" \
      autocorrect=\"off\" spellcheck=\"false\" placeholder=\"the name your daemon uses\">"
         .to_string()
-}
-
-fn kind_field() -> String {
-    // Driven by `IntakeKind::ALL`, so a kind added there appears here without
-    // anyone remembering to update a second list.
-    let mut opts = String::new();
-    for k in IntakeKind::ALL {
-        opts.push_str(&format!(
-            "<option value=\"{slug}\">{slug}</option>",
-            slug = esc(k.slug())
-        ));
-    }
-    format!(
-        "<label for=\"kind\">Kind</label>\
-         <select id=\"kind\" name=\"kind\">{opts}</select>"
-    )
 }
 
 /// The list, plus the form to file something new.
@@ -372,225 +286,6 @@ fn release_action(id: &str) -> String {
     )
 }
 
-/// A timestamp, as something a human reads.
-///
-/// Deliberately coarse. The reviewer's question is "is this fresh, or did it sit
-/// overnight?", which a relative age answers and a wall-clock time does not —
-/// the server has no idea what timezone the phone is in.
-fn ago(then_ms: u64, now_ms: u64) -> String {
-    let secs = now_ms.saturating_sub(then_ms) / 1000;
-    match secs {
-        0..=59 => "just now".to_string(),
-        60..=3599 => format!("{} min ago", secs / 60),
-        3600..=86_399 => format!("{} hr ago", secs / 3600),
-        _ => format!("{} days ago", secs / 86_400),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The public surface
-//
-// Rendered by functions of their own rather than by reusing the private pages
-// with fields hidden. Hoping every future edit remembers which fields are
-// public is the mistake `security_headers` was factored out to avoid — and the
-// fields that must never appear here are exactly the ones a careless edit would
-// add: `artifact_dir` is a path on the developer's machine, `note` carries
-// daemon failure text that names repositories, and `id` is enumerable.
-// ---------------------------------------------------------------------------
-
-/// Ask for a sign-in link.
-pub fn signin_page() -> String {
-    shell(
-        "Sign in",
-        "<h1>Sign in</h1>\
-         <p>Filing a request needs an email address — it is how you find your \
-         way back to what you filed, and it keeps this form from being a \
-         free-for-all.</p>\
-         <form method=\"post\" action=\"/public/signin\">\
-         <label for=\"email\">Email</label>\
-         <input id=\"email\" name=\"email\" type=\"email\" required \
-         autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
-         placeholder=\"you@example.com\">\
-         <button type=\"submit\">Email me a link</button></form>\
-         <p class=\"meta\">No password. We send a link that works once, for \
-         fifteen minutes.</p>",
-    )
-}
-
-/// Shown after asking for a link — **identical whatever actually happened**.
-///
-/// New address, existing account, revoked account, malformed input, over the
-/// outstanding cap: all land here. Only what gets *sent* differs, so the page
-/// cannot be used to discover whether an address has an account.
-pub fn signin_sent_page() -> String {
-    shell(
-        "Check your email",
-        "<h1>Check your email</h1>\
-         <p>If that address can receive mail, a sign-in link is on its way. It \
-         expires in fifteen minutes.</p>\
-         <p class=\"meta\">Nothing else has happened yet — the link is what \
-         signs you in.</p>",
-    )
-}
-
-/// The landing page a sign-in link opens. **Changes nothing.**
-///
-/// A GET here must be inert: mail scanners (Outlook Safe Links and friends)
-/// fetch every URL in a message, often within seconds, so a GET that spent the
-/// token would burn it before the human opened their inbox.
-///
-/// It renders the same form whether the token is valid, expired or fabricated.
-/// A 404 on an invalid one would be a free validity oracle — an attacker could
-/// test candidate tokens with a GET, which costs less budget than the POST.
-pub fn signin_confirm_page(token: &str) -> String {
-    shell(
-        "Confirm sign-in",
-        &format!(
-            "<h1>Confirm sign-in</h1>\
-             <p>Press the button to finish signing in on this device.</p>\
-             <form method=\"post\" action=\"/public/signin/{}\">\
-             <button type=\"submit\">Sign me in</button></form>\
-             <p class=\"meta\">If you did not ask for this, close the page — \
-             nothing happens until you press it.</p>",
-            esc(token)
-        ),
-    )
-}
-
-/// A link that could not be spent.
-pub fn signin_failed_page(already_used: bool) -> String {
-    // "Invalid link" to somebody whose sign-in just worked reads as a bug, so a
-    // second click is told apart from a forgery. That leaks only that a token
-    // once existed — and it was theirs.
-    let body = if already_used {
-        "<p class=\"note\">That link has already been used. You are probably \
-         signed in already — <a href=\"/public\">try filing something</a>.</p>"
-    } else {
-        "<p class=\"note\">That link is not valid any more. They expire after \
-         fifteen minutes.</p>"
-    };
-    shell(
-        "That link did not work",
-        &format!(
-            "<h1>That link did not work</h1>{body}\
-             <p><a href=\"/public/signin\">Ask for a new one</a></p>"
-        ),
-    )
-}
-
-/// The public filing form, plus what this filer has already sent.
-///
-/// **No repository field.** Public filings go to the repository the operator
-/// configured, so a stranger cannot aim work at one that was never nominated for
-/// public intake. Absent from the form *and* ignored in the body.
-pub fn public_file_page(mine: &[Request], show_spec: bool) -> String {
-    let mut items = String::new();
-    for r in crate::routes::listing_order(mine.to_vec()) {
-        items.push_str(&format!(
-            "<a class=\"item\" href=\"/public/request/{id}\">{summary}\
-             <div class=\"meta\"><span class=\"tag\">{state}</span> {kind}</div></a>",
-            id = esc(&r.id),
-            summary = esc(r.summary()),
-            state = esc(public_state_label(r.state)),
-            kind = esc(r.kind.slug()),
-        ));
-    }
-    if mine.is_empty() {
-        items.push_str("<p class=\"meta\">You have not filed anything yet.</p>");
-    }
-
-    shell(
-        "File a request",
-        &format!(
-            "<h1>File a request</h1>\
-             <form method=\"post\" action=\"/public\">\
-             <label for=\"text\">What needs doing?</label>\
-             <textarea id=\"text\" name=\"text\" required maxlength=\"{bytes}\" \
-             placeholder=\"Describe it the way you would to a colleague.\"></textarea>\
-             {kind}\
-             <button type=\"submit\">File it</button></form>\
-             <p class=\"meta\">Up to {words} words. Short is better — a spec is \
-             drafted from what you write, not copied from it.{spec_note}</p>\
-             <h2>What you have filed</h2>{items}\
-             <p class=\"meta\"><a href=\"/public/signout\">Sign out</a></p>",
-            bytes = crate::routes::MAX_BYTES,
-            words = crate::routes::MAX_WORDS,
-            kind = kind_field(),
-            spec_note = if show_spec {
-                " You will be able to read the spec that comes back."
-            } else {
-                ""
-            },
-            items = items,
-        ),
-    )
-}
-
-/// What a filer is told about a state.
-///
-/// Deliberately coarser than [`RequestState::label`]. A filer does not need to
-/// know that their request is being screened for spam — saying so invites
-/// gaming, and "queued" is true in the sense they care about. `Quarantined`
-/// likewise reads as waiting rather than as an accusation, since a human may yet
-/// release it.
-fn public_state_label(state: RequestState) -> &'static str {
-    match state {
-        RequestState::Screening | RequestState::Quarantined | RequestState::Queued => "received",
-        RequestState::Claimed => "being written up",
-        RequestState::AwaitingReview => "with a reviewer",
-        RequestState::Ready => "accepted",
-        RequestState::Discarded | RequestState::Failed => "closed",
-    }
-}
-
-/// One of a filer's own requests.
-///
-/// Renders **only** what is theirs to see: their own text, a coarse state, and —
-/// when the operator allows it — the drafted spec. Never `artifact_dir` (a path
-/// on the developer's machine), never `note` (daemon failure text naming
-/// repositories), never the repository name.
-pub fn public_detail(r: &Request, show_spec: bool) -> String {
-    let mut body = format!(
-        "<h1>{summary}</h1>\
-         <p class=\"meta\"><span class=\"tag\">{state}</span> {kind} · filed {when}</p>\
-         <h2>What you asked for</h2><pre>{text}</pre>",
-        summary = esc(r.summary()),
-        state = esc(public_state_label(r.state)),
-        kind = esc(r.kind.slug()),
-        when = esc(&ago(r.filed_ms, crate::store::now_ms())),
-        text = esc(&r.text),
-    );
-
-    match (&r.spec, show_spec) {
-        (Some(spec), true) => body.push_str(&format!(
-            "<h2>The spec that came back</h2><pre>{}</pre>",
-            esc(spec)
-        )),
-        (Some(_), false) => {
-            body.push_str("<p class=\"meta\">A spec has been written and is with a reviewer.</p>")
-        }
-        (None, _) => {}
-    }
-
-    body.push_str("<p><a href=\"/public\">Back</a></p>");
-    shell(r.summary(), &body)
-}
-
-/// Confirmation that a public request was filed.
-pub fn public_filed(r: &Request) -> String {
-    let body = if r.kind == IntakeKind::Feedback {
-        "<p>Thanks — that is recorded. Feedback is kept for the developer to \
-         read; it does not become a spec.</p>"
-            .to_string()
-    } else {
-        "<p>Filed. Come back to this page to see what happens to it.</p>".to_string()
-    };
-    shell(
-        "Filed",
-        &format!("<h1>Filed</h1>{body}<p><a href=\"/public\">Back</a></p>"),
-    )
-}
-
 /// Who can file, and the switch that stops them.
 ///
 /// Revoked accounts are **listed, not hidden** — a list that silently shrinks
@@ -703,40 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn a_page_references_nothing_remote() {
-        // The CSP forbids remote subresources; a page that needed one would be a
-        // page that does not render, which is worse than one that never asks.
-        //
-        // Every page belongs in this list. The public ones especially: they are
-        // the surface strangers see, and an omission here means the check
-        // silently stops covering the newest thing.
-        let pages = [
-            index(&[req("a thing")]),
-            detail(&req("a thing")),
-            enrol_page(),
-            enrolled_page(),
-            not_found(),
-            message("nope"),
-            signin_page(),
-            signin_sent_page(),
-            signin_confirm_page("abc123"),
-            signin_failed_page(true),
-            signin_failed_page(false),
-            public_file_page(&[req("a thing")], true),
-            public_detail(&req("a thing"), true),
-            public_filed(&req("a thing")),
-            accounts_page(&Accounts::default()),
-        ];
-        for p in pages {
-            assert!(!p.contains("http://"), "{p}");
-            assert!(!p.contains("https://"), "{p}");
-            assert!(!p.contains("<script"), "{p}");
-            assert!(!p.contains("<img"), "{p}");
-            assert!(!p.contains("<link"), "{p}");
-        }
-    }
-
-    #[test]
     fn a_drafted_spec_is_escaped_rather_than_rendered() {
         // A model wrote it and it may contain anything. Escaping removes the
         // whole class; a filter that has to be right every time eventually is not.
@@ -760,13 +421,6 @@ mod tests {
         let html = detail(&r);
         assert!(html.contains("&lt;b&gt;"), "{html}");
         assert!(!html.contains("<b>bold</b>"), "{html}");
-    }
-
-    #[test]
-    fn escaping_covers_every_character_that_matters() {
-        assert_eq!(esc("<&>\"'"), "&lt;&amp;&gt;&quot;&#39;");
-        // Ampersand first, or the escapes escape each other.
-        assert_eq!(esc("&lt;"), "&amp;lt;");
     }
 
     #[test]
@@ -993,18 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn ages_read_the_way_a_human_would_say_them() {
-        let now = 10_000_000_000u64;
-        assert_eq!(ago(now, now), "just now");
-        assert_eq!(ago(now - 59_000, now), "just now");
-        assert_eq!(ago(now - 60_000, now), "1 min ago");
-        assert_eq!(ago(now - 3_600_000, now), "1 hr ago");
-        assert_eq!(ago(now - 172_800_000, now), "2 days ago");
-        // A clock that went backwards must not underflow into "584 million years".
-        assert_eq!(ago(now + 5_000, now), "just now");
-    }
-
-    #[test]
     fn the_skip_link_is_visible_rather_than_hidden() {
         // Hiding the bypass does not remove it — flicking to the bottom is the
         // bypass — it only lets the system believe nobody used one.
@@ -1143,61 +785,6 @@ mod tests {
         assert!(html.contains("jo***@x.com"), "still listed: {html}");
         assert!(html.contains("revoked"), "{html}");
         assert!(!html.contains("/revoke\">"), "no button for it: {html}");
-    }
-
-    #[test]
-    fn the_public_form_offers_no_repository_field() {
-        // A stranger must not be able to aim work at a repository the operator
-        // did not nominate. Absent from the form, and ignored in the body.
-        let html = public_file_page(&[], true);
-        for path_ish in ["name=\"repo\"", "name=\"path\"", "name=\"workspace\""] {
-            assert!(!html.contains(path_ish), "{path_ish}: {html}");
-        }
-        assert!(html.contains("name=\"text\""), "{html}");
-        assert!(html.contains("name=\"kind\""), "{html}");
-    }
-
-    #[test]
-    fn a_filers_page_shows_nothing_about_the_developers_machine() {
-        // `artifact_dir` is a path on their machine; `note` carries daemon
-        // failure text that names repositories. Neither is the filer's business,
-        // and a shared renderer would eventually leak one.
-        let mut r = req("a thing");
-        r.state = RequestState::AwaitingReview;
-        r.spec = Some("# The spec".to_string());
-        r.artifact_dir = Some("specs/a-thing".to_string());
-        r.note = Some("could not draft: /home/dev/secret-repo is mid-rebase".to_string());
-
-        let html = public_detail(&r, true);
-        assert!(html.contains("# The spec"), "the spec is shown");
-        assert!(!html.contains("specs/a-thing"), "{html}");
-        assert!(!html.contains("secret-repo"), "{html}");
-        assert!(!html.contains("alpha"), "not even the repo name: {html}");
-    }
-
-    #[test]
-    fn a_filer_sees_no_spec_when_the_operator_turns_it_off() {
-        let mut r = req("a thing");
-        r.state = RequestState::AwaitingReview;
-        r.spec = Some("# Private details".to_string());
-
-        let html = public_detail(&r, false);
-        assert!(!html.contains("Private details"), "{html}");
-        assert!(html.contains("with a reviewer"), "but they know it moved");
-    }
-
-    #[test]
-    fn a_filer_is_not_told_their_request_was_screened_for_spam() {
-        // Saying so invites gaming, and "received" is true in the sense the
-        // filer cares about — a human may yet release it.
-        for state in [RequestState::Screening, RequestState::Quarantined] {
-            let mut r = req("a thing");
-            r.state = state;
-            let html = public_detail(&r, true);
-            assert!(!html.to_lowercase().contains("spam"), "{state:?}: {html}");
-            assert!(!html.contains("quarantin"), "{state:?}: {html}");
-            assert!(html.contains("received"), "{state:?}: {html}");
-        }
     }
 
     #[test]

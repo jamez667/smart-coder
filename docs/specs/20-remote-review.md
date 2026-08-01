@@ -88,7 +88,7 @@ Four concrete commitments, each aimed at the failure above:
   no more. The gap between "the bottom was reached" and "the page was seen" is a
   category gap, not a capability gap, and **no client-side mechanism closes it.**
 
-  What is built instead <!--@ crates/sc-server/src/page.rs -->:
+  What is built instead <!--@ crates/sc-server/src/page/private.rs -->:
 
   - The decision controls sit after the *close* of the artifact block, so on a
     phone they are physically below it. Asserted as an invariant, anchored on the
@@ -238,7 +238,7 @@ submitted without it is refused, not merged.
   about a surprising artifact is "what did it read," and
   [19](19-queue-and-runner.md) guarantees the log exists to answer it.
 
-✅ **The queue and the artifact are built** <!--@ crates/sc-server/src/page.rs -->,
+✅ **The queue and the artifact are built** <!--@ crates/sc-server/src/page/private.rs -->,
 along with the header and CSP hardening ([18](18-task-intake.md)).
 
 **Provenance is half built, and the half that is missing is the one this section

@@ -457,7 +457,7 @@ request path at all, because a request carries no path.
 broke the first half of that.** The server holds no configuration and no copy of
 the repository set — that is the property that makes it safe to expose — so it
 cannot render a picker. The *device* form asks for a free-text **name**
-<!--@ crates/sc-server/src/page.rs -->, and the closed set is enforced one hop
+<!--@ crates/sc-server/src/page -->, and the closed set is enforced one hop
 later, when the daemon resolves it. The **public** form has no repository field
 at all: a public filing takes `PUBLIC_REPO` from the server's own configuration
 <!--@ crates/sc-server/src/config.rs -->, so a stranger cannot name a repository
@@ -555,7 +555,7 @@ describing itself as SSE; the SSE frame helper is dead relative to the pages tha
 ship. A phone on a train loses its connection constantly, and polling reconnects by
 asking again, which is the failure mode that needs no code.
 
-✅ **Built** <!--@ crates/sc-server/src/page.rs -->, **with the transport
+✅ **Built** <!--@ crates/sc-server/src/page -->, **with the transport
 deviating**: the page is server-rendered HTML with **no script and no polling at
 all** — forms and links, refreshed by the developer pulling down.
 
