@@ -29,6 +29,7 @@
 pub mod account;
 pub mod auth;
 pub mod config;
+pub mod i18n;
 pub mod mail;
 pub mod page;
 pub mod ratelimit;
