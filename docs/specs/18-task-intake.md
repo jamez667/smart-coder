@@ -1,5 +1,14 @@
 # 18 — Task intake & the public surface
 
+> **The server described here ships from its own repository:**
+> [`smart-coder-web`](https://github.com/jamez667/smart-coder-web). Anchors that
+> name it resolve as **`unknown`** to this repository's traceability check — "we
+> could not look", never "we looked and it was fine"
+> <!--@ crates/sc-trace/src/resolve/path.rs -->. Verify them there.
+>
+> The daemon half — `queue link`, `queue serve`, the local queue — stays here,
+> and so does the protocol both ends share <!--@ crates/sc-proto/src/wire.rs -->.
+
 ## Principle
 
 A task can be filed from anywhere. **The work only ever happens on the machine
@@ -102,7 +111,7 @@ dodge: **a model may only *withhold* work from the queue, never introduce it.**
 The screener's verdict type has two variants and the parser's fallback is
 *admit*, so unreachable, timed out, garbled, wrong shape, no key configured —
 every unexpected outcome is indistinguishable from approval, by construction
-<!--@ crates/sc-server/src/screen.rs -->. Code admits; the model subtracts. And
+<!--@ smart-coder-web:crates/sc-server/src/screen.rs -->. Code admits; the model subtracts. And
 what it withholds is **quarantined, not deleted**: visible to the developer and
 released in one click.
 
@@ -148,7 +157,7 @@ member of the public who may file and read their own requests and nothing else.
 
 ### The public → server
 
-✅ **Built** <!--@ crates/sc-server/src/account.rs -->. The filing form is
+✅ **Built** <!--@ smart-coder-web:crates/sc-server/src/account.rs -->. The filing form is
 reachable **with no credential at all**; reviewing stays behind device
 enrolment. This is a real move of the trust boundary, so what makes it
 defensible is worth stating rather than assuming.
@@ -179,7 +188,7 @@ what is *sent* differs, so the surface cannot be used to discover who has an
 account. A revoked account is sent **nothing at all**: a "your account was
 revoked" mail is one an attacker can trigger at a victim's address.
 
-**The email body is fixed text with one URL in it** <!--@ crates/sc-server/src/mail.rs -->.
+**The email body is fixed text with one URL in it** <!--@ smart-coder-web:crates/sc-server/src/mail.rs -->.
 No request text, no name, nothing a stranger typed. That is what separates a
 bounded notification mailer from a usable relay, and it costs nothing — the
 person who asked for the link knows why. The **outstanding-link cap** is the real
@@ -199,7 +208,7 @@ The filer's page withholds `artifact_dir` (a path on the developer's machine),
 **not the spec body**. Turn it off for a repository whose contents should not be
 described to strangers.
 
-✅ **Revocation has a surface** <!--@ crates/sc-server/src/routes.rs -->:
+✅ **Revocation has a surface** <!--@ smart-coder-web:crates/sc-server/src/routes.rs -->:
 `/accounts` lists who can file and one POST stops an account, ending every
 session it holds at once. Revoked accounts stay listed rather than vanishing —
 a list that silently shrinks cannot answer "did I already deal with that?".
@@ -273,13 +282,13 @@ minted for anything longer. **No credential on this path is written to that file
 > no-referrer`, `Cache-Control: no-store`, and a CSP that forbids remote
 > subresources. None of these headers exist in `sc-web` today.
 >
-> ✅ **Built** <!--@ crates/sc-server/src/routes.rs -->. All three are returned
+> ✅ **Built** <!--@ smart-coder-web:crates/sc-server/src/routes.rs -->. All three are returned
 > from one function and written on **every** response, because a header added per
 > route is a header eventually missing from one. Beyond them, a drafted spec is
 > rendered as escaped text in a `<pre>` — never as Markdown and never as HTML —
 > which removes the class rather than filtering it.
 
-✅ **Built** <!--@ crates/sc-server/src/auth.rs -->, with two deviations recorded
+✅ **Built** <!--@ smart-coder-web:crates/sc-server/src/auth.rs -->, with two deviations recorded
 below.
 
 Credentials are **hashed at rest** — SHA-256 of each device token, never the
@@ -309,7 +318,7 @@ URL at all, so there is nothing to exchange and nothing to leak into a log.
 carries only `repos`.
 
 *Not built:* **revocation has primitives but no surface.** `revoke` and the device
-list exist <!--@ crates/sc-server/src/auth.rs --> and are tested, but no route
+list exist <!--@ smart-coder-web:crates/sc-server/src/auth.rs --> and are tested, but no route
 reaches them — so the lost-phone case that *justifies* per-device credentials
 cannot yet be acted on without editing `credentials.json` on the volume by hand.
 The argument for per-device credentials is only half-delivered until that route
@@ -339,7 +348,7 @@ A request is a small, deliberately boring record:
 Three of these are closed sets, and that is the security-relevant part.
 
 A filed request can also be **discarded** from the surface
-<!--@ crates/sc-server/src/routes.rs -->, which drops it before approval. That is
+<!--@ smart-coder-web:crates/sc-server/src/routes.rs -->, which drops it before approval. That is
 a queue operation on the request, not a fifth gate decision — [19](19-queue-and-runner.md)
 already separates the two — so [20](20-remote-review.md)'s four review decisions
 are unchanged by it.
@@ -385,10 +394,10 @@ request path at all, because a request carries no path.
 broke the first half of that.** The server holds no configuration and no copy of
 the repository set — that is the property that makes it safe to expose — so it
 cannot render a picker. The *device* form asks for a free-text **name**
-<!--@ crates/sc-server/src/page.rs -->, and the closed set is enforced one hop
+<!--@ smart-coder-web:crates/sc-server/src/page.rs -->, and the closed set is enforced one hop
 later, when the daemon resolves it. The **public** form has no repository field
 at all: a public filing takes `PUBLIC_REPO` from the server's own configuration
-<!--@ crates/sc-server/src/config.rs -->, so a stranger cannot name a repository
+<!--@ smart-coder-web:crates/sc-server/src/config.rs -->, so a stranger cannot name a repository
 and the public surface serves exactly one. Asserted as *ignored*, not merely
 hidden — a repo submitted in the body is discarded.
 
@@ -483,7 +492,7 @@ describing itself as SSE; the SSE frame helper is dead relative to the pages tha
 ship. A phone on a train loses its connection constantly, and polling reconnects by
 asking again, which is the failure mode that needs no code.
 
-✅ **Built** <!--@ crates/sc-server/src/page.rs -->, **with the transport
+✅ **Built** <!--@ smart-coder-web:crates/sc-server/src/page.rs -->, **with the transport
 deviating**: the page is server-rendered HTML with **no script and no polling at
 all** — forms and links, refreshed by the developer pulling down.
 
@@ -517,7 +526,7 @@ wasted requests: a request filed on the train would wait an interval for no reas
 WebSockets and SSE were rejected for the machinery they add to solve a problem
 long-polling already solves at this scale.
 
-✅ **Built** <!--@ crates/sc-server/src/serve.rs -->. The server holds an idle
+✅ **Built** <!--@ smart-coder-web:crates/sc-server/src/serve.rs -->. The server holds an idle
 poll open for `POLL_TIMEOUT`, re-checking every 250ms so a request filed
 mid-poll is picked up in well under a second rather than waiting out the window.
 The protocol constants are shared with the daemon <!--@ crates/sc-proto/src/wire.rs -->
@@ -530,7 +539,7 @@ dependency is `serde` — and `sc-daemon` re-exports them, so nothing in this
 workspace changed at its call sites.
 
 The move earns its keep twice. **`sc-server` now depends on `sc-proto` and
-nothing else** <!--@ crates/sc-server/Cargo.toml -->: no `sc-daemon`, and through
+nothing else** <!--@ smart-coder-web:crates/sc-server/Cargo.toml -->: no `sc-daemon`, and through
 it no `sc-model`, no `sc-workflow`, no `sc-core`. The claim that no model is
 anywhere near the public server becomes *literally* true rather than true in
 spirit, and the image build stops compiling the entire local agent to obtain two
@@ -549,16 +558,16 @@ meant to run for weeks.
 ## Deployment
 
 **A separate Docker image, installed in Portainer on its own.**
-<!--@ deploy/sc-server.stack.yml --> It shares a repository with the rest of this
+<!--@ smart-coder-web:deploy/sc-server.stack.yml --> It shares a repository with the rest of this
 workspace and nothing else: no dependency on the desktop client, the daemon, or a
 model, and no reason for a change to any of them to redeploy it.
 
 - **One port, one volume.** All state — requests, drafted specs, credentials —
-  lives under a single directory <!--@ crates/sc-server/src/store.rs -->. State
+  lives under a single directory <!--@ smart-coder-web:crates/sc-server/src/store.rs -->. State
   split across paths is a footgun, because the backup that misses one looks like
   it worked.
 - **Configured entirely from environment variables**
-  <!--@ crates/sc-server/src/config.rs -->, because a Portainer stack editor is
+  <!--@ smart-coder-web:crates/sc-server/src/config.rs -->, because a Portainer stack editor is
   where a user configures a container. A config file baked into an image cannot
   be edited without rebuilding, and mounting one to override it makes two sources
   of truth.
@@ -580,7 +589,7 @@ model, and no reason for a change to any of them to redeploy it.
   constructs a spec-only pipeline, so the later phases are *unreachable* rather
   than declined ([19](19-queue-and-runner.md)).
 
-  ✅ **Held** <!--@ crates/sc-server/src/routes.rs -->. The server holds text: it
+  ✅ **Held** <!--@ smart-coder-web:crates/sc-server/src/routes.rs -->. The server holds text: it
   has no repository, no path to one, no model, and no way to reach the daemon —
   the daemon dials *out*. The record has no path field, so traversal is
   unreachable rather than mitigated, and a test asserts the build-ish routes 404.

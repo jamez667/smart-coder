@@ -236,6 +236,28 @@ and was hard-won: **a check that cannot determine something must say so, not gue
   never counted as passing. Collapsing `UNKNOWN` into `OK` is how a checker starts
   lying quietly.
 
+### A claim about another repository
+
+✅ **Built** <!--@ crates/sc-trace/src/resolve/path.rs -->. An anchor may name a
+sibling repo — `<!--@ smart-coder-web:crates/… -->` — and resolves `UNKNOWN`.
+
+Not a special case invented for convenience: the hosted intake surface ships from
+its own repository ([18](18-task-intake.md)), and specs 18 and 20 still govern it.
+The alternatives were both worse than admitting the limit. **Deleting those
+anchors** loses the claim entirely, which is the drift this spec exists to catch,
+arrived at by tidying. **Leaving them pointing at paths that are not here**
+reports twenty-one `BROKEN`s — and a check that cries wolf twenty-one times is a
+check somebody switches off, which is the failure mode
+[13](13-compliance-evidence.md) warns about in its own domain.
+
+`UNKNOWN` is the honest answer because it is *literally* true: this checker reads
+one working tree. It does not gate, it is never counted as passing, and the
+report says so in the same line — "the checker could not look … not a pass".
+
+A cross-repo anchor stays `UNKNOWN` **even when a path of that name happens to
+exist here**, so the answer cannot depend on a coincidence of local layout. The
+claim is verified by running the check in the repository that owns the code.
+
 There is no single headline score. A "94% traceable" number invites exactly the
 misreading [13](13-compliance-evidence.md) refuses — the 6% is where the drift is.
 Reporting *counts* per status is fine and useful, in the same way that spec's

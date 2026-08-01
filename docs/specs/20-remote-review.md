@@ -1,5 +1,11 @@
 # 20 — Remote review & approval
 
+> **The review surface ships from
+> [`smart-coder-web`](https://github.com/jamez667/smart-coder-web).** Anchors
+> naming it resolve as `unknown` here — this checker reads one working tree, and
+> saying so is more honest than either deleting the claim or reporting a false
+> break ([18](18-task-intake.md)).
+
 ## Principle
 
 **A gate reached from a phone is the same gate.**
@@ -88,7 +94,7 @@ Four concrete commitments, each aimed at the failure above:
   no more. The gap between "the bottom was reached" and "the page was seen" is a
   category gap, not a capability gap, and **no client-side mechanism closes it.**
 
-  What is built instead <!--@ crates/sc-server/src/page.rs -->:
+  What is built instead <!--@ smart-coder-web:crates/sc-server/src/page.rs -->:
 
   - The decision controls sit after the *close* of the artifact block, so on a
     phone they are physically below it. Asserted as an invariant, anchored on the
@@ -97,8 +103,8 @@ Four concrete commitments, each aimed at the failure above:
     approved — the artifact's opening and closing lines verbatim, never a summary,
     because a summary is a second artifact nobody verified.
   - The confirmation **binds the approval to the exact bytes displayed**, by
-    carrying a digest that [`Store::approve`](../../crates/sc-server/src/store.rs)
-    re-checks. This is the part that earns the second step: it is not ceremony but
+    carrying a digest that `Store::approve`
+    <!--@ smart-coder-web:crates/sc-server/src/store.rs --> re-checks. This is the part that earns the second step: it is not ceremony but
     a real guarantee, and it closes a race described below.
   - A **visible** "skip to the decision" link. Counter-intuitive and deliberate:
     hiding the bypass does not remove it — flicking is the bypass, always
@@ -167,7 +173,7 @@ decision on this surface.
 ### On JavaScript and the CSP
 
 The surface is server-rendered HTML with **no script at all**, and the
-Content-Security-Policy is `default-src 'none'` <!--@ crates/sc-server/src/routes.rs -->.
+Content-Security-Policy is `default-src 'none'` <!--@ smart-coder-web:crates/sc-server/src/routes.rs -->.
 
 The reason to record is not "the trade was unfavourable" but **"the capability
 JavaScript would buy does not exist"**. Scroll detection proves nothing more than
@@ -238,7 +244,7 @@ submitted without it is refused, not merged.
   about a surprising artifact is "what did it read," and
   [19](19-queue-and-runner.md) guarantees the log exists to answer it.
 
-✅ **The queue and the artifact are built** <!--@ crates/sc-server/src/page.rs -->,
+✅ **The queue and the artifact are built** <!--@ smart-coder-web:crates/sc-server/src/page.rs -->,
 along with the header and CSP hardening ([18](18-task-intake.md)).
 
 **Provenance is half built, and the half that is missing is the one this section

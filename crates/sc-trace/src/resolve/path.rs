@@ -3,12 +3,27 @@
 //! The simplest and most robust anchor, and deliberately **language-agnostic** —
 //! a spec governing a config file, an HTML template or a TOML pack is checkable
 //! exactly like one governing Rust (spec 17). There is no parsing here, only a
-//! filesystem question, so there is no case where the checker is limited and
-//! therefore no `Unknown` outcome.
+//! filesystem question.
+//!
+//! ## Claims about another repository
+//!
+//! An anchor may name a sibling repository: `<!--@ smart-coder-web:crates/… -->`.
+//! Some of this project's specs govern code that ships from elsewhere — the
+//! hosted intake surface is its own repo — and the alternatives were both worse
+//! than admitting it. Deleting those anchors loses the claim; pointing them at a
+//! path that is not here reports `Broken`, and twenty false alarms is how a
+//! check gets switched off.
+//!
+//! Such an anchor resolves [`Unknown`](crate::status::ClaimStatus::Unknown):
+//! **"we could not look", never "we looked and it was fine"**. It does not gate,
+//! and it is never counted as passing.
 
 use std::path::Path;
 
 use super::{Located, Resolution};
+
+/// Separates a repository name from the path within it.
+const REPO_SEP: char = ':';
 
 /// Does `rel` exist under `root`?
 ///
@@ -16,6 +31,14 @@ use super::{Located, Resolution};
 /// is making a real claim about a real thing, and rejecting it would push authors
 /// toward naming an arbitrary file inside it instead.
 pub fn resolve(rel: &str, root: &Path) -> Resolution {
+    // A claim about a sibling repository. This checker reads one working tree, so
+    // it cannot answer — and saying so is the whole point of `Unknown`.
+    if let Some((repo, path)) = rel.split_once(REPO_SEP) {
+        return Resolution::unknown(format!(
+            "{path} lives in {repo}, which this checker cannot read — verify it there"
+        ));
+    }
+
     // Reject traversal rather than following it. An anchor is a claim about this
     // repository; `../` leaves it, and answering for something outside the
     // workspace would be a claim the checker has no business making.
@@ -37,6 +60,33 @@ mod tests {
     use super::*;
     use crate::status::ClaimStatus;
     use crate::test_support::{repo_root, temp_repo, write};
+
+    #[test]
+    fn a_claim_about_another_repository_is_unknown_not_broken() {
+        // Some specs govern code that ships from a sibling repo. Reporting those
+        // as broken would be twenty false alarms, which is how a check gets
+        // switched off — and reporting them as `Ok` would be a lie.
+        let root = temp_repo("cross-repo");
+        let r = resolve("smart-coder-web:crates/sc-server/src/routes.rs", &root);
+
+        assert_eq!(r.status, ClaimStatus::Unknown);
+        let note = r.note.clone().unwrap_or_default();
+        assert!(note.contains("smart-coder-web"), "{note}");
+        assert!(note.contains("cannot read"), "{note}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cross_repo_anchor_is_unknown_even_if_the_path_happens_to_exist_here() {
+        // Otherwise the answer depends on a coincidence of layout: the same
+        // anchor would pass in one checkout and fail in another.
+        let root = temp_repo("cross-repo-collide");
+        write(&root, "crates/sc-proto/src/lib.rs", "// here too");
+
+        let r = resolve("smart-coder-web:crates/sc-proto/src/lib.rs", &root);
+        assert_eq!(r.status, ClaimStatus::Unknown);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn an_existing_path_resolves() {
