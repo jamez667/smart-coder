@@ -760,8 +760,26 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str) -> Res {
         }
     }
     let id = match accounts.by_email(&email_hash) {
+        // Signing in again as somebody who already has an account creates
+        // nothing, so the ceiling below never blocks an existing filer.
         Some(a) => a.id.clone(),
-        None => accounts.create(&email_hash, &email_hint, ctx.now_ms).id,
+        None => {
+            // What the per-account filing cap rests on. An id an attacker cannot
+            // *vary* is one they can **re-mint**: a script with a hundred
+            // disposable addresses would otherwise hold a hundred budgets.
+            let cap = ctx.public.map(|p| p.max_accounts).unwrap_or(0);
+            if accounts.accounts.len() >= cap {
+                // Logged for the operator, because a signup wall is something
+                // they need to know they have hit — the page below says only
+                // that it did not work.
+                eprintln!(
+                    "signup refused: {} accounts exist, the limit is {cap}",
+                    accounts.accounts.len()
+                );
+                return Res::html(200, crate::page::signin_failed_page(false));
+            }
+            accounts.create(&email_hash, &email_hint, ctx.now_ms).id
+        }
     };
     let session = accounts.open_session(&id, ctx.now_ms);
     if let Err(e) = ctx.store.put_accounts(&accounts) {
@@ -826,7 +844,49 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
         return Res::html(400, crate::page::message(&msg));
     }
 
-    let request = Request::public(new_id(), text, &repo, kind, account_id, screened);
+    // The ceiling on model spend. Every filing that clears the screener costs a
+    // full drafting run on the developer's machine, and the per-credential rate
+    // limit is no defence against something that expensive.
+    //
+    // Counted and written **under the same lock** the account paths hold.
+    // Without it the count-then-write is a race: a filer holding two sessions,
+    // or one script issuing parallel POSTs, would have every request read the
+    // same pre-write total and every one of them pass — an overshoot bounded by
+    // concurrency rather than by the cap.
+    //
+    // Checked *before* the record is written, so a refused filing costs a
+    // directory read and nothing else.
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    let since = ctx.now_ms.saturating_sub(crate::config::FILING_WINDOW_MS);
+    match ctx.store.filed_since(account_id, since) {
+        Ok(n) if n >= public.max_daily_filings => {
+            return Res::html(
+                429,
+                crate::page::message(&format!(
+                    "That is {n} requests in a day, which is the limit. Each one is \
+                     written up by hand on someone's machine, so the cap is there to \
+                     keep that manageable — try again tomorrow, or say the rest in a \
+                     request you have already filed."
+                )),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => return error(500, &e.to_string()),
+    }
+
+    // Stamped from the handler's clock, which is the one the cap above measures
+    // against — two clock sources in one decision is a window that never quite
+    // lines up with the records it counts.
+    let request = Request::public(
+        new_id(),
+        text,
+        &repo,
+        kind,
+        account_id,
+        screened,
+        ctx.now_ms,
+    );
     match ctx.store.put(&request) {
         Ok(()) => Res::html(200, crate::page::public_filed(&request)),
         Err(e) => error(500, &e.to_string()),
@@ -1057,8 +1117,19 @@ mod tests {
                     model: "test-model".into(),
                 }),
                 max_outstanding_links: 200,
+                max_daily_filings: crate::config::DEFAULT_MAX_DAILY_FILINGS,
+                max_accounts: crate::config::DEFAULT_MAX_ACCOUNTS,
                 show_spec: true,
             });
+            self
+        }
+
+        /// Tighten the caps, so a test can reach them without filing twenty.
+        fn with_caps(mut self, daily: usize, accounts: usize) -> Fixture {
+            if let Some(p) = self.public.as_mut() {
+                p.max_daily_filings = daily;
+                p.max_accounts = accounts;
+            }
             self
         }
 
@@ -1962,6 +2033,225 @@ mod tests {
         ] {
             assert!(named.contains(&required));
         }
+    }
+
+    #[test]
+    fn an_account_cannot_file_past_its_daily_cap() {
+        // The ceiling on model spend. Every filing that clears the screener
+        // costs a full drafting run on the developer's machine, and 240/min is
+        // no defence against something that expensive.
+        let mut f = Fixture::new("daily-cap")
+            .with_public(false)
+            .with_caps(3, 100);
+        let session = f.signed_in("jo@x.com");
+
+        for i in 0..3 {
+            let res = f.go(
+                &Req::post(public_route::FILE, &format!("text=thing+{i}&kind=bug"))
+                    .with_cookie(&session),
+            );
+            assert_eq!(res.status, 200, "filing {i}: {}", res.body);
+        }
+
+        let refused = f
+            .go(&Req::post(public_route::FILE, "text=one+too+many&kind=bug").with_cookie(&session));
+        assert_eq!(refused.status, 429, "{}", refused.body);
+        assert!(refused.body.contains("limit"), "{}", refused.body);
+        assert_eq!(f.store.all().unwrap().len(), 3, "nothing extra was written");
+    }
+
+    #[test]
+    fn the_daily_cap_counts_filings_not_survivors() {
+        // Discarding a request must not free up budget, or file-then-discard is
+        // a way around the limit. The cost being capped is the *filing*.
+        let mut f = Fixture::new("cap-counts")
+            .with_public(false)
+            .with_caps(2, 100);
+        let session = f.signed_in("jo@x.com");
+
+        f.go(&Req::post(public_route::FILE, "text=first&kind=bug").with_cookie(&session));
+        let id = f.store.all().unwrap()[0].id.clone();
+        f.store.discard(&id).unwrap();
+        f.go(&Req::post(public_route::FILE, "text=second&kind=bug").with_cookie(&session));
+
+        let refused =
+            f.go(&Req::post(public_route::FILE, "text=third&kind=bug").with_cookie(&session));
+        assert_eq!(refused.status, 429, "a discard did not refund the budget");
+    }
+
+    #[test]
+    fn a_quarantined_filing_still_counts_against_the_cap() {
+        // It cost a screening call. Refunding the budget for spam would make
+        // "file spam until quarantined" a free way to keep filing.
+        let mut f = Fixture::new("cap-quarantined")
+            .with_public(true)
+            .with_caps(1, 100);
+        let session = f.signed_in("jo@x.com");
+
+        f.go(&Req::post(public_route::FILE, "text=spam&kind=bug").with_cookie(&session));
+        let id = f.store.all().unwrap()[0].id.clone();
+        f.store
+            .finish_screening(&id, Some("screened as spam"))
+            .unwrap();
+
+        let refused =
+            f.go(&Req::post(public_route::FILE, "text=another&kind=bug").with_cookie(&session));
+        assert_eq!(refused.status, 429, "quarantine did not refund the budget");
+    }
+
+    #[test]
+    fn a_developers_own_filings_are_outside_the_account_cap() {
+        // The ceiling bounds what strangers spend of the developer's budget, not
+        // what the developer spends of their own — a device filing carries no
+        // account, so it counts against nobody.
+        let mut f = Fixture::new("cap-device")
+            .with_public(false)
+            .with_caps(1, 100);
+        let device = f.enrolled();
+        for i in 0..3 {
+            let res = f.go(
+                &Req::post("/file", &format!("text=thing+{i}&repo=alpha&kind=bug"))
+                    .with_cookie(&device),
+            );
+            assert_eq!(res.status, 200, "device filing {i}: {}", res.body);
+        }
+        assert_eq!(f.store.all().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn revoking_does_not_free_a_slot_under_the_account_ceiling() {
+        // A revoked address can never be re-created, so a freed slot could only
+        // be taken by a *different* one — counting live accounts would let
+        // burned identities be swapped one for one under a wall that looks
+        // intact. The lever at the ceiling is raising it, not revoking.
+        let mut f = Fixture::new("ceiling-revoked")
+            .with_public(false)
+            .with_caps(20, 1);
+        f.signed_in("first@x.com");
+
+        let mut accounts = f.store.accounts().unwrap();
+        let id = accounts.live()[0].id.clone();
+        accounts.revoke(&id);
+        f.store.put_accounts(&accounts).unwrap();
+        assert!(f.store.accounts().unwrap().live().is_empty());
+
+        // A different address, with the only account revoked.
+        f.go(&Req::post(public_route::SIGNIN, "email=second%40x.com"));
+        let body = f.mailer.last_body().unwrap();
+        let token = body
+            .split(public_route::SIGNIN_PREFIX)
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        let res = f.go(&Req::post(
+            &format!("{}{token}", public_route::SIGNIN_PREFIX),
+            "",
+        ));
+
+        assert!(cookie_token(&res).is_none(), "the slot was not freed");
+        assert_eq!(f.store.accounts().unwrap().accounts.len(), 1);
+    }
+
+    #[test]
+    fn the_cap_is_per_account_not_global() {
+        // Otherwise one busy filer silences everyone else — the same failure the
+        // shared anonymous rate-limit bucket had.
+        let mut f = Fixture::new("cap-per-account")
+            .with_public(false)
+            .with_caps(1, 100);
+
+        let alice = f.signed_in("alice@x.com");
+        f.go(&Req::post(public_route::FILE, "text=alice&kind=bug").with_cookie(&alice));
+        assert_eq!(
+            f.go(&Req::post(public_route::FILE, "text=more&kind=bug").with_cookie(&alice))
+                .status,
+            429
+        );
+
+        let bob = f.signed_in("bob@x.com");
+        assert_eq!(
+            f.go(&Req::post(public_route::FILE, "text=bob&kind=bug").with_cookie(&bob))
+                .status,
+            200,
+            "another filer has their own budget"
+        );
+    }
+
+    #[test]
+    fn the_window_rolls_so_a_capped_filer_recovers() {
+        // A cap that never forgives is a ban dressed as a limit.
+        let mut f = Fixture::new("cap-rolls")
+            .with_public(false)
+            .with_caps(1, 100);
+        let session = f.signed_in("jo@x.com");
+        f.go(&Req::post(public_route::FILE, "text=first&kind=bug").with_cookie(&session));
+        assert_eq!(
+            f.go(&Req::post(public_route::FILE, "text=second&kind=bug").with_cookie(&session))
+                .status,
+            429
+        );
+
+        // A day later.
+        f.now_ms += crate::config::FILING_WINDOW_MS + 1;
+        assert_eq!(
+            f.go(&Req::post(public_route::FILE, "text=tomorrow&kind=bug").with_cookie(&session))
+                .status,
+            200
+        );
+    }
+
+    #[test]
+    fn signup_stops_at_the_account_ceiling() {
+        // What the per-account cap rests on: an id an attacker cannot vary is
+        // one they can re-mint, and a script with a hundred disposable addresses
+        // would otherwise hold a hundred budgets.
+        let mut f = Fixture::new("account-cap")
+            .with_public(false)
+            .with_caps(20, 1);
+        f.signed_in("first@x.com");
+        assert_eq!(f.store.accounts().unwrap().accounts.len(), 1);
+
+        // The link is still issued and spent — the refusal is at creation, so
+        // nothing about it tells a stranger where the wall is.
+        f.go(&Req::post(public_route::SIGNIN, "email=second%40x.com"));
+        let body = f.mailer.last_body().unwrap();
+        let token = body
+            .split(public_route::SIGNIN_PREFIX)
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap()
+            .to_string();
+        let res = f.go(&Req::post(
+            &format!("{}{token}", public_route::SIGNIN_PREFIX),
+            "",
+        ));
+
+        assert!(cookie_token(&res).is_none(), "no session was opened");
+        assert_eq!(
+            f.store.accounts().unwrap().accounts.len(),
+            1,
+            "and no account was created"
+        );
+    }
+
+    #[test]
+    fn an_existing_filer_signs_in_past_the_account_ceiling() {
+        // The ceiling is on *creation*. Locking out the people who already have
+        // accounts would turn a signup wall into an outage.
+        let mut f = Fixture::new("account-cap-existing")
+            .with_public(false)
+            .with_caps(20, 1);
+        f.signed_in("jo@x.com");
+
+        // Same address again, with the ceiling already reached.
+        let session = f.signed_in("jo@x.com");
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
+                .status,
+            200
+        );
+        assert_eq!(f.store.accounts().unwrap().accounts.len(), 1);
     }
 
     #[test]

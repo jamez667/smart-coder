@@ -76,6 +76,35 @@ pub struct PublicConfig {
     /// thirty a minute sustained is tens of thousands a day; this refuses before
     /// the mailer is called.
     pub max_outstanding_links: usize,
+    /// How many requests one account may file per rolling 24 hours.
+    ///
+    /// **The ceiling on model spend**, and the only thing standing between a
+    /// hostile account and the developer's bill. Every filing that clears the
+    /// screener costs a full drafting run on the developer's machine, and the
+    /// per-credential rate limit — 240 a minute — is no defence against
+    /// something that expensive.
+    ///
+    /// Generous for a person and tight against a script: a real filer reporting
+    /// a morning's worth of bugs does not reach it, and a loop hits it in
+    /// seconds.
+    pub max_daily_filings: usize,
+    /// How many accounts may exist at all.
+    ///
+    /// Without this the per-account cap is weaker than it looks: an id the
+    /// attacker cannot *vary* is one they can **re-mint**, and a script with a
+    /// hundred disposable addresses holds a hundred budgets. This is the bound
+    /// the filing cap is built on.
+    ///
+    /// Reached, signup stops and the lever is **raising this** — revoking does
+    /// *not* make room, because revoked accounts still occupy their slot. A
+    /// revoked address can never be re-created, so a freed slot could only be
+    /// taken by a different one, and counting only live accounts would let an
+    /// attacker's burned identities be swapped one for one under a wall that
+    /// looks intact.
+    ///
+    /// A public form that quietly stops working is bad; one that silently scales
+    /// to any number of budgets is worse.
+    pub max_accounts: usize,
     /// Does a filer get to read the spec drafted from their request?
     ///
     /// Defaults **on**, which is a deliberate choice worth understanding: the
@@ -115,6 +144,26 @@ pub const DEFAULT_SCREEN_MODEL: &str = "gemini-2.5-flash-lite";
 /// The default ceiling on unspent sign-in links.
 pub const DEFAULT_MAX_OUTSTANDING_LINKS: usize = 200;
 
+/// The default per-account daily filing cap.
+///
+/// Twenty is a lot of genuine bug reports from one person in a day and nothing
+/// at all to a script.
+pub const DEFAULT_MAX_DAILY_FILINGS: usize = 20;
+
+/// The default ceiling on how many accounts may exist.
+///
+/// High enough that a real audience never notices, low enough that a signup
+/// flood stops somewhere the developer can see rather than growing until the
+/// volume fills.
+pub const DEFAULT_MAX_ACCOUNTS: usize = 1_000;
+
+/// The window the filing cap is measured over.
+///
+/// Rolling rather than calendar: "resets at midnight" invites waiting for
+/// midnight, and midnight in whose timezone has no good answer on a server that
+/// holds no locale.
+pub const FILING_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// The environment variables, named once so the error messages and the
 /// documentation cannot disagree.
 pub mod env {
@@ -129,6 +178,10 @@ pub mod env {
     pub const PUBLIC_BASE_URL: &str = "SC_SERVER_PUBLIC_BASE_URL";
     pub const PUBLIC_MAX_LINKS: &str = "SC_SERVER_PUBLIC_MAX_LINKS";
     pub const PUBLIC_SHOW_SPEC: &str = "SC_SERVER_PUBLIC_SHOW_SPEC";
+    /// Requests one account may file per rolling 24h — the model-spend ceiling.
+    pub const PUBLIC_MAX_DAILY: &str = "SC_SERVER_PUBLIC_MAX_DAILY";
+    /// How many accounts may exist — what the per-account cap rests on.
+    pub const PUBLIC_MAX_ACCOUNTS: &str = "SC_SERVER_PUBLIC_MAX_ACCOUNTS";
 
     pub const MAIL_PROVIDER: &str = "SC_SERVER_MAIL_PROVIDER";
     pub const MAIL_KEY: &str = "SC_SERVER_MAIL_KEY";
@@ -204,6 +257,33 @@ impl Config {
     }
 }
 
+/// Read a numeric limit, or its default.
+///
+/// **Zero is refused.** A cap of nought is a public surface that silently
+/// accepts nothing, which reads to the operator as a broken feature rather than
+/// a setting — and "turn it off" is expressed by not setting `PUBLIC_REPO` at
+/// all, which turns the whole surface off honestly.
+fn count(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: usize,
+) -> std::result::Result<usize, String> {
+    let Some(raw) = opt(get, key) else {
+        return Ok(default);
+    };
+    let n: usize = raw
+        .parse()
+        .map_err(|_| format!("{key} must be a whole number, got {raw:?}"))?;
+    if n == 0 {
+        return Err(format!(
+            "{key} must not be 0 — that would accept nothing while looking \
+             configured. To turn the public surface off, leave {} unset.",
+            env::PUBLIC_REPO
+        ));
+    }
+    Ok(n)
+}
+
 /// Read a trimmed, non-blank setting. Blank is *absent*, not present-and-empty.
 fn opt(get: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
     get(key)
@@ -251,12 +331,9 @@ fn public_from(
         base_url: base_url.trim_end_matches('/').to_string(),
         mail: mail_from(get)?,
         screen: screen_from(get)?,
-        max_outstanding_links: match opt(get, env::PUBLIC_MAX_LINKS) {
-            Some(v) => v
-                .parse()
-                .map_err(|_| format!("{} must be a number, got {v:?}", env::PUBLIC_MAX_LINKS))?,
-            None => DEFAULT_MAX_OUTSTANDING_LINKS,
-        },
+        max_outstanding_links: count(get, env::PUBLIC_MAX_LINKS, DEFAULT_MAX_OUTSTANDING_LINKS)?,
+        max_daily_filings: count(get, env::PUBLIC_MAX_DAILY, DEFAULT_MAX_DAILY_FILINGS)?,
+        max_accounts: count(get, env::PUBLIC_MAX_ACCOUNTS, DEFAULT_MAX_ACCOUNTS)?,
         // On unless explicitly turned off.
         show_spec: opt(get, env::PUBLIC_SHOW_SPEC)
             .map(|v| {
@@ -529,6 +606,47 @@ mod tests {
         let mut short = public_vars();
         short.push((env::SCREEN_KEY, "hunter2"));
         assert!(load(&short).unwrap_err().contains("at least"));
+    }
+
+    #[test]
+    fn the_spend_ceilings_have_defaults_and_are_overridable() {
+        let p = load(&public_vars()).unwrap().public.unwrap();
+        assert_eq!(p.max_daily_filings, DEFAULT_MAX_DAILY_FILINGS);
+        assert_eq!(p.max_accounts, DEFAULT_MAX_ACCOUNTS);
+
+        let mut vars = public_vars();
+        vars.push((env::PUBLIC_MAX_DAILY, "5"));
+        vars.push((env::PUBLIC_MAX_ACCOUNTS, "50"));
+        let p = load(&vars).unwrap().public.unwrap();
+        assert_eq!(p.max_daily_filings, 5);
+        assert_eq!(p.max_accounts, 50);
+    }
+
+    #[test]
+    fn a_cap_of_zero_is_refused_rather_than_silently_accepting_nothing() {
+        // A public surface that accepts nothing reads as a broken feature, not a
+        // setting — and "off" is expressed by leaving PUBLIC_REPO unset, which
+        // turns the whole surface off honestly.
+        for key in [
+            env::PUBLIC_MAX_DAILY,
+            env::PUBLIC_MAX_ACCOUNTS,
+            env::PUBLIC_MAX_LINKS,
+        ] {
+            let mut vars = public_vars();
+            vars.push((key, "0"));
+            let err = load(&vars).unwrap_err();
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("accept nothing"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_non_numeric_cap_is_a_clear_error() {
+        let mut vars = public_vars();
+        vars.push((env::PUBLIC_MAX_DAILY, "lots"));
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("whole number"), "{err}");
+        assert!(err.contains("lots"), "names what was given: {err}");
     }
 
     #[test]

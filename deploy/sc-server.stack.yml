@@ -34,6 +34,59 @@ services:
       # SC_SERVER_PORT: "8420"
       # SC_SERVER_DATA: "/data"
 
+      # ---------------------------------------------------------------------
+      # The PUBLIC surface — anyone with an email address can file a request.
+      #
+      # OFF unless SC_SERVER_PUBLIC_REPO is set. Setting it makes the rest
+      # required: the server refuses to start half-public rather than accepting
+      # filings it cannot send a sign-in link for.
+      #
+      # Reviewing stays private either way — an account holder can file and read
+      # their own requests and nothing else.
+      # ---------------------------------------------------------------------
+
+      # The repository public filings are attributed to. A NAME, resolved by
+      # your daemon against its own configured set. Point it at a scratch repo
+      # rather than your main one: public work also queues behind your own work
+      # in that repository.
+      # SC_SERVER_PUBLIC_REPO: "intake"
+
+      # https, absolute. Sign-in links are built from it, and it is NOT inferred
+      # from the Host header — that is attacker-controlled, so a link built from
+      # it would send the filer to whatever host the request claimed to be.
+      # SC_SERVER_PUBLIC_BASE_URL: "https://specs.example.com"
+
+      # brevo | resend | postmark
+      # SC_SERVER_MAIL_PROVIDER: "brevo"
+      # SC_SERVER_MAIL_KEY: "..."
+      # SC_SERVER_MAIL_FROM: "noreply@example.com"
+
+      # The spam screener. ABSENT means filings are not screened at all, which
+      # is honest — a server that pretends to screen is worse than one that
+      # plainly does not. It runs here, so it never sees your machine or code.
+      # SC_SERVER_SCREEN_KEY: "..."
+
+      # Spend ceilings. These are what stand between a hostile signup and your
+      # model bill, so the defaults are deliberately not generous.
+      #
+      #   MAX_DAILY     requests one account may file per rolling 24h. Every
+      #                 filing that clears the screener costs a real drafting
+      #                 run on YOUR machine.
+      #   MAX_ACCOUNTS  how many accounts may exist. This is what the per-account
+      #                 cap rests on: an id an attacker cannot vary is one they
+      #                 can re-mint with a disposable address.
+      #
+      # Neither may be 0 — the server refuses to start rather than accept
+      # nothing while looking configured.
+      # SC_SERVER_PUBLIC_MAX_DAILY: "20"
+      # SC_SERVER_PUBLIC_MAX_ACCOUNTS: "1000"
+
+      # Whether a filer reads the spec drafted from their request. Defaults ON.
+      # That spec is model output produced by reading your repository, and the
+      # filer wrote the prompt that produced it — turn it off for a repository
+      # whose contents should not be described to strangers.
+      # SC_SERVER_PUBLIC_SHOW_SPEC: "0"
+
     ports:
       # Put a reverse proxy in front of this and terminate TLS there. The server
       # speaks plain HTTP by design: certificates, renewal and a private key

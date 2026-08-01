@@ -184,6 +184,14 @@ impl Request {
     /// produce a claimable record at all. Public filings start in
     /// [`RequestState::Screening`], so nothing unscreened can reach the
     /// developer's machine even if every later check were removed.
+    /// `now_ms` is **required**, not read from the wall clock.
+    ///
+    /// The filing cap compares `filed_ms` against the handler's own clock, and a
+    /// record stamped from a different source is one the window can never quite
+    /// line up with. Taking it as an argument rather than offering a
+    /// `.at(now_ms)` afterwards is the same reasoning that makes this a separate
+    /// constructor at all: a later filing path can forget to chain a mutator,
+    /// and would then silently escape the window. It cannot forget an argument.
     pub fn public(
         id: impl Into<String>,
         text: impl Into<String>,
@@ -191,6 +199,7 @@ impl Request {
         kind: IntakeKind,
         account_id: &str,
         screened: bool,
+        now_ms: u64,
     ) -> Self {
         Self {
             // When screening is switched off there is nothing to wait for, and a
@@ -202,11 +211,17 @@ impl Request {
                 RequestState::Queued
             },
             account_id: Some(account_id.to_string()),
+            filed_ms: now_ms,
             ..Request::new(id, text, repo, kind)
         }
     }
 
     /// Was this filed by `account_id`?
+    ///
+    /// `false` for a request the developer filed from an enrolled device, which
+    /// carries no account. That is deliberate: the spend ceilings bound what
+    /// *strangers* can spend of the developer's budget, not what the developer
+    /// spends of their own.
     pub fn filed_by(&self, account_id: &str) -> bool {
         self.account_id.as_deref() == Some(account_id)
     }
@@ -382,6 +397,26 @@ impl Store {
         req.state = RequestState::Ready;
         self.put(&req)?;
         Ok(req)
+    }
+
+    /// How many requests this account filed in the last `window_ms`.
+    ///
+    /// Counted from the records themselves rather than a separate tally: a
+    /// counter is state that can drift from the thing it counts, and a filer who
+    /// discovers the drift is the one who benefits from it. Every state counts,
+    /// including `Discarded` and `Quarantined` — the cost being capped is the
+    /// *filing*, and letting a discarded request free up budget would make
+    /// file-then-discard a way around the limit.
+    ///
+    /// A rolling window rather than calendar days: "resets at midnight" invites
+    /// waiting for midnight, and midnight in whose timezone is a question with
+    /// no good answer on a server that holds no locale.
+    pub fn filed_since(&self, account_id: &str, since_ms: u64) -> Result<usize> {
+        Ok(self
+            .all()?
+            .iter()
+            .filter(|r| r.filed_by(account_id) && r.filed_ms >= since_ms)
+            .count())
     }
 
     /// Every request still waiting to be screened.

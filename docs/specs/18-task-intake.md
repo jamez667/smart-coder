@@ -250,28 +250,58 @@ revocation being *the* lever, and a lever reachable only by hand-editing
 `accounts.json` on the volume is not one anybody pulls at the moment they need
 it.
 
-⬚ **Two exposures, named in the order they actually bite.**
+✅ **Two spend ceilings, built in the order they actually bite.**
 
-**Nothing bounds how many accounts exist.** No allowlist, no domain restriction,
-no ceiling on the count. A confirmed mailbox is the whole cost, and disposable
-address services make that near zero. So the per-account budget is weaker than it
-looks: the id an attacker cannot *vary* is one they can *re-mint*, and a script
-with a hundred addresses holds a hundred budgets. The outstanding-link cap
-throttles the signup *rate* but does not bound the total, and revocation is
-per-account rather than per-person. **This is the deeper of the two** — a filing
-cap built on top of an unbounded account count does not close it.
+**A per-account filing cap** — 20 requests per rolling 24 hours by default
+<!--@ crates/sc-server/src/routes.rs -->. This is the ceiling on *model* spend:
+every filing that clears the screener costs a full drafting run on the
+developer's machine, and the per-credential rate limit (240/min) is no defence
+against something that expensive.
 
-**There is no per-account filing cap.** A filing that clears the screener spends
-a full drafting run on the developer's machine, and the per-credential limit
-(240/min for a signed-in account; the anonymous buckets are split 600/min read
-and 30/min write) is no defence against that. One account with a script could
-saturate the daemon with plausible-looking requests a spam filter has no reason
-to block.
+Counted from the request records rather than a tally, because a counter is state
+that can drift from the thing it counts and the filer who discovers the drift is
+the one who benefits. **Every state counts**, including `Discarded` and
+`Quarantined` — a filing the screener rejected still cost a screening call, and
+letting either refund the budget would make file-then-discard a way around the
+limit. The window **rolls**: "resets at midnight" invites waiting for midnight,
+and midnight in whose timezone has no good answer on a server holding no locale.
 
-Both are deliberate for this pass: the developer chose to watch first, with
-revocation as the backstop. Recording them plainly so that is a decision rather
-than an oversight — and revocation is *reactive*, so the signal will be a model
-bill or a stalled queue rather than an alert.
+The count and the write happen **under the same lock** the account paths hold.
+Without it a filer with two sessions, or one script issuing parallel POSTs,
+would have every request read the same pre-write total and every one of them
+pass — an overshoot bounded by concurrency rather than by the cap.
+
+**The cap keys on the account id**, so requests the developer files from an
+enrolled device — which carry no account — are outside it. The ceiling bounds
+what strangers spend of the developer's budget, not what the developer spends of
+their own.
+
+**A ceiling on how many accounts exist** — 1,000 by default. This is what the
+filing cap *rests on*, and it is the deeper of the two: an id an attacker cannot
+*vary* is one they can **re-mint**, and a script with a hundred disposable
+addresses would otherwise hold a hundred budgets. A cap built on an unbounded
+account count is not a cap.
+
+The ceiling is on **creation**, so somebody who already has an account still
+signs in after it is reached — a signup wall that locked out existing filers
+would be an outage. Refused signups are logged for the operator, because a wall
+you have hit is something you need to know about; the page says only that it did
+not work.
+
+**The count includes revoked accounts, and that has a consequence worth stating
+plainly: revoking does not make room.** A revoked address can never be
+re-created, so a slot it freed could only be taken by a *different* address —
+counting only live accounts would let an attacker's burned identities be swapped
+one for one under a wall that looks intact. At the ceiling the lever is raising
+`PUBLIC_MAX_ACCOUNTS`, not revoking.
+
+A cap of `0` is **refused at startup**: a public surface that accepts nothing
+reads as a broken feature rather than a setting, and "off" is expressed by
+leaving `PUBLIC_REPO` unset, which turns the whole surface off honestly.
+
+*Still reactive:* revocation remains the answer to an account that is inside both
+ceilings and still unwelcome, and the developer finds that one by looking. What
+the ceilings buy is that the finding-out is not a bill.
 
 ### The browser → server
 
