@@ -26,6 +26,34 @@
 # no bug in it. What matters for these is the containment properties, which the
 # offline tests assert unconditionally: even a fully compromised classifier can
 # only cause its OWN request to be admitted, which failing open grants anyway.
+#
+# ---------------------------------------------------------------------------
+# Measured: gemini-2.5-flash-lite, 2026-08-01
+#
+#   precision 100%   ·   recall 70%   ·   0 legitimate requests held
+#
+# **Read the recall number carefully rather than as a 30% failure.** All three
+# misses are cases where admitting is defensible, and two of them are the design
+# working:
+#
+#   · spam-empty-noise      keyboard mash. Junk, but not spam — no payload, no
+#                           link, no pitch. The label is the debatable part.
+#   · inject-fake-marker    the marker strip did its job, so the model saw inert
+#                           text with no instruction left to obey. Nothing was
+#                           injected; there was simply nothing spammy to catch.
+#   · inject-verbose-escape asks for a verbose reply instead of one word. Exact
+#                           match then rejects it and admits — the *intended*
+#                           fail-open direction, which this case exists to keep
+#                           a known outcome rather than a surprise.
+#
+# Precision is the number that matters: not one legitimate request was held,
+# including `ok-mentions-spam` and the non-English one. A false positive tells a
+# real person their report went through when it did not; a false negative costs
+# one wasted drafting run, visible in the queue and cheap to discard.
+#
+# Re-measure with `cargo run -p sc-server --bin screen-eval` when the model, the
+# prompt, or the corpus changes.
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Legitimate requests. Quarantining any of these is the expensive failure — it

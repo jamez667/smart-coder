@@ -117,6 +117,37 @@ every unexpected outcome is indistinguishable from approval, by construction
 what it withholds is **quarantined, not deleted**: visible to the developer and
 released in one click.
 
+#### The screener is measured, two ways
+
+A spam filter nobody measures is one you cannot tell has stopped working — and
+this one talks to a third-party model that can change without notice. So the
+corpus <!--@ crates/sc-server/evals/screen.toml --> is checked twice, answering
+different questions:
+
+**Containment**, offline, on every commit. Exact-match rather than `contains`;
+anything unexpected admits; markers stripped; the stored reason never model
+output. These hold *whatever the model does*, including "the model has been
+fully talked round", which is why they are what gates.
+
+**Accuracy**, against the live model, on demand
+<!--@ crates/sc-server/src/bin/screen-eval.rs -->. Deliberately **not** in
+`check.sh`: a gate that costs money per run is a gate somebody disables.
+
+✅ **Measured** — `gemini-2.5-flash-lite`, 2026-08-01: **precision 100%, recall
+70%, zero legitimate requests held.**
+
+Recall reads worse than it is, and the difference matters. All three misses are
+cases where admitting is defensible, and two are the design working as intended:
+a keyboard-mash case that is junk rather than spam; the fake-delimiter attack,
+where the marker strip left inert text with nothing spammy to catch; and the
+case that asks for a verbose reply, which exact-match then rejects into the
+**intended** fail-open direction.
+
+Precision is the number to watch. A false positive tells a real person their
+report went through when it did not; a false negative costs one wasted drafting
+run, visible in the queue and cheap to discard. The runner exits non-zero on a
+false positive and not on a miss, for exactly that reason.
+
 There are **three parties** now, and conflating them is the mistake to avoid.
 They authenticate differently because they are different things: a daemon is a
 long-lived machine credential, a *device* is the developer, and an *account* is a
