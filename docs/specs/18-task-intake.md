@@ -734,6 +734,56 @@ mid-poll is picked up in well under a second rather than waiting out the window.
 The protocol constants are shared with the daemon <!--@ crates/sc-proto/src/wire.rs -->
 rather than restated, so the two ends cannot drift.
 
+### A claim expires
+
+<!--@ sc_server::store::CLAIM_TIMEOUT_MS -->
+
+**Found by running it, not by reading it.** Claiming is serialised per
+repository: `claim_next` skips any repo that already has something `Claimed`, so
+two daemons never work the same tree. The consequence nobody had stated is that
+an *abandoned* claim holds its repository **for ever** — nothing else for that
+repo can ever be claimed again, no error is raised anywhere, and the only symptom
+is a queue that quietly stops moving. A daemon killed mid-draft is enough; so is
+an operator curling the work endpoint to see what it returns, which is exactly
+how this was found.
+
+A claim now carries `claimed_ms` and is returned to the queue after twenty
+minutes, with a note saying why so the developer's page can answer "why is this
+queued again".
+
+Three decisions inside that, each the less obvious option:
+
+**Reclaimed in `claim_next`, not on a background thread.** A stale claim has no
+consequence until somebody asks for work, so checking at that moment costs one
+scan on a request that already scans — no second thread, and no window in which a
+sweep and a claim disagree about who holds a repository.
+
+**Twenty minutes, not two.** The two failures are not symmetric: too short
+reclaims a *live* draft and puts two daemons on one tree, too long delays a repo
+whose daemon is already dead. Only the first corrupts anything, so the timeout
+sits well clear of a plausible drafting run rather than close to it. It is not
+configurable — an operator tuning it down for snappiness is choosing duplicate
+work without the trade being visible — and a `const` assertion fails the **build**
+if it is ever shortened past ten minutes.
+
+**A late report is refused** <!--@ sc_server::store::Store -->.
+This is the hazard the timeout *introduces*: a daemon that comes back after its
+claim expired would otherwise overwrite whatever happened since — a spec another
+daemon has drafted, a decision a reviewer has made. Reclaiming stale work is only
+safe if the work it reclaimed can no longer write, so both daemon-facing verbs
+require the request to still be `Claimed`.
+
+That guard also revealed two existing tests were exercising a transition the
+state machine already forbade — a daemon redrafting straight over a spec sitting
+in `AwaitingReview`. They now drive the real path (send back, requeue, reclaim),
+which is the only way a redraft actually happens.
+
+`claimed_ms` is dropped by `Store::put` on anything not `Claimed`, rather than
+cleared at each of the ten transitions out of that state — a rule that holds
+until the eleventh is added. A record written before the field existed is treated
+as claimed *now* rather than as infinitely stale, so upgrading does not reclaim
+every in-flight draft at once.
+
 ### The protocol lives in `sc-proto`
 
 ✅ **Built.** `wire` and `IntakeKind` sit in `sc-proto` — a crate whose only

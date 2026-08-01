@@ -1722,7 +1722,11 @@ mod tests {
         let asked = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
         let stale = digest_from(&asked.body);
 
-        // The daemon redrafts under them.
+        // The daemon redrafts under them. Through the real path — sent back,
+        // requeued, claimed again — because a daemon may now only report on a
+        // claim it currently holds.
+        f.go(&Req::post(&format!("/request/{id}/send-back"), "notes=redo").with_cookie(&token));
+        f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let v2 = serde_json::to_string(&DraftedSpec::new(&id, "# Version two", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &v2).with_bearer(KEY));
 

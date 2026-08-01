@@ -28,6 +28,37 @@ use serde::{Deserialize, Serialize};
 use crate::account::{Accounts, Links};
 use crate::auth::Credentials;
 
+/// How long a claim may stand before the request returns to the queue.
+///
+/// **Generous on purpose — twenty minutes.** The two failures are not symmetric:
+///
+/// | too short | too long |
+/// |---|---|
+/// | a live draft is reclaimed and **two daemons work the same tree** | a dead daemon's repository stays blocked a while longer |
+///
+/// The left column is the one that corrupts something, so the timeout sits well
+/// above any plausible drafting run rather than close to it. A drafting run is a
+/// model call against a real repository — usually a minute or two, occasionally
+/// much longer on a slow model or a large tree — and the cost of waiting is only
+/// latency on a repo whose daemon has already died.
+///
+/// Not configurable. An operator tuning this down to "make things snappier" is
+/// choosing duplicate work without the trade being visible to them.
+pub const CLAIM_TIMEOUT_MS: u64 = 20 * 60 * 1000;
+
+/// Shortening the timeout past a plausible drafting run fails the **build**.
+///
+/// Beside the constant rather than inside `mod tests`: a `const` assertion in a
+/// `#[cfg(test)]` module is only evaluated when that module is compiled, so
+/// `cargo check` and `cargo build` sail straight past it. Found by shortening
+/// the constant to 30s and watching it *not* fire — an inert guard is worse than
+/// none, because it reads as protection that is not there.
+const _: () = assert!(
+    CLAIM_TIMEOUT_MS >= 10 * 60 * 1000,
+    "a drafting run is a model call against a real repository, so the claim \
+     timeout must stay well clear of one"
+);
+
 /// Where a request stands, from the server's point of view.
 ///
 /// Deliberately close to the daemon's own `TaskState` but not the same type: the
@@ -48,6 +79,10 @@ pub enum RequestState {
     /// Filed, waiting for a daemon to claim it.
     Queued,
     /// A daemon is drafting. Claimed, so no second daemon takes it.
+    ///
+    /// **Expires.** See [`CLAIM_TIMEOUT_MS`]: a daemon that dies mid-draft would
+    /// otherwise hold its repository for ever, because [`Store::claim_next`]
+    /// skips any repo with something already claimed.
     Claimed,
     /// A spec came back and is waiting for a human.
     AwaitingReview,
@@ -152,6 +187,20 @@ pub struct Request {
     /// time-ordered and enumerable in seconds.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// When the current claim was taken, for [`CLAIM_TIMEOUT_MS`].
+    ///
+    /// The **server's** clock, like `drafted_ms` and for the same reason: the
+    /// wire carries no timestamp, and a clock the daemon controls is one this
+    /// server cannot check — a daemon reporting a fresh claim forever would hold
+    /// a repository indefinitely, which is the failure this field exists to end.
+    ///
+    /// `Option` because records written before this field existed have none.
+    /// A `Claimed` request without one is treated as **claimed just now** rather
+    /// than as infinitely stale: on upgrade the alternative would reclaim every
+    /// in-flight draft at once, and duplicating live work is worse than waiting
+    /// one more timeout for a claim that was already stuck.
+    #[serde(default)]
+    pub claimed_ms: Option<u64>,
 }
 
 impl Request {
@@ -174,6 +223,7 @@ impl Request {
             send_back_note: None,
             drafted_ms: None,
             account_id: None,
+            claimed_ms: None,
         }
     }
 
@@ -273,8 +323,21 @@ impl Store {
     }
 
     /// Write a request.
+    ///
+    /// **Drops `claimed_ms` on anything not `Claimed`.** There are ten places a
+    /// request leaves that state, and "remember to clear the stamp" at each is
+    /// the kind of rule that holds until the eleventh is added. Enforcing it at
+    /// the one write everything funnels through makes a stale stamp
+    /// unrepresentable on disk rather than merely unlikely.
     pub fn put(&self, req: &Request) -> Result<()> {
-        let json = serde_json::to_string_pretty(req).map_err(|e| DcError::Eval(e.to_string()))?;
+        let json = if req.state == RequestState::Claimed || req.claimed_ms.is_none() {
+            serde_json::to_string_pretty(req)
+        } else {
+            let mut cleaned = req.clone();
+            cleaned.claimed_ms = None;
+            serde_json::to_string_pretty(&cleaned)
+        }
+        .map_err(|e| DcError::Eval(e.to_string()))?;
         write_atomic(&self.request_path(&req.id), json.as_bytes())
     }
 
@@ -317,7 +380,14 @@ impl Store {
     /// skipped, so two daemons — or one daemon restarted mid-draft — do not both
     /// work the same tree. Skipping rather than stopping means a free repo's work
     /// does not wait behind a busy one.
+    ///
+    /// **Stale claims are returned to the queue first.** Because a busy repo is
+    /// skipped, a daemon that dies mid-draft would otherwise hold its repository
+    /// for ever: nothing else for that repo could ever be claimed, and no error
+    /// would be reported anywhere. See [`CLAIM_TIMEOUT_MS`].
     pub fn claim_next(&self) -> Result<Option<Request>> {
+        self.reclaim_stale(now_ms())?;
+
         let all = self.all()?;
         let busy: Vec<String> = all
             .iter()
@@ -334,13 +404,67 @@ impl Store {
             return Ok(None);
         };
         next.state = RequestState::Claimed;
+        next.claimed_ms = Some(now_ms());
         self.put(&next)?;
         Ok(Some(next))
     }
 
+    /// Return claims older than [`CLAIM_TIMEOUT_MS`] to the queue.
+    ///
+    /// Run from [`claim_next`](Self::claim_next) rather than from a background
+    /// thread. A stale claim has no consequence until somebody asks for work, so
+    /// checking at that moment costs one scan on a request that already scans,
+    /// needs no second thread, and leaves no window in which a sweep and a claim
+    /// disagree about who holds a repository.
+    ///
+    /// A reclaimed request keeps its `send_back_note` — it was never drafted, so
+    /// the reason it was sent back still applies to the next attempt.
+    ///
+    /// `now_ms` is a parameter so a test can age a claim without sleeping.
+    pub fn reclaim_stale(&self, now_ms: u64) -> Result<usize> {
+        let mut reclaimed = 0;
+        for mut req in self.all()? {
+            if req.state != RequestState::Claimed {
+                continue;
+            }
+            // A record from before this field existed is treated as claimed now:
+            // stamping it starts the clock rather than expiring everything
+            // in-flight the moment the server is upgraded.
+            let Some(claimed_ms) = req.claimed_ms else {
+                req.claimed_ms = Some(now_ms);
+                self.put(&req)?;
+                continue;
+            };
+            // `saturating_sub`, so a clock that jumped backwards cannot make a
+            // fresh claim look ancient and reclaim work that is genuinely in
+            // progress — duplicating a live draft is the harm here.
+            if now_ms.saturating_sub(claimed_ms) < CLAIM_TIMEOUT_MS {
+                continue;
+            }
+            req.state = RequestState::Queued;
+            req.claimed_ms = None;
+            // Said plainly, because the developer's page shows it and "why did
+            // this go back to queued" is otherwise unanswerable.
+            req.note = Some(
+                "the daemon that claimed this stopped responding, so it went back to the queue"
+                    .to_string(),
+            );
+            self.put(&req)?;
+            reclaimed += 1;
+        }
+        Ok(reclaimed)
+    }
+
     /// Record a drafted spec.
+    ///
+    /// **Refused unless the request is still `Claimed`.** Introducing a claim
+    /// timeout introduces a daemon that comes back after its claim expired, and
+    /// without this check its late report would overwrite whatever happened
+    /// since — a spec another daemon has since drafted, a decision a reviewer
+    /// has since made. Reclaiming stale work is only safe if the work it
+    /// reclaimed cannot still write.
     pub fn record_drafted(&self, id: &str, spec: &str, artifact_dir: &str) -> Result<Request> {
-        let mut req = self.require(id)?;
+        let mut req = self.claimed(id)?;
         req.state = RequestState::AwaitingReview;
         req.spec = Some(spec.to_string());
         req.artifact_dir = Some(artifact_dir.to_string());
@@ -353,11 +477,34 @@ impl Store {
     }
 
     /// Record that a daemon could not draft it.
+    ///
+    /// Same guard as [`record_drafted`](Self::record_drafted): a late failure
+    /// report must not mark something `Failed` that has already been reclaimed
+    /// and successfully drafted by somebody else.
     pub fn record_failed(&self, id: &str, reason: &str) -> Result<Request> {
-        let mut req = self.require(id)?;
+        let mut req = self.claimed(id)?;
         req.state = RequestState::Failed;
         req.note = Some(reason.to_string());
         self.put(&req)?;
+        Ok(req)
+    }
+
+    /// Load a request, refusing it unless a daemon currently holds the claim.
+    ///
+    /// The error says *reclaimed* rather than "not found", because the daemon on
+    /// the other end did real work and the log it writes is the only place that
+    /// will ever explain where the work went.
+    fn claimed(&self, id: &str) -> Result<Request> {
+        let req = self.require(id)?;
+        if req.state != RequestState::Claimed {
+            return Err(DcError::Eval(format!(
+                "request {id:?} is {} rather than claimed — its claim was \
+                 reclaimed after {} minutes, and this report arrived too late \
+                 to be recorded",
+                req.state.label(),
+                CLAIM_TIMEOUT_MS / 60_000
+            )));
+        }
         Ok(req)
     }
 
@@ -707,6 +854,166 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // -- stale claims ---------------------------------------------------------
+
+    #[test]
+    fn a_dead_daemon_does_not_block_its_repository_for_ever() {
+        // The failure this exists to end, stated as the symptom rather than the
+        // mechanism: `claim_next` skips a repo that has anything claimed, so one
+        // abandoned claim means *nothing else for that repo is ever claimable*.
+        // Silent, permanent, and reported nowhere.
+        let (s, dir) = store("stale-blocks");
+        file(&s, "r-1", "alpha");
+        file(&s, "r-2", "alpha");
+
+        let claimed = s.claim_next().unwrap().unwrap();
+        assert_eq!(claimed.id, "r-1");
+        assert!(claimed.claimed_ms.is_some(), "the claim is stamped");
+        // The daemon now dies. Nothing else for alpha can be claimed.
+        assert!(s.claim_next().unwrap().is_none());
+
+        // Age the claim past the timeout.
+        let mut stuck = s.require("r-1").unwrap();
+        stuck.claimed_ms = Some(now_ms() - CLAIM_TIMEOUT_MS - 1);
+        s.put(&stuck).unwrap();
+
+        // The next daemon to ask gets r-1 back — the abandoned one, oldest
+        // first — rather than finding the repo permanently wedged.
+        let again = s.claim_next().unwrap().unwrap();
+        assert_eq!(again.id, "r-1");
+        assert_eq!(again.state, RequestState::Claimed);
+        assert!(
+            again.note.as_deref().is_some_and(|n| n.contains("queue")),
+            "the developer is told why it went back: {:?}",
+            again.note
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_claim_inside_the_timeout_is_left_alone() {
+        // The expensive mistake is the other one: reclaiming a *live* draft puts
+        // two daemons on the same tree.
+        let (s, dir) = store("stale-fresh");
+        file(&s, "r-1", "alpha");
+        let claimed = s.claim_next().unwrap().unwrap();
+        // Measured from the **stamp**, not from `now_ms()`: the claim was taken
+        // a moment ago, so "now plus the timeout" is already past it.
+        let at = claimed.claimed_ms.unwrap();
+
+        assert_eq!(s.reclaim_stale(at).unwrap(), 0);
+        // And one millisecond short of the timeout is still inside it.
+        assert_eq!(s.reclaim_stale(at + CLAIM_TIMEOUT_MS - 1).unwrap(), 0);
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Claimed);
+
+        // Exactly at the timeout it goes. Pinned on both sides, because a
+        // boundary asserted only from the far side passes just as well when the
+        // comparison is wrong by a whole timeout.
+        assert_eq!(s.reclaim_stale(at + CLAIM_TIMEOUT_MS).unwrap(), 1);
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Queued);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backwards_clock_cannot_reclaim_live_work() {
+        // `saturating_sub`: a clock that jumped back would otherwise make a
+        // fresh claim look ancient, and duplicating a running draft is the harm
+        // this whole timeout is careful about.
+        let (s, dir) = store("stale-clock");
+        file(&s, "r-1", "alpha");
+        let claimed = s.claim_next().unwrap().unwrap();
+
+        let long_before = claimed.claimed_ms.unwrap().saturating_sub(86_400_000);
+        assert_eq!(s.reclaim_stale(long_before).unwrap(), 0);
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Claimed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_upgraded_record_starts_its_clock_rather_than_expiring_at_once() {
+        // Records written before `claimed_ms` existed have none. Treating that
+        // as infinitely stale would reclaim every in-flight draft the moment the
+        // server is upgraded, which is the one thing worse than a stuck claim.
+        let (s, dir) = store("stale-upgrade");
+        file(&s, "r-1", "alpha");
+        let mut old = s.require("r-1").unwrap();
+        old.state = RequestState::Claimed;
+        old.claimed_ms = None;
+        s.put(&old).unwrap();
+
+        let now = now_ms();
+        assert_eq!(s.reclaim_stale(now).unwrap(), 0, "not reclaimed on sight");
+        let stamped = s.require("r-1").unwrap();
+        assert_eq!(stamped.state, RequestState::Claimed);
+        assert_eq!(stamped.claimed_ms, Some(now), "the clock started instead");
+
+        // And it does expire once the timeout has actually elapsed.
+        assert_eq!(s.reclaim_stale(now + CLAIM_TIMEOUT_MS).unwrap(), 1);
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Queued);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaving_the_claimed_state_drops_the_stamp() {
+        // Enforced in `put` rather than at each of the ten transitions out of
+        // `Claimed`, so a stale stamp is unrepresentable on disk instead of
+        // merely unlikely. Checked through the states a claim actually reaches.
+        let (s, dir) = store("stale-drop");
+        for (id, finish) in [("r-1", true), ("r-2", false)] {
+            file(&s, id, id); // one repo each, so both are claimable
+            s.claim_next().unwrap();
+            assert!(s.require(id).unwrap().claimed_ms.is_some());
+
+            if finish {
+                s.record_drafted(id, "# Spec", "specs/x").unwrap();
+                assert_eq!(s.require(id).unwrap().state, RequestState::AwaitingReview);
+            } else {
+                s.record_failed(id, "could not draft").unwrap();
+                assert_eq!(s.require(id).unwrap().state, RequestState::Failed);
+            }
+            assert_eq!(
+                s.require(id).unwrap().claimed_ms,
+                None,
+                "{id} kept a stale claim stamp"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_daemon_that_comes_back_after_its_claim_expired_cannot_overwrite() {
+        // The hazard the timeout introduces. Reclaiming stale work is only safe
+        // if the work it reclaimed cannot still write: without this, a resurrected
+        // daemon's late report would clobber a spec somebody else has since
+        // drafted, or a decision a reviewer has since made.
+        let (s, dir) = store("late-report");
+        file(&s, "r-1", "alpha");
+        s.claim_next().unwrap();
+
+        // Its claim expires and a second daemon picks the work up and finishes.
+        let mut stale = s.require("r-1").unwrap();
+        stale.claimed_ms = Some(now_ms() - CLAIM_TIMEOUT_MS - 1);
+        s.put(&stale).unwrap();
+        s.claim_next().unwrap();
+        s.record_drafted("r-1", "# The good spec", "specs/x")
+            .unwrap();
+
+        // Now the first daemon wakes up and reports. Both verbs are refused.
+        let err = s
+            .record_drafted("r-1", "# The stale spec", "specs/y")
+            .expect_err("a late report must not be recorded")
+            .to_string();
+        assert!(err.contains("too late"), "{err}");
+        assert!(err.contains("reclaimed"), "{err}");
+        assert!(s.record_failed("r-1", "gave up").is_err());
+
+        // The good spec survives untouched, still awaiting its reviewer.
+        let req = s.require("r-1").unwrap();
+        assert_eq!(req.spec.as_deref(), Some("# The good spec"));
+        assert_eq!(req.state, RequestState::AwaitingReview);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_drafted_spec_comes_back_and_waits_for_a_human() {
         let (s, dir) = store("drafted");
@@ -751,7 +1058,11 @@ mod tests {
         s.record_drafted("r-1", "# Version one", "specs/x").unwrap();
         let read_this = s.require("r-1").unwrap().spec_digest().unwrap();
 
-        // The daemon pushes a redraft under the reviewer.
+        // A redraft lands under the reviewer. Through the real path — sent back,
+        // requeued, claimed again — since a daemon may only report on a claim it
+        // currently holds. The reviewer is still holding v1's digest throughout.
+        s.send_back("r-1", "redo").unwrap();
+        s.claim_next().unwrap();
         s.record_drafted("r-1", "# Version two", "specs/x").unwrap();
 
         let err = s
@@ -782,6 +1093,12 @@ mod tests {
         s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
         let digest = s.require("r-1").unwrap().spec_digest().unwrap();
 
+        // The real redraft path — sent back, requeued, claimed again — rather
+        // than two `record_drafted` calls in a row. A daemon can only report on
+        // a claim it currently holds, so the shortcut no longer models anything
+        // that can happen.
+        s.send_back("r-1", "change it").unwrap();
+        s.claim_next().unwrap();
         s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
         assert!(s.approve("r-1", &digest).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
