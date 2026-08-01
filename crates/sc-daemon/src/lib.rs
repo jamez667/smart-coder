@@ -22,6 +22,7 @@
 //! [`WorkflowMode`]: sc_workflow::WorkflowMode
 
 pub mod atomic;
+pub mod client;
 pub mod config;
 pub mod feedback;
 pub mod intake;
@@ -30,10 +31,12 @@ pub mod preflight;
 pub mod queue;
 pub mod runner;
 pub mod task;
+pub mod wire;
 
 #[cfg(test)]
 mod test_support;
 
+pub use client::{one_turn, run_loop, HttpTransport, Transport, Turn};
 pub use config::{DaemonConfig, Repo};
 pub use feedback::{Feedback, FeedbackStore};
 pub use intake::IntakeKind;
@@ -42,3 +45,4 @@ pub use preflight::NotReady;
 pub use queue::Queue;
 pub use runner::{approve, discard, draft, draft_next, send_back, Drafted};
 pub use task::{Task, TaskState};
+pub use wire::{DraftFailed, DraftedSpec, PollResponse, WorkItem, PROTOCOL_VERSION};

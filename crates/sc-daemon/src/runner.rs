@@ -246,11 +246,20 @@ pub fn send_back(queue: &Queue, cfg: &DaemonConfig, id: &str, notes: &str) -> Re
                 .to_string(),
         ));
     }
+    send_back_note(cfg, &task, notes)?;
+    queue.set_state(id, TaskState::Queued, Some(format!("sent back: {notes}")))
+}
+
+/// Record a send-back note where the *next* drafting run will read it, and drop
+/// the rejected draft so that run produces a fresh spec rather than restoring the
+/// one the developer just turned down.
+///
+/// Split out from [`send_back`] because a redraft arriving from the server has no
+/// local `AwaitingReview` task to transition — the note still has to land, or the
+/// regeneration proceeds as if nobody had said anything.
+pub fn send_back_note(cfg: &DaemonConfig, task: &Task, notes: &str) -> Result<()> {
     let repo = cfg.require_repo(&task.repo)?;
     let (dir, _) = sc_workflow::artifact_dirs(&task.text, &repo.path);
-
-    // Record the note where the regeneration will read it, and drop the draft so
-    // the next run produces a fresh one rather than restoring this.
     if let Some(dir) = dir {
         if let Ok(Some(mut state)) = sc_workflow::load_from(&dir) {
             state.invalidate_from(Phase::Specs);
@@ -258,7 +267,7 @@ pub fn send_back(queue: &Queue, cfg: &DaemonConfig, id: &str, notes: &str) -> Re
             sc_workflow::save_to(&dir, &mut state, true)?;
         }
     }
-    queue.set_state(id, TaskState::Queued, Some(format!("sent back: {notes}")))
+    Ok(())
 }
 
 /// Drop a task before it was approved.

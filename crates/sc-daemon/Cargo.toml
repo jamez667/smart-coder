@@ -12,3 +12,5 @@ sc-model = { path = "../sc-model" }
 sc-workflow = { path = "../sc-workflow" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Sync HTTP client, matching sc-model: no async runtime outside the GUI.
+ureq = { version = "3", features = ["json"] }
