@@ -688,6 +688,34 @@ Looking at any of this without standing up a mail provider is
 <!--@ crates/sc-server/examples/render-public.rs -->, which writes every public
 page in every language through the real renderers.
 
+#### Two concessions to running it locally, both derived rather than configured
+
+Standing the container up to *use* the surface — rather than look at rendered
+files — hit two things that behave correctly in production and make the feature
+appear broken on `http://localhost`. Both are now decided from the base URL,
+which already has to be `https://` before a deployed server will start.
+
+**`Secure` comes off on loopback** <!--@ sc_server::config::PublicConfig -->. A
+browser silently *discards* a `Secure` cookie that arrives over plain HTTP, so
+locally the sign-in and the language switcher both appeared to do nothing: the
+request succeeded, the cookie vanished, and the next page had forgotten. The
+symptom reads as a bug in the feature rather than a property of the cookie.
+Nothing else relaxes with it — `HttpOnly` and `SameSite` are unchanged, and a
+test asserts that, since "drop `Secure` locally" is an easy edit to over-apply.
+
+**`SC_SERVER_MAIL_TO_CONSOLE` prints sign-in links to the log**
+<!--@ sc_server::mail::Console -->, so trying the surface does not require an API
+key for a third party. A sign-in link is a credential, so this hands an account
+to anyone who can read the log — which is why it is **refused unless the base URL
+is loopback**, and why it is deliberately *not* a [`Provider`] variant: a variant
+would sit in the same setting that names Brevo or Resend, one typo from
+production. In this mode `PublicConfig::mail` is `None` rather than a
+placeholder, so there is no provider for a later branch to fall back to.
+
+The guard tests the **base URL**, not the bind address. Inside a container the
+bind is `0.0.0.0` whether or not anything outside can reach it, so a
+loopback-*bind* check would reject exactly the case this exists for.
+
 **Daemon transport is long-polling.** The daemon asks "is there work for me?" and
 the server holds the request open until there is, or until a timeout of about
 thirty seconds. That gives near-instant pickup with almost no idle traffic, and it

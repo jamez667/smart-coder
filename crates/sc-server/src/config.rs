@@ -47,6 +47,18 @@ pub struct Config {
     /// `daemon_key` required — the unsafe configuration should be impossible to
     /// express, not merely discouraged.
     pub public: Option<PublicConfig>,
+    /// Print sign-in links to the log instead of emailing them.
+    ///
+    /// **For looking at the surface locally.** A sign-in link is a credential, so
+    /// this hands an account to anyone who can read the log.
+    ///
+    /// Guarded by the *base URL* rather than by the bind address: inside a
+    /// container the bind is `0.0.0.0` whether or not anyone outside can reach
+    /// it, so a loopback-bind check would reject exactly the case this exists
+    /// for. The base URL is the address links are actually built from — if that
+    /// is `localhost`, the links only work for somebody already on the machine,
+    /// which is the same person who can read the log.
+    pub mail_to_console: bool,
 }
 
 /// What the public surface needs before it may exist.
@@ -66,7 +78,13 @@ pub struct PublicConfig {
     /// somebody a link to `localhost`, which is merely useless.
     pub base_url: String,
     /// How to send the sign-in link.
-    pub mail: MailConfig,
+    ///
+    /// `None` only when [`Config::mail_to_console`] is on, which is refused
+    /// unless the base URL is loopback. An `Option` rather than a placeholder
+    /// `MailConfig`: a placeholder holding a real provider name and an empty key
+    /// is one refactor away from silently constructing an `HttpMailer` that
+    /// authenticates with nothing, and this way that does not compile.
+    pub mail: Option<MailConfig>,
     /// The spam screener. `None` means file straight to `Queued` — a server that
     /// pretends to screen is worse than one that plainly does not.
     pub screen: Option<ScreenConfig>,
@@ -105,6 +123,20 @@ pub struct PublicConfig {
     /// A public form that quietly stops working is bad; one that silently scales
     /// to any number of budgets is worse.
     pub max_accounts: usize,
+    /// Should cookies carry the `Secure` attribute?
+    ///
+    /// **On everywhere except a loopback base URL**, and derived rather than
+    /// configured: a browser silently *discards* a `Secure` cookie sent over
+    /// plain HTTP, so on `http://localhost` sign-in and the language switcher
+    /// would both appear to do nothing at all — the request succeeds, the cookie
+    /// vanishes, and the next page has forgotten. The symptom looks like a bug
+    /// in the feature rather than a property of the cookie.
+    ///
+    /// Derived from the same check that already governs `http://` in
+    /// [`PublicConfig::base_url`], so there is no setting to get wrong: a
+    /// deployed server cannot be talked into dropping `Secure`, because its base
+    /// URL must be `https://` to start at all.
+    pub secure_cookies: bool,
     /// Does a filer get to read the spec drafted from their request?
     ///
     /// Defaults **on**, which is a deliberate choice worth understanding: the
@@ -188,6 +220,13 @@ pub mod env {
     pub const MAIL_FROM: &str = "SC_SERVER_MAIL_FROM";
     pub const MAIL_FROM_NAME: &str = "SC_SERVER_MAIL_FROM_NAME";
 
+    /// Print sign-in links to the log instead of sending them — **local only**.
+    ///
+    /// Honoured solely when `PUBLIC_BASE_URL` is a loopback address, so setting
+    /// it on a deployed server is a startup error rather than a quiet downgrade
+    /// to "anyone reading the log can sign in as anyone".
+    pub const MAIL_TO_CONSOLE: &str = "SC_SERVER_MAIL_TO_CONSOLE";
+
     /// Optional. Absent means filings are not screened at all.
     pub const SCREEN_KEY: &str = "SC_SERVER_SCREEN_KEY";
     pub const SCREEN_URL: &str = "SC_SERVER_SCREEN_URL";
@@ -247,6 +286,10 @@ impl Config {
             enrol_code: get(env::ENROL_CODE)
                 .map(|c| c.trim().to_string())
                 .filter(|c| !c.is_empty()),
+            // Read again here rather than threaded out of `public_from`, which
+            // returns `None` when the public surface is off — and the switch is
+            // meaningless in that case anyway, since nothing sends mail.
+            mail_to_console: flag(&get, env::MAIL_TO_CONSOLE),
             public: public_from(&get)?,
         })
     }
@@ -282,6 +325,18 @@ fn count(
         ));
     }
     Ok(n)
+}
+
+/// Read a boolean switch. **Off unless plainly turned on.**
+///
+/// Only the affirmative spellings count, so `SC_SERVER_MAIL_TO_CONSOLE=false`
+/// means false rather than "a non-empty string, therefore true" — which is the
+/// classic way a safety switch ends up on.
+fn flag(get: &impl Fn(&str) -> Option<String>, key: &str) -> bool {
+    matches!(
+        opt(get, key).map(|v| v.to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// Read a trimmed, non-blank setting. Blank is *absent*, not present-and-empty.
@@ -326,10 +381,34 @@ fn public_from(
         ));
     }
 
+    // Console mail waives the provider settings, because supplying a Brevo key
+    // to a server that will not call Brevo is a hurdle with no purpose. The
+    // placeholder below is never read: `build_mailer` picks `Console` first.
+    //
+    // Validated here rather than in `Config::from_vars` so that the base URL —
+    // which is what the guard tests — is already parsed and checked.
+    let to_console = flag(get, env::MAIL_TO_CONSOLE);
+    if to_console && !is_loopback(&base_url) {
+        return Err(format!(
+            "{} prints sign-in links to the log, which hands an account to anyone \
+             who can read it. It is honoured only when {} is a loopback address, \
+             and this one is {base_url:?}. Configure a real mail provider.",
+            env::MAIL_TO_CONSOLE,
+            env::PUBLIC_BASE_URL
+        ));
+    }
+
     Ok(Some(PublicConfig {
         repo,
+        // Computed before `base_url` is moved, and from the same value the
+        // `https://` check above ran on.
+        secure_cookies: !is_loopback(&base_url),
         base_url: base_url.trim_end_matches('/').to_string(),
-        mail: mail_from(get)?,
+        mail: if to_console {
+            None
+        } else {
+            Some(mail_from(get)?)
+        },
         screen: screen_from(get)?,
         max_outstanding_links: count(get, env::PUBLIC_MAX_LINKS, DEFAULT_MAX_OUTSTANDING_LINKS)?,
         max_daily_filings: count(get, env::PUBLIC_MAX_DAILY, DEFAULT_MAX_DAILY_FILINGS)?,
@@ -520,6 +599,67 @@ mod tests {
         ]
     }
 
+    // -- console mail, the local-only escape hatch ---------------------------
+
+    #[test]
+    fn console_mail_is_refused_on_a_deployed_base_url() {
+        // The guard that keeps this out of production. It prints sign-in links —
+        // which are credentials — so on a reachable host it would hand an
+        // account to anyone who can read the log.
+        let err = load(&[
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::PUBLIC_REPO, "intake"),
+            (env::PUBLIC_BASE_URL, "https://specs.example.com"),
+            (env::MAIL_TO_CONSOLE, "1"),
+        ])
+        .unwrap_err();
+        assert!(err.contains(env::MAIL_TO_CONSOLE), "{err}");
+        assert!(err.contains("read it"), "{err}");
+    }
+
+    #[test]
+    fn console_mail_waives_the_provider_settings_on_loopback() {
+        // The point of the switch: looking at the surface locally must not
+        // require an API key for a third party.
+        let cfg = load(&[
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::PUBLIC_REPO, "intake"),
+            (env::PUBLIC_BASE_URL, "http://localhost:8420"),
+            (env::MAIL_TO_CONSOLE, "true"),
+        ])
+        .unwrap();
+        assert!(cfg.mail_to_console);
+        // `None`, not a placeholder: there is no provider to fall back to, so no
+        // later branch can quietly construct an `HttpMailer` with an empty key.
+        assert!(cfg.public.unwrap().mail.is_none());
+    }
+
+    #[test]
+    fn console_mail_is_off_unless_plainly_turned_on() {
+        // The classic way a safety switch ends up on is "non-empty means true",
+        // which reads `MAIL_TO_CONSOLE=false` as yes.
+        //
+        // Asserted on a **loopback** base URL deliberately. With a deployed one
+        // the guard would reject a wrong reading with an error, and this test
+        // would pass on the panic rather than on the property — reporting the
+        // right result for the wrong reason.
+        for value in ["false", "0", "no", "off", "", "  ", "maybe"] {
+            let cfg = load(&[
+                (env::DAEMON_KEY, GOOD_KEY),
+                (env::PUBLIC_REPO, "intake"),
+                (env::PUBLIC_BASE_URL, "http://localhost:8420"),
+                (env::MAIL_PROVIDER, "brevo"),
+                (env::MAIL_KEY, GOOD_KEY),
+                (env::MAIL_FROM, "noreply@example.com"),
+                (env::MAIL_TO_CONSOLE, value),
+            ])
+            .unwrap_or_else(|e| panic!("{value:?} was read as on: {e}"));
+            assert!(!cfg.mail_to_console, "{value:?} turned it on");
+            // And the real provider is still required and read.
+            assert!(cfg.public.unwrap().mail.is_some(), "{value:?}");
+        }
+    }
+
     #[test]
     fn the_public_surface_is_off_unless_asked_for() {
         // A fresh container must not be an open intake form by accident.
@@ -553,8 +693,9 @@ mod tests {
         let p = cfg.public.expect("configured");
         assert_eq!(p.repo, "intake");
         assert_eq!(p.base_url, "https://specs.example.com");
-        assert_eq!(p.mail.provider, crate::mail::Provider::Brevo);
-        assert_eq!(p.mail.from_name, "Smart Coder", "a sensible default");
+        let mail = p.mail.as_ref().expect("a provider is configured");
+        assert_eq!(mail.provider, crate::mail::Provider::Brevo);
+        assert_eq!(mail.from_name, "Smart Coder", "a sensible default");
         assert_eq!(p.max_outstanding_links, DEFAULT_MAX_OUTSTANDING_LINKS);
         // Screening is absent unless a key is given, and that is a legitimate
         // choice rather than a broken one.

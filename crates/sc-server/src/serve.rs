@@ -118,7 +118,18 @@ pub fn run(cfg: &Config) -> Result<()> {
 
 /// The mailer the configuration asks for.
 fn build_mailer(cfg: &Config) -> Box<dyn Mailer> {
-    match cfg.public.as_ref().map(|p| &p.mail) {
+    // Checked first, and it is why `PublicConfig::mail` is `None` in this mode:
+    // there is no provider to fall back to, so this cannot be bypassed by a
+    // later branch.
+    if cfg.mail_to_console {
+        eprintln!(
+            "{} is on: sign-in links are printed below instead of emailed. \
+             Anyone who can read this log can sign in as anyone.",
+            crate::config::env::MAIL_TO_CONSOLE
+        );
+        return Box::new(crate::mail::Console);
+    }
+    match cfg.public.as_ref().and_then(|p| p.mail.as_ref()) {
         Some(m) => Box::new(HttpMailer::new(
             m.provider,
             &m.api_key,

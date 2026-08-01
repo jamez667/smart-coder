@@ -30,6 +30,25 @@ use crate::store::{new_id, Request, RequestState, Store};
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
 
+/// The `; Secure` a cookie carries, or nothing on a loopback server.
+///
+/// A browser **discards** a `Secure` cookie arriving over plain HTTP, so on
+/// `http://localhost` this attribute makes sign-in and the language switcher both
+/// appear to do nothing: the request succeeds, the cookie is dropped, and the
+/// next page has forgotten. That reads as a bug in the feature.
+///
+/// Derived from the base URL rather than configured — a deployed server's base
+/// URL must be `https://` before it will start, so there is nothing to get wrong
+/// and no setting an operator can talk into dropping it. When no public surface
+/// is configured the answer is `Secure`, which is the safe direction: the only
+/// cookie in play then is the developer's own device credential.
+fn secure_attr(ctx: &Ctx<'_>) -> &'static str {
+    match ctx.public {
+        Some(p) if !p.secure_cookies => "",
+        _ => "; Secure",
+    }
+}
+
 /// The cookie remembering the reader's chosen language.
 ///
 /// Separate from [`COOKIE`] and **not** `HttpOnly`: it holds a preference, not a
@@ -555,11 +574,12 @@ fn enrol(ctx: &mut Ctx<'_>, req: &Req, mut creds: Credentials) -> Res {
         return error(500, &format!("could not record the device: {e}"));
     }
 
+    let secure = secure_attr(ctx);
     let mut res = Res::html(200, crate::page::enrolled_page());
     // HttpOnly so script cannot read it; SameSite=Strict so a cross-site form
     // cannot ride it; Secure because this is served over TLS at the proxy.
     res.set_cookie = Some(format!(
-        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=31536000"
+        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
     ));
     res
 }
@@ -686,7 +706,7 @@ fn public_route(
         // Choosing a language. Signed out on purpose: somebody who cannot read
         // the sign-in page is exactly who needs this, and requiring an account
         // first would mean reading a page in a language they do not have.
-        ("POST", public_route::LANGUAGE) => set_language(req),
+        ("POST", public_route::LANGUAGE) => set_language(ctx, req),
 
         // The landing page a link opens. **Changes nothing** — mail scanners
         // fetch every URL in a message, and a GET that spent the token would
@@ -912,10 +932,11 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     if let Err(e) = ctx.store.put_accounts(&accounts) {
         return error(500, &e.to_string());
     }
+    let secure = secure_attr(ctx);
 
     let mut res = Res::html(200, crate::page::public_file_page(&[], false, locale));
     res.set_cookie = Some(format!(
-        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=31536000"
+        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
     ));
     res
 }
@@ -936,10 +957,11 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
             }
         }
     }
+    let secure = secure_attr(ctx);
     let mut res = Res::html(200, crate::page::signin_page_in(req.locale()));
     // Max-Age=0 so the browser drops it rather than carrying a dead token.
     res.set_cookie = Some(format!(
-        "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0"
+        "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0"
     ));
     res
 }
@@ -954,7 +976,7 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 /// were" field on a route reachable by anyone is an open redirect waiting to be
 /// found, and this surface is small enough that landing on the sign-in page —
 /// now in the chosen language — is no real loss.
-fn set_language(req: &Req) -> Res {
+fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
     let fields = form_fields(&req.body);
     // An unknown code selects the default rather than erroring. The value is
     // matched against the catalogues this server actually has, so nothing a
@@ -964,13 +986,14 @@ fn set_language(req: &Req) -> Res {
         .and_then(|v| Locale::parse(v))
         .unwrap_or_default();
 
+    let secure = secure_attr(ctx);
     let mut res = Res::html(200, crate::page::signin_page_in(locale));
     // Not `HttpOnly`: this is a preference, not a credential, and the public
     // surface's script may read it. `SameSite=Lax` rather than `Strict` so that
     // arriving from an external link — which is how somebody reaches a filing
     // page — still shows the language they chose.
     res.set_cookie = Some(format!(
-        "{LANG_COOKIE}={}; Path=/; SameSite=Lax; Secure; Max-Age=31536000",
+        "{LANG_COOKIE}={}; Path=/; SameSite=Lax{secure}; Max-Age=31536000",
         locale.code()
     ));
     res
@@ -1271,12 +1294,15 @@ mod tests {
             self.public = Some(PublicConfig {
                 repo: "intake".into(),
                 base_url: "https://specs.example.test".into(),
-                mail: crate::config::MailConfig {
+                // Matching the base URL above, which is what the real
+                // configuration derives this from.
+                secure_cookies: true,
+                mail: Some(crate::config::MailConfig {
                     provider: crate::mail::Provider::Brevo,
                     api_key: KEY.into(),
                     from: "noreply@example.test".into(),
                     from_name: "Smart Coder".into(),
-                },
+                }),
                 screen: screened.then(|| crate::config::ScreenConfig {
                     api_key: KEY.into(),
                     url: "https://screen.example.test".into(),
@@ -1287,6 +1313,15 @@ mod tests {
                 max_accounts: crate::config::DEFAULT_MAX_ACCOUNTS,
                 show_spec: true,
             });
+            self
+        }
+
+        /// Run as a loopback server, which is what drops `Secure` from cookies.
+        fn on_loopback(mut self) -> Fixture {
+            if let Some(p) = self.public.as_mut() {
+                p.base_url = "http://localhost:8420".into();
+                p.secure_cookies = false;
+            }
             self
         }
 
@@ -2310,6 +2345,40 @@ mod tests {
         assert!(cookie.contains("SameSite=Lax"), "{cookie}");
         assert!(cookie.contains("Secure"), "{cookie}");
         assert!(res.body.contains("<html lang=\"fr\""), "{}", res.body);
+    }
+
+    #[test]
+    fn cookies_are_secure_on_a_deployed_server_and_not_on_loopback() {
+        // A browser *discards* a `Secure` cookie sent over plain HTTP, so on
+        // http://localhost sign-in and the switcher would both appear to do
+        // nothing — the request succeeds and the cookie vanishes. That reads as
+        // a bug in the feature rather than a property of the cookie.
+        //
+        // Asserted on **every** cookie this server sets, not just the language
+        // one, because the failure is identical for the session cookie and
+        // rather more confusing.
+        let mut deployed = Fixture::new("secure-yes").with_public(false);
+        let account = deployed.signed_in("filer@example.test");
+        for res in [
+            deployed.go(&Req::post(public_route::LANGUAGE, "lang=fr")),
+            deployed.go(&Req::post(public_route::SIGNOUT, "").with_cookie(&account)),
+        ] {
+            let c = res.set_cookie.expect("a cookie is set");
+            assert!(c.contains("; Secure"), "{c}");
+        }
+
+        let mut local = Fixture::new("secure-no").with_public(false).on_loopback();
+        let account = local.signed_in("filer@example.test");
+        for res in [
+            local.go(&Req::post(public_route::LANGUAGE, "lang=fr")),
+            local.go(&Req::post(public_route::SIGNOUT, "").with_cookie(&account)),
+        ] {
+            let c = res.set_cookie.expect("a cookie is set");
+            assert!(!c.contains("Secure"), "{c}");
+            // Everything else is unchanged — dropping `Secure` on loopback must
+            // not quietly relax `HttpOnly` or `SameSite` with it.
+            assert!(c.contains("SameSite="), "{c}");
+        }
     }
 
     #[test]

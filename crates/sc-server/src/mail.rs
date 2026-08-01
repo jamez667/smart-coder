@@ -215,6 +215,30 @@ impl Mailer for Unconfigured {
     }
 }
 
+/// A mailer that prints the message to the log instead of sending it.
+///
+/// **For looking at the surface locally, and nothing else.** It prints the
+/// sign-in link — which is a credential — to stdout, so anyone who can read the
+/// container log can sign in as anyone. That is precisely what makes it useful
+/// for a local run and disqualifying anywhere else.
+///
+/// It is deliberately **not** a [`Provider`]. A provider variant would put this
+/// one typo away from production in the same setting that names Brevo or Resend.
+/// It is reached only by [`Config::mail_to_console`](crate::config::Config), a
+/// separate switch that the server refuses to honour on a non-loopback bind.
+pub struct Console;
+
+impl Mailer for Console {
+    fn send(&self, to: &str, subject: &str, text: &str) -> Result<()> {
+        // The address is printed here, unlike in `HttpMailer`'s error path. The
+        // reason that one withholds it — somebody's personal data landing in a
+        // log — is not a reason here: printing the *link* is the entire point,
+        // and the link is worth more than the address.
+        println!("\n--- mail (console) ---\nto: {to}\nsubject: {subject}\n\n{text}\n---\n");
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
