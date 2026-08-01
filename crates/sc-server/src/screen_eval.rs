@@ -6,7 +6,7 @@
 //!
 //! | Run | Question | Cost |
 //! |---|---|---|
-//! | [`Corpus::load`] + the tests below | do the **containment** properties hold? | free, every commit |
+//! | [`Corpus::bundled`] + the tests below | do the **containment** properties hold? | free, every commit |
 //! | `smart-coder screen-eval` | does the **model** still classify well? | a key and a few cents |
 //!
 //! The split matters. Containment is what makes the screener safe to have at all

@@ -3,8 +3,9 @@
 //! **Forms, not fetch, and no script at all.** These pages render drafted specs
 //! from *every* filer, so the argument that permits script on the public half —
 //! that a filer only ever sees their own — does not reach here. The CSP stays
-//! `default-src 'none'`, and permitting script is what would make a rendered
-//! model-authored spec dangerous.
+//! `default-src 'none'` with no `script-src` at all
+//! ([`Policy::Strict`](crate::routes::Policy::Strict)), and permitting script is
+//! what would make a rendered model-authored spec dangerous.
 //!
 //! It also makes the surface work on a phone with a bad connection on a train,
 //! which is the situation this whole feature exists for.

@@ -350,6 +350,19 @@ minted for anything longer. **No credential on this path is written to that file
 > route is a header eventually missing from one. Beyond them, a drafted spec is
 > rendered as escaped text in a `<pre>` — never as Markdown and never as HTML —
 > which removes the class rather than filtering it.
+>
+> **The CSP is now per-surface** <!--@ sc_server::routes::Policy -->, and the
+> paragraph above is what does **not** vary: `default-src 'none'` holds on both,
+> so no remote subresource is reachable from either. What varies is `script-src`,
+> which is `'self'` on the public surface and absent everywhere else — see the
+> transport section below for why that trade reversed there and only there.
+>
+> The policy rides on the response and is stamped in **one** place, at the
+> dispatch site that already decides public-or-not, so a public handler cannot be
+> written without it. `Policy::Strict` is the `Default`, which fixes the direction
+> the mistake falls in: a handler that forgets produces a public page whose script
+> does not run — visible at once — rather than a private page that quietly permits
+> one.
 
 ✅ **Built** <!--@ crates/sc-server/src/auth.rs -->, with two deviations recorded
 below.
@@ -365,12 +378,19 @@ gets its own credential and can be revoked alone, and a revoked device is *kept*
 rather than deleted so a list can say it was revoked.
 
 **Deviation — CSRF.** This spec asks for a required header on write routes. The
-surface is server-rendered HTML forms with no script at all (the CSP is
-`default-src 'none'`), and a form cannot set a header — so requiring one would
-mean requiring script, which is the thing that makes a rendered model-authored
-spec dangerous. The defence is `SameSite=Strict` plus `form-action 'self'`
-instead. That is a genuinely weaker guarantee on very old browsers, and it is the
-trade this pass took deliberately rather than by omission.
+surface is server-rendered HTML forms, and a form cannot set a header — so
+requiring one would mean requiring script on the surface where script is exactly
+what makes a rendered model-authored spec dangerous. The defence is
+`SameSite=Strict` plus `form-action 'self'` instead. That is a genuinely weaker
+guarantee on very old browsers, and it is the trade this pass took deliberately
+rather than by omission.
+
+Script is now permitted on the *public* surface, so "a form cannot set a header"
+is no longer a hard constraint there. The deviation stands anyway, on the
+narrower ground it should always have rested on: `form-action 'self'` plus a
+`SameSite=Strict` cookie is the defence, and adding a header would not
+meaningfully strengthen it. The pages remain forms that work with script
+disabled — the script is progressive enhancement, not the transport.
 
 **Deviation — no `?k=` bootstrap.** The spec permits a query parameter to
 bootstrap, exchanged immediately. None is implemented: the enrolment code is
@@ -566,6 +586,37 @@ nothing on the page needs script. Polling with a cursor needs script. So the
 choice was between a live-updating page with a weaker CSP and a static page with
 the strongest one, and on the surface that renders model-authored text the static
 page wins.
+
+**Amended: the public surface now permits `script-src 'self'`**
+<!--@ sc_server::routes::Policy -->. The paragraph above treated "renders
+model-authored text" as one property of one surface. It is two, and separating
+them is what changed the answer:
+
+| | whose text it renders | script |
+|---|---|---|
+| private | **every** filer's, on one page | never |
+| public | only the reader's own | `'self'` |
+
+A script that misbehaves on the public surface reaches the data of the person who
+filed it — who wrote the prompt that produced it in the first place. The same
+script on the private surface reaches every filer's specs at once, which is a
+cross-tenant leak with no equivalent on the other side. The blanket ban was
+buying nothing on the public half that the reader could not already do to
+themselves, and it was the reason a filer could not have a theme toggle or a
+language they can read.
+
+Three things this does **not** relax, and they are what keep the deviation
+narrow:
+
+- `default-src 'none'` is unchanged on both, so no remote subresource is
+  reachable from either. The exfiltration argument the section above makes is
+  untouched — it is about *remotes*, not about script.
+- `'self'` and not `'unsafe-inline'`. An inline-script allowance is also what a
+  successful injection needs, and this is the surface rendering model-authored
+  text. Script here must be a served file.
+- The transport is still forms and links. The pages work with script disabled;
+  what script is permitted *for* is presentation. The polling deviation this
+  section records therefore still stands.
 
 What is lost is live updates: a spec that finishes drafting while the developer
 is looking at the list does not appear until they reload. On a phone on a train

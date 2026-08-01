@@ -1,6 +1,6 @@
 //! The HTTP layer: bytes off a wire, and the long poll.
 //!
-//! Everything that decides anything lives in [`routes`](crate::routes) as a pure
+//! Everything that decides anything lives in [`crate::routes`] as a pure
 //! function. This module reads a request, calls it, and writes the response — so
 //! the untested surface is as small as it can be.
 //!
@@ -306,8 +306,10 @@ fn write(request: tiny_http::Request, res: Res) -> Result<()> {
         headers.push(h);
     }
     // Every response, without exception — a header added per route is a header
-    // eventually missing from one.
-    for (name, value) in routes::security_headers() {
+    // eventually missing from one. The *policy* rides on the response, decided
+    // at the one dispatch site in `handle`; this writer does not know or ask
+    // which surface it is serving.
+    for (name, value) in routes::security_headers(res.policy) {
         if let Ok(h) = format!("{name}: {value}").parse() {
             headers.push(h);
         }

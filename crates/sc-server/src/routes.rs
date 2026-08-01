@@ -120,6 +120,10 @@ pub struct Res {
     /// Set when the handler wants the caller to hold the connection open — the
     /// long-poll. The HTTP layer waits, then calls back.
     pub hold_for_work: bool,
+    /// What this is served with. Defaults to [`Policy::Strict`]; the public
+    /// surface is stamped in one place, in [`handle`], rather than by each
+    /// handler remembering to.
+    pub policy: Policy,
 }
 
 impl Res {
@@ -130,6 +134,7 @@ impl Res {
             body: body.into(),
             set_cookie: None,
             hold_for_work: false,
+            policy: Policy::Strict,
         }
     }
 
@@ -140,7 +145,19 @@ impl Res {
             body: body.into(),
             set_cookie: None,
             hold_for_work: false,
+            policy: Policy::Strict,
         }
+    }
+
+    /// Serve this on the public surface's policy.
+    ///
+    /// Called **once**, on everything `public_route` returns. Applied at the
+    /// dispatch site rather than at each `Res::html` inside the public handlers,
+    /// because there are twenty of those and one of them would eventually be
+    /// added without it.
+    fn with_policy(mut self, policy: Policy) -> Res {
+        self.policy = policy;
+        self
     }
 
     fn ok_json<T: serde::Serialize>(value: &T) -> Res {
@@ -159,7 +176,58 @@ fn error(status: u16, msg: &str) -> Res {
     Res::json(status, body)
 }
 
-/// The three headers on **every** response, without exception.
+/// Which surface a response came from, and therefore what it is served with.
+///
+/// The two surfaces differ in exactly one way — whether the page may run script
+/// — and this is where that difference lives. It is carried **on the response**
+/// rather than decided in `serve.rs`, because by the time a response reaches the
+/// socket writer the only thing left to distinguish the surfaces by is the path,
+/// and matching the path a second time is a second copy of the routing table.
+///
+/// [`Strict`](Policy::Strict) is the `Default`. A handler that forgets to say
+/// which surface it is on gets the *tighter* policy, so the failure is a public
+/// page whose script does not run — visible immediately — rather than a private
+/// page that quietly permits one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Policy {
+    /// No script at all. The private surface, and everything not on the public
+    /// one: JSON for the daemon, errors, the enrolment page.
+    #[default]
+    Strict,
+    /// Script from this origin only. The public surface.
+    ///
+    /// Permitted here and nowhere else because of who reads what: a filer's
+    /// pages show **their own** requests, so a script that went wrong reaches
+    /// only its author's data. The private surface renders every filer's spec on
+    /// one page, and the same argument does not reach it.
+    PublicScript,
+}
+
+impl Policy {
+    /// The `Content-Security-Policy` value.
+    ///
+    /// `default-src 'none'` on both, so a remote subresource is unreachable
+    /// either way. That is the directive doing the security work; `script-src`
+    /// is the one that differs.
+    pub fn csp(self) -> &'static str {
+        match self {
+            Policy::Strict => {
+                "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; \
+                 base-uri 'none'; frame-ancestors 'none'"
+            }
+            // `'self'` and not `'unsafe-inline'`: an inline-script allowance is
+            // also what a successful injection needs, and the public surface is
+            // the one rendering model-authored text. Script here must be a
+            // served file.
+            Policy::PublicScript => {
+                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
+                 form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+            }
+        }
+    }
+}
+
+/// The five headers on **every** response, without exception.
 ///
 /// Rendering model-authored Markdown is an exfiltration path: one hallucinated
 /// remote image leaks the page URL — which identifies the request — through the
@@ -168,7 +236,7 @@ fn error(status: u16, msg: &str) -> Res {
 ///
 /// They are returned from one function rather than added per route, because a
 /// header added per route is a header eventually missing from one.
-pub fn security_headers() -> [(&'static str, &'static str); 5] {
+pub fn security_headers(policy: Policy) -> [(&'static str, &'static str); 5] {
     [
         // No `Referer` anywhere, so a remote subresource cannot leak the URL.
         ("Referrer-Policy", "no-referrer"),
@@ -176,11 +244,7 @@ pub fn security_headers() -> [(&'static str, &'static str); 5] {
         ("Cache-Control", "no-store"),
         // No remote subresources at all: the CSP is what makes the exfiltration
         // path unreachable rather than merely unreferred.
-        (
-            "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; \
-             base-uri 'none'; frame-ancestors 'none'",
-        ),
+        ("Content-Security-Policy", policy.csp()),
         ("X-Content-Type-Options", "nosniff"),
         ("X-Frame-Options", "DENY"),
     ]
@@ -255,9 +319,18 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     //
     // Skipped entirely when no public surface is configured, so the routes do not
     // exist rather than existing and refusing.
+    //
+    // This is also **the one place the public policy is applied**. Everything
+    // `public_route` returns is stamped here, so a public handler cannot be
+    // written without it and a private one cannot accidentally acquire it — the
+    // two properties a per-handler `.with_policy()` call would each fail at.
     if is_public_path(&path) {
         return match ctx.public {
-            Some(_) => public_route(ctx, req, method, &path, &caller),
+            Some(_) => {
+                public_route(ctx, req, method, &path, &caller).with_policy(Policy::PublicScript)
+            }
+            // No public surface configured: this 404 is not *on* that surface, so
+            // it is served strict like every other non-public response.
             None => Res::html(404, crate::page::not_found()),
         };
     }
@@ -1631,44 +1704,88 @@ mod tests {
 
     // -- headers and limits -------------------------------------------------
 
+    /// Both policies, so a property asserted here is asserted for the whole
+    /// server rather than for whichever one the test happened to pick.
+    const POLICIES: [Policy; 2] = [Policy::Strict, Policy::PublicScript];
+
     #[test]
     fn the_three_headers_spec_18_names_are_all_present() {
         // Rendering model-authored Markdown is an exfiltration path: one
         // hallucinated remote image leaks the page URL via `Referer`.
-        let headers = security_headers();
-        let named: Vec<&str> = headers.iter().map(|(k, _)| *k).collect();
-        for required in [
-            "Referrer-Policy",
-            "Cache-Control",
-            "Content-Security-Policy",
-        ] {
-            assert!(named.contains(&required), "missing {required}");
+        for policy in POLICIES {
+            let headers = security_headers(policy);
+            let named: Vec<&str> = headers.iter().map(|(k, _)| *k).collect();
+            for required in [
+                "Referrer-Policy",
+                "Cache-Control",
+                "Content-Security-Policy",
+            ] {
+                assert!(named.contains(&required), "{policy:?} missing {required}");
+            }
+            let referrer = headers
+                .iter()
+                .find(|(k, _)| *k == "Referrer-Policy")
+                .unwrap();
+            assert_eq!(referrer.1, "no-referrer", "{policy:?}");
+            let cache = headers.iter().find(|(k, _)| *k == "Cache-Control").unwrap();
+            assert_eq!(cache.1, "no-store", "{policy:?}");
         }
-        let referrer = headers
-            .iter()
-            .find(|(k, _)| *k == "Referrer-Policy")
-            .unwrap();
-        assert_eq!(referrer.1, "no-referrer");
-        let cache = headers.iter().find(|(k, _)| *k == "Cache-Control").unwrap();
-        assert_eq!(cache.1, "no-store");
     }
 
     #[test]
-    fn the_csp_forbids_remote_subresources() {
+    fn no_policy_permits_a_remote_subresource() {
         // This is what makes the exfiltration path unreachable rather than
-        // merely unreferred.
-        let csp = security_headers()
-            .iter()
-            .find(|(k, _)| *k == "Content-Security-Policy")
-            .unwrap()
-            .1;
-        assert!(csp.starts_with("default-src 'none'"), "{csp}");
-        assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
-        assert!(
-            !csp.contains("https:"),
-            "no remote origin is allowed: {csp}"
-        );
-        assert!(!csp.contains('*'), "no wildcard origin: {csp}");
+        // merely unreferred — and it is the part the public/private split does
+        // **not** relax. Permitting script is not permitting a remote origin.
+        for policy in POLICIES {
+            let csp = policy.csp();
+            assert!(csp.starts_with("default-src 'none'"), "{policy:?}: {csp}");
+            assert!(csp.contains("frame-ancestors 'none'"), "{policy:?}: {csp}");
+            assert!(!csp.contains("https:"), "{policy:?} allows a remote: {csp}");
+            assert!(!csp.contains("http:"), "{policy:?} allows a remote: {csp}");
+            assert!(!csp.contains('*'), "{policy:?} allows a wildcard: {csp}");
+        }
+    }
+
+    #[test]
+    fn only_the_public_policy_permits_script() {
+        // The whole point of the split. Stated as an equality on both sides:
+        // "strict has no script-src" alone would still pass if `default-src`
+        // were loosened, since script would then fall back to it.
+        assert!(!Policy::Strict.csp().contains("script-src"));
+        assert!(Policy::PublicScript.csp().contains("script-src 'self'"));
+    }
+
+    #[test]
+    fn no_policy_permits_an_inline_script() {
+        // `'unsafe-inline'` on `script-src` is what a successful injection needs.
+        // Script on the public surface must be a served file, so that an
+        // injected `<script>` in a rendered spec still does not run.
+        //
+        // Checked on `script-src` specifically — `style-src 'unsafe-inline'` is
+        // deliberate and present in both, so a bare `contains` would fail here
+        // for the wrong reason.
+        for policy in POLICIES {
+            let csp = policy.csp();
+            let Some(rest) = csp.split("script-src").nth(1) else {
+                continue;
+            };
+            let directive = rest.split(';').next().unwrap_or("");
+            assert!(
+                !directive.contains("unsafe-inline"),
+                "{policy:?} permits an inline script: {csp}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_response_is_strict_unless_something_says_otherwise() {
+        // The direction the default must fail in. A handler that forgets which
+        // surface it is on produces a page whose script does not run — visible
+        // at once — rather than a private page that quietly permits one.
+        assert_eq!(Res::html(200, "x").policy, Policy::Strict);
+        assert_eq!(Res::json(200, "{}").policy, Policy::Strict);
+        assert_eq!(Policy::default(), Policy::Strict);
     }
 
     #[test]
@@ -2025,7 +2142,10 @@ mod tests {
         // The headers are returned from one function for every response, so this
         // holds by construction — asserted anyway, since the public surface is
         // the one that renders model-authored text to strangers.
-        let named: Vec<&str> = security_headers().iter().map(|(k, _)| *k).collect();
+        let named: Vec<&str> = security_headers(Policy::PublicScript)
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
         for required in [
             "Referrer-Policy",
             "Cache-Control",
@@ -2033,6 +2153,61 @@ mod tests {
         ] {
             assert!(named.contains(&required));
         }
+    }
+
+    #[test]
+    fn the_script_policy_reaches_the_public_surface_and_stops_there() {
+        // Driven through `handle`, not by calling `csp()`, because the property
+        // is about *routing*: the stamp is applied once at the dispatch site, so
+        // what this really checks is that the dispatch site is the same one
+        // every public route goes through.
+        let mut f = Fixture::new("policy-split").with_public(false);
+        let account = f.signed_in("filer@example.test");
+        let device = f.enrolled();
+
+        let signin_link = format!("{}sometoken", public_route::SIGNIN_PREFIX);
+        for path in [public_route::SIGNIN, public_route::FILE, &signin_link] {
+            let res = f.go(&Req::get(path).with_cookie(&account));
+            assert_eq!(
+                res.policy,
+                Policy::PublicScript,
+                "{path} is on the public surface"
+            );
+        }
+
+        // A path that merely *looks* public is not, and must not pick the
+        // permission up. `is_public_path` is an allowlist, so an unmatched
+        // `/public/...` falls through to the private surface's device gate —
+        // which is where its policy comes from too.
+        let stray = f.go(&Req::get("/public/nothing-here").with_cookie(&account));
+        assert_eq!(stray.status, 401, "not a public route");
+        assert_eq!(stray.policy, Policy::Strict);
+
+        // The private surface, including the routes a *device* reaches. These
+        // render every filer's spec on one page, which is the reason the
+        // permission does not extend here.
+        for path in ["/", "/accounts"] {
+            let res = f.go(&Req::get(path).with_cookie(&device));
+            assert_eq!(res.status, 200, "{path}: {}", res.body);
+            assert_eq!(res.policy, Policy::Strict, "{path} is private");
+        }
+
+        // And the daemon's API, which is neither.
+        assert_eq!(
+            f.go(&Req::get("/api/v1/work").with_bearer(KEY)).policy,
+            Policy::Strict
+        );
+    }
+
+    #[test]
+    fn a_public_path_is_strict_when_no_public_surface_is_configured() {
+        // The 404 for a surface that does not exist is not *on* that surface.
+        // Worth pinning: it is rendered from inside the `is_public_path` branch,
+        // one line from the stamp, and is the easiest thing to sweep into it.
+        let mut f = Fixture::new("policy-unconfigured");
+        let res = f.go(&Req::get(public_route::SIGNIN));
+        assert_eq!(res.status, 404);
+        assert_eq!(res.policy, Policy::Strict);
     }
 
     #[test]

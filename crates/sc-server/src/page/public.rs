@@ -18,6 +18,14 @@
 //! The residual risk here is privacy rather than attack: a model can emit a
 //! hallucinated remote reference nobody asked for. `default-src 'none'` still
 //! blocks the fetch, so permitting script does not reopen it.
+//!
+//! What actually grants the permission is
+//! [`Policy::PublicScript`](crate::routes::Policy::PublicScript), applied to
+//! everything the public routes return. It is **not** a property of the
+//! renderers in this module: a page defined here and served from a private route
+//! would be served strict, which is the safe direction for that mistake to fall.
+//! The permission is `'self'`, so an inline `<script>` reaching a page through
+//! model output still does not run.
 
 use sc_proto::IntakeKind;
 
