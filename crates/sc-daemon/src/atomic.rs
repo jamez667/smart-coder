@@ -16,6 +16,24 @@ use sc_proto::Result;
 
 /// Write `bytes` to `path` atomically.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_inner(path, bytes, false)
+}
+
+/// Write atomically, readable only by the owner.
+///
+/// For files holding a secret — the daemon's config carries the server API key.
+/// The permissions are set on the **temp file, before the rename**, so the secret
+/// is never briefly world-readable: setting them afterwards leaves a window in
+/// which another user can open it, and an attacker who loses that race still only
+/// has to win it once.
+///
+/// A no-op on Windows, where the mode bits do not apply and the inherited ACL is
+/// what governs.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_inner(path, bytes, true)
+}
+
+fn write_inner(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
@@ -25,6 +43,9 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;
+        if private {
+            set_owner_only(&f)?;
+        }
         f.write_all(bytes)?;
         // Without this the rename can land before the contents reach disk, and a
         // power cut leaves an intact-looking file full of zeroes.
@@ -38,6 +59,20 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
             Err(e.into())
         }
     }
+}
+
+#[cfg(unix)]
+fn set_owner_only(f: &std::fs::File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_f: &std::fs::File) -> Result<()> {
+    // Windows has no mode bits; the file inherits the directory's ACL, and
+    // `~/.smart-coder` is already under the user's profile.
+    Ok(())
 }
 
 #[cfg(test)]
@@ -77,6 +112,40 @@ mod tests {
             .filter(|n| n.contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_private_write_is_owner_only_and_never_briefly_world_readable() {
+        // The daemon's config carries the server API key. Setting the mode after
+        // the rename would leave a window another user can open it in — and an
+        // attacker only has to win that race once.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("atomic-private");
+        let path = dir.join("secret.json");
+        write_private(&path, b"{\"key\":\"s3cret\"}").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_private_write_is_still_atomic_and_leaves_no_temp() {
+        // The permission handling must not have cost the durability property.
+        let dir = temp_dir("atomic-private-clean");
+        let path = dir.join("secret.json");
+        write_private(&path, b"first").unwrap();
+        write_private(&path, b"second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

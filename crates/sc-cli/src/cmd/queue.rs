@@ -31,6 +31,9 @@ pub fn queue(cli: &Cli, action: &QueueAction) -> ExitCode {
         QueueAction::File { text, repo, kind } => file(&q, &cfg, text, repo, *kind),
         QueueAction::List => list(&q),
         QueueAction::Run => return run(cli, &q, &cfg),
+        QueueAction::Serve => return serve(cli, &q, &cfg),
+        QueueAction::Link { url, key } => link(url, key),
+        QueueAction::LinkStatus => link_status(&cfg),
         QueueAction::Show { id } => show(&q, &cfg, id),
         QueueAction::Approve { id } => approve(&q, &cfg, id),
         QueueAction::SendBack { id, notes } => send_back(&q, &cfg, id, notes),
@@ -173,6 +176,9 @@ fn run(cli: &Cli, q: &sc_daemon::Queue, cfg: &sc_daemon::DaemonConfig) -> ExitCo
     }
 
     println!("● queue  drafting specs for {} repo(s)", cfg.repos.len());
+    // Same reasoning as `serve`: a task left `Drafting` by a killed run holds its
+    // repository, and every later task for it is skipped without explanation.
+    reclaim_abandoned(q);
     let mut drafted = 0usize;
     loop {
         match sc_daemon::draft_next(&orchestrator, q, cfg) {
@@ -208,6 +214,139 @@ fn run(cli: &Cli, q: &sc_daemon::Queue, cfg: &sc_daemon::DaemonConfig) -> ExitCo
         println!("nothing to draft");
     }
     ExitCode::SUCCESS
+}
+
+/// Link this daemon to a hosted server.
+fn link(url: &str, key: &str) -> sc_proto::Result<()> {
+    let mut cfg = sc_daemon::config::load()?;
+    cfg.link(url, key)?;
+    sc_daemon::config::save(&cfg)?;
+
+    let link = cfg.require_server()?;
+    println!("linked to {}", link.url);
+    println!(
+        "\nThe daemon dials OUT to it and accepts no connections, so nothing on \
+         this machine is exposed."
+    );
+    println!("Run `smart-coder queue serve` to start drafting what it hands over.");
+    Ok(())
+}
+
+/// Say where this daemon points, without printing the key.
+fn link_status(cfg: &sc_daemon::DaemonConfig) -> sc_proto::Result<()> {
+    match &cfg.server {
+        // Never the key itself: this is the command a developer runs while
+        // screen-sharing or pasting output into a bug report.
+        Some(link) => {
+            println!("linked to {}", link.url);
+            println!("key: set ({} characters, not shown)", link.key.len());
+        }
+        None => {
+            println!("not linked to a server");
+            println!(
+                "\n`smart-coder queue run` drafts from the local queue and needs no \
+                 server.\nTo dial out to one: `smart-coder queue link <url> --key <key>`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Dial the linked server and draft whatever it hands over.
+fn serve(cli: &Cli, q: &sc_daemon::Queue, cfg: &sc_daemon::DaemonConfig) -> ExitCode {
+    let link = match cfg.require_server() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if cfg.repos.is_empty() {
+        eprintln!(
+            "error: this daemon serves no repositories, so it can draft nothing the \
+             server hands over. Add one with `smart-coder queue add-repo <name> <path>`."
+        );
+        return ExitCode::FAILURE;
+    }
+    let orchestrator = cli.orchestrator();
+    // Fail at the terminal rather than on the first work item at 3am.
+    if let Err(e) = sc_cli::preflight(&[("orchestrator", &orchestrator)]) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    // Anything still `Drafting` is a corpse from a previous run — this process
+    // has claimed nothing yet. Left alone it would hold its repository forever
+    // and every later request for it would be skipped in silence.
+    reclaim_abandoned(q);
+
+    let transport = sc_daemon::HttpTransport::new(&link.url, &link.key);
+    println!("● serve  {}", link.url);
+    println!(
+        "         {} repo(s) · specs only · Ctrl-C to stop",
+        cfg.repos.len()
+    );
+
+    // Ctrl-C terminates the process outright — there is no signal handler here,
+    // because a dependency for one buys little: the queue is durable, so an
+    // abrupt stop loses the in-flight model call and nothing else, and the next
+    // start reclaims the task above. The stop flag `run_loop` takes exists for
+    // programmatic callers and tests.
+    sc_daemon::run_loop(
+        &transport,
+        &orchestrator,
+        q,
+        cfg,
+        &|| false,
+        &report_turn,
+        // Only used after an *unreachable* server; an ordinary idle poll is
+        // already paced by the server holding the request open.
+        std::time::Duration::from_secs(10),
+    );
+
+    println!("stopped");
+    ExitCode::SUCCESS
+}
+
+/// Requeue anything a previous run left mid-draft, and say so.
+///
+/// Not fatal if it fails: the daemon can still work on repositories that are not
+/// blocked, and refusing to start over a housekeeping error would be worse than
+/// the blockage it fixes.
+fn reclaim_abandoned(q: &sc_daemon::Queue) {
+    match q.requeue_abandoned() {
+        Ok(ids) if ids.is_empty() => {}
+        Ok(ids) => {
+            println!(
+                "  ↺ requeued {} task(s) left mid-draft by a previous run: {}",
+                ids.len(),
+                ids.join(", ")
+            );
+        }
+        Err(e) => eprintln!("warning: could not check for abandoned tasks: {e}"),
+    }
+}
+
+/// Render one turn of the serve loop.
+fn report_turn(turn: &sc_daemon::Turn) {
+    match turn {
+        // An idle poll is the resting state, not news. Printing it would scroll
+        // the interesting lines away at two per minute, forever.
+        sc_daemon::Turn::Idle => {}
+        sc_daemon::Turn::Drafted { id, artifact_dir } => {
+            println!("  ◇ [{id}] drafted → {artifact_dir}");
+            println!("      the reviewer reads it on the web surface");
+        }
+        sc_daemon::Turn::Deferred { id, reason } => {
+            println!("  · [{id}] deferred — {reason}");
+        }
+        sc_daemon::Turn::Failed { id, reason } => {
+            eprintln!("  ✗ [{id}] failed — {reason}");
+        }
+        sc_daemon::Turn::Unreachable { reason } => {
+            eprintln!("  ⚠ server unreachable — {reason}");
+        }
+    }
 }
 
 fn show(q: &sc_daemon::Queue, cfg: &sc_daemon::DaemonConfig, id: &str) -> sc_proto::Result<()> {

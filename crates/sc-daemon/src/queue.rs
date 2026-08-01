@@ -140,6 +140,44 @@ impl Queue {
             .cloned())
     }
 
+    /// Requeue tasks left `Drafting` by a process that is no longer running.
+    ///
+    /// Call this at **startup, before the first claim**. At that moment no draft
+    /// can be in flight — this process has not started one — so anything still
+    /// `Drafting` is a corpse from a previous run that was killed, crashed, or
+    /// lost power mid-draft.
+    ///
+    /// Without this, such a task holds its repository forever
+    /// ([`holds_the_repo`](TaskState::holds_the_repo)) and every later request
+    /// for that repo is skipped silently — the developer sees work simply stop
+    /// arriving, with nothing saying why. `queue serve` makes that likely rather
+    /// than exotic, because it is a long-running process people Ctrl-C routinely.
+    ///
+    /// Requeued rather than failed: nothing about the *request* went wrong, so
+    /// reporting a failure would make the developer investigate their own
+    /// interrupt. The note says what happened, because a task that silently
+    /// reappears at the back of the queue is its own small mystery.
+    ///
+    /// Returns the ids that were reclaimed.
+    pub fn requeue_abandoned(&self) -> Result<Vec<String>> {
+        let mut reclaimed = Vec::new();
+        for task in self.all()? {
+            if task.state == TaskState::Drafting {
+                self.set_state(
+                    &task.id,
+                    TaskState::Queued,
+                    Some(
+                        "requeued: the daemon stopped while drafting this, so it was \
+                         picked up again"
+                            .to_string(),
+                    ),
+                )?;
+                reclaimed.push(task.id);
+            }
+        }
+        Ok(reclaimed)
+    }
+
     /// Is anything currently drafting for `repo`?
     pub fn repo_busy(&self, repo: &str) -> Result<bool> {
         Ok(self
@@ -182,6 +220,79 @@ mod tests {
         let t = Task::new(id, format!("task {id}"), repo);
         q.put(&t).unwrap();
         t
+    }
+
+    #[test]
+    fn a_task_stranded_by_a_kill_stops_blocking_its_repository() {
+        // A daemon killed mid-draft leaves a task `Drafting`, which holds the
+        // repo — so every later request for it is skipped silently and the
+        // developer sees work simply stop arriving, with nothing saying why.
+        // `queue serve` makes this routine, not exotic: it is long-running and
+        // people Ctrl-C it.
+        let (q, dir) = queue("abandoned");
+        file(&q, "0001", "alpha");
+        q.set_state("0001", TaskState::Drafting, None).unwrap();
+        file(&q, "0002", "alpha");
+
+        // Before reclaiming, the repo is blocked and 0002 never runs.
+        assert!(q.next_to_draft().unwrap().is_none(), "alpha looks busy");
+
+        let reclaimed = q.requeue_abandoned().unwrap();
+        assert_eq!(reclaimed, vec!["0001".to_string()]);
+        assert_eq!(q.require("0001").unwrap().state, TaskState::Queued);
+        // And the queue moves again, oldest first.
+        assert_eq!(q.next_to_draft().unwrap().unwrap().id, "0001");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reclaimed_task_says_why_it_reappeared() {
+        // A task that silently returns to the back of the queue is its own small
+        // mystery. It is requeued rather than failed, because nothing about the
+        // *request* went wrong — reporting a failure would send the developer
+        // investigating their own Ctrl-C.
+        let (q, dir) = queue("abandoned-note");
+        file(&q, "0001", "alpha");
+        q.set_state("0001", TaskState::Drafting, None).unwrap();
+
+        q.requeue_abandoned().unwrap();
+        let note = q.require("0001").unwrap().note.unwrap_or_default();
+        assert!(note.contains("stopped while drafting"), "{note}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reclaiming_leaves_every_other_state_alone() {
+        // Only `Drafting` can be a corpse: it is the one state that means "a
+        // process is working on this right now". Touching a task awaiting review
+        // would throw away a spec a human has not read yet.
+        let (q, dir) = queue("abandoned-scope");
+        for (id, state) in [
+            ("0001", TaskState::Queued),
+            ("0002", TaskState::AwaitingReview),
+            ("0003", TaskState::Ready),
+            ("0004", TaskState::Failed),
+            ("0005", TaskState::Discarded),
+        ] {
+            file(&q, id, "alpha");
+            q.set_state(id, state, None).unwrap();
+        }
+
+        assert!(q.requeue_abandoned().unwrap().is_empty());
+        assert_eq!(
+            q.require("0002").unwrap().state,
+            TaskState::AwaitingReview,
+            "an unread spec is not thrown away"
+        );
+        assert_eq!(q.require("0003").unwrap().state, TaskState::Ready);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reclaiming_an_empty_queue_is_a_no_op() {
+        let (q, dir) = queue("abandoned-empty");
+        assert!(q.requeue_abandoned().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

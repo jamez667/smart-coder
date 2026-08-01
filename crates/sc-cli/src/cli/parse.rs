@@ -744,8 +744,8 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
     let mut it = rest.into_iter();
     let action = it.next().ok_or_else(|| {
         DcError::Eval(
-            "queue needs an action: file | list | run | approve | send-back | \
-             discard | show | feedback | ack | repos | add-repo | forget-repo"
+            "queue needs an action: file | list | run | serve | approve | send-back | \
+             discard | show | feedback | ack | repos | add-repo | forget-repo | link"
                 .to_string(),
         )
     })?;
@@ -757,6 +757,7 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
     // the backend config instead of looking accepted and doing nothing (found live).
     let mut repo: Option<String> = None;
     let mut kind: Option<sc_daemon::IntakeKind> = None;
+    let mut key: Option<String> = None;
     let mut all = false;
     let mut words: Vec<String> = Vec::new();
     let mut leftover: Vec<String> = Vec::new();
@@ -780,6 +781,12 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
                     Some(it.next().ok_or_else(|| {
                         DcError::Eval("--repo needs a repository name".to_string())
                     })?)
+            }
+            "--key" => {
+                key = Some(
+                    it.next()
+                        .ok_or_else(|| DcError::Eval("--key needs the API key".to_string()))?,
+                )
             }
             other if other.starts_with("--") => {
                 leftover.push(w);
@@ -828,7 +835,24 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
         }
         "list" => Ok((QueueAction::List, leftover)),
         "run" => Ok((QueueAction::Run, leftover)),
+        "serve" => Ok((QueueAction::Serve, leftover)),
         "repos" => Ok((QueueAction::Repos, leftover)),
+        "link" => {
+            // Bare `queue link` reports; `queue link <url> --key <k>` sets. One
+            // word for both, because "where am I pointed?" is the question a
+            // developer asks right before and right after changing it.
+            if first.is_empty() {
+                return Ok((QueueAction::LinkStatus, leftover));
+            }
+            let key = key.ok_or_else(|| {
+                DcError::Eval(
+                    "queue link needs --key <key>: the same value as the server's \
+                     SC_SERVER_DAEMON_KEY. Generate one with `openssl rand -hex 32`."
+                        .to_string(),
+                )
+            })?;
+            Ok((QueueAction::Link { url: first, key }, leftover))
+        }
         "feedback" => Ok((QueueAction::Feedback { repo, all }, leftover)),
         "ack" => {
             let id = require_id(&first, "ack")?;

@@ -251,6 +251,28 @@ runner, not daemon work, so they were fixed ahead of it.
   event-driven" came back regenerated having never seen the note. Narrower than the
   three above (guidance, not an approved decision) but the same class of silent
   loss, and a two-line fix once the others were in place.
+- ✅ **A task killed mid-draft stops blocking its repository.** Found while
+  building `queue serve`. A daemon that dies while drafting leaves its task
+  `Drafting`, and that state *holds the repo*
+  <!--@ crates/sc-daemon/src/task.rs --> — so on the next start every request for
+  that repository was skipped in silence. Not an error, not a log line: work
+  simply stopped arriving, forever, with nothing to point at.
+
+  Latent before, routine now: `queue serve` is a long-running foreground process
+  that people Ctrl-C, where `queue run` drained and exited.
+
+  The fix is `requeue_abandoned()` <!--@ crates/sc-daemon/src/queue.rs -->,
+  called at startup **before the first claim** — the one moment when nothing can
+  legitimately be in flight, because this process has claimed nothing yet, so
+  anything `Drafting` is provably a corpse. **Requeued, not failed:** nothing
+  about the *request* went wrong, and reporting a failure would send the
+  developer investigating their own interrupt. The note says what happened,
+  because a task that silently reappears at the back of the queue is its own
+  small mystery.
+
+  Only `Drafting` is touched. It is the one state meaning "a process is working
+  on this right now" — reclaiming `AwaitingReview` would throw away a spec a
+  human has not read yet.
 
 ## Task identity
 

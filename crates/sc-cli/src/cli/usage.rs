@@ -49,6 +49,12 @@ COMMANDS:
                       repos                   what this daemon serves
                       add-repo NAME PATH      serve another repository
                       forget-repo NAME        stop serving one
+                      link [URL --key KEY]    link to a hosted server (spec 18), or
+                                              with no URL, say where it points
+                      serve                   dial the linked server and draft what
+                                              it hands over. The daemon calls OUT and
+                                              accepts no connections, so nothing here
+                                              is exposed. `run` is the offline twin.
     trace           Check the specs against the code (spec 17): anchors that no
                     longer resolve, assertions that are false, crates no spec
                     claims. Deterministic — no model runs. See --check.

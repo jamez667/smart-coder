@@ -132,6 +132,23 @@ pub enum QueueAction {
     ForgetRepo {
         name: String,
     },
+    /// Link this daemon to a hosted server (spec 18).
+    ///
+    /// The daemon dials **out** to it and accepts no connections, so this is a
+    /// client credential and there is no inbound surface it protects.
+    Link {
+        url: String,
+        key: String,
+    },
+    /// Show which server this daemon is linked to, if any. Never prints the key.
+    LinkStatus,
+    /// Dial the linked server and draft whatever it hands over, until stopped.
+    ///
+    /// Distinct from [`Run`](QueueAction::Run), which drafts from the *local*
+    /// queue and needs no server. Two commands rather than a flag, because they
+    /// fail in different ways and a developer needs to know which one they are
+    /// running when it stops.
+    Serve,
 }
 
 /// Which tool-call enforcement to ask the backend for (spec 02). Maps onto the

@@ -105,6 +105,25 @@ who might lose their phone, and a daemon is a long-lived machine credential.
   <!--@ crates/sc-daemon/src/config.rs --> — and sent as
   `Authorization: Bearer`. One key per machine, so a lost laptop is revoked
   without locking the developer out of their desktop.
+
+  ✅ **Built.** `smart-coder queue link <url> --key <key>` sets it and
+  `queue serve` runs the dial-out loop; `queue run` is the offline twin that
+  needs no server at all. Two commands rather than one flag, because they fail
+  in different ways and a developer needs to know which one they are running
+  when it stops.
+
+  The link is validated **at the keyboard**, not at 3am in a poll loop: a key
+  under 32 characters is refused with the server's own floor, and plain HTTP to
+  a *remote* host is refused because it would send the key in the clear.
+  Loopback over HTTP is allowed, because that is how a developer tries the
+  server before deploying it and nothing leaves the machine.
+
+  Because that file now holds a secret, it is written owner-only
+  <!--@ crates/sc-daemon/src/atomic.rs -->, with the mode set on the temp file
+  *before* the rename — setting it afterwards leaves a window another user can
+  open it in, and an attacker only has to win that race once. `queue link` with
+  no argument reports the URL and never the key, because that is the command
+  someone runs while screen-sharing.
 - The key authenticates **outbound** requests only. The daemon accepts no
   connections, so there is no inbound surface to authenticate.
 - Short-lived exchanged tokens were considered and rejected for this pass: they

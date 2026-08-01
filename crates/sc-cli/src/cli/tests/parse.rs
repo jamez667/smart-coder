@@ -528,11 +528,81 @@ fn queue_actions_parse() {
                 name: "city".into(),
             },
         ),
+        (vec!["queue", "serve"], QueueAction::Serve),
+        (vec!["queue", "link"], QueueAction::LinkStatus),
     ];
     for (argv, expected) in cases {
         let cli = Cli::parse(argv.clone()).unwrap();
         assert_eq!(cli.command, Command::Queue { action: expected }, "{argv:?}");
     }
+}
+
+#[test]
+fn linking_takes_a_url_and_a_key() {
+    let cli = Cli::parse([
+        "queue",
+        "link",
+        "https://specs.example.com",
+        "--key",
+        "0123456789abcdef0123456789abcdef",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.command,
+        Command::Queue {
+            action: QueueAction::Link {
+                url: "https://specs.example.com".into(),
+                key: "0123456789abcdef0123456789abcdef".into(),
+            }
+        }
+    );
+}
+
+#[test]
+fn linking_without_a_key_says_where_to_get_one() {
+    // Silently linking with no key would produce a daemon that polls and is
+    // refused every time, with the reason three layers away.
+    let err = Cli::parse(["queue", "link", "https://specs.example.com"])
+        .expect_err("a key is required")
+        .to_string();
+    assert!(err.contains("--key"), "{err}");
+    assert!(
+        err.contains("SC_SERVER_DAEMON_KEY"),
+        "names the other end: {err}"
+    );
+}
+
+#[test]
+fn serve_and_run_are_separate_commands() {
+    // They fail in different ways — one needs a server, the other does not — and
+    // a developer needs to know which they are running when it stops.
+    let serve = Cli::parse(["queue", "serve"]).unwrap();
+    let run = Cli::parse(["queue", "run"]).unwrap();
+    assert_ne!(serve.command, run.command);
+}
+
+#[test]
+fn serve_still_forwards_backend_flags() {
+    // `queue run --orchestrator-url …` being silently ignored was a real bug
+    // found live; `serve` takes the same path and must not reintroduce it.
+    let cli = Cli::parse([
+        "queue",
+        "serve",
+        "--orchestrator-url",
+        "http://localhost:11435/v1",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.command,
+        Command::Queue {
+            action: QueueAction::Serve
+        }
+    );
+    assert!(
+        cli.orchestrator_url.as_deref() == Some("http://localhost:11435/v1"),
+        "the flag reached the backend config: {:?}",
+        cli.orchestrator_url
+    );
 }
 
 #[test]

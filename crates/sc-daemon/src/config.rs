@@ -31,6 +31,79 @@ pub struct Repo {
     pub path: PathBuf,
 }
 
+/// The hosted server this daemon dials out to (spec 18).
+///
+/// **Outbound only.** The daemon holds no certificate and listens on nothing —
+/// it is an HTTPS *client*, which is the whole reason this architecture needs no
+/// tunnel, no reverse proxy and no bind-address discipline. There is no inbound
+/// surface here to authenticate, so this key authenticates requests the daemon
+/// makes and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerLink {
+    /// Where the server lives: `https://specs.example.com`.
+    pub url: String,
+    /// The per-daemon API key, matching `SC_SERVER_DAEMON_KEY` on the server.
+    ///
+    /// One key per machine, so a lost laptop is revoked by rotating *its* key
+    /// without locking the developer out of their desktop.
+    pub key: String,
+}
+
+/// How short a key may be before it is refused.
+///
+/// Matches the server's own floor. A short key is worse than no key: it looks
+/// configured while being guessable, which is the failure nobody notices.
+pub const MIN_KEY_LEN: usize = 32;
+
+impl ServerLink {
+    /// Check a link before it is written, so a bad one fails at the keyboard
+    /// rather than at 3am in a poll loop.
+    pub fn validate(&self) -> Result<()> {
+        if !self.url.starts_with("https://") && !self.url.starts_with("http://") {
+            return Err(DcError::Eval(format!(
+                "{:?} is not a URL — it needs a scheme, like https://specs.example.com",
+                self.url
+            )));
+        }
+        // Plain HTTP carries the key in the clear. Refused outright for a remote
+        // host; permitted for loopback, which is how this is tested and how a
+        // developer tries it before deploying.
+        if self.url.starts_with("http://") && !is_loopback(&self.url) {
+            return Err(DcError::Eval(format!(
+                "{:?} is plain HTTP to a remote host, which sends the API key in \
+                 the clear. Use https:// — terminate TLS at your proxy.",
+                self.url
+            )));
+        }
+        if self.key.trim().len() < MIN_KEY_LEN {
+            return Err(DcError::Eval(format!(
+                "the API key is only {} characters. Use at least {MIN_KEY_LEN} — \
+                 a short key looks configured while being guessable.",
+                self.key.trim().len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Is this URL pointing at this machine?
+fn is_loopback(url: &str) -> bool {
+    let authority = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("");
+
+    // A bracketed IPv6 literal is split on its closing bracket, not on a colon —
+    // `[::1]:8420` is full of colons and splitting on them yields `[`.
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 /// The daemon's configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -38,6 +111,13 @@ pub struct DaemonConfig {
     /// do, which is a legitimate (if useless) state rather than an error.
     #[serde(default)]
     pub repos: Vec<Repo>,
+    /// The hosted server, if this daemon is linked to one.
+    ///
+    /// Absent is the normal state for a purely local daemon: `queue run` drafts
+    /// from the local queue and needs no server at all. Linking is what turns on
+    /// the dial-out loop.
+    #[serde(default)]
+    pub server: Option<ServerLink>,
 }
 
 impl DaemonConfig {
@@ -102,6 +182,30 @@ impl DaemonConfig {
         Ok(())
     }
 
+    /// The linked server, or an error saying how to link one.
+    pub fn require_server(&self) -> Result<&ServerLink> {
+        self.server.as_ref().ok_or_else(|| {
+            DcError::Eval(format!(
+                "this daemon is not linked to a server. Link one with \
+                 `smart-coder queue link <url> --key <key>`, or use \
+                 `smart-coder queue run` to draft from the local queue only. \
+                 Config: {}",
+                config_file().display()
+            ))
+        })
+    }
+
+    /// Link this daemon to a server, validating before storing.
+    pub fn link(&mut self, url: &str, key: &str) -> Result<()> {
+        let link = ServerLink {
+            url: url.trim().trim_end_matches('/').to_string(),
+            key: key.trim().to_string(),
+        };
+        link.validate()?;
+        self.server = Some(link);
+        Ok(())
+    }
+
     /// Forget a repo. `true` if one was removed.
     pub fn remove(&mut self, name: &str) -> bool {
         let before = self.repos.len();
@@ -163,7 +267,10 @@ pub fn save_to(path: &Path, cfg: &DaemonConfig) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(cfg).map_err(|e| DcError::Eval(e.to_string()))?;
-    crate::atomic::write(path, json.as_bytes())
+    // Owner-only: this file carries the server API key. Written private
+    // unconditionally rather than only when a key is present, so the mode does
+    // not silently change the first time someone links a server.
+    crate::atomic::write_private(path, json.as_bytes())
 }
 
 #[cfg(test)]
@@ -301,6 +408,126 @@ mod tests {
         assert_eq!(load_from(&path).unwrap(), cfg);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    const GOOD_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn an_unlinked_daemon_is_normal_and_says_how_to_link_one() {
+        // A purely local daemon needs no server at all — `queue run` drafts from
+        // the local queue. So absent is a resting state, not a broken one.
+        let cfg = DaemonConfig::default();
+        assert!(cfg.server.is_none());
+
+        let err = cfg.require_server().expect_err("not linked").to_string();
+        assert!(err.contains("queue link"), "{err}");
+        assert!(
+            err.contains("queue run"),
+            "says the local option too: {err}"
+        );
+    }
+
+    #[test]
+    fn linking_stores_the_url_and_key() {
+        let mut cfg = DaemonConfig::default();
+        cfg.link("https://specs.example.com/", GOOD_KEY).unwrap();
+        let link = cfg.require_server().unwrap();
+        assert_eq!(
+            link.url, "https://specs.example.com",
+            "the slash is trimmed"
+        );
+        assert_eq!(link.key, GOOD_KEY);
+    }
+
+    #[test]
+    fn a_short_key_is_refused_at_the_keyboard() {
+        // Worse than no key: it looks configured while being guessable, and the
+        // developer does not find out until it matters. The floor matches the
+        // server's own.
+        let mut cfg = DaemonConfig::default();
+        let err = cfg
+            .link("https://specs.example.com", "hunter2")
+            .expect_err("too short")
+            .to_string();
+        assert!(err.contains("at least 32"), "{err}");
+        assert!(cfg.server.is_none(), "nothing was stored");
+    }
+
+    #[test]
+    fn plain_http_to_a_remote_host_is_refused_because_it_leaks_the_key() {
+        let mut cfg = DaemonConfig::default();
+        let err = cfg
+            .link("http://specs.example.com", GOOD_KEY)
+            .expect_err("plain HTTP")
+            .to_string();
+        assert!(err.contains("in the clear"), "{err}");
+        assert!(err.contains("https"), "{err}");
+    }
+
+    #[test]
+    fn plain_http_to_loopback_is_allowed_because_that_is_how_it_is_tried() {
+        // A developer running the server locally before deploying it should not
+        // have to stand up TLS to do so, and nothing leaves the machine.
+        for url in [
+            "http://localhost:8420",
+            "http://127.0.0.1:8420",
+            "http://[::1]:8420",
+        ] {
+            let mut cfg = DaemonConfig::default();
+            cfg.link(url, GOOD_KEY)
+                .unwrap_or_else(|e| panic!("{url} should be allowed: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_host_that_merely_looks_like_loopback_is_not_treated_as_loopback() {
+        // The loopback exemption sends a key in the clear, so anything that only
+        // resembles a local host must fall through to the https requirement.
+        for url in [
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://notlocalhost",
+            "http://evil.com/localhost",
+            "http://evil.com#localhost",
+        ] {
+            let mut cfg = DaemonConfig::default();
+            assert!(
+                cfg.link(url, GOOD_KEY).is_err(),
+                "{url} must not pass as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_without_a_scheme_is_refused_with_an_example() {
+        // "specs.example.com" is the obvious thing to type and would otherwise
+        // fail deep inside the HTTP client with something unhelpful.
+        let mut cfg = DaemonConfig::default();
+        let err = cfg
+            .link("specs.example.com", GOOD_KEY)
+            .expect_err("no scheme")
+            .to_string();
+        assert!(err.contains("https://"), "shows the shape: {err}");
+    }
+
+    #[test]
+    fn a_config_written_before_the_server_field_existed_still_loads() {
+        // The developer's daemon.json predates this field; an upgrade must not
+        // make their configured repos unreadable.
+        let cfg: DaemonConfig = serde_json::from_str(r#"{"repos":[]}"#).unwrap();
+        assert!(cfg.server.is_none());
+    }
+
+    #[test]
+    fn a_link_round_trips_through_disk() {
+        let dir = temp_dir("cfg-link");
+        let path = dir.join("daemon.json");
+        let mut cfg = DaemonConfig::default();
+        cfg.link("https://specs.example.com", GOOD_KEY).unwrap();
+
+        save_to(&path, &cfg).unwrap();
+        assert_eq!(load_from(&path).unwrap(), cfg);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
