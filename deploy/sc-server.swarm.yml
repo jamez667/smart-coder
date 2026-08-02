@@ -1,0 +1,130 @@
+# A Docker Swarm stack for the hosted intake surface (spec 18).
+#
+# Portainer → Stacks → Add stack → **Swarm**, paste this, set the environment
+# below, deploy. The difference from `sc-server.stack.yml` is one thing:
+# **the update never leaves a window with nothing listening.**
+#
+#     old task running  ──►  new task starts  ──►  new task healthy  ──►  old stops
+#
+# `order: start-first` plus the image's own HEALTHCHECK is what makes that
+# sequence real. Without the healthcheck Swarm calls a task ready the moment its
+# process is spawned — before the port is listening — and the proxy in front
+# returns 502 for the second or two in between, which is the gap this file
+# exists to close.
+#
+# ---------------------------------------------------------------------------
+# ONE REPLICA, AND THAT IS NOT A PLACEHOLDER
+# ---------------------------------------------------------------------------
+#
+# `replicas: 1`, and raising it corrupts data. This server keeps its whole state
+# in one directory — `accounts.json`, `links.json`, and a file per request — and
+# serialises writes with a `Mutex` **inside the process**. Two tasks on the same
+# volume would both read-modify-write `accounts.json` and silently lose signups,
+# and the per-repository claim serialisation that stops two daemons drafting the
+# same tree would break the same way.
+#
+# So this is zero-downtime *deployment*, not horizontal scaling. Scaling needs
+# the state moved somewhere that can arbitrate between processes — a database —
+# which is a real change to a design whose premise is one binary and one volume.
+#
+# During a start-first rollout the two tasks do overlap for a few seconds. That
+# is survivable where two *steady-state* replicas are not: the old task is
+# draining, the new one is starting, and the window is seconds rather than
+# permanent. It is still a window — if a signup lands in it, the losing write is
+# lost. Deploy when nobody is filing, or accept the risk knowingly.
+
+version: "3.8"
+
+services:
+  sc-server:
+    image: ghcr.io/jamez667/sc-server:${SC_SERVER_TAG:-latest}
+
+    environment:
+      # REQUIRED. Without it the server refuses to start rather than running
+      # open — an unauthenticated intake surface on the public internet is the
+      # failure this whole design exists to prevent.
+      SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:?set this to 32+ random characters}
+
+      SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
+      SC_SERVER_BIND: ${SC_SERVER_BIND:-0.0.0.0}
+      SC_SERVER_PORT: ${SC_SERVER_PORT:-8420}
+      SC_SERVER_DATA: ${SC_SERVER_DATA:-/data}
+
+      # The public surface. OFF unless PUBLIC_REPO is set; setting it makes the
+      # rest required, so the server refuses to start half-public.
+      SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
+      # What the masthead calls the site. A label, not the routing key above.
+      SC_SERVER_PUBLIC_SITE_NAME: ${SC_SERVER_PUBLIC_SITE_NAME:-}
+      # https, absolute. Sign-in links are built from it.
+      SC_SERVER_PUBLIC_BASE_URL: ${SC_SERVER_PUBLIC_BASE_URL:-}
+
+      SC_SERVER_MAIL_PROVIDER: ${SC_SERVER_MAIL_PROVIDER:-}
+      SC_SERVER_MAIL_KEY: ${SC_SERVER_MAIL_KEY:-}
+      SC_SERVER_MAIL_FROM: ${SC_SERVER_MAIL_FROM:-}
+      SC_SERVER_MAIL_FROM_NAME: ${SC_SERVER_MAIL_FROM_NAME:-}
+
+      # Absent means filings are not screened. It can only ever WITHHOLD, and
+      # every unexpected outcome is indistinguishable from approval.
+      SC_SERVER_SCREEN_KEY: ${SC_SERVER_SCREEN_KEY:-}
+      SC_SERVER_SCREEN_URL: ${SC_SERVER_SCREEN_URL:-}
+      SC_SERVER_SCREEN_MODEL: ${SC_SERVER_SCREEN_MODEL:-}
+
+      SC_SERVER_PUBLIC_MAX_DAILY: ${SC_SERVER_PUBLIC_MAX_DAILY:-}
+      SC_SERVER_PUBLIC_MAX_ACCOUNTS: ${SC_SERVER_PUBLIC_MAX_ACCOUNTS:-}
+      SC_SERVER_PUBLIC_MAX_LINKS: ${SC_SERVER_PUBLIC_MAX_LINKS:-}
+      SC_SERVER_PUBLIC_SHOW_SPEC: ${SC_SERVER_PUBLIC_SHOW_SPEC:-}
+
+      # LOCAL ONLY. The server refuses to start with this set unless the base
+      # URL is a loopback or private address, so it cannot reach production by
+      # being forgotten here.
+      SC_SERVER_MAIL_TO_CONSOLE: ${SC_SERVER_MAIL_TO_CONSOLE:-}
+
+    ports:
+      # Terminate TLS at the proxy. `mode: host` keeps the client's own address
+      # visible rather than the ingress mesh's — worth having where a rate
+      # limiter exists, even though this one keys on credentials rather than IP.
+      - target: 8420
+        published: 8420
+        protocol: tcp
+        mode: host
+
+    volumes:
+      - sc-server-data:/data
+
+    deploy:
+      # See the header. This is a correctness constraint, not a default.
+      replicas: 1
+
+      update_config:
+        # **The whole point of this file.** Start the replacement, wait for it
+        # to pass its healthcheck, then stop the old one — rather than the
+        # default `stop-first`, which leaves nothing listening in between.
+        order: start-first
+        # How long the new task must stay healthy before the rollout is called
+        # good. Longer than the healthcheck interval, so at least one real check
+        # runs inside the window rather than the window ending first.
+        monitor: 30s
+        failure_action: rollback
+        delay: 5s
+
+      rollback_config:
+        order: start-first
+        monitor: 20s
+
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        # Not unlimited: a container that cannot start — a bad key, a missing
+        # setting — should end up visibly failed rather than restarting for ever
+        # while the stack reports itself as merely unsettled.
+        max_attempts: 3
+        window: 60s
+
+      resources:
+        limits:
+          # It holds text. The ceiling exists so a runaway cannot take the host
+          # down with it, not because the workload needs managing.
+          memory: 256M
+
+volumes:
+  sc-server-data:

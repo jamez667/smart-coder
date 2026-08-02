@@ -58,6 +58,23 @@ ENV SC_SERVER_DATA=/data
 
 EXPOSE 8420
 
+# **The binary checks itself.** No curl or wget in this layer: the runtime is
+# Alpine plus one static binary, and adding an HTTP client to the one component
+# facing the internet — for a check the binary answers in ten lines — is a
+# package and its dependencies bought for nothing.
+#
+# Without a healthcheck Docker reports the container *running* the moment the
+# process is spawned, which is before the port is listening; a proxy in front
+# then forwards to a socket nobody is on yet and the deploy shows a 502 for a
+# second or two. It is also how Swarm decides a new task is ready, so a
+# start-first rollout has nothing to wait for without it.
+#
+# `--start-period` covers the first start, where a cold image opening its data
+# directory takes longer than a steady-state check; failures during it do not
+# count against the retries.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD ["/usr/local/bin/sc-server", "--health"]
+
 # Non-root. This is the one process in this system that faces the public
 # internet; it holds text and nothing else, and it runs as a user that can write
 # exactly one directory.

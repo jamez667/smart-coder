@@ -43,3 +43,25 @@ pub mod store;
 pub use config::Config;
 pub use serve::run;
 pub use store::{Request, RequestState, Store};
+
+/// Is this server answering on its own port?
+///
+/// The container's healthcheck, run as `sc-server --health`. **A TCP connect,
+/// not an HTTP request**: every route needs a credential or a configured public
+/// surface, so any URL worth probing returns 401 or 404 on a perfectly healthy
+/// server — and a check that has to enumerate which non-200 responses are fine
+/// is a check that eventually calls a broken server healthy. "Is anybody
+/// listening" is the question a proxy actually cares about, and it has one
+/// unambiguous answer.
+///
+/// Reads the same environment the server does, so it probes the port the server
+/// binds rather than a hardcoded one an operator may have changed.
+pub fn health() -> std::result::Result<(), String> {
+    let port = Config::from_env().map(|c| c.port).unwrap_or(8420);
+    // Loopback rather than the configured bind: this runs *inside* the
+    // container, where `0.0.0.0` is not an address to connect to.
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+        .map(|_| ())
+        .map_err(|e| format!("nothing listening on {port}: {e}"))
+}

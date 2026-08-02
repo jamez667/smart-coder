@@ -700,7 +700,20 @@ mod tests {
         // Checked **both ways**. A missing setting is undocumented; a setting
         // named in the file but unknown to the server is worse, because a user
         // will paste it, see no error, and believe it took effect.
-        let stack = include_str!("../../../deploy/sc-server.stack.yml");
+        // **Both deployment files.** They are separate because Compose and
+        // Swarm want different shapes, which means a setting can be added to
+        // one and forgotten in the other — and an operator on the Swarm stack
+        // would then have no box for a cap that exists.
+        let files = [
+            (
+                "deploy/sc-server.stack.yml",
+                include_str!("../../../deploy/sc-server.stack.yml"),
+            ),
+            (
+                "deploy/sc-server.swarm.yml",
+                include_str!("../../../deploy/sc-server.swarm.yml"),
+            ),
+        ];
         let source = include_str!("config.rs");
         let block = source
             .split("pub mod env {")
@@ -718,11 +731,10 @@ mod tests {
             "the env names did not parse: {declared:?}"
         );
 
-        for name in &declared {
-            assert!(
-                stack.contains(name),
-                "{name} is not mentioned in deploy/sc-server.stack.yml"
-            );
+        for (path, stack) in files {
+            for name in &declared {
+                assert!(stack.contains(name), "{name} is not mentioned in {path}");
+            }
         }
 
         // Consumed by **Compose**, not by the server: it substitutes the image
@@ -731,14 +743,16 @@ mod tests {
         // entry here instead of quietly slipping through a prefix rule.
         const NOT_THE_SERVERS: [&str; 1] = ["SC_SERVER_TAG"];
 
-        // The reverse direction, by scanning the file for anything that looks
+        // The reverse direction, by scanning each file for anything that looks
         // like one of ours.
-        for word in stack.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if word.starts_with("SC_SERVER_") && !NOT_THE_SERVERS.contains(&word) {
-                assert!(
-                    declared.contains(&word),
-                    "{word} is in the stack file but the server never reads it"
-                );
+        for (path, stack) in files {
+            for word in stack.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                if word.starts_with("SC_SERVER_") && !NOT_THE_SERVERS.contains(&word) {
+                    assert!(
+                        declared.contains(&word),
+                        "{word} is in {path} but the server never reads it"
+                    );
+                }
             }
         }
 

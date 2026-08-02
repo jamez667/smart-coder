@@ -885,6 +885,45 @@ source.
   lives under a single directory <!--@ crates/sc-server/src/store.rs -->. State
   split across paths is a footgun, because the backup that misses one looks like
   it worked.
+
+#### Deploying without a gap
+
+A single container restarting shows a 502 for the second or two in between, and
+closing that needs two things.
+
+**The image checks itself** <!--@ ./Dockerfile -->. `sc-server --health` opens a
+TCP connection to its own configured port. Without a healthcheck Docker reports
+a container *running* the instant its process is spawned — before the port is
+listening — so a proxy in front forwards to a socket nobody is on yet.
+
+The check is a **TCP connect, not an HTTP request**, and that is deliberate:
+every route here needs a credential or a configured public surface, so any URL
+worth probing returns 401 or 404 on a perfectly healthy server. A check that has
+to enumerate which non-200 responses are acceptable is one that eventually calls
+a broken server healthy. It is also the binary rather than `curl`, because the
+runtime layer is Alpine plus one static binary and adding an HTTP client to the
+one component facing the internet buys nothing.
+
+**A Swarm stack rolls forward rather than restarting**
+<!--@ deploy/sc-server.swarm.yml -->. `order: start-first` starts the
+replacement, waits for its healthcheck, and only then stops the old task.
+
+> **One replica, and raising it corrupts data.** The state is one directory and
+> the write lock is a `Mutex` *inside the process*, so two tasks on the same
+> volume would both read-modify-write `accounts.json` and silently lose signups —
+> and the per-repository claim serialisation would break the same way. This is
+> zero-downtime *deployment*, not horizontal scaling; scaling needs the state
+> moved somewhere that can arbitrate between processes.
+>
+> A start-first rollout does overlap the two tasks for a few seconds, which is
+> survivable where two steady-state replicas are not: one is draining, the other
+> starting, and the window is seconds rather than permanent. It is still a
+> window, and a signup landing in it can lose its write.
+
+Both deployment files are checked against the config's environment module in
+both directions <!--@ crates/sc-server/src/config.rs -->, so a setting cannot be added to one
+and forgotten in the other — which would leave an operator on the Swarm stack
+with no box for a cap that exists.
 - **Configured entirely from environment variables**
   <!--@ crates/sc-server/src/config.rs -->, because a Portainer stack editor is
   where a user configures a container. A config file baked into an image cannot
