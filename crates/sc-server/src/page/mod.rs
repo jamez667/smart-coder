@@ -134,29 +134,27 @@ font-weight:100 1000;font-style:normal;font-display:swap}
 --s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
 --radius:.625rem;--pill:999px;
 color-scheme:light}
-/* Following the OS is the default and stays the default when nothing is chosen.
-   `:not(:has(...))` keeps an explicit light choice from being overridden by a
-   dark OS. */
+/* Following the OS is the default: with the box unticked, these two blocks are
+   the only thing deciding, and they read `prefers-color-scheme` directly.
+   Ticking `#theme-invert` means "the other one", so a dark OS goes light and a
+   light OS goes dark. One box, two rules, and no state it cannot leave. */
 @media(prefers-color-scheme:dark){
-:root:not(:has(#theme-light:checked)){
+:root:not(:has(#theme-invert:checked)){
 --bg:#141218;--surface:#1f1c24;--surface-2:#2a2633;
 --fg:#f2eef8;--dim:#9d94ab;--faint:#7a7288;
 --line:#3a3445;--line-2:#4a4356;
 --link:#e85d6c;--accent-ink:#fff;
 --shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
 color-scheme:dark}}
-/* An explicit choice wins over the OS, in both directions.
-   `:not(:has(#theme-light:checked))` so that a light choice beats a dark one if
-   both boxes are somehow ticked — two independent checkboxes make that state
-   reachable, and every rule below resolves it the same way rather than leaving
-   the colours and the toggle disagreeing. */
-:root:has(#theme-dark:checked):not(:has(#theme-light:checked)){
+/* A light OS with the box ticked: dark. */
+@media(prefers-color-scheme:light){
+:root:has(#theme-invert:checked){
 --bg:#141218;--surface:#1f1c24;--surface-2:#2a2633;
 --fg:#f2eef8;--dim:#9d94ab;--faint:#7a7288;
 --line:#3a3445;--line-2:#4a4356;
 --link:#e85d6c;--accent-ink:#fff;
 --shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
-color-scheme:dark}
+color-scheme:dark}}
 *{box-sizing:border-box}
 /* **A local stack, not a web font.** Memosy loads DM Sans and Fraunces from
    Google. This surface is served with `default-src 'none'`, which forbids the
@@ -193,30 +191,36 @@ border-radius:var(--pill);border:1px solid var(--line);background:var(--surface-
 cursor:pointer;flex:none;transition:border-color .12s}
 .theme:hover{border-color:var(--dim)}
 /* The knob. `inset-inline-start` rather than `left`, so it sits on the correct
-   side when the surface is read right-to-left. */
-.theme .knob{position:absolute;top:.125rem;inset-inline-start:2px;
+   side when the surface is read right-to-left.
+   Centred by `top:50%` and a translate rather than a hand-computed offset: the
+   track is 1.5rem and the knob 1.15rem, and any arithmetic here has to be
+   redone the moment either changes — which is how it ended up a pixel high. */
+.theme .knob{position:absolute;top:50%;transform:translateY(-50%);
+inset-inline-start:2px;
 width:1.15rem;height:1.15rem;border-radius:var(--pill);
 background:var(--link);color:var(--accent-ink);
 display:flex;align-items:center;justify-content:center;
 font-size:.7rem;line-height:1;transition:inset-inline-start .2s}
-/* The light-facing pill has its knob to the right and shows a sun; the
-   dark-facing one keeps it left with a moon. */
-.to-light .knob{inset-inline-start:calc(100% - 1.15rem - 2px)}
-.to-light .moon,.to-dark .sun{display:none}
-/* **Exactly one pill is visible**, so it reads as a single control that
-   toggles. The visible one is always the *opposite* of the current theme —
-   press it and you go there.
-   Dark now (either chosen, or a dark OS with nothing chosen): show the pill
-   that goes to light. Otherwise show the one that goes to dark. */
+/* **One checkbox, meaning "the opposite of what the OS says".**
+   Two checkboxes could both end up ticked, and then no press could get back:
+   ticking `light` and then `dark` left both set, an explicit-light rule kept
+   winning, and dark became unreachable without script to untick the other. A
+   single box cannot reach a state it cannot leave.
+   So there are two pills — one for each OS setting — and exactly one is in the
+   document flow at a time. Under a dark OS the sun pill shows and ticking the
+   box means light; under a light OS the moon pill shows and ticking means dark. */
 .to-light{display:none}
-:root:has(#theme-dark:checked):not(:has(#theme-light:checked)) .to-light{display:inline-block}
-:root:has(#theme-dark:checked):not(:has(#theme-light:checked)) .to-dark{display:none}
 @media(prefers-color-scheme:dark){
-:root:not(:has(#theme-light:checked)) .to-light{display:inline-block}
-:root:not(:has(#theme-light:checked)) .to-dark{display:none}}
-/* An explicit light choice wins over a dark OS, so the dark-going pill returns. */
-:root:has(#theme-light:checked) .to-dark{display:inline-block}
-:root:has(#theme-light:checked) .to-light{display:none}
+.to-light{display:inline-block}
+.to-dark{display:none}}
+/* Whichever pill is showing, ticking the box slides its knob across and swaps
+   the glyph — so the control always animates towards the state it just entered. */
+.to-light .moon,.to-dark .sun{display:none}
+:root:has(#theme-invert:checked) .to-light .knob,
+:root:not(:has(#theme-invert:checked)) .to-dark .knob{inset-inline-start:2px}
+:root:not(:has(#theme-invert:checked)) .to-light .knob,
+:root:has(#theme-invert:checked) .to-dark .knob{
+inset-inline-start:calc(100% - 1.15rem - 2px)}
 .theme-in:focus-visible~.masthead .theme{outline:2px solid var(--link);outline-offset:2px}
 .masthead{display:flex;justify-content:space-between;align-items:center;
 gap:var(--s4);flex-wrap:wrap;padding-block:var(--s4)}
@@ -266,15 +270,11 @@ appearance:none;cursor:pointer;transition:color .12s,border-color .12s}
 width:.4rem;height:.4rem;pointer-events:none;
 border-inline-end:1.6px solid currentColor;border-block-end:1.6px solid currentColor;
 transform:translateY(-15%) rotate(45deg);color:var(--dim)}
-/* **Hidden by default, shown when there is no script.** The reverse — visible
-   until the script hides it — leaves the button on screen for the moment before
-   the script runs, and permanently on any page rendered without the server (a
-   saved copy, a preview). `<html class="js">` is set by the script itself, so
-   the button is present and working whenever that class is absent, which is
-   exactly when it is needed. */
+/* The submit button exists only inside `<noscript>`, so with script it is not
+   in the document at all — no flash before a handler attaches, and nothing to
+   hide. Without script it is the only way to change language, and it works. */
 .lang button{font-size:.78rem;width:auto;margin:0;margin-inline-start:var(--s1);
 padding:.3rem var(--s3);height:1.95rem;border-radius:999px}
-.js .lang button{display:none}
 /* The masthead's buttons and the landing page's call to action. */
 .btn{display:inline-flex;align-items:center;gap:var(--s1);height:1.95rem;
 padding:0 var(--s3);border-radius:var(--pill);border:1px solid var(--line);
@@ -386,23 +386,22 @@ fn masthead(locale: Locale, signed: Signed) -> String {
     // direction the page is not currently showing, so the reader always presses
     // the same pill and it always means "switch".
     format!(
-        "<input type=\"checkbox\" id=\"theme-light\" class=\"theme-in\">\
-<input type=\"checkbox\" id=\"theme-dark\" class=\"theme-in\">\
+        "<input type=\"checkbox\" id=\"theme-invert\" class=\"theme-in\">\
 <header class=\"bar\"><div class=\"bar-inner masthead\">\
 <a class=\"wordmark\" href=\"/\"><span class=\"logo\" aria-hidden=\"true\">SC</span><span>{brand}</span></a>\
 <div class=\"controls\">\
-<label class=\"theme to-dark\" for=\"theme-dark\" title=\"{dark}\">\
+<label class=\"theme to-dark\" for=\"theme-invert\" title=\"{dark}\">\
 <span class=\"theme-in\">{dark}</span>\
 <span class=\"knob\" aria-hidden=\"true\"><span class=\"sun\">\u{2600}</span>\
 <span class=\"moon\">\u{263e}</span></span></label>\
-<label class=\"theme to-light\" for=\"theme-light\" title=\"{light}\">\
+<label class=\"theme to-light\" for=\"theme-invert\" title=\"{light}\">\
 <span class=\"theme-in\">{light}</span>\
 <span class=\"knob\" aria-hidden=\"true\"><span class=\"sun\">\u{2600}</span>\
 <span class=\"moon\">\u{263e}</span></span></label>\
 <form class=\"lang\" method=\"post\" action=\"/public/language\" id=\"langform\">\
 <label for=\"lang\" class=\"theme-in\">{lang_label}</label>\
 <select id=\"lang\" name=\"lang\">{options}</select>\
-<button type=\"submit\">{apply}</button></form>\
+<noscript><button type=\"submit\">{apply}</button></noscript></form>\
 {account}\
 </div></div></header>",
         brand = esc(&site::name(s.brand)),
@@ -570,13 +569,9 @@ pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fraunces.woff2");
 /// script sees the language change on selection, which is what everyone expects
 /// a language picker to do.
 pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
-  // Marks the document as scripted. The stylesheet hides the language form's
-  // submit button behind `.js`, so it is visible — and the only way to change
-  // language — on any page this script did not reach: script blocked, script
-  // failed to load, or a copy of the page saved and opened without a server.
-  document.documentElement.classList.add('js');
-
-  // The language switcher submits on change instead of needing a second click.
+  // The language switcher submits on change. The submit button lives inside
+  // `<noscript>`, so there is nothing to hide here — the two paths are exclusive
+  // by construction rather than by a class this has to remember to set.
   var form = document.getElementById('langform');
   if (form) {
     var select = form.querySelector('select');
@@ -585,22 +580,12 @@ pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
     }
   }
 
-  // The theme pair is two checkboxes, so both can be ticked at once — and then
-  // the stylesheet's colour rules and its which-pill-to-show rules disagree.
-  // Ticking one clears the other, which is the state the CSS is written for.
-  //
-  // Without script the pair still works for the first press in either
-  // direction, which is the common case; this makes the third press behave too.
-  var light = document.getElementById('theme-light');
-  var dark = document.getElementById('theme-dark');
-  if (light && dark) {
-    light.addEventListener('change', function () {
-      if (light.checked) dark.checked = false;
-    });
-    dark.addEventListener('change', function () {
-      if (dark.checked) light.checked = false;
-    });
-  }
+  // **The theme control needs no script at all.** It was two checkboxes, and
+  // this reset the other one — which meant that without script, a third press
+  // could reach a state it could not leave: light, then dark, left both ticked
+  // and the light rule kept winning, so dark became unreachable. One checkbox
+  // meaning "invert the OS" has no such state, so the script that papered over
+  // it is gone rather than kept as a safety net for a bug that no longer exists.
 })();
 "#;
 
@@ -791,6 +776,62 @@ mod tests {
                 assert!(!html.contains(hazard), "{name} contains {hazard}");
             }
         }
+    }
+
+    #[test]
+    fn the_theme_toggle_is_one_control_that_reverses() {
+        // **A toggle that only goes one way**, which is what shipped: two
+        // checkboxes meant light-then-dark left both ticked, an explicit-light
+        // rule kept winning, and dark was unreachable without script.
+        //
+        // The fix is structural — one checkbox meaning "invert the OS" has no
+        // state it cannot leave — so this asserts the structure rather than the
+        // symptom. Counting inputs is crude, but it is exactly the thing that
+        // went wrong, and a second one cannot reappear unnoticed.
+        let html = signin_page_in(Locale::En);
+        assert_eq!(
+            html.matches("type=\"checkbox\"").count(),
+            1,
+            "the theme control is one checkbox: {html}"
+        );
+        assert!(html.contains("id=\"theme-invert\""), "{html}");
+        // Both pills drive that one box, so whichever is visible reverses it.
+        assert_eq!(
+            html.matches("for=\"theme-invert\"").count(),
+            2,
+            "both pills point at the single checkbox: {html}"
+        );
+
+        // And the stylesheet decides from the OS preference plus that one box,
+        // never from a second one that could disagree with it.
+        assert!(
+            !PUBLIC_STYLE.contains("theme-light"),
+            "a second box returned"
+        );
+        assert!(
+            !PUBLIC_STYLE.contains("theme-dark"),
+            "a second box returned"
+        );
+    }
+
+    #[test]
+    fn the_language_form_needs_no_button_when_there_is_script() {
+        // The button lives inside `<noscript>`, so with script it is not in the
+        // document at all — no flash before a handler attaches, and nothing for
+        // a stylesheet rule to hide. Without script it is the only way to change
+        // language, and it is present and working.
+        let html = signin_page_in(Locale::En);
+        let form = html
+            .split("id=\"langform\"")
+            .nth(1)
+            .and_then(|s| s.split("</form>").next())
+            .expect("the language form is rendered");
+        assert!(form.contains("<noscript><button"), "{form}");
+        assert_eq!(
+            form.matches("<button").count(),
+            1,
+            "one button, and it is the noscript one: {form}"
+        );
     }
 
     #[test]
