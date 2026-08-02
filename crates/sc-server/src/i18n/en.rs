@@ -21,7 +21,6 @@ pub static STRINGS: Strings = Strings {
 
     landing_headline: "Ask for a change — get a spec back.",
     landing_sub: "Describe what needs doing in your own words. It comes back as a                   written specification for the developer to read, approve, or send                   back for another pass.",
-    landing_cta: "File a request",
     landing_point_1_title: "Say it plainly",
     landing_point_1_body: "No forms to learn and no issue tracker to join. Write it the                            way you would tell a colleague, in a few hundred words.",
     landing_point_2_title: "A person decides",

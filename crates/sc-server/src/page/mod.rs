@@ -163,18 +163,30 @@ color-scheme:dark}}
    typography. Georgia is Memosy's own declared fallback for Fraunces, making
    this the degradation that design already anticipated rather than a
    substitution invented here. */
+/* The coral glow behind the top of the page, from the reference. A gradient
+   rather than an image, so it costs no subresource — which the CSP forbids. */
 body{margin:0;min-height:100vh;display:flex;flex-direction:column;
-background:var(--bg);color:var(--fg);
+background:radial-gradient(ellipse 120% 80% at 50% -20%,
+color-mix(in srgb,var(--link) 18%,transparent),transparent 55%),var(--bg);
+color:var(--fg);
 font:16px/1.6 "DM Sans",system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
 -webkit-font-smoothing:antialiased}
 /* The header and footer rules span the viewport; their contents share the
    column width with `main`, so the lines run edge to edge while the text stays
    readable — the arrangement in the reference design. */
 .bar{border-block-end:1px solid var(--line);background:var(--surface)}
-.bar-inner,main{max-width:60rem;margin-inline:auto;width:100%;
-padding-inline:var(--s5)}
-main{flex:1;padding-block:var(--s6) 4rem;display:block}
-@media(max-width:520px){.bar-inner,main{padding-inline:var(--s4)}}
+/* **The bars are 960px and the text column is 720px** — the reference's own
+   two widths, and the thing I had wrong. Making them equal put the header's
+   controls directly above body text that then stopped short of them, which is
+   what read as "nothing lines up". A narrower measure is also simply easier to
+   read; 60rem of prose is too wide a line.
+   Padding is 2rem here against the reference's px-8, so the two columns still
+   share a left edge on a wide screen. */
+.bar-inner{max-width:60rem;margin-inline:auto;width:100%;padding-inline:2rem}
+main{flex:1;max-width:45rem;margin-inline:auto;width:100%;
+padding:3rem 2rem;display:block}
+@media(max-width:520px){.bar-inner{padding-inline:var(--s4)}
+main{padding-inline:var(--s4)}}
 /* The radios are off-screen rather than `display:none`, which would take them
    out of the tab order and hide them from a screen reader. */
 .theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
@@ -190,16 +202,37 @@ overflow:hidden;clip-path:inset(50%);white-space:nowrap}
    baseline**, so it hangs below the buttons beside it by the depth of a
    descender — which reads as "not aligned" and is not fixed by centring the
    knob inside it. A flex item aligns to the row's centre line instead. */
-.theme{position:relative;display:inline-flex;width:2.75rem;height:1.5rem;
-border-radius:var(--pill);border:1px solid var(--line);background:var(--surface-2);
-cursor:pointer;flex:none;align-self:center;transition:border-color .12s}
+/* The reference's 44x24. The neighbouring controls are 1.95rem tall, and two
+   boxes of different heights in a centred row read as misaligned even when both
+   are centred — so the pill gets the same box height and holds its 24px track
+   inside it. That is what "align it" actually meant; centring the knob within a
+   short box could never fix it. */
+/* The reference's 44x24 track, and **the box IS the track** — an earlier
+   attempt made the box 1.95rem to match its neighbours and drew the track as a
+   `::before`, which put the knob's `top:50%` and its `calc(100% - ...)` on the
+   box while the visible track was somewhere else. The knob ended up off-centre
+   and hanging past the right edge.
+   Matching the neighbours' height is done by `align-self:center` in the flex
+   row instead, which is what centres a shorter item without lying about its
+   size. */
+/* Transcribed from the reference's ThemeToggle, class for class:
+     w-11 h-6 rounded-full border border-border bg-secondary p-0 flex-shrink-0
+   which is 44x24 under `border-box` — Tailwind's reset, and this file's global
+   default, so the border sits inside the 24px exactly as it does there. */
+.theme{position:relative;display:block;flex:none;align-self:center;
+width:2.75rem;height:1.5rem;padding:0;cursor:pointer;
+border-radius:var(--pill);border:1px solid var(--line);
+background:var(--surface-2);transition:border-color .12s}
 .theme:hover{border-color:var(--dim)}
-/* The knob. `inset-inline-start` rather than `left`, so it sits on the correct
-   side when the surface is read right-to-left.
-   Centred by `top:50%` and a translate rather than a hand-computed offset: the
-   track is 1.5rem and the knob 1.15rem, and any arithmetic here has to be
-   redone the moment either changes — which is how it ended up a pixel high. */
-.theme .knob{position:absolute;top:50%;transform:translateY(-50%);
+/* The knob, also transcribed rather than derived:
+     absolute top-0.5 w-[1.15rem] h-[1.15rem] rounded-full bg-primary
+     transition-all duration-200 flex items-center justify-center
+     text-[0.7rem] leading-none
+   **`top:2px`, not `top:50%` with a transform.** Every attempt to centre this
+   arithmetically landed a pixel out, because the offset is measured from the
+   border box while a 50% translate centres on the padding box. The reference
+   just says 2px from the top, and 2px from the top is correct. */
+.theme .knob{position:absolute;top:2px;
 inset-inline-start:2px;
 width:1.15rem;height:1.15rem;border-radius:var(--pill);
 background:var(--link);color:var(--accent-ink);
@@ -243,7 +276,27 @@ border-radius:var(--radius);box-shadow:var(--shadow);
 background:linear-gradient(140deg,var(--link),color-mix(in srgb,var(--link) 55%,#000));
 color:var(--accent-ink);display:inline-flex;align-items:center;justify-content:center;
 font-family:"Fraunces",Georgia,serif;font-size:.95rem;font-weight:600;letter-spacing:.02em}
-.controls{display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap}
+/* The nav row, as the reference has it: `flex items-center gap-2` and nothing
+   else. **No `flex-wrap`** — wrapping is what put the sign-in button on its own
+   line as soon as the row got tight, and a nav that reflows into two rows is
+   not the design. The items are small and `white-space:nowrap`, so the row
+   fits; the masthead above still wraps, which is where a narrow screen should
+   break.
+   The dialog is excluded because a closed `<dialog>` is still a child, and as a
+   flex item it would take a slot in this row and push the buttons along. */
+/* `flex items-center gap-2` from the reference's PublicHeader nav — 8px.
+   **The margin reset is the whole fix.** The form rules below give every
+   `label` a 16px top margin and every `button` a 16px one, which is right in a
+   form and wrong in a nav — and the pill IS a label and Sign in IS a button, so
+   each was being pushed down by 16px independently. That is what four rounds of
+   adjusting heights, box-sizing and baselines never touched: the boxes were the
+   right size all along and the margins were moving them.
+   Measured, not guessed: `scripts/layout-check.js` reported the pill at y=34,
+   the select at y=24 and the button at y=32, with computed margins of
+   `16px 0 4px` and `16px 0 0`. */
+.controls{display:flex;align-items:center;gap:8px}
+.controls label,.controls button,.controls select,.controls a{margin:0}
+.controls>dialog{position:fixed}
 /* The footer, matching the reference: a copyright line and a dot-separated
    set of links, stacking centred on a narrow screen. */
 .footer{margin-top:auto;border-block-start:1px solid var(--line);
@@ -262,10 +315,11 @@ gap:var(--s4);padding-block:var(--s5);font-size:.85rem;color:var(--dim)}
    kind of thing. The button stays in the markup for readers without script and
    is hidden from those with it, so neither audience sees a dead control. */
 .lang{position:relative;display:inline-flex;align-items:center;margin:0}
+/* The same 32px box as the buttons it sits between. */
 .lang select{font:inherit;font-size:.8rem;width:auto;
-padding:.3rem 1.6rem .3rem var(--s3);
-border:1px solid var(--line);border-radius:999px;
-background:var(--surface);color:var(--dim);height:1.95rem;
+padding:0 1.6rem 0 10px;height:32px;
+border:1px solid var(--line);border-radius:var(--pill);
+background:var(--surface);color:var(--dim);
 appearance:none;cursor:pointer;transition:color .12s,border-color .12s}
 .lang select:hover{color:var(--fg);border-color:var(--line-2)}
 /* The chevron, drawn in CSS rather than fetched — `appearance:none` removes the
@@ -277,20 +331,18 @@ transform:translateY(-15%) rotate(45deg);color:var(--dim)}
 /* The submit button exists only inside `<noscript>`, so with script it is not
    in the document at all — no flash before a handler attaches, and nothing to
    hide. Without script it is the only way to change language, and it works. */
-.lang button{font-size:.78rem;width:auto;margin:0;margin-inline-start:var(--s1);
-padding:.3rem var(--s3);height:1.95rem;border-radius:999px}
+.lang button{font-size:.78rem;width:auto;margin:0;margin-inline-start:6px;
+padding:0 10px;height:32px;border-radius:var(--pill)}
 /* The masthead's buttons and the landing page's call to action. */
-.btn{display:inline-flex;align-items:center;gap:var(--s1);height:1.95rem;
-padding:0 var(--s3);border-radius:var(--pill);border:1px solid var(--line);
-background:var(--surface);color:var(--fg);font-size:.82rem;font-weight:600;
-text-decoration:none;cursor:pointer;white-space:nowrap;
-transition:border-color .12s,background .12s}
+/* The reference's `size="sm"`: h-8 (32px), px-2.5 (10px). Transcribed rather
+   than eyeballed — the heights I had picked were within a pixel of these and
+   still visibly wrong beside a 24px pill. */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+height:32px;padding:0 10px;border-radius:var(--pill);
+border:1px solid var(--line);background:var(--surface);color:var(--fg);
+font-size:.82rem;font-weight:600;text-decoration:none;cursor:pointer;
+white-space:nowrap;transition:border-color .12s,background .12s}
 .btn:hover{border-color:var(--line-2);background:var(--surface-2)}
-.cta{display:inline-block;margin-block:var(--s2) var(--s5);
-padding:.6rem var(--s5);border-radius:var(--pill);
-background:var(--link);color:var(--accent-ink);
-text-decoration:none;font-weight:600;box-shadow:var(--shadow)}
-.cta:hover{filter:brightness(1.08)}
 /* The account menu: `<details>`, so it opens with no script at all. */
 .acct{position:relative}
 .acct summary{list-style:none}
@@ -309,9 +361,9 @@ background:transparent;color:var(--fg);font:inherit;font-size:.85rem;
 font-weight:500;text-decoration:none;cursor:pointer}
 .acct .menu a:hover,.acct .menu button:hover{background:var(--surface-2)}
 /* The landing page's three points. */
-.point{margin-block:var(--s6)}
-.point h2{margin:0 0 var(--s2);border:0;padding:0}
-.point p{margin:0;color:var(--dim);max-width:38rem}
+.point{margin-block:3rem}
+.point h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
+.point p{margin:0;color:var(--dim);font-size:.95rem;line-height:1.65}
 /* The sign-in dialog. Measurements from the reference: 380px, 1.75rem padding,
    a 55% black backdrop with a 4px blur.
    **A real `<dialog>`**, not a div positioned over the page. The element brings
@@ -342,11 +394,15 @@ dialog .close:hover{background:var(--surface-2);color:var(--fg)}
 /* Serif headings against a sans body, which is the pairing that makes the
    reference design read as designed rather than as a default stylesheet. */
 h1,h2{font-family:"Fraunces",Georgia,"Times New Roman",serif;font-weight:600}
-h1{font-size:clamp(1.6rem,1.35rem + 1vw,2.1rem);margin:0 0 var(--s4);
+h1{font-size:clamp(1.75rem,4vw,2.35rem);margin:0 0 var(--s4);
 letter-spacing:-.02em;line-height:1.2}
 h2{font-size:1.2rem;margin:var(--s6) 0 var(--s3);letter-spacing:-.01em}
 /* The paragraph directly after an h1 is the subtitle. */
-h1+p{color:var(--dim);font-size:1.02rem;max-width:38rem;margin-block:0 var(--s5)}
+/* No `max-width` on the prose. A 38rem cap inside a 60rem column left every
+   paragraph stopping two-thirds of the way across while the header ran the full
+   width — the mismatch that reads as "nothing lines up". Measure is controlled
+   by the column, in one place. */
+h1+p{color:var(--dim);font-size:1rem;line-height:1.65;margin-block:0 3rem}
 a{color:var(--link);text-underline-offset:2px}
 a:hover{text-decoration-thickness:2px}
 :focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}

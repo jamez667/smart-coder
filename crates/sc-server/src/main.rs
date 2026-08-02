@@ -10,13 +10,15 @@ fn main() {
             // Refusing to start is the point: an unauthenticated intake surface
             // on the public internet is the failure this design exists to
             // prevent, so a misconfiguration must not degrade into running open.
-            eprintln!("sc-server cannot start: {msg}");
+            sc_server::log::error("cannot start")
+                .text("err", msg)
+                .emit();
             std::process::exit(2);
         }
     };
 
     if let Err(e) = sc_server::run(&cfg) {
-        eprintln!("sc-server stopped: {e}");
+        sc_server::log::error("stopped").text("err", e).emit();
         std::process::exit(1);
     }
 }

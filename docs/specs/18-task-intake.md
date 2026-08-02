@@ -407,10 +407,16 @@ cannot yet be acted on without editing `credentials.json` on the volume by hand.
 The argument for per-device credentials is only half-delivered until that route
 exists, and this is the most valuable outstanding piece of the auth work.
 
-*Not built:* **there is no way to arm a second enrolment code.** One is minted at
-first start and printed to the container log; once spent, enrolling a second
-device means an operator with access to the data volume. A `smart-coder enrol`
-subcommand is the obvious home for this and does not exist in any crate.
+*Not built:* **there is no way to arm a second enrolment code while one device is
+already enrolled.** One is minted at first start and written to the container
+log; once spent, enrolling a second device means an operator with access to the
+data volume. A `smart-coder enrol` subcommand is the obvious home for this and
+does not exist in any crate.
+
+Restarting is not the workaround it might look like: `arm_enrolment` mints a code
+only when *nothing* is enrolled, precisely so a restart cannot be used to reopen
+a server that is already in use. The thirty-minute expiry (see Deployment) bounds
+an *unspent* code's life; it does not add a way to arm a new one.
 
 > **On TLS.** A hosted server terminates TLS the ordinary way, at the edge, with
 > whatever its deployment already uses. The *daemon* holds no certificate and
@@ -725,7 +731,7 @@ symptom reads as a bug in the feature rather than a property of the cookie.
 Nothing else relaxes with it — `HttpOnly` and `SameSite` are unchanged, and a
 test asserts that, since "drop `Secure` locally" is an easy edit to over-apply.
 
-**`SC_SERVER_MAIL_TO_CONSOLE` prints sign-in links to the log**
+**`SC_SERVER_MAIL_TO_CONSOLE` writes sign-in links to the log**
 <!--@ sc_server::mail::Console -->, so trying the surface does not require an API
 key for a third party. A sign-in link is a credential, so this hands an account
 to anyone who can read the log — which is why it is **refused unless the base URL
@@ -733,6 +739,11 @@ is loopback**, and why it is deliberately *not* a [`Provider`] variant: a varian
 would sit in the same setting that names Brevo or Resend, one typo from
 production. In this mode `PublicConfig::mail` is `None` rather than a
 placeholder, so there is no provider for a later branch to fall back to.
+
+The loopback rule is worth stating precisely, because "local only" is the wrong
+reading: the log ships wherever the host's logs ship either way. What the rule
+buys is that the *link* is worthless — it points at `127.0.0.1`, an address the
+reader cannot reach. The containment is the address, not the audience.
 
 The guard tests the **base URL**, not the bind address. Inside a container the
 bind is `0.0.0.0` whether or not anything outside can reach it, so a
@@ -887,8 +898,55 @@ source.
   stays readable by the next — an image that changes it on upgrade greets the
   developer with permission errors on data that was fine yesterday.
 - **A fresh install is usable but never open.** With no enrolment code
-  configured, one is minted at first start and printed to the container log. It
-  is stored hashed, so that log line is the only place it ever appears.
+  configured, one is minted at first start and written to the container log. It
+  is stored hashed, so that log line is the only place it ever appears — and
+  that is a liability as much as a safeguard. **The container log's audience is
+  whatever scrapes it.** On a host shipping logs to an aggregator, the code's
+  exposure is the aggregator's exposure, and a code that never expired would be
+  a standing credential published to everyone who can run a query.
+
+  So it **expires** <!--@ crates/sc-server/src/auth.rs -->. A minted code is
+  good for thirty minutes; `arm_enrolment` re-arms on any start where nothing is
+  enrolled, so a lapsed code costs a restart rather than a lockout. The bound is
+  time, because the audience cannot be bounded. A code set through
+  `SC_SERVER_ENROL_CODE` is chosen by the operator and never logged.
+
+### Logs
+
+**One JSON object per line, on stdout** <!--@ crates/sc-server/src/log.rs -->.
+The destination is a log aggregator, and that is what those parse — which turns
+"grep the container log and hope" into a query over named fields rather than a
+match against a sentence somebody may reword.
+
+- **Every line carries `svc`.** A scraper labels lines with the Docker container
+  name, and under Swarm that name carries a task id that changes on every
+  redeploy — so anything pinned to it silently stops matching. `svc` does not
+  move, and is what dashboards should key on.
+- **Messages are fixed strings; the variable part goes in fields.** A message
+  built by interpolation is one nobody can query for.
+- **One access line per request** <!--@ crates/sc-server/src/serve.rs -->,
+  emitted once per *request* rather than per dispatch — the long poll re-runs
+  dispatch every 250ms, and logging there would mean four lines a second per idle
+  daemon: a log of nothing happening, drowning the log of something happening.
+- **The route is classified, not sanitised.** Each request maps onto one of a
+  fixed set of labels, and anything unrecognised becomes `other`. A sign-in
+  token is a path segment and a bearer credential; a query string is free-form
+  caller input. A redactor decides what to remove and is wrong the first time it
+  misses something, so this decides what to *keep* — enforced by the return
+  type, which cannot borrow from the path.
+- **Deliberately not logged:** query strings, bearer tokens, cookies, email
+  addresses, and the client IP. Behind the reverse proxy this design assumes,
+  the peer address is the proxy's own; reading `X-Forwarded-For` instead would
+  put an attacker-controlled header carrying personal data into a log built to be
+  shipped elsewhere.
+- **No level setting.** Three levels, all of them emitted. A filter would need an
+  environment variable, an entry in the stack file, a row in the drift test, and
+  a paragraph here — to suppress lines from a server whose whole output is a
+  startup banner and one line per request.
+
+*Not built:* nothing authenticates the log itself. Anything that can write to the
+aggregator can forge a line under any label, so the log is an operational record
+and not evidence.
 
 ## Anti-goals
 

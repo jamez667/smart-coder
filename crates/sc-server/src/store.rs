@@ -803,7 +803,7 @@ mod tests {
         let (s, dir) = store("one-volume");
         file(&s, "r-1", "alpha");
         let mut creds = Credentials::default();
-        creds.set_enrol_code("A");
+        creds.set_enrol_code("A", 0);
         s.put_credentials(&creds).unwrap();
 
         assert!(dir.join("requests").join("r-1.json").is_file());
@@ -1416,7 +1416,7 @@ mod tests {
         assert_eq!(s.credentials().unwrap(), Credentials::default());
 
         let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123");
+        creds.set_enrol_code("ABC-123", 0);
         s.put_credentials(&creds).unwrap();
         assert_eq!(s.credentials().unwrap(), creds);
         let _ = std::fs::remove_dir_all(&dir);

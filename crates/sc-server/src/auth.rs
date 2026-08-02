@@ -40,11 +40,25 @@ pub fn mint_secret() -> String {
     hex(&bytes)
 }
 
+/// How long a minted enrolment code stays usable.
+///
+/// The code is logged in the clear — it has to be, since it is the only way into
+/// a fresh install — and the container log goes wherever the host ships logs. On
+/// a machine running a log aggregator that makes it readable by anyone who can
+/// read the aggregator, so its value must be bounded by *time* rather than by
+/// the log's audience.
+///
+/// Thirty minutes: long enough to walk to a phone after a deploy, short enough
+/// that a code sitting in a log tomorrow is inert. A restart re-arms one, so
+/// letting it lapse costs nothing but a redeploy.
+pub const ENROL_TTL_MS: u64 = 30 * 60 * 1000;
+
 /// A short, human-typeable enrolment code.
 ///
 /// Read off a terminal and typed into a phone, so it trades length for
 /// typeability — which is safe only because it is **single-use and short-lived**
-/// (it enrols one device, then is spent). It is never a standing credential.
+/// (it enrols one device, then is spent, and it expires after
+/// [`ENROL_TTL_MS`] regardless). It is never a standing credential.
 pub fn mint_enrol_code() -> String {
     let mut bytes = [0u8; 6];
     getrandom::fill(&mut bytes).expect("the OS random source is unavailable");
@@ -137,12 +151,36 @@ pub struct Credentials {
     /// SHA-256 of the pending one-time enrolment code, if one is outstanding.
     #[serde(default)]
     pub enrol_code_hash: Option<String>,
+    /// Unix ms after which the outstanding code is refused.
+    ///
+    /// `Option` and `#[serde(default)]` so a `credentials.json` written before
+    /// this field existed still loads — it reads as `None`, which
+    /// [`Credentials::enrol_expired`] treats as *expired*. A code armed by the
+    /// older build is exactly the standing credential this field exists to end,
+    /// so failing closed and making the operator restart is the right default.
+    #[serde(default)]
+    pub enrol_code_expires_ms: Option<u64>,
 }
 
 impl Credentials {
     /// Arm enrolment with a fresh one-time code, replacing any outstanding one.
-    pub fn set_enrol_code(&mut self, code: &str) {
+    ///
+    /// Expires [`ENROL_TTL_MS`] after `now_ms`.
+    pub fn set_enrol_code(&mut self, code: &str, now_ms: u64) {
         self.enrol_code_hash = Some(hash(code));
+        self.enrol_code_expires_ms = Some(now_ms.saturating_add(ENROL_TTL_MS));
+    }
+
+    /// Is there no code that would still be accepted at `now_ms`?
+    ///
+    /// True when none is armed, when one is armed without an expiry (written by
+    /// a build older than the TTL), or when its window has passed.
+    pub fn enrol_expired(&self, now_ms: u64) -> bool {
+        match (&self.enrol_code_hash, self.enrol_code_expires_ms) {
+            (None, _) => true,
+            (Some(_), None) => true,
+            (Some(_), Some(expires)) => now_ms >= expires,
+        }
     }
 
     /// Spend the enrolment code and register a device, returning its token.
@@ -153,12 +191,20 @@ impl Credentials {
     /// The code is single-use: consuming it here means an intercepted code
     /// cannot be replayed to enrol a second device, and the developer sees
     /// enrolment fail rather than silently sharing access.
+    ///
+    /// An expired code is refused **before** it is compared, and cleared on the
+    /// way out — so a code that outlived its window stops being a credential
+    /// rather than merely being unlucky.
     pub fn enrol(&mut self, code: &str, label: &str, now_ms: u64) -> Option<(Device, String)> {
+        if self.enrol_expired(now_ms) {
+            self.clear_enrol_code();
+            return None;
+        }
         let expected = self.enrol_code_hash.as_ref()?;
         if !matches(code, expected) {
             return None;
         }
-        self.enrol_code_hash = None;
+        self.clear_enrol_code();
 
         let token = mint_secret();
         let device = Device {
@@ -177,6 +223,16 @@ impl Credentials {
         };
         self.devices.push(device.clone());
         Some((device, token))
+    }
+
+    /// Forget the outstanding code, expiry and all.
+    ///
+    /// Both fields together: a hash left without its expiry would read as
+    /// expired, but a stale expiry left without its hash is a field that means
+    /// nothing and invites a later reader to trust it.
+    fn clear_enrol_code(&mut self) {
+        self.enrol_code_hash = None;
+        self.enrol_code_expires_ms = None;
     }
 
     /// Which device holds this token, if any live one does.
@@ -213,7 +269,7 @@ mod tests {
         // nothing that grants access (spec 18 — the daemon must not inherit
         // `remote-sessions.jsonl`'s posture).
         let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123");
+        creds.set_enrol_code("ABC-123", 0);
         let (device, token) = creds.enrol("ABC-123", "phone", 1).unwrap();
 
         let serialized = serde_json::to_string(&creds).unwrap();
@@ -233,7 +289,7 @@ mod tests {
         // An intercepted code must not enrol a second device. Consuming it means
         // the developer sees a failure rather than silently sharing access.
         let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123");
+        creds.set_enrol_code("ABC-123", 0);
 
         assert!(creds.enrol("ABC-123", "phone", 1).is_some());
         assert!(
@@ -244,9 +300,63 @@ mod tests {
     }
 
     #[test]
+    fn an_enrolment_code_expires() {
+        // The code is logged in the clear, and the log goes wherever the host
+        // ships logs. Time is what bounds its value, since its audience cannot
+        // be.
+        let mut creds = Credentials::default();
+        creds.set_enrol_code("ABC-123", 1_000);
+
+        assert!(
+            creds
+                .enrol("ABC-123", "phone", 1_000 + ENROL_TTL_MS - 1)
+                .is_some(),
+            "inside the window it still works"
+        );
+
+        let mut creds = Credentials::default();
+        creds.set_enrol_code("ABC-123", 1_000);
+        assert!(
+            creds
+                .enrol("ABC-123", "attacker", 1_000 + ENROL_TTL_MS)
+                .is_none(),
+            "the moment it expires, the correct code is worth nothing"
+        );
+        assert!(creds.devices.is_empty());
+    }
+
+    #[test]
+    fn an_expired_code_is_cleared_rather_than_left_lying_around() {
+        // It stops being a credential, instead of merely being refused — so a
+        // clock correction cannot bring a lapsed code back to life.
+        let mut creds = Credentials::default();
+        creds.set_enrol_code("ABC-123", 0);
+        assert!(creds.enrol("ABC-123", "attacker", ENROL_TTL_MS).is_none());
+
+        assert!(creds.enrol_code_hash.is_none());
+        assert!(creds.enrol_code_expires_ms.is_none());
+        assert!(creds.enrol_expired(0), "even back inside the old window");
+    }
+
+    #[test]
+    fn a_code_stored_before_expiry_existed_is_treated_as_expired() {
+        // The migration case: a `credentials.json` written by an older build has
+        // a hash and no expiry. That is precisely the standing credential the
+        // TTL exists to end, so it fails closed — the operator restarts and gets
+        // a fresh one.
+        let older = r#"{"devices":[],"enrol_code_hash":"__replace__"}"#
+            .replace("__replace__", &hash("ABC-123"));
+        let mut creds: Credentials =
+            serde_json::from_str(&older).expect("an older file still loads");
+
+        assert!(creds.enrol_expired(0));
+        assert!(creds.enrol("ABC-123", "phone", 0).is_none());
+    }
+
+    #[test]
     fn a_wrong_code_enrols_nothing_and_does_not_spend_the_real_one() {
         let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123");
+        creds.set_enrol_code("ABC-123", 0);
 
         assert!(creds.enrol("XYZ-999", "attacker", 1).is_none());
         assert!(creds.devices.is_empty());
@@ -270,9 +380,9 @@ mod tests {
         // mean losing the desktop, or the developer away from their desk cannot
         // safely rotate.
         let mut creds = Credentials::default();
-        creds.set_enrol_code("A");
+        creds.set_enrol_code("A", 0);
         let (phone, phone_token) = creds.enrol("A", "phone", 1).unwrap();
-        creds.set_enrol_code("B");
+        creds.set_enrol_code("B", 0);
         let (_laptop, laptop_token) = creds.enrol("B", "laptop", 2).unwrap();
 
         assert!(creds.revoke(&phone.id));
@@ -293,7 +403,7 @@ mod tests {
         // A list that silently shrinks cannot answer "did I already deal with
         // that?" — so the developer revokes it again, or worries they never did.
         let mut creds = Credentials::default();
-        creds.set_enrol_code("A");
+        creds.set_enrol_code("A", 0);
         let (phone, _) = creds.enrol("A", "phone", 1).unwrap();
         creds.revoke(&phone.id);
 
@@ -309,9 +419,9 @@ mod tests {
         // exist to prevent. Caught for real by the routes test, whose fixture
         // pins the clock.
         let mut creds = Credentials::default();
-        creds.set_enrol_code("A");
+        creds.set_enrol_code("A", 0);
         let (phone, phone_token) = creds.enrol("A", "phone", 1_000).unwrap();
-        creds.set_enrol_code("B");
+        creds.set_enrol_code("B", 0);
         let (laptop, laptop_token) = creds.enrol("B", "laptop", 1_000).unwrap();
 
         assert_ne!(phone.id, laptop.id);
@@ -326,7 +436,7 @@ mod tests {
     #[test]
     fn an_unknown_token_matches_nothing() {
         let mut creds = Credentials::default();
-        creds.set_enrol_code("A");
+        creds.set_enrol_code("A", 0);
         creds.enrol("A", "phone", 1).unwrap();
         assert!(creds.device_for("not-a-real-token").is_none());
         assert!(creds.device_for("").is_none());
@@ -374,7 +484,7 @@ mod tests {
     #[test]
     fn credentials_round_trip_through_json() {
         let mut creds = Credentials::default();
-        creds.set_enrol_code("A");
+        creds.set_enrol_code("A", 0);
         creds.enrol("A", "phone", 1).unwrap();
         let json = serde_json::to_string(&creds).unwrap();
         assert_eq!(serde_json::from_str::<Credentials>(&json).unwrap(), creds);

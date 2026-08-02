@@ -26,7 +26,6 @@ pub static STRINGS: Strings = Strings {
 
     landing_headline: "Demandez un changement, recevez une spécification.",
     landing_sub: "Décrivez ce qu’il faut faire avec vos propres mots. Vous                   recevez en retour une spécification écrite que le                   développeur lira, approuvera ou renverra pour une nouvelle                   version.",
-    landing_cta: "Déposer une demande",
     landing_point_1_title: "Dites-le simplement",
     landing_point_1_body: "Aucun formulaire à apprendre, aucun outil de suivi à                            rejoindre. Écrivez-le comme vous l’expliqueriez                            à un collègue, en quelques centaines de mots.",
     landing_point_2_title: "C’est un humain qui décide",

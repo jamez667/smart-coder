@@ -77,27 +77,54 @@ pub fn run(cfg: &Config) -> Result<()> {
     let server = tiny_http::Server::http(cfg.addr())
         .map_err(|e| DcError::Eval(format!("could not bind {}: {e}", cfg.addr())))?;
 
-    println!("sc-server listening on {}", cfg.addr());
-    println!("state in {}", cfg.data_dir.display());
+    // One line for one event: the address and the state directory are the same
+    // fact about this start, and two lines would only have to be correlated.
+    crate::log::info("listening")
+        .with("addr", cfg.addr())
+        .with("data_dir", cfg.data_dir.display().to_string())
+        .emit();
     match &cfg.public {
         Some(p) => {
-            println!("public intake ON → {} ({})", p.repo, p.base_url);
-            println!(
-                "  screening: {}",
-                match &p.screen {
-                    Some(s) => format!("{} via {}", s.model, s.url),
-                    // Said plainly: a server that pretends to screen is worse
-                    // than one that visibly does not.
-                    None => "off — filings queue unscreened".to_string(),
-                }
-            );
+            crate::log::info("public intake")
+                .with("enabled", true)
+                .with("repo", p.repo.clone())
+                .with("base_url", p.base_url.clone())
+                .with("screening", p.screen.is_some())
+                .emit();
+            if let Some(s) = &p.screen {
+                crate::log::info("screening")
+                    .with("model", s.model.clone())
+                    .with("url", s.url.clone())
+                    .emit();
+            } else {
+                // Its own line, at `warn`, rather than a `false` in the field
+                // above. Said plainly: a server that pretends to screen is worse
+                // than one that visibly does not — and "visibly" means a line an
+                // operator sees, not a value they would have to go looking for.
+                crate::log::warn("screening off")
+                    .with("note", "filings queue unscreened")
+                    .emit();
+            }
         }
-        None => println!("public intake off"),
+        None => crate::log::info("public intake")
+            .with("enabled", false)
+            .emit(),
     }
     if let Some(code) = &code {
-        // Printed once, at startup, because it is the only way in on a fresh
+        // Logged once, at startup, because it is the only way in on a fresh
         // install and nothing else will show it — it is stored hashed.
-        println!("\n  enrolment code: {code}\n  (single use; open the site and type it)\n");
+        //
+        // **This line is a credential**, and it goes wherever the container log
+        // goes. On a host that ships logs to an aggregator, anyone who can read
+        // the aggregator can enrol a device. That is why the code now expires
+        // (see `auth::ENROL_TTL_MS`): the window is the minutes after a deploy
+        // you performed, not forever. Set `SC_SERVER_ENROL_CODE` and enrol
+        // promptly.
+        crate::log::warn("enrolment armed")
+            .with("code", code.clone())
+            .with("expires_in_s", crate::auth::ENROL_TTL_MS / 1000)
+            .with("note", "single use; open the site and type it")
+            .emit();
     }
 
     spawn_screening(cfg, store);
@@ -108,9 +135,9 @@ pub fn run(cfg: &Config) -> Result<()> {
         // daemons, so a thread pool would be machinery without a load to justify
         // it. The long poll needs a blocking thread regardless.
         std::thread::spawn(move || {
-            if let Err(e) = serve_one(request, &shared) {
-                eprintln!("request failed: {e}");
-            }
+            // Logged inside `serve_one`, which knows the request id — so the
+            // failure can be tied to the access line for the same request.
+            let _ = serve_one(request, &shared);
         });
     }
     Ok(())
@@ -122,11 +149,14 @@ fn build_mailer(cfg: &Config) -> Box<dyn Mailer> {
     // there is no provider to fall back to, so this cannot be bypassed by a
     // later branch.
     if cfg.mail_to_console {
-        eprintln!(
-            "{} is on: sign-in links are printed below instead of emailed. \
-             Anyone who can read this log can sign in as anyone.",
-            crate::config::env::MAIL_TO_CONSOLE
-        );
+        crate::log::warn("mail to console")
+            .with("setting", crate::config::env::MAIL_TO_CONSOLE)
+            .with(
+                "note",
+                "sign-in links are logged instead of emailed; anyone who can \
+                 read this log can sign in as anyone",
+            )
+            .emit();
         return Box::new(crate::mail::Console);
     }
     match cfg.public.as_ref().and_then(|p| p.mail.as_ref()) {
@@ -159,7 +189,9 @@ fn spawn_screening(cfg: &Config, store: Store) {
             if let Err(e) = screen_pending(&store, &screener) {
                 // Never fatal. A screener that cannot run must not stop the
                 // server, and the requests it did not reach stay pending.
-                eprintln!("screening sweep: {e}");
+                crate::log::error("screening sweep failed")
+                    .text("err", e)
+                    .emit();
             }
         }
     });
@@ -182,6 +214,12 @@ fn screen_pending(store: &Store, screener: &dyn Screener) -> Result<()> {
 }
 
 /// Make sure there is a way in, and return a code if one was freshly minted.
+///
+/// Re-arms on every start where nobody is enrolled, which is what makes
+/// [`crate::auth::ENROL_TTL_MS`] safe to enforce: a code that lapsed while the
+/// container was down is replaced by a fresh one here, so an expiring code
+/// cannot lock a developer out of their own install. The cost of letting one
+/// lapse is a restart.
 fn arm_enrolment(store: &Store, cfg: &Config) -> Result<Option<String>> {
     let mut creds = store.credentials()?;
     if !creds.live().is_empty() {
@@ -193,13 +231,31 @@ fn arm_enrolment(store: &Store, cfg: &Config) -> Result<Option<String>> {
         .enrol_code
         .clone()
         .unwrap_or_else(crate::auth::mint_enrol_code);
-    creds.set_enrol_code(&code);
+    creds.set_enrol_code(&code, now_ms());
     store.put_credentials(&creds)?;
     Ok(Some(code))
 }
 
 fn serve_one(mut request: tiny_http::Request, shared: &Shared) -> Result<()> {
-    let req = read(&mut request)?;
+    let started = std::time::Instant::now();
+    // Minted per request so the access line below and any error it produces can
+    // be found together — this server answers several requests at once, and
+    // interleaved lines are otherwise impossible to attribute.
+    let id = request_id();
+
+    // Logged here rather than propagated silently: this is the one failure that
+    // happens *before* there is a request to describe, so the access line below
+    // is unreachable for it and nothing else would record that it occurred.
+    let req = match read(&mut request) {
+        Ok(req) => req,
+        Err(e) => {
+            crate::log::error("request unreadable")
+                .req(&id)
+                .text("err", &e)
+                .emit();
+            return Err(e);
+        }
+    };
     let is_poll = req.method == "GET" && req.path.split('?').next() == Some(wire::route::WORK);
 
     let mut res = dispatch(shared, &req);
@@ -219,7 +275,107 @@ fn serve_one(mut request: tiny_http::Request, shared: &Shared) -> Result<()> {
         }
     }
 
-    write(request, res)
+    // Read before `write` takes the response.
+    let status = res.status;
+    let bytes = match &res.binary {
+        Some(b) => b.len(),
+        None => res.body.len(),
+    } as u64;
+    let route = route_label(&req.path);
+
+    let outcome = write(request, res);
+
+    // **Once per request, not once per dispatch.** The poll loop above calls
+    // `dispatch` every 250ms for up to `POLL_TIMEOUT`, so a line in there would
+    // mean roughly four a second for every idle daemon — a log of nothing
+    // happening, drowning the log of something happening.
+    //
+    // After `write`, so `ms` covers writing the response too, and so a client
+    // that hangs up mid-body still leaves a record of what was attempted.
+    crate::log::info("request")
+        .req(&id)
+        .with("method", req.method.clone())
+        .with("route", route)
+        .with("status", status as u64)
+        .with("ms", started.elapsed().as_millis() as u64)
+        .with("bytes", bytes)
+        // A held poll legitimately reads ~30s, which would wreck a latency
+        // panel that could not tell it apart from a slow page.
+        .with("poll", is_poll)
+        .emit();
+
+    if let Err(e) = &outcome {
+        crate::log::error("request failed")
+            .req(&id)
+            .text("err", e)
+            .emit();
+    }
+    outcome
+}
+
+/// A short id for one request. Not a credential, so 4 bytes of hex is plenty to
+/// tell concurrent requests apart in a log.
+fn request_id() -> String {
+    let mut bytes = [0u8; 4];
+    // Unlike a credential, an id that repeats costs nothing but an ambiguous
+    // grep — so this falls back rather than refusing to serve the request.
+    if getrandom::fill(&mut bytes).is_err() {
+        return "????????".to_string();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Which route a request hit, as a **label** — never the URL it sent.
+///
+/// The path off the wire is attacker-controlled and carries credentials: a
+/// sign-in link's token is a path segment, and that token is a bearer credential
+/// good for somebody's account. The query string can carry anything at all.
+///
+/// So this does not *sanitise* the path, it **classifies** it: every request maps
+/// onto one of a fixed set of strings spelled out below, and anything
+/// unrecognised becomes `"other"`. A redactor decides what to remove and is
+/// wrong the first time it misses something; a classifier decides what to keep
+/// and is wrong only by being uninformative.
+///
+/// The `&'static str` return type is what enforces it. No arm can borrow from
+/// `path`, so request data reaching the log is not a bug to be avoided but a
+/// thing the signature makes impossible.
+///
+/// **Deliberately not logged anywhere in the access line**, each because it will
+/// be proposed eventually:
+///
+/// - the **query string**, dropped at the first `?` — it is caller-controlled
+///   and free-form;
+/// - the **bearer token** and **cookies**, which are credentials;
+/// - the **email address**, which only ever arrives in a POST body — a body this
+///   line never touches;
+/// - the **client IP**. Behind the reverse proxy this deployment assumes it is
+///   the proxy's own address, so it is a constant that says nothing. "Fixing"
+///   that by reading `X-Forwarded-For` would put an attacker-controlled header
+///   carrying somebody's personal data into a log built to be shipped elsewhere;
+/// - the **`User-Agent`**, high-cardinality and caller-controlled, and absent
+///   from [`Req`] — which holds only what the routes actually use, a property
+///   worth more than the field would be.
+fn route_label(path: &str) -> &'static str {
+    use crate::routes::{private_route, public_route};
+
+    let path = path.split('?').next().unwrap_or("");
+    match path {
+        public_route::LANDING => "/",
+        public_route::FILE => "/public",
+        public_route::SIGNIN => "/public/signin",
+        public_route::SIGNOUT => "/public/signout",
+        public_route::LANGUAGE => "/public/language",
+        public_route::SCRIPT => "/public/app.js",
+        public_route::FONT_BODY | public_route::FONT_DISPLAY => "/public/font",
+        private_route::REVIEW => "/review",
+        private_route::ENROL => "/enrol",
+        p if p.starts_with(public_route::SIGNIN_PREFIX) => "/public/signin/:token",
+        p if p.starts_with(public_route::REQUEST_PREFIX) => "/public/request/:id",
+        p if p.starts_with(wire::route::WORK) => "/api/v1/work",
+        p if p.starts_with(&format!("{}/", private_route::REVIEW)) => "/review/:rest",
+        _ => "other",
+    }
 }
 
 fn dispatch(shared: &Shared, req: &Req) -> Res {
@@ -369,6 +525,108 @@ fn write(request: tiny_http::Request, res: Res) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every label `route_label` is allowed to produce.
+    const LABELS: [&str; 14] = [
+        "/",
+        "/public",
+        "/public/signin",
+        "/public/signout",
+        "/public/language",
+        "/public/app.js",
+        "/public/font",
+        "/public/signin/:token",
+        "/public/request/:id",
+        "/api/v1/work",
+        "/review",
+        "/review/:rest",
+        "/enrol",
+        "other",
+    ];
+
+    #[test]
+    fn a_route_label_never_carries_request_data() {
+        // The property the access log rests on. A sign-in token is a bearer
+        // credential and the query string is free-form, so neither may survive
+        // into a line that is shipped to a log aggregator.
+        const SECRET: &str = "s3cr3ttokenvalue";
+        let hostile = [
+            format!("/public/signin/{SECRET}"),
+            format!("/public/request/{SECRET}"),
+            format!("/public?email=someone@example.com&t={SECRET}"),
+            format!("/api/v1/work/{SECRET}/drafted"),
+            format!("/review/{SECRET}/approve"),
+            format!("/{SECRET}"),
+            format!("/public/../../{SECRET}"),
+            format!("/PUBLIC/SIGNIN/{SECRET}"),
+            format!("/public/signin/{}", "A".repeat(4096)),
+            String::new(),
+            "?".to_string(),
+            "/public?".to_string(),
+        ];
+
+        for path in &hostile {
+            let label = route_label(path);
+            assert!(
+                LABELS.contains(&label),
+                "{path} produced an unknown label {label}"
+            );
+            assert!(
+                !label.contains(SECRET) && !label.contains('@') && !label.contains("AAA"),
+                "{path} leaked request data as {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_known_routes_classify_to_themselves() {
+        // The other half: the classifier must actually be informative, or
+        // "return `other` always" would pass the test above.
+        use crate::routes::{private_route, public_route};
+
+        assert_eq!(route_label(public_route::LANDING), "/");
+        assert_eq!(route_label(public_route::FILE), "/public");
+        assert_eq!(route_label(public_route::SIGNIN), "/public/signin");
+        assert_eq!(route_label(public_route::SIGNOUT), "/public/signout");
+        assert_eq!(route_label(public_route::LANGUAGE), "/public/language");
+        assert_eq!(route_label(public_route::SCRIPT), "/public/app.js");
+        assert_eq!(route_label(public_route::FONT_BODY), "/public/font");
+        assert_eq!(route_label(public_route::FONT_DISPLAY), "/public/font");
+        assert_eq!(route_label(private_route::REVIEW), "/review");
+        assert_eq!(route_label(private_route::ENROL), "/enrol");
+        assert_eq!(route_label(wire::route::WORK), "/api/v1/work");
+        assert_eq!(route_label(&wire::route::drafted("srv-1")), "/api/v1/work");
+        assert_eq!(route_label("/public/signin/abc"), "/public/signin/:token");
+        assert_eq!(route_label("/public/request/xyz"), "/public/request/:id");
+    }
+
+    #[test]
+    fn a_query_string_never_survives_classification() {
+        // Dropped, not truncated — a truncated query is still caller-controlled
+        // content in the log.
+        use crate::routes::public_route;
+        assert_eq!(route_label("/public?email=a@b.com"), "/public");
+        assert_eq!(
+            route_label(&format!("{}?next=/review", public_route::SIGNIN)),
+            "/public/signin"
+        );
+    }
+
+    #[test]
+    fn an_unknown_path_is_not_reflected() {
+        // The catch-all is a constant, so a scanner probing for `/wp-admin`
+        // cannot write its own strings into the log.
+        assert_eq!(route_label("/wp-admin.php"), "other");
+        assert_eq!(route_label("/publicXYZ"), "other");
+        assert_eq!(route_label("/../etc/passwd"), "other");
+    }
+
+    #[test]
+    fn a_request_id_is_short_and_hex() {
+        let id = request_id();
+        assert_eq!(id.len(), 8, "{id}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+    }
 
     #[test]
     fn a_cookie_is_found_among_others() {

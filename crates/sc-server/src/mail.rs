@@ -234,7 +234,11 @@ impl Mailer for Console {
         // reason that one withholds it — somebody's personal data landing in a
         // log — is not a reason here: printing the *link* is the entire point,
         // and the link is worth more than the address.
-        println!("\n--- mail (console) ---\nto: {to}\nsubject: {subject}\n\n{text}\n---\n");
+        crate::log::warn("console mail")
+            .with("to", to.to_string())
+            .with("subject", subject.to_string())
+            .with("body", text.to_string())
+            .emit();
         Ok(())
     }
 }

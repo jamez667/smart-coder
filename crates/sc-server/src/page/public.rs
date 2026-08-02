@@ -63,12 +63,13 @@ pub fn landing_page(locale: Locale) -> String {
         locale,
         s.landing_headline,
         &format!(
-            "<h1>{headline}</h1><p>{sub}</p>\
-             <p><a class=\"cta\" href=\"/public\">{cta}</a></p>\
-             {p1}{p2}{p3}",
+            // **No call-to-action button.** The masthead's Sign in is the way
+            // in, and a second button competing with it — going to a page that
+            // immediately asks for the same sign-in — was a step that added
+            // nothing. The reference has no CTA here either.
+            "<h1>{headline}</h1><p>{sub}</p>{p1}{p2}{p3}",
             headline = esc(s.landing_headline),
             sub = esc(s.landing_sub),
-            cta = esc(s.landing_cta),
             p1 = point(s.landing_point_1_title, s.landing_point_1_body),
             p2 = point(s.landing_point_2_title, s.landing_point_2_body),
             p3 = point(s.landing_point_3_title, s.landing_point_3_body),
@@ -479,9 +480,42 @@ mod tests {
             "already been used",
             "You have not filed",
         ];
+        // **Text only, with tags stripped.** Element ids and class names are
+        // English by necessity — `id="signin-dialog"` is markup, not copy, and
+        // is not translated in any codebase. Grepping the raw HTML flagged those
+        // as untranslated text, which is a false positive that would push
+        // somebody towards renaming ids to satisfy a test.
+        // The stylesheet and the script go too. Their *contents* are prose in a
+        // sense — the CSS carries long English comments — but none of it is copy
+        // a reader sees, and a comment explaining the sign-in dialog naturally
+        // contains the words "Sign in".
+        let visible = |html: &str| {
+            let body = html
+                .rsplit("</style>")
+                .next()
+                .unwrap_or(html)
+                .split("<script")
+                .next()
+                .unwrap_or("");
+            let mut out = String::with_capacity(body.len());
+            let mut inside_tag = false;
+            for c in body.chars() {
+                match c {
+                    '<' => inside_tag = true,
+                    '>' => inside_tag = false,
+                    _ if !inside_tag => out.push(c),
+                    _ => {}
+                }
+            }
+            out
+        };
         for html in &pages {
+            let text = visible(html);
             for word in english {
-                assert!(!html.contains(word), "English {word:?} survived: {html}");
+                assert!(
+                    !text.contains(word),
+                    "English {word:?} survived in visible text: {text}"
+                );
             }
         }
     }

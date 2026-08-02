@@ -186,7 +186,6 @@ pub struct Strings {
     // reader already knows.
     pub landing_headline: &'static str,
     pub landing_sub: &'static str,
-    pub landing_cta: &'static str,
     pub landing_point_1_title: &'static str,
     pub landing_point_1_body: &'static str,
     pub landing_point_2_title: &'static str,
@@ -377,7 +376,6 @@ mod tests {
             s.dialog_close,
             s.landing_headline,
             s.landing_sub,
-            s.landing_cta,
             s.landing_point_1_title,
             s.landing_point_1_body,
             s.landing_point_2_title,
