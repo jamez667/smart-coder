@@ -316,11 +316,32 @@ self-approval, under any ceremony, behind any flag.
   a tree mid-rebase but runs on a merely dirty one, and four intake kinds
   (bug/feature/improvement shape the drafting prompt; feedback is kept as a note
   and never reaches a model). Driven end to end against a live qwen3-coder-30b.
+- ✅ **The hosted server** <!--@ crates/sc-server --> — accounts by magic link,
+  a Gemini spam screener that can only withhold, spend ceilings, a themed and
+  translated public surface, and a claim that expires so a dead daemon cannot
+  wedge a repository. Shipped as its own Docker image
+  <!--@ deploy/sc-server.stack.yml -->.
+- ✅ **The daemon dials out** — `queue link` stores the server and key,
+  `queue serve` long-polls it, drafts locally and pushes the spec back
+  <!--@ crates/sc-daemon/src/client.rs -->.
 - **Exit criteria:** ✅ a request filed against any configured repository produces
   a drafted spec that parks for review, and approving writes it into that
-  repository and starts nothing; the queue survives a restart. ⬚ The same filed
-  from a phone with the desktop closed — that needs the hosted server and the
-  daemon's poll loop, which are the remaining work.
+  repository and starts nothing; the queue survives a restart.
+
+  ✅ **Filed remotely, drafted locally, parked for review** — demonstrated
+  against the real container: a request filed through the public web surface was
+  polled, claimed and pushed back by `HttpTransport` (the type `queue serve`
+  uses), and landed in `awaiting-review` with the claim stamp correctly dropped.
+  The probe is kept <!--@ crates/sc-daemon/examples/poll-once.rs --> because
+  `queue serve` refuses to start without a local model, which leaves poll, claim
+  and push-back untestable exactly when the model is down.
+
+  ⬚ **The drafting step itself has not been run against the hosted server.** The
+  probe supplies the spec text rather than generating one, so what remains
+  unproven is narrow but real: a live `queue serve` with a model up, drafting
+  from a *remotely* filed request. Every other link in the chain is exercised.
+  Stated as an open box rather than folded into the tick above, because "we
+  proved the transport" and "we proved the feature" are not the same claim.
 
 **Deliberately not built:** concurrent runs (one local model server is the
 bottleneck, so concurrency buys contention), cross-run scheduling or priorities,
