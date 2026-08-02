@@ -29,6 +29,19 @@
 
 services:
   sc-server:
+    # `latest` moves only on a `v*` tag, never on a push to main — so pulling it
+    # gets a version somebody chose to release. Pin `:0.0.3` instead if you would
+    # rather decide when to move.
+    #
+    # A `manifest unknown` or `unauthorized` here means the package is PRIVATE.
+    # GitHub Packages does not inherit repository visibility: a package linked to
+    # a public repo inherits its access *permissions* but is still published
+    # private by default. Make it public in the package's settings (Danger Zone →
+    # Change visibility), or give Portainer a registry credential — a GitHub
+    # username and a classic token with `read:packages`.
+    #
+    # Note that public is one-way: GitHub does not allow a public package to be
+    # made private again.
     image: ghcr.io/jamez667/sc-server:latest
     container_name: sc-server
     restart: unless-stopped
