@@ -15,6 +15,7 @@ pub static STRINGS: Strings = Strings {
     theme_dark: "Dark",
     language_label: "Language",
     language_apply: "Apply",
+    footer_tagline: "Smart Coder — file a request, read the spec it becomes.",
 
     signin_title: "Sign in",
     signin_intro: "Filing a request needs an email address — it is how you find your way back \

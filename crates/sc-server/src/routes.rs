@@ -83,6 +83,9 @@ pub mod public_route {
     /// **signed out**, since somebody who cannot read the sign-in page is
     /// precisely who needs it.
     pub const LANGUAGE: &str = "/public/language";
+    /// The surface's own script. A served file rather than an inline block,
+    /// because the policy is `script-src 'self'` and never `'unsafe-inline'`.
+    pub const SCRIPT: &str = "/public/app.js";
 }
 
 /// The verbs that decide a request's fate.
@@ -447,6 +450,7 @@ fn is_public_path(path: &str) -> bool {
         || path == public_route::SIGNIN
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
+        || path == public_route::SCRIPT
         || path.starts_with(public_route::SIGNIN_PREFIX)
         || path.starts_with(public_route::REQUEST_PREFIX)
 }
@@ -707,6 +711,14 @@ fn public_route(
         // the sign-in page is exactly who needs this, and requiring an account
         // first would mean reading a page in a language they do not have.
         ("POST", public_route::LANGUAGE) => set_language(ctx, req),
+
+        // The surface's script. Static, identical for everyone, and reachable
+        // signed out — the sign-in page carries the language switcher it
+        // enhances.
+        ("GET", public_route::SCRIPT) => Res {
+            content_type: "text/javascript; charset=utf-8",
+            ..Res::html(200, crate::page::PUBLIC_SCRIPT)
+        },
 
         // The landing page a link opens. **Changes nothing** — mail scanners
         // fetch every URL in a message, and a GET that spent the token would
@@ -2411,7 +2423,23 @@ mod tests {
             let res = f.go(&Req::post(public_route::LANGUAGE, hostile));
             assert_eq!(res.status, 200, "{hostile}");
             assert!(res.body.contains("<html lang=\"en\""), "{hostile}");
-            assert!(!res.body.contains("<script"), "{hostile}: {}", res.body);
+            // The page carries exactly one script — its own, from this origin —
+            // and the hostile value contributes nothing. Asserted as "only the
+            // expected tag" rather than "no script at all": the shell now has a
+            // legitimate one, and a blanket ban would have to be deleted here,
+            // taking the injection check with it.
+            assert_eq!(
+                res.body.matches("<script").count(),
+                1,
+                "{hostile}: {}",
+                res.body
+            );
+            assert!(
+                res.body
+                    .contains("<script src=\"/public/app.js\" defer></script>"),
+                "{hostile}: the only script is the surface's own"
+            );
+            assert!(!res.body.contains("alert(1)"), "{hostile}: {}", res.body);
             assert!(!res.body.contains("passwd"), "{hostile}: {}", res.body);
             let cookie = res.set_cookie.unwrap_or_default();
             assert!(

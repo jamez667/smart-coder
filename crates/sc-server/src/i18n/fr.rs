@@ -20,6 +20,7 @@ pub static STRINGS: Strings = Strings {
     theme_dark: "Sombre",
     language_label: "Langue",
     language_apply: "Appliquer",
+    footer_tagline: "Smart Coder — déposez une demande, lisez la spécification qui en naît.",
 
     signin_title: "Se connecter",
     signin_intro: "Déposer une demande nécessite une adresse e-mail — c'est ce qui vous \

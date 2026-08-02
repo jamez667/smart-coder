@@ -174,6 +174,9 @@ pub struct Strings {
     pub language_label: &'static str,
     /// The switcher's submit button, for readers with script disabled.
     pub language_apply: &'static str,
+    /// The footer's left-hand line. Says what this surface is, since a filer may
+    /// arrive on it from a link with no other context.
+    pub footer_tagline: &'static str,
 
     // -- signing in ---------------------------------------------------------
     pub signin_title: &'static str,
@@ -354,6 +357,7 @@ mod tests {
             s.theme_dark,
             s.language_label,
             s.language_apply,
+            s.footer_tagline,
             s.signin_title,
             s.signin_intro,
             s.signin_email_label,
