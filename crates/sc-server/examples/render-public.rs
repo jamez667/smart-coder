@@ -71,7 +71,8 @@ fn main() {
     let mut wrote = 0;
     for locale in Locale::ALL {
         let code = locale.code();
-        let pages: [(String, String); 7] = [
+        let pages: [(String, String); 8] = [
+            (format!("landing-{code}.html"), page::landing_page(locale)),
             (format!("signin-{code}.html"), page::signin_page_in(locale)),
             (format!("sent-{code}.html"), page::signin_sent_page(locale)),
             (

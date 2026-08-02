@@ -20,6 +20,19 @@ pub static STRINGS: Strings = Strings {
     language_apply: "Appliquer",
     footer_tagline: "Smart Coder — déposez une demande, lisez la spécification qui en naît.",
 
+    nav_signin: "Se connecter",
+    nav_account: "Compte",
+
+    landing_headline: "Demandez un changement, recevez une spécification.",
+    landing_sub: "Décrivez ce qu’il faut faire avec vos propres mots. Vous                   recevez en retour une spécification écrite que le                   développeur lira, approuvera ou renverra pour une nouvelle                   version.",
+    landing_cta: "Déposer une demande",
+    landing_point_1_title: "Dites-le simplement",
+    landing_point_1_body: "Aucun formulaire à apprendre, aucun outil de suivi à                            rejoindre. Écrivez-le comme vous l’expliqueriez                            à un collègue, en quelques centaines de mots.",
+    landing_point_2_title: "C’est un humain qui décide",
+    landing_point_2_body: "Rien ici ne construit quoi que ce soit. Une spécification                            est rédigée à partir de votre texte, puis une                            personne la lit et tranche — déposer une demande                            ouvre donc un échange, pas un automate.",
+    landing_point_3_title: "Aucun mot de passe à retenir",
+    landing_point_3_body: "Connectez-vous avec une adresse e-mail et un lien à usage                            unique. Il n’y a pas de mot de passe à choisir,                            à divulguer ou à réinitialiser.",
+
     signin_title: "Se connecter",
     signin_intro: "Déposer une demande nécessite une adresse e-mail — c'est ce qui vous \
                    permet de retrouver ce que vous avez déposé, et cela évite que ce \

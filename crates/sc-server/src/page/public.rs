@@ -37,9 +37,44 @@
 
 use sc_proto::IntakeKind;
 
-use super::{esc, kind_field_in, public_shell, relative_time};
+use super::{esc, kind_field_in, public_shell, public_shell_as, relative_time, Signed};
 use crate::i18n::Locale;
 use crate::store::{Request, RequestState};
+
+/// The landing page: what this is, for somebody who has never seen it.
+///
+/// **The only page that explains anything.** Every other page assumes the reader
+/// knows why they are here — they followed a sign-in link, or they came back to
+/// check on something they filed. This one is what a bare address shows a
+/// stranger, so it leads with the premise rather than with a form.
+///
+/// Signed-in filers never see it: the route sends them to their own page
+/// instead, because they have read the pitch and came back for their requests.
+pub fn landing_page(locale: Locale) -> String {
+    let s = locale.strings();
+    let point = |title: &str, body: &str| {
+        format!(
+            "<section class=\"point\"><h2>{}</h2><p>{}</p></section>",
+            esc(title),
+            esc(body)
+        )
+    };
+    public_shell(
+        locale,
+        s.landing_headline,
+        &format!(
+            "<h1>{headline}</h1><p>{sub}</p>\
+             <p><a class=\"cta\" href=\"/public\">{cta}</a></p>\
+             {p1}{p2}{p3}",
+            headline = esc(s.landing_headline),
+            sub = esc(s.landing_sub),
+            cta = esc(s.landing_cta),
+            p1 = point(s.landing_point_1_title, s.landing_point_1_body),
+            p2 = point(s.landing_point_2_title, s.landing_point_2_body),
+            p3 = point(s.landing_point_3_title, s.landing_point_3_body),
+        ),
+    )
+}
 
 /// Ask for a sign-in link.
 pub fn signin_page() -> String {
@@ -174,7 +209,7 @@ pub fn public_file_page(mine: &[Request], show_spec: bool, locale: Locale) -> St
         ));
     }
 
-    public_shell(
+    public_shell_as(
         locale,
         s.file_title,
         &format!(
@@ -206,6 +241,7 @@ pub fn public_file_page(mine: &[Request], show_spec: bool, locale: Locale) -> St
             items = items,
             signout = esc(s.file_signout),
         ),
+        Signed::In,
     )
 }
 
@@ -275,7 +311,7 @@ pub fn public_filed(r: &Request, locale: Locale) -> String {
     } else {
         esc(s.filed_body)
     };
-    public_shell(
+    public_shell_as(
         locale,
         s.filed_title,
         &format!(
@@ -283,6 +319,7 @@ pub fn public_filed(r: &Request, locale: Locale) -> String {
             title = esc(s.filed_title),
             back = esc(s.back),
         ),
+        Signed::In,
     )
 }
 

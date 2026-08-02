@@ -15,6 +15,19 @@ pub static STRINGS: Strings = Strings {
     language_apply: "Apply",
     footer_tagline: "Smart Coder — file a request, read the spec it becomes.",
 
+    nav_signin: "Sign in",
+    nav_account: "Account",
+
+    landing_headline: "Ask for a change — get a spec back.",
+    landing_sub: "Describe what needs doing in your own words. It comes back as a                   written specification for the developer to read, approve, or send                   back for another pass.",
+    landing_cta: "File a request",
+    landing_point_1_title: "Say it plainly",
+    landing_point_1_body: "No forms to learn and no issue tracker to join. Write it the                            way you would tell a colleague, in a few hundred words.",
+    landing_point_2_title: "A person decides",
+    landing_point_2_body: "Nothing here builds anything. A specification is drafted from                            what you wrote, and a human reads it and decides — so                            filing a request starts a conversation, not a robot.",
+    landing_point_3_title: "No password to forget",
+    landing_point_3_body: "Sign in with an email address and a link that works once.                            There is no password to choose, leak, or reset.",
+
     signin_title: "Sign in",
     signin_intro: "Filing a request needs an email address — it is how you find your way back \
                    to what you filed, and it keeps this form from being a free-for-all.",

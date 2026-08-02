@@ -31,7 +31,7 @@ pub use private::{
     filed, index, message, not_found,
 };
 pub use public::{
-    public_detail, public_file_page, public_filed, public_message, public_not_found,
+    landing_page, public_detail, public_file_page, public_filed, public_message, public_not_found,
     signin_confirm_page, signin_failed_page, signin_page, signin_page_in, signin_sent_page,
 };
 
@@ -230,9 +230,11 @@ gap:.65rem}
    (Written without the tag name in angle brackets on purpose: this stylesheet
    ships inside the page, and the self-containment test greps the rendered HTML
    for markup it must not contain. A comment naming the tag would trip it.) */
-.masthead .wordmark::before{content:"";width:2.25rem;height:2.25rem;flex:none;
+.masthead .logo{width:2.25rem;height:2.25rem;flex:none;
 border-radius:var(--radius);box-shadow:var(--shadow);
-background:linear-gradient(140deg,var(--link),color-mix(in srgb,var(--link) 55%,#000))}
+background:linear-gradient(140deg,var(--link),color-mix(in srgb,var(--link) 55%,#000));
+color:var(--accent-ink);display:inline-flex;align-items:center;justify-content:center;
+font-family:"Fraunces",Georgia,serif;font-size:.95rem;font-weight:600;letter-spacing:.02em}
 .controls{display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap}
 /* The footer, matching the reference: a copyright line and a dot-separated
    set of links, stacking centred on a narrow screen. */
@@ -264,8 +266,48 @@ appearance:none;cursor:pointer;transition:color .12s,border-color .12s}
 width:.4rem;height:.4rem;pointer-events:none;
 border-inline-end:1.6px solid currentColor;border-block-end:1.6px solid currentColor;
 transform:translateY(-15%) rotate(45deg);color:var(--dim)}
+/* **Hidden by default, shown when there is no script.** The reverse — visible
+   until the script hides it — leaves the button on screen for the moment before
+   the script runs, and permanently on any page rendered without the server (a
+   saved copy, a preview). `<html class="js">` is set by the script itself, so
+   the button is present and working whenever that class is absent, which is
+   exactly when it is needed. */
 .lang button{font-size:.78rem;width:auto;margin:0;margin-inline-start:var(--s1);
 padding:.3rem var(--s3);height:1.95rem;border-radius:999px}
+.js .lang button{display:none}
+/* The masthead's buttons and the landing page's call to action. */
+.btn{display:inline-flex;align-items:center;gap:var(--s1);height:1.95rem;
+padding:0 var(--s3);border-radius:var(--pill);border:1px solid var(--line);
+background:var(--surface);color:var(--fg);font-size:.82rem;font-weight:600;
+text-decoration:none;cursor:pointer;white-space:nowrap;
+transition:border-color .12s,background .12s}
+.btn:hover{border-color:var(--line-2);background:var(--surface-2)}
+.cta{display:inline-block;margin-block:var(--s2) var(--s5);
+padding:.6rem var(--s5);border-radius:var(--pill);
+background:var(--link);color:var(--accent-ink);
+text-decoration:none;font-weight:600;box-shadow:var(--shadow)}
+.cta:hover{filter:brightness(1.08)}
+/* The account menu: `<details>`, so it opens with no script at all. */
+.acct{position:relative}
+.acct summary{list-style:none}
+.acct summary::-webkit-details-marker{display:none}
+.acct summary::after{content:"";width:.35rem;height:.35rem;
+border-inline-end:1.5px solid currentColor;border-block-end:1.5px solid currentColor;
+transform:translateY(-25%) rotate(45deg)}
+.acct[open] summary{border-color:var(--line-2);background:var(--surface-2)}
+.acct .menu{position:absolute;inset-inline-end:0;top:calc(100% + var(--s1));
+min-width:11rem;padding:var(--s1);z-index:20;
+background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);box-shadow:var(--shadow)}
+.acct .menu a,.acct .menu button{display:block;width:100%;text-align:start;
+padding:var(--s2) var(--s3);border:0;border-radius:.4rem;margin:0;
+background:transparent;color:var(--fg);font:inherit;font-size:.85rem;
+font-weight:500;text-decoration:none;cursor:pointer}
+.acct .menu a:hover,.acct .menu button:hover{background:var(--surface-2)}
+/* The landing page's three points. */
+.point{margin-block:var(--s6)}
+.point h2{margin:0 0 var(--s2);border:0;padding:0}
+.point p{margin:0;color:var(--dim);max-width:38rem}
 /* Serif headings against a sans body, which is the pairing that makes the
    reference design read as designed rather than as a default stylesheet. */
 h1,h2{font-family:"Fraunces",Georgia,"Times New Roman",serif;font-weight:600}
@@ -322,7 +364,7 @@ padding:var(--s3) var(--s4);margin:var(--s5) 0;box-shadow:var(--shadow)}
 /// the honest limit of doing this without script, and it is the right trade
 /// here: the alternative is a third cookie and a route to set it, on a surface
 /// whose pages a reader passes through two or three at a time.
-fn masthead(locale: Locale) -> String {
+fn masthead(locale: Locale, signed: Signed) -> String {
     let s = locale.strings();
     let mut options = String::new();
     for l in Locale::ALL {
@@ -347,7 +389,7 @@ fn masthead(locale: Locale) -> String {
         "<input type=\"checkbox\" id=\"theme-light\" class=\"theme-in\">\
 <input type=\"checkbox\" id=\"theme-dark\" class=\"theme-in\">\
 <header class=\"bar\"><div class=\"bar-inner masthead\">\
-<a class=\"wordmark\" href=\"/public\">{brand}</a>\
+<a class=\"wordmark\" href=\"/\"><span class=\"logo\" aria-hidden=\"true\">SC</span><span>{brand}</span></a>\
 <div class=\"controls\">\
 <label class=\"theme to-dark\" for=\"theme-dark\" title=\"{dark}\">\
 <span class=\"theme-in\">{dark}</span>\
@@ -361,8 +403,10 @@ fn masthead(locale: Locale) -> String {
 <label for=\"lang\" class=\"theme-in\">{lang_label}</label>\
 <select id=\"lang\" name=\"lang\">{options}</select>\
 <button type=\"submit\">{apply}</button></form>\
+{account}\
 </div></div></header>",
-        brand = esc(s.brand),
+        brand = esc(&site::name(s.brand)),
+        account = account_nav(locale, signed == Signed::In),
         light = esc(s.theme_light),
         dark = esc(s.theme_dark),
         lang_label = esc(s.language_label),
@@ -370,23 +414,59 @@ fn masthead(locale: Locale) -> String {
     )
 }
 
-/// The footer, matching the reference design's shape.
+/// The footer.
 ///
 /// The links are **relative and internal only**. A footer is where an "about"
 /// or "privacy" link to somebody else's site would naturally go, and a remote
 /// href on this surface would be a subresource the CSP forbids as well as a
 /// referrer leak from a page whose URL identifies a request.
+///
+/// **Sign out is not here.** It moved to the account menu, which is where a
+/// reader looks for it — and a destructive action sitting in the footer next to
+/// navigation links is one somebody eventually presses by accident.
 fn footer(locale: Locale) -> String {
     let s = locale.strings();
     format!(
         "<footer class=\"bar footer\"><div class=\"bar-inner\">\
 <p>{tagline}</p>\
-<nav><a href=\"/public\">{file}</a>\
+<nav><a href=\"/\">{home}</a>\
 <span class=\"sep\" aria-hidden=\"true\">·</span>\
-<a href=\"/public/signout\">{signout}</a></nav>\
+<a href=\"/public\">{file}</a></nav>\
 </div></footer>",
         tagline = esc(s.footer_tagline),
+        home = esc(s.brand),
         file = esc(s.file_title),
+    )
+}
+
+/// The masthead's account control.
+///
+/// Signed out it is one button, and the wording is deliberate: this surface has
+/// no separate "register", because a first sign-in *is* the signup. Offering
+/// both would promise a difference that does not exist — and the two paths must
+/// stay indistinguishable anyway, since that is what stops the page revealing
+/// whether an address already has an account.
+///
+/// Signed in it is a details/summary menu holding sign-out. No script: a menu
+/// that needs JavaScript to open is a menu that does not open for a reader whose
+/// script failed, and `<details>` is the same interaction with none.
+fn account_nav(locale: Locale, signed_in: bool) -> String {
+    let s = locale.strings();
+    if !signed_in {
+        return format!(
+            "<a class=\"btn\" href=\"/public/signin\">{}</a>",
+            esc(s.nav_signin)
+        );
+    }
+    format!(
+        "<details class=\"acct\"><summary class=\"btn\">{account}</summary>\
+<div class=\"menu\">\
+<a href=\"/public\">{mine}</a>\
+<form method=\"post\" action=\"/public/signout\">\
+<button type=\"submit\">{signout}</button></form>\
+</div></details>",
+        account = esc(s.nav_account),
+        mine = esc(s.file_mine_heading),
         signout = esc(s.file_signout),
     )
 }
@@ -397,6 +477,62 @@ fn footer(locale: Locale) -> String {
 /// with English phonemes — the accessibility failure a language switcher exists
 /// to fix rather than to cause.
 pub(crate) fn public_shell(locale: Locale, title: &str, body: &str) -> String {
+    public_shell_as(locale, title, body, Signed::Out)
+}
+
+/// What the masthead calls this site.
+///
+/// **The configured repository name**, set per request from `PublicConfig`
+/// rather than compiled in: one binary serves whichever repository an operator
+/// nominated, and a masthead reading "Smart Coder" on a surface collecting
+/// requests for *their* project is the wrong name on every page.
+///
+/// A thread-local because the alternative is threading it through ten renderers
+/// that have no other reason to know it. Set once per request in `routes`, and
+/// falling back to the product name when nothing set it — which is what the
+/// private surface and the render-to-file example both do.
+pub(crate) mod site {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Name this request's site. Cleared by [`clear`] when the request ends.
+    pub fn set(name: &str) {
+        NAME.with(|n| *n.borrow_mut() = Some(name.to_string()));
+    }
+
+    /// Forget it. **A thread serves many requests**, so a name left set would
+    /// leak one repository's name onto the next request's page.
+    pub fn clear() {
+        NAME.with(|n| *n.borrow_mut() = None);
+    }
+
+    pub fn name(fallback: &str) -> String {
+        NAME.with(|n| n.borrow().clone())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+}
+
+/// Whether the masthead shows a sign-in button or an account menu.
+///
+/// An explicit two-variant enum rather than a `bool`, because `public_shell(l,
+/// t, b, true)` at a call site says nothing about what is true — and the wrong
+/// value here shows a stranger an account menu, or a signed-in filer a button
+/// telling them to sign in again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signed {
+    In,
+    Out,
+}
+
+/// The document, with the masthead told who is reading.
+pub(crate) fn public_shell_as(locale: Locale, title: &str, body: &str, signed: Signed) -> String {
+    shell_inner(locale, title, body, signed)
+}
+
+fn shell_inner(locale: Locale, title: &str, body: &str, signed: Signed) -> String {
     format!(
         "<!doctype html>\n<html lang=\"{lang}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -405,7 +541,7 @@ pub(crate) fn public_shell(locale: Locale, title: &str, body: &str) -> String {
 <script src=\"/public/app.js\" defer></script></body></html>",
         lang = esc(locale.code()),
         title = esc(title),
-        masthead = masthead(locale),
+        masthead = masthead(locale, signed),
         footer = footer(locale),
     )
 }
@@ -434,16 +570,17 @@ pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fraunces.woff2");
 /// script sees the language change on selection, which is what everyone expects
 /// a language picker to do.
 pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
+  // Marks the document as scripted. The stylesheet hides the language form's
+  // submit button behind `.js`, so it is visible — and the only way to change
+  // language — on any page this script did not reach: script blocked, script
+  // failed to load, or a copy of the page saved and opened without a server.
+  document.documentElement.classList.add('js');
+
   // The language switcher submits on change instead of needing a second click.
   var form = document.getElementById('langform');
   if (form) {
     var select = form.querySelector('select');
-    var button = form.querySelector('button');
-    if (select && button) {
-      // Hidden only now, so the button is never missing while it is the only
-      // way to submit — the failure a `display:none` in the stylesheet would
-      // cause for anyone whose script did not load.
-      button.hidden = true;
+    if (select) {
       select.addEventListener('change', function () { form.submit(); });
     }
   }
@@ -589,6 +726,7 @@ pub(crate) mod corpus {
         let mut all = Vec::new();
         for l in Locale::ALL {
             all.extend([
+                ("landing_page", landing_page(l)),
                 ("signin_page", signin_page()),
                 ("signin_page_in", signin_page_in(l)),
                 ("signin_sent_page", signin_sent_page(l)),

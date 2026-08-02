@@ -173,6 +173,23 @@ pub struct Strings {
     /// The footer's left-hand line. Says what this surface is, since a filer may
     /// arrive on it from a link with no other context.
     pub footer_tagline: &'static str,
+    /// The masthead's sign-in action, and the account menu.
+    pub nav_signin: &'static str,
+    pub nav_account: &'static str,
+
+    // -- the landing page ----------------------------------------------------
+    //
+    // The only page that says what this is for. Everything else assumes the
+    // reader already knows.
+    pub landing_headline: &'static str,
+    pub landing_sub: &'static str,
+    pub landing_cta: &'static str,
+    pub landing_point_1_title: &'static str,
+    pub landing_point_1_body: &'static str,
+    pub landing_point_2_title: &'static str,
+    pub landing_point_2_body: &'static str,
+    pub landing_point_3_title: &'static str,
+    pub landing_point_3_body: &'static str,
 
     // -- signing in ---------------------------------------------------------
     pub signin_title: &'static str,
@@ -352,6 +369,17 @@ mod tests {
             s.language_label,
             s.language_apply,
             s.footer_tagline,
+            s.nav_signin,
+            s.nav_account,
+            s.landing_headline,
+            s.landing_sub,
+            s.landing_cta,
+            s.landing_point_1_title,
+            s.landing_point_1_body,
+            s.landing_point_2_title,
+            s.landing_point_2_body,
+            s.landing_point_3_title,
+            s.landing_point_3_body,
             s.signin_title,
             s.signin_intro,
             s.signin_email_label,

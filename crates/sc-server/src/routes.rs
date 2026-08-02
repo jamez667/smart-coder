@@ -90,6 +90,20 @@ pub mod public_route {
     pub const FONT_BODY: &str = "/public/dm-sans.woff2";
     /// The display face, served from this origin.
     pub const FONT_DISPLAY: &str = "/public/fraunces.woff2";
+    /// The landing page — what `/` is, and the first thing a stranger sees.
+    pub const LANDING: &str = "/";
+}
+
+/// The developer's own paths.
+///
+/// Named here for the same reason the public ones are: the route matcher and the
+/// enrolment gate must agree about which address shows the code box, and two
+/// string literals in two functions eventually will not.
+pub mod private_route {
+    /// The review surface. **Moved off `/`**, which is now the landing page.
+    pub const REVIEW: &str = "/review";
+    /// Where a device is enrolled. `GET` renders the form, `POST` spends a code.
+    pub const ENROL: &str = "/enrol";
 }
 
 /// The verbs that decide a request's fate.
@@ -367,6 +381,20 @@ pub struct Ctx<'a> {
 
 /// Route one request.
 pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    // The masthead names the repository this surface collects for. Set here,
+    // once, rather than passed through ten renderers that have no other reason
+    // to know it — and **cleared on the way out**, because a thread serves many
+    // requests and a name left behind would appear on the next one.
+    match ctx.public {
+        Some(p) => crate::page::site::set(&p.repo),
+        None => crate::page::site::clear(),
+    }
+    let res = handle_inner(ctx, req);
+    crate::page::site::clear();
+    res
+}
+
+fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     let creds = match ctx.store.credentials() {
         Ok(c) => c,
         Err(e) => return error(500, &format!("the credential store is unreadable: {e}")),
@@ -402,7 +430,7 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 
     // Enrolment is the one route reachable without a credential — it is how a
     // credential is obtained. It is guarded by the single-use code instead.
-    if method == "POST" && path == "/enrol" {
+    if method == "POST" && path == private_route::ENROL {
         return enrol(ctx, req, creds);
     }
 
@@ -428,13 +456,20 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         };
     }
 
-    // Everything else is the browser surface.
+    // Everything else is the developer's own surface.
     let Some(Caller::Device { .. }) = caller else {
-        // An un-enrolled browser gets the enrolment page rather than a bare 401,
-        // because the person on the other end is the developer and the next thing
-        // they need is the box to type their code into.
-        if method == "GET" {
+        // **The enrolment page lives at `/enrol` and nowhere else.** It used to
+        // be what any un-enrolled GET rendered, which made every wrong URL look
+        // like a login prompt — and left `/` unable to be a landing page,
+        // because a stranger arriving there met a box asking for a code they
+        // could not have.
+        if method == "GET" && path == private_route::ENROL {
             return Res::html(401, crate::page::enrol_page());
+        }
+        // Anything else private, without a device, is **not found** rather than
+        // unauthorized: a 401 on `/review` tells a stranger the address is real.
+        if method == "GET" {
+            return Res::html(404, crate::page::not_found());
         }
         return error(401, "unauthorized");
     };
@@ -476,7 +511,10 @@ fn bucket_for(caller: &Option<Caller>, path: &str, ctx: &Ctx<'_>) -> Bucket {
 /// `/`, so `/publicXYZ` cannot match — on the private surface a loose prefix
 /// fails *closed* (401), but here it fails **open**.
 fn is_public_path(path: &str) -> bool {
-    path == public_route::FILE
+    // The landing page is public: it is what a stranger arriving at the bare
+    // address sees, and it must render for somebody with no account at all.
+    path == public_route::LANDING
+        || path == public_route::FILE
         || path == public_route::SIGNIN
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
@@ -622,10 +660,16 @@ fn enrol(ctx: &mut Ctx<'_>, req: &Req, mut creds: Credentials) -> Res {
 
 fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
     match (method, path) {
-        ("GET", "/") | ("GET", "/index.html") => match ctx.store.all() {
+        // The review list. `/` used to be here and is now the landing page, so
+        // an enrolled device arriving there is sent on rather than left looking
+        // at a page meant for strangers.
+        ("GET", private_route::REVIEW) | ("GET", "/index.html") => match ctx.store.all() {
             Ok(all) => Res::html(200, crate::page::index(&all)),
             Err(e) => error(500, &e.to_string()),
         },
+
+        // A device that just enrolled, or one following an old bookmark.
+        ("GET", private_route::ENROL) => Res::html(200, crate::page::enrolled_page()),
 
         ("POST", "/file") => {
             let form = form_fields(&req.body);
@@ -733,6 +777,26 @@ fn public_route(
     let locale = req.locale();
 
     match (method, path) {
+        // The landing page. What the bare address is, and the only page here
+        // that says what any of this is for.
+        //
+        // A signed-in filer is sent to their own page instead: they have already
+        // read the pitch, and the thing they came back for is what they filed.
+        ("GET", public_route::LANDING) => match &account_id {
+            Some(id) => match mine(ctx, id) {
+                Ok(list) => Res::html(
+                    200,
+                    crate::page::public_file_page(
+                        &list,
+                        ctx.public.map(|p| p.show_spec).unwrap_or(false),
+                        locale,
+                    ),
+                ),
+                Err(e) => error(500, &e.to_string()),
+            },
+            None => Res::html(200, crate::page::landing_page(locale)),
+        },
+
         // Ask for a link. Reachable signed-out — it is how one signs in.
         ("GET", public_route::SIGNIN) => Res::html(200, crate::page::signin_page_in(locale)),
         ("POST", public_route::SIGNIN) => request_sign_in(ctx, req),
@@ -868,7 +932,18 @@ fn request_sign_in(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     if let Err(e) = sent {
         // Logged for the operator, never shown: the page must look the same
         // whether or not mail went out.
-        eprintln!("sign-in link not sent: {e}");
+        //
+        // `warn`, not `error`: the common cause is the outstanding-links cap,
+        // which is the design working.
+        //
+        // The error text is the only part that varies, and none of the paths
+        // that produce it put the address in: `try_send_link` refuses with a
+        // fixed string, `Unconfigured` with another, and `HttpMailer` formats
+        // only its provider slug and the transport error — deliberately, for
+        // this reason (see `mail.rs`).
+        crate::log::warn("sign-in link not sent")
+            .text("err", e)
+            .emit();
     }
     Res::html(200, crate::page::signin_sent_page(req.locale()))
 }
@@ -969,10 +1044,10 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
                 // Logged for the operator, because a signup wall is something
                 // they need to know they have hit — the page below says only
                 // that it did not work.
-                eprintln!(
-                    "signup refused: {} accounts exist, the limit is {cap}",
-                    accounts.accounts.len()
-                );
+                crate::log::warn("signup refused")
+                    .with("accounts", accounts.accounts.len() as u64)
+                    .with("cap", cap as u64)
+                    .emit();
                 return Res::html(200, crate::page::signin_failed_page(false, locale));
             }
             accounts.create(&email_hash, &email_hint, ctx.now_ms).id
@@ -1461,7 +1536,7 @@ mod tests {
         /// Enrol a browser and return its cookie token.
         fn enrolled(&mut self) -> String {
             let mut creds = Credentials::default();
-            creds.set_enrol_code("ABC-123");
+            creds.set_enrol_code("ABC-123", 0);
             self.store.put_credentials(&creds).unwrap();
             let res = self.go(&Req::post("/enrol", "code=ABC-123&label=phone"));
             assert_eq!(res.status, 200, "{}", res.body);
@@ -1586,13 +1661,24 @@ mod tests {
     // -- the browser side ---------------------------------------------------
 
     #[test]
-    fn an_un_enrolled_browser_gets_the_enrolment_page_not_a_bare_401() {
-        // The person on the other end is the developer, and the next thing they
-        // need is the box to type their code into.
+    fn the_enrolment_page_is_at_enrol_and_nowhere_else() {
+        // The person typing a code is the developer, and the next thing they
+        // need is the box — but **only at `/enrol`**. It used to be what any
+        // un-enrolled GET rendered, which made every wrong URL look like a
+        // login prompt and left `/` unable to be a landing page, because a
+        // stranger arriving there met a box asking for a code they cannot have.
         let mut f = Fixture::new("unenrolled");
-        let res = f.go(&Req::get("/"));
+        let res = f.go(&Req::get(private_route::ENROL));
         assert_eq!(res.status, 401);
         assert!(res.body.contains("enrol"), "{}", res.body);
+
+        // Everywhere else private is **not found** rather than a code box: a
+        // 401 on `/review` tells a stranger the address is real.
+        for path in [private_route::REVIEW, "/accounts", "/request/anything"] {
+            let res = f.go(&Req::get(path));
+            assert_eq!(res.status, 404, "{path}: {}", res.body);
+            assert!(!res.body.contains("Enrol this device"), "{path}");
+        }
     }
 
     #[test]
@@ -1601,7 +1687,7 @@ mod tests {
         // tells a guesser which half they got right.
         let mut f = Fixture::new("enrol-wrong");
         let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123");
+        creds.set_enrol_code("ABC-123", 0);
         f.store.put_credentials(&creds).unwrap();
 
         let wrong = f.go(&Req::post("/enrol", "code=XYZ-999&label=phone"));
@@ -1623,7 +1709,7 @@ mod tests {
         // Script must not read it, and a cross-site form must not ride it.
         let mut f = Fixture::new("cookie");
         let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123");
+        creds.set_enrol_code("ABC-123", 0);
         f.store.put_credentials(&creds).unwrap();
 
         let res = f.go(&Req::post("/enrol", "code=ABC-123&label=phone"));
@@ -1640,7 +1726,7 @@ mod tests {
         // Arm the second code on the *existing* store — a fresh `Credentials`
         // would wipe the phone this test is about.
         let mut creds = f.store.credentials().unwrap();
-        creds.set_enrol_code("DEF-456");
+        creds.set_enrol_code("DEF-456", 0);
         f.store.put_credentials(&creds).unwrap();
         let laptop = f
             .go(&Req::post("/enrol", "code=DEF-456&label=laptop"))
@@ -1660,8 +1746,17 @@ mod tests {
         assert!(creds.revoke(&phone_id));
         f.store.put_credentials(&creds).unwrap();
 
-        assert_eq!(f.go(&Req::get("/").with_cookie(&phone)).status, 401);
-        assert_eq!(f.go(&Req::get("/").with_cookie(&laptop)).status, 200);
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&phone))
+                .status,
+            404,
+            "a revoked device is a stranger: not found, not unauthorized"
+        );
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&laptop))
+                .status,
+            200
+        );
     }
 
     #[test]
@@ -2262,11 +2357,27 @@ mod tests {
             assert_eq!(res.status, 401, "an account reached {verb}: {}", res.body);
         }
         // And the private list and detail pages are closed to them too.
-        assert_eq!(f.go(&Req::get("/").with_cookie(&session)).status, 401);
+        //
+        // **404, not 401.** A signed-in filer is not a device, and the review
+        // surface should not confirm its own address to them — the same
+        // reasoning as somebody else's request id returning "not found" rather
+        // than "forbidden".
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            404
+        );
         assert_eq!(
             f.go(&Req::get(&format!("/request/{id}")).with_cookie(&session))
                 .status,
-            401
+            404
+        );
+        // `/` is the landing page and *is* reachable — it is the one public
+        // thing here, and a filer seeing it is the design rather than a leak.
+        assert_eq!(
+            f.go(&Req::get(public_route::LANDING).with_cookie(&session))
+                .status,
+            200
         );
     }
 
@@ -2346,7 +2457,7 @@ mod tests {
 
         assert_eq!(
             f.go(&Req::get("/accounts").with_cookie(&session)).status,
-            401
+            404
         );
         assert_eq!(
             f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&session))
@@ -2417,13 +2528,13 @@ mod tests {
         // `/public/...` falls through to the private surface's device gate —
         // which is where its policy comes from too.
         let stray = f.go(&Req::get("/public/nothing-here").with_cookie(&account));
-        assert_eq!(stray.status, 401, "not a public route");
+        assert_eq!(stray.status, 404, "not a public route");
         assert_eq!(stray.policy, Policy::Strict);
 
         // The private surface, including the routes a *device* reaches. These
         // render every filer's spec on one page, which is the reason the
         // permission does not extend here.
-        for path in ["/", "/accounts"] {
+        for path in [private_route::REVIEW, "/accounts"] {
             let res = f.go(&Req::get(path).with_cookie(&device));
             assert_eq!(res.status, 200, "{path}: {}", res.body);
             assert_eq!(res.policy, Policy::Strict, "{path} is private");
@@ -2611,7 +2722,7 @@ mod tests {
         // localised" does not creep in later without the decision being retaken.
         let mut f = Fixture::new("lang-private").with_public(false);
         let device = f.enrolled();
-        let res = f.go(&Req::get("/")
+        let res = f.go(&Req::get(private_route::REVIEW)
             .with_cookie(&device)
             .with_lang(Some("fr"), None));
         assert_eq!(res.status, 200);
@@ -2875,14 +2986,20 @@ mod tests {
             "/public-admin",
             "/publicsignin/abc",
             "/publi",
-            "/",
             "/enrol",
+            // The review surface must not become public by resembling one.
+            "/review",
             // The private surface's own request route must not become public by
             // resembling one.
             "/request/abc",
         ] {
             assert!(!is_public_path(near_miss), "{near_miss} must not be public");
         }
+
+        // `/` **is** public now — it is the landing page. Asserted here rather
+        // than left as an absence from the list above, because "not in the
+        // not-public list" and "deliberately public" read the same in a diff.
+        assert!(is_public_path("/"), "the landing page is public");
     }
 
     #[test]
@@ -2911,9 +3028,14 @@ mod tests {
         assert_eq!(probe(&mut f, public_route::FILE), Bucket::PublicRead);
         assert_eq!(probe(&mut f, "/public/request/abc"), Bucket::PublicRead);
 
+        // The landing page is a page render like the others, so it shares their
+        // budget rather than enrolment's — starving it would take the site down
+        // for everyone who has not signed in.
+        assert_eq!(probe(&mut f, public_route::LANDING), Bucket::PublicRead);
+
         // And nothing public shares a budget with enrolment.
-        assert_eq!(probe(&mut f, "/enrol"), Bucket::Enrol);
-        assert_eq!(probe(&mut f, "/"), Bucket::Enrol);
+        assert_eq!(probe(&mut f, private_route::ENROL), Bucket::Enrol);
+        assert_eq!(probe(&mut f, private_route::REVIEW), Bucket::Enrol);
     }
 
     #[test]
@@ -2924,7 +3046,8 @@ mod tests {
             f.go(&Req::post("/enrol", "code=GUESS&label=x"));
         }
         assert_eq!(
-            f.go(&Req::get("/").with_cookie(&token)).status,
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&token))
+                .status,
             200,
             "the developer's own device still works"
         );
@@ -2952,7 +3075,10 @@ mod tests {
     fn a_query_string_does_not_change_which_route_runs() {
         let mut f = Fixture::new("query");
         let token = f.enrolled();
-        assert_eq!(f.go(&Req::get("/?x=1").with_cookie(&token)).status, 200);
+        assert_eq!(
+            f.go(&Req::get("/review?x=1").with_cookie(&token)).status,
+            200
+        );
     }
 
     #[test]
