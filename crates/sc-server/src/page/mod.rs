@@ -301,15 +301,11 @@ font-family:"Fraunces",Georgia,serif;font-size:.95rem;font-weight:600;letter-spa
    set of links, stacking centred on a narrow screen. */
 .footer{margin-top:auto;border-block-start:1px solid var(--line);
 border-block-end:0;background:transparent}
-.footer .bar-inner{display:flex;justify-content:space-between;align-items:center;
-gap:var(--s4);padding-block:var(--s5);font-size:.85rem;color:var(--dim)}
+/* One line. `space-between` and the nav rules went with the link list — with a
+   single child, `space-between` is just `flex-start` with extra words. */
+.footer .bar-inner{padding-block:var(--s5);font-size:.85rem;color:var(--dim)}
 .footer p{margin:0;opacity:.75}
-.footer nav{display:flex;align-items:center;gap:var(--s4)}
-.footer a{color:var(--dim);text-decoration:none;transition:color .12s}
-.footer a:hover{color:var(--fg)}
-.footer .sep{opacity:.3}
-@media(max-width:520px){
-.footer .bar-inner{flex-direction:column;align-items:center;text-align:center}}
+@media(max-width:520px){.footer .bar-inner{text-align:center}}
 /* **Submits on change.** Requiring a second click on "Apply" to change language
    is a step nobody expects, and this surface permits script for exactly this
    kind of thing. The button stays in the markup for readers without script and
@@ -512,16 +508,15 @@ fn masthead(locale: Locale, signed: Signed) -> String {
 /// navigation links is one somebody eventually presses by accident.
 fn footer(locale: Locale) -> String {
     let s = locale.strings();
+    // **One line, no link list.** The right-hand nav duplicated the masthead:
+    // the wordmark already goes home and Sign in already leads to filing, so it
+    // was a second copy of the same two destinations at the bottom of a page
+    // short enough that nobody scrolls to find them.
     format!(
         "<footer class=\"bar footer\"><div class=\"bar-inner\">\
-<p>{tagline}</p>\
-<nav><a href=\"/\">{home}</a>\
-<span class=\"sep\" aria-hidden=\"true\">·</span>\
-<a href=\"/public\">{file}</a></nav>\
-</div></footer>",
+<p>{name}{tagline}</p></div></footer>",
+        name = esc(&site::name(s.brand)),
         tagline = esc(s.footer_tagline),
-        home = esc(s.brand),
-        file = esc(s.file_title),
     )
 }
 

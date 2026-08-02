@@ -170,8 +170,13 @@ pub struct Strings {
     pub language_label: &'static str,
     /// The switcher's submit button, for readers with script disabled.
     pub language_apply: &'static str,
-    /// The footer's left-hand line. Says what this surface is, since a filer may
-    /// arrive on it from a link with no other context.
+    /// The footer line, **after** the site's name. Says what this surface is,
+    /// since a filer may arrive on it from a link with no other context.
+    ///
+    /// The name is interpolated rather than written into the string, so the
+    /// footer and the masthead cannot call the same site two different things —
+    /// which they did when this read "Smart Coder ..." against a masthead
+    /// showing the configured repository.
     pub footer_tagline: &'static str,
     /// The masthead's sign-in action, and the account menu.
     pub nav_signin: &'static str,

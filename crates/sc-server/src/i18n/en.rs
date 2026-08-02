@@ -13,7 +13,7 @@ pub static STRINGS: Strings = Strings {
     theme_dark: "Dark",
     language_label: "Language",
     language_apply: "Apply",
-    footer_tagline: "Smart Coder — file a request, read the spec it becomes.",
+    footer_tagline: " — file a request, read the spec it becomes.",
 
     nav_signin: "Sign in",
     nav_account: "Account",
