@@ -86,6 +86,10 @@ pub mod public_route {
     /// The surface's own script. A served file rather than an inline block,
     /// because the policy is `script-src 'self'` and never `'unsafe-inline'`.
     pub const SCRIPT: &str = "/public/app.js";
+    /// The body face, served from this origin.
+    pub const FONT_BODY: &str = "/public/dm-sans.woff2";
+    /// The display face, served from this origin.
+    pub const FONT_DISPLAY: &str = "/public/fraunces.woff2";
 }
 
 /// The verbs that decide a request's fate.
@@ -178,6 +182,17 @@ pub struct Res {
     pub status: u16,
     pub content_type: &'static str,
     pub body: String,
+    /// Set instead of `body` for a response that is not text — a font.
+    ///
+    /// A separate field rather than making `body` a `Vec<u8>`: every other
+    /// handler and every test builds and asserts on a `String`, and converting
+    /// them all to bytes would be a large diff in service of two routes. `None`
+    /// on everything but those, and the writer prefers this when it is set.
+    ///
+    /// `&'static [u8]` because the only sources are `include_bytes!` — there is
+    /// no path from a request to a file on disk, and this type is what keeps it
+    /// that way.
+    pub binary: Option<&'static [u8]>,
     /// A `Set-Cookie` value, used exactly once: at enrolment.
     pub set_cookie: Option<String>,
     /// Set when the handler wants the caller to hold the connection open — the
@@ -195,6 +210,7 @@ impl Res {
             status,
             content_type: "application/json",
             body: body.into(),
+            binary: None,
             set_cookie: None,
             hold_for_work: false,
             policy: Policy::Strict,
@@ -206,6 +222,7 @@ impl Res {
             status,
             content_type: "text/html; charset=utf-8",
             body: body.into(),
+            binary: None,
             set_cookie: None,
             hold_for_work: false,
             policy: Policy::Strict,
@@ -270,21 +287,34 @@ impl Policy {
     /// The `Content-Security-Policy` value.
     ///
     /// `default-src 'none'` on both, so a remote subresource is unreachable
-    /// either way. That is the directive doing the security work; `script-src`
-    /// is the one that differs.
+    /// either way. **That is the directive doing the security work**, and every
+    /// other entry here is a narrow re-permission of something same-origin.
+    ///
+    /// The distinction worth holding on to: the exfiltration argument is about
+    /// *remote origins*, not about subresources as such. A font or a `fetch()`
+    /// that never leaves this server tells nobody that a page was viewed, so
+    /// permitting those costs nothing the argument was protecting. Permitting a
+    /// remote one would cost all of it.
     pub fn csp(self) -> &'static str {
         match self {
             Policy::Strict => {
-                "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; \
-                 base-uri 'none'; frame-ancestors 'none'"
+                "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; \
+                 form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
             }
             // `'self'` and not `'unsafe-inline'`: an inline-script allowance is
             // also what a successful injection needs, and the public surface is
             // the one rendering model-authored text. Script here must be a
             // served file.
+            //
+            // `connect-src 'self'` lets that script call this server — a live
+            // status on a filed request without a reload — while leaving a call
+            // to anywhere else refused. That is the shape that matters: script
+            // able to *reach a third party* is what turns a rendered spec into
+            // an exfiltration channel, and this grants none of it.
             Policy::PublicScript => {
                 "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
-                 form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                 font-src 'self'; connect-src 'self'; form-action 'self'; \
+                 base-uri 'none'; frame-ancestors 'none'"
             }
         }
     }
@@ -451,6 +481,8 @@ fn is_public_path(path: &str) -> bool {
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
         || path == public_route::SCRIPT
+        || path == public_route::FONT_BODY
+        || path == public_route::FONT_DISPLAY
         || path.starts_with(public_route::SIGNIN_PREFIX)
         || path.starts_with(public_route::REQUEST_PREFIX)
 }
@@ -720,6 +752,12 @@ fn public_route(
             ..Res::html(200, crate::page::PUBLIC_SCRIPT)
         },
 
+        // The two faces, compiled into the binary. Same-origin by construction:
+        // there is no path from a request to a file on disk here, so no request
+        // can name one.
+        ("GET", public_route::FONT_BODY) => font(crate::page::FONT_BODY),
+        ("GET", public_route::FONT_DISPLAY) => font(crate::page::FONT_DISPLAY),
+
         // The landing page a link opens. **Changes nothing** — mail scanners
         // fetch every URL in a message, and a GET that spent the token would
         // burn it before the human saw it.
@@ -976,6 +1014,29 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0"
     ));
     res
+}
+
+/// One of the two faces, as bytes.
+///
+/// **Still `no-store`, like every other response.** A font could safely be
+/// cached for a year, and re-fetching 100KB per page is a real cost on the bad
+/// connection this surface is designed for. It is not done here because the
+/// `Cache-Control` header is returned from one function for *every* response —
+/// which is what stops a drafted spec being left in a proxy — and carving an
+/// exception into that would make "no response is cached" a claim with an
+/// asterisk rather than a fact. The browser's own connection reuse absorbs most
+/// of it; if the cost ever shows up in practice, the fix is a per-response
+/// cache policy carried on `Res`, not a special case in the header function.
+fn font(bytes: &'static [u8]) -> Res {
+    Res {
+        status: 200,
+        content_type: "font/woff2",
+        body: String::new(),
+        binary: Some(bytes),
+        set_cookie: None,
+        hold_for_work: false,
+        policy: Policy::PublicScript,
+    }
 }
 
 /// Remember the reader's language.
@@ -1888,6 +1949,38 @@ mod tests {
             assert!(!csp.contains("https:"), "{policy:?} allows a remote: {csp}");
             assert!(!csp.contains("http:"), "{policy:?} allows a remote: {csp}");
             assert!(!csp.contains('*'), "{policy:?} allows a wildcard: {csp}");
+
+            // The invariant behind those greps, checked directly rather than by
+            // naming the ways it could be broken: **every source in every
+            // directive is same-origin or nothing.** A bare domain, a `data:`
+            // URI, a `blob:` — none carry the strings above, and each would be a
+            // way out of this server. Written as an allowlist so a source nobody
+            // anticipated is refused rather than merely unlisted.
+            for directive in csp.split(';') {
+                let directive = directive.trim();
+                let Some((name, sources)) = directive.split_once(' ') else {
+                    continue;
+                };
+                for source in sources.split_whitespace() {
+                    assert!(
+                        matches!(source, "'self'" | "'none'" | "'unsafe-inline'"),
+                        "{policy:?}: {name} permits {source:?}, which is not same-origin"
+                    );
+                }
+            }
+            // And `'unsafe-inline'` is tolerated above only for styles — the
+            // stylesheet ships inside the page. Anywhere else it is an injection
+            // vector, and `no_policy_permits_an_inline_script` pins the script
+            // case specifically.
+            for directive in csp.split(';') {
+                let directive = directive.trim();
+                if directive.contains("'unsafe-inline'") {
+                    assert!(
+                        directive.starts_with("style-src"),
+                        "{policy:?}: {directive:?} is inline-permitting and is not style-src"
+                    );
+                }
+            }
         }
     }
 
@@ -2395,6 +2488,46 @@ mod tests {
             // not quietly relax `HttpOnly` or `SameSite` with it.
             assert!(c.contains("SameSite="), "{c}");
         }
+    }
+
+    #[test]
+    fn the_fonts_are_served_from_this_origin_as_real_woff2() {
+        // The whole point of vendoring them. If these 404, the page silently
+        // falls back to Georgia and nobody notices until they look closely —
+        // and if they serve something that is not a font, the browser rejects
+        // it just as quietly.
+        let mut f = Fixture::new("fonts").with_public(false);
+        for path in [public_route::FONT_BODY, public_route::FONT_DISPLAY] {
+            let res = f.go(&Req::get(path));
+            assert_eq!(res.status, 200, "{path}");
+            assert_eq!(res.content_type, "font/woff2", "{path}");
+            let bytes = res.binary.expect("a font is bytes, not a string");
+            // The woff2 signature. A truncated download or an error page would
+            // be served happily and render as no font at all.
+            assert_eq!(&bytes[..4], b"wOF2", "{path} is not a woff2");
+            assert!(bytes.len() > 10_000, "{path} is suspiciously small");
+        }
+
+        // Reachable **signed out**: the sign-in page is the first thing anyone
+        // sees, and it should not be the one page rendered in a fallback face.
+        assert_eq!(f.go(&Req::get(public_route::FONT_BODY)).status, 200);
+    }
+
+    #[test]
+    fn the_stylesheet_asks_for_no_origin_but_this_one() {
+        // `font-src 'self'` permits these two and refuses everything else, so a
+        // stylesheet that named a remote face would produce an invisible
+        // failure: the CSP blocks it, the page falls back, and nothing errors.
+        let css = crate::page::PUBLIC_STYLE;
+        for face in css.split("@font-face").skip(1) {
+            let block = face.split('}').next().unwrap_or("");
+            assert!(
+                block.contains("url(/public/"),
+                "a face is not served from this origin: {block}"
+            );
+        }
+        assert!(!css.contains("fonts.googleapis"), "{css}");
+        assert!(!css.contains("fonts.gstatic"), "{css}");
     }
 
     #[test]

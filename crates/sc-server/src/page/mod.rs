@@ -109,6 +109,17 @@ pre { white-space: pre-wrap; word-wrap: break-word; padding: .8rem;
 /// language switcher, which is what makes it a real prospect rather than a
 /// hypothetical one.
 pub(crate) const PUBLIC_STYLE: &str = r#"
+/* The real faces, served from this origin. Memosy loads these from Google;
+   here they are compiled into the binary and served from `/public/`, so the page
+   looks the same while `default-src 'none'` still forbids every remote fetch —
+   `font-src 'self'` permits exactly these two and nothing else.
+   `display:swap` so text is readable in the fallback face while they load,
+   rather than invisible: on the bad connection this surface is designed for,
+   the alternative is a blank page holding real content. */
+@font-face{font-family:"DM Sans";src:url(/public/dm-sans.woff2)format("woff2");
+font-weight:100 1000;font-style:normal;font-display:swap}
+@font-face{font-family:"Fraunces";src:url(/public/fraunces.woff2)format("woff2");
+font-weight:100 1000;font-style:normal;font-display:swap}
 /* Warm cream in light, plum-black with coral in dark. Taken from Memosy's own
    palette (web/src/app.css in that repository) so two properties by the same
    owner look like it — reuse rather than imitation. Values are copied rather
@@ -152,7 +163,7 @@ color-scheme:dark}
    substitution invented here. */
 body{margin:0;min-height:100vh;display:flex;flex-direction:column;
 background:var(--bg);color:var(--fg);
-font:16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+font:16px/1.6 "DM Sans",system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
 -webkit-font-smoothing:antialiased}
 /* The header and footer rules span the viewport; their contents share the
    column width with `main`, so the lines run edge to edge while the text stays
@@ -188,7 +199,7 @@ background:var(--link);color:var(--accent-ink)}
 .theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
 .masthead{display:flex;justify-content:space-between;align-items:center;
 gap:var(--s4);flex-wrap:wrap;padding-block:var(--s4)}
-.masthead .wordmark{font-family:Georgia,"Times New Roman",serif;
+.masthead .wordmark{font-family:"Fraunces",Georgia,"Times New Roman",serif;
 font-weight:600;font-size:1.25rem;letter-spacing:-.02em;
 text-decoration:none;color:var(--fg);display:inline-flex;align-items:center;
 gap:.65rem}
@@ -236,7 +247,7 @@ transform:translateY(-15%) rotate(45deg);color:var(--dim)}
 padding:.3rem var(--s3);height:1.95rem;border-radius:999px}
 /* Serif headings against a sans body, which is the pairing that makes the
    reference design read as designed rather than as a default stylesheet. */
-h1,h2{font-family:Georgia,"Times New Roman",serif;font-weight:600}
+h1,h2{font-family:"Fraunces",Georgia,"Times New Roman",serif;font-weight:600}
 h1{font-size:clamp(1.6rem,1.35rem + 1vw,2.1rem);margin:0 0 var(--s4);
 letter-spacing:-.02em;line-height:1.2}
 h2{font-size:1.2rem;margin:var(--s6) 0 var(--s3);letter-spacing:-.01em}
@@ -381,6 +392,17 @@ pub(crate) fn public_shell(locale: Locale, title: &str, body: &str) -> String {
         footer = footer(locale),
     )
 }
+
+/// The body face — DM Sans, variable weight, Latin subset.
+///
+/// Compiled in rather than read from disk, like the eval corpus: it travels with
+/// the binary, so the container has no asset directory to mount and no file that
+/// can go missing. **SIL Open Font License 1.1**, whose text ships beside it in
+/// `assets/` — the licence requires the notice to travel with the font.
+pub const FONT_BODY: &[u8] = include_bytes!("../../assets/dm-sans.woff2");
+
+/// The display face — Fraunces, variable weight, Latin subset. Same licence.
+pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fraunces.woff2");
 
 /// The public surface's script. **Progressive enhancement only.**
 ///

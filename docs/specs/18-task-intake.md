@@ -605,6 +605,28 @@ buying nothing on the public half that the reader could not already do to
 themselves, and it was the reason a filer could not have a theme toggle or a
 language they can read — both of which the section below now builds.
 
+**Same-origin subresources are permitted; remote ones are not.** The policy also
+carries `font-src 'self'` and, on the public half, `connect-src 'self'` — added
+when the blanket ban turned out to be costing things it was never protecting.
+
+The distinction is the whole argument. What makes a rendered spec an
+exfiltration channel is a fetch that **leaves this server**: it tells a third
+party the page was viewed, and hands them the URL — which identifies the request
+— through `Referer`. A font served from `/public/`, or a `fetch()` back to this
+same origin, tells nobody anything. Refusing those bought no security and cost
+real typography and any live status on a filed request.
+
+So the rule is now stated exactly: **every source in every directive is `'self'`
+or `'none'`**, with `'unsafe-inline'` tolerated for styles alone because the
+stylesheet ships inside the page. A test asserts that as an allowlist rather than
+by grepping for `https:` — a bare domain like `fonts.gstatic.com` carries no
+scheme and would have passed the old check.
+
+The two faces are `include_bytes!`-ed into the binary
+<!--@ crates/sc-server/assets -->, so the container has no asset directory to
+mount and no file that can go missing. Both are SIL Open Font License 1.1, whose
+text travels beside them as the licence requires.
+
 Three things this does **not** relax, and they are what keep the deviation
 narrow:
 

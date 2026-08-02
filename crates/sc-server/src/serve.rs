@@ -344,13 +344,26 @@ fn write(request: tiny_http::Request, res: Res) -> Result<()> {
         }
     }
 
-    let mut response = tiny_http::Response::from_string(res.body).with_status_code(res.status);
-    for h in headers {
-        response.add_header(h);
-    }
-    request
-        .respond(response)
-        .map_err(|e| DcError::Eval(format!("could not respond: {e}")))
+    // A binary body wins where one is set — a font cannot travel as a `String`,
+    // and `from_data` is the same writer with a byte slice rather than UTF-8.
+    let status = tiny_http::StatusCode(res.status);
+    let respond = match res.binary {
+        Some(bytes) => {
+            let mut response = tiny_http::Response::from_data(bytes).with_status_code(status);
+            for h in headers {
+                response.add_header(h);
+            }
+            request.respond(response)
+        }
+        None => {
+            let mut response = tiny_http::Response::from_string(res.body).with_status_code(status);
+            for h in headers {
+                response.add_header(h);
+            }
+            request.respond(response)
+        }
+    };
+    respond.map_err(|e| DcError::Eval(format!("could not respond: {e}")))
 }
 
 #[cfg(test)]
