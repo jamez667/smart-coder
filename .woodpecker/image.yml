@@ -130,6 +130,62 @@ steps:
       password:
         from_secret: jcnash-woodpecker
 
+  # Tell Portainer the new `latest` exists, so a release deploys itself.
+  #
+  # Portainer's git polling cannot do this on its own: it redeploys when the
+  # *repo ref* moves, and cutting a tag does not move `refs/heads/main`. So a
+  # release with no file change on main is invisible to the poller — the stack
+  # sits on the previous image looking perfectly healthy. This step is what
+  # makes "cut a tag" and "the server runs it" the same event.
+  #
+  # OPTIONAL BY DESIGN. Without the secret set this step logs why and exits 0,
+  # because the image is already pushed by the time it runs: failing here would
+  # mark a *successful publish* as a failed pipeline, and the manual fallback is
+  # one click in Portainer. Absent automation should not look like a broken
+  # build.
+  #
+  # REQUIRED SECRET: `sc_server_portainer_webhook` — the full webhook URL from
+  # Portainer → Stacks → sc-server → Webhooks. Create the stack's webhook there
+  # and copy the whole URL, which looks like:
+  #
+  #     https://portainer.example.com/api/stacks/webhooks/<uuid>
+  #
+  # **The URL is the credential.** It carries no token and no signature, so
+  # anyone who can reach it can trigger a redeploy — hold it as a secret, and do
+  # not let it reach a pull-request build. This step runs only on `v*` tags,
+  # which are pushed by you, so it never runs on a contributor's branch.
+  #
+  # Redeploy pulls `latest` afresh only if the stack has **"Re-pull image"**
+  # enabled in its webhook/auto-update settings. Without that Portainer reuses
+  # the locally cached layers for the same tag and nothing changes — a silent
+  # no-op that looks exactly like success.
+  - name: redeploy
+    when:
+      - event: tag
+        ref: refs/tags/v*
+    image: alpine/curl:8.14.1
+    environment:
+      WEBHOOK:
+        from_secret: sc_server_portainer_webhook
+    commands:
+      # Bare `$$VAR` only — Woodpecker's envsubst pass does not understand shell
+      # parameter expansion and rejects the file before it runs. See the same
+      # note in release.yml.
+      - |
+        set -eu
+        if [ -z "$$WEBHOOK" ]; then
+          echo "sc_server_portainer_webhook secret not set - skipping redeploy."
+          echo "The image is published; redeploy the stack in Portainer by hand."
+          exit 0
+        fi
+        # --fail turns Portainer's 4xx/5xx into a non-zero exit. A 404 here
+        # means the webhook was deleted or the stack was recreated (the uuid
+        # changes), which is worth failing on: the image shipped and the
+        # deployment silently did not.
+        curl --fail --silent --show-error --retry 3 --retry-connrefused \
+          -X POST "$$WEBHOOK"
+        echo "Portainer redeploy triggered for $$CI_COMMIT_TAG."
+
 
 # **The smoke test moved out of CI, and that is a real loss worth naming.**
 #

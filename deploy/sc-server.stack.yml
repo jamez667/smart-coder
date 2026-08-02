@@ -39,6 +39,28 @@ services:
     # Pinning one without the other is the mismatch worth avoiding: set
     # SC_SERVER_TAG to the same version and the two agree.
     #
+    # TO STOP MAINTAINING THE VERSION BY HAND, do the opposite — float both:
+    # point the stack's git reference at `refs/heads/main` and leave
+    # SC_SERVER_TAG unset. Then `latest` is the only version you track, and it
+    # moves only on a release.
+    #
+    # Make releases deploy themselves with the stack's WEBHOOK, not with git
+    # polling. Polling redeploys when the repo ref moves, and cutting a tag does
+    # not move `refs/heads/main` — so a release containing no change to this
+    # file would never be noticed. Instead:
+    #
+    #   1. Portainer → this stack → Webhooks → create one, and copy the URL.
+    #   2. Enable **"Re-pull image"** on it. Without that Portainer reuses the
+    #      cached layers for `latest` and the redeploy changes nothing —
+    #      silently, and looking just like success.
+    #   3. Add the URL to Woodpecker as the `sc_server_portainer_webhook` repo
+    #      secret.
+    #
+    # `.woodpecker/image.yml` then POSTs it after each `v*` tag push, and
+    # `git push origin v0.1.0` becomes the whole deployment procedure. The
+    # webhook URL is the credential — it carries no token, so anyone who can
+    # reach it can trigger a redeploy.
+    #
     # A `manifest unknown` or `unauthorized` here means the package is PRIVATE.
     # GitHub Packages does not inherit repository visibility: a package linked to
     # a public repo inherits its access *permissions* but is still published
