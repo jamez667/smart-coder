@@ -599,6 +599,54 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn the_portainer_stack_file_documents_every_setting() {
+        // The deployment file is how a Portainer user learns this server exists
+        // at all — it is the only documentation most installs will ever get.
+        // Nothing else notices when it falls behind: the server starts fine
+        // without a setting being *mentioned*, so the drift is silent and the
+        // symptom is somebody not knowing a cap exists until it bites.
+        //
+        // Checked **both ways**. A missing setting is undocumented; a setting
+        // named in the file but unknown to the server is worse, because a user
+        // will paste it, see no error, and believe it took effect.
+        let stack = include_str!("../../../deploy/sc-server.stack.yml");
+        let source = include_str!("config.rs");
+        let block = source
+            .split("pub mod env {")
+            .nth(1)
+            .and_then(|s| s.split("\n}").next())
+            .expect("the env module is declared in this file");
+
+        let declared: Vec<&str> = block
+            .split("pub const ")
+            .skip(1)
+            .filter_map(|s| s.split('"').nth(1))
+            .collect();
+        assert!(
+            declared.len() > 10,
+            "the env names did not parse: {declared:?}"
+        );
+
+        for name in &declared {
+            assert!(
+                stack.contains(name),
+                "{name} is not mentioned in deploy/sc-server.stack.yml"
+            );
+        }
+
+        // The reverse direction, by scanning the file for anything that looks
+        // like one of ours.
+        for word in stack.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if word.starts_with("SC_SERVER_") {
+                assert!(
+                    declared.contains(&word),
+                    "{word} is in the stack file but the server never reads it"
+                );
+            }
+        }
+    }
+
     // -- console mail, the local-only escape hatch ---------------------------
 
     #[test]

@@ -11,6 +11,21 @@
 # The same value goes in the daemon's config. It is the only thing that lets a
 # daemon claim work, so treat it like a password: 32+ random characters, and the
 # server refuses to start with anything shorter.
+#
+# ---------------------------------------------------------------------------
+# What you get with nothing but the key set: a private review surface. Enrol a
+# browser with the code printed to the log, file requests, read drafted specs,
+# approve or send back. Nobody else can reach anything.
+#
+# Setting SC_SERVER_PUBLIC_REPO additionally opens a public filing surface —
+# sign in by email, file a request, watch your own. That half is themed, has a
+# light/dark control and reads in English or French; the review half stays
+# private and is not translated, because it has one reader.
+# ---------------------------------------------------------------------------
+#
+# BACK UP THE VOLUME. Credentials in it are hashed, so a copy grants nobody
+# access — but it is the only copy of every filed request and drafted spec, and
+# nothing else in this system holds them.
 
 services:
   sc-server:
@@ -60,11 +75,35 @@ services:
       # SC_SERVER_MAIL_PROVIDER: "brevo"
       # SC_SERVER_MAIL_KEY: "..."
       # SC_SERVER_MAIL_FROM: "noreply@example.com"
+      # SC_SERVER_MAIL_FROM_NAME: "Smart Coder"
+
+      # ---------------------------------------------------------------------
+      # LOCAL ONLY. Prints sign-in links to the container log instead of
+      # emailing them, so you can try the surface without a mail provider.
+      #
+      # A sign-in link is a credential, so this hands an account to anyone who
+      # can read the log. The server REFUSES TO START with it set unless
+      # PUBLIC_BASE_URL is a loopback address — it cannot be switched on here by
+      # accident. With it on, the MAIL_ settings above are not needed.
+      # ---------------------------------------------------------------------
+      # SC_SERVER_MAIL_TO_CONSOLE: "1"
 
       # The spam screener. ABSENT means filings are not screened at all, which
       # is honest — a server that pretends to screen is worse than one that
       # plainly does not. It runs here, so it never sees your machine or code.
+      #
+      # It can only ever WITHHOLD: a quarantined filing is kept, shown to you,
+      # and released in one click. Every unexpected outcome — timeout, garbled
+      # reply, no key, HTTP 500 — is indistinguishable from approval, so a
+      # screener that breaks cannot become an off-switch for your intake.
+      #
+      # Turning it on does NOT screen filings already in the queue.
       # SC_SERVER_SCREEN_KEY: "..."
+
+      # Both optional; these are the defaults. Any OpenAI-compatible endpoint
+      # works, so a different provider is a URL and a model name.
+      # SC_SERVER_SCREEN_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
+      # SC_SERVER_SCREEN_MODEL: "gemini-2.5-flash-lite"
 
       # Spend ceilings. These are what stand between a hostile signup and your
       # model bill, so the defaults are deliberately not generous.
@@ -75,17 +114,41 @@ services:
       #   MAX_ACCOUNTS  how many accounts may exist. This is what the per-account
       #                 cap rests on: an id an attacker cannot vary is one they
       #                 can re-mint with a disposable address.
+      #   MAX_LINKS     unspent sign-in links outstanding at once — the ceiling
+      #                 on MAIL spend. The rate limiter shapes traffic, but
+      #                 thirty a minute sustained is tens of thousands a day.
+      #                 Refused before the mailer is called, so a flood is free.
       #
-      # Neither may be 0 — the server refuses to start rather than accept
-      # nothing while looking configured.
+      # None may be 0 — the server refuses to start rather than accept nothing
+      # while looking configured. To turn the public surface off, leave
+      # PUBLIC_REPO unset, which turns it off honestly.
+      #
+      # Raising MAX_ACCOUNTS is the lever when signup stops; revoking does NOT
+      # make room, because a revoked account keeps its slot. That is deliberate:
+      # a revoked address can never be re-created, so counting only live
+      # accounts would let an attacker's burned identities be swapped one for
+      # one under a wall that looks intact.
       # SC_SERVER_PUBLIC_MAX_DAILY: "20"
       # SC_SERVER_PUBLIC_MAX_ACCOUNTS: "1000"
+      # SC_SERVER_PUBLIC_MAX_LINKS: "200"
 
       # Whether a filer reads the spec drafted from their request. Defaults ON.
       # That spec is model output produced by reading your repository, and the
       # filer wrote the prompt that produced it — turn it off for a repository
       # whose contents should not be described to strangers.
       # SC_SERVER_PUBLIC_SHOW_SPEC: "0"
+
+      # There is no setting for the claim timeout, and that is on purpose.
+      #
+      # Claiming is serialised per repository, so a daemon that dies mid-draft
+      # would hold that repo for ever — nothing else for it could be claimed
+      # again, silently. A claim therefore expires after twenty minutes and the
+      # request returns to the queue with a note saying why.
+      #
+      # Not configurable because the two failures are not symmetric: too short
+      # reclaims a LIVE draft and puts two daemons on one tree, while too long
+      # only delays a repo whose daemon is already dead. Tuning it down for
+      # snappiness buys duplicate work, so the trade is not offered.
 
     ports:
       # Put a reverse proxy in front of this and terminate TLS there. The server
