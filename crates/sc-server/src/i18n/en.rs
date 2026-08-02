@@ -9,8 +9,6 @@ use super::Strings;
 
 pub static STRINGS: Strings = Strings {
     brand: "Smart Coder",
-    theme_label: "Theme",
-    theme_auto: "Auto",
     theme_light: "Light",
     theme_dark: "Dark",
     language_label: "Language",

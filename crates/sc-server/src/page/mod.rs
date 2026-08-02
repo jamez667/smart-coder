@@ -145,8 +145,12 @@ color-scheme:light}
 --link:#e85d6c;--accent-ink:#fff;
 --shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
 color-scheme:dark}}
-/* An explicit choice wins over the OS, in both directions. */
-:root:has(#theme-dark:checked){
+/* An explicit choice wins over the OS, in both directions.
+   `:not(:has(#theme-light:checked))` so that a light choice beats a dark one if
+   both boxes are somehow ticked — two independent checkboxes make that state
+   reachable, and every rule below resolves it the same way rather than leaving
+   the colours and the toggle disagreeing. */
+:root:has(#theme-dark:checked):not(:has(#theme-light:checked)){
 --bg:#141218;--surface:#1f1c24;--surface-2:#2a2633;
 --fg:#f2eef8;--dim:#9d94ab;--faint:#7a7288;
 --line:#3a3445;--line-2:#4a4356;
@@ -177,26 +181,43 @@ main{flex:1;padding-block:var(--s6) 4rem;display:block}
    out of the tab order and hide them from a screen reader. */
 .theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
 overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-/* One control, three states, drawn as icons rather than the words "Auto Light
-   Dark". A sun and a moon are read faster than their names and do not need
-   translating — which matters on the one surface that has a language switcher
-   beside them. */
-.theme{display:inline-flex;gap:2px;align-items:center;padding:2px;
-border:1px solid var(--line);border-radius:999px;background:var(--surface)}
-.theme label{width:1.75rem;height:1.75rem;border-radius:999px;cursor:pointer;
-display:inline-flex;align-items:center;justify-content:center;color:var(--dim);
-transition:background .12s,color .12s}
-.theme label:hover{background:var(--surface-2);color:var(--fg)}
-.theme svg{width:15px;height:15px;display:block;
-/* `currentColor` on a stroke, so the icon follows the label's colour through
-   hover and selection without a second rule per state. */
-fill:none;stroke:currentColor;stroke-width:1.7;
-stroke-linecap:round;stroke-linejoin:round}
-#theme-os:checked~.masthead label[for=theme-os],
-#theme-light:checked~.masthead label[for=theme-light],
-#theme-dark:checked~.masthead label[for=theme-dark]{
-background:var(--link);color:var(--accent-ink)}
-.theme-in:focus-visible~.masthead label[for]{outline:2px solid var(--link);outline-offset:2px}
+/* A sliding pill: a 44x24 track with a knob that moves and carries one glyph.
+   Copied from Memosy's ThemeToggle, down to the measurements — 1.15rem knob,
+   2px inset, 200ms — because "roughly like theirs" is what produced the last
+   version, and it did not look like theirs.
+   Two states rather than three. Theirs has two, and the third (follow the OS)
+   is what the page does before anything is clicked, so nothing is lost that a
+   reader can reach. */
+.theme{position:relative;display:inline-block;width:2.75rem;height:1.5rem;
+border-radius:var(--pill);border:1px solid var(--line);background:var(--surface-2);
+cursor:pointer;flex:none;transition:border-color .12s}
+.theme:hover{border-color:var(--dim)}
+/* The knob. `inset-inline-start` rather than `left`, so it sits on the correct
+   side when the surface is read right-to-left. */
+.theme .knob{position:absolute;top:.125rem;inset-inline-start:2px;
+width:1.15rem;height:1.15rem;border-radius:var(--pill);
+background:var(--link);color:var(--accent-ink);
+display:flex;align-items:center;justify-content:center;
+font-size:.7rem;line-height:1;transition:inset-inline-start .2s}
+/* The light-facing pill has its knob to the right and shows a sun; the
+   dark-facing one keeps it left with a moon. */
+.to-light .knob{inset-inline-start:calc(100% - 1.15rem - 2px)}
+.to-light .moon,.to-dark .sun{display:none}
+/* **Exactly one pill is visible**, so it reads as a single control that
+   toggles. The visible one is always the *opposite* of the current theme —
+   press it and you go there.
+   Dark now (either chosen, or a dark OS with nothing chosen): show the pill
+   that goes to light. Otherwise show the one that goes to dark. */
+.to-light{display:none}
+:root:has(#theme-dark:checked):not(:has(#theme-light:checked)) .to-light{display:inline-block}
+:root:has(#theme-dark:checked):not(:has(#theme-light:checked)) .to-dark{display:none}
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-light:checked)) .to-light{display:inline-block}
+:root:not(:has(#theme-light:checked)) .to-dark{display:none}}
+/* An explicit light choice wins over a dark OS, so the dark-going pill returns. */
+:root:has(#theme-light:checked) .to-dark{display:inline-block}
+:root:has(#theme-light:checked) .to-light{display:none}
+.theme-in:focus-visible~.masthead .theme{outline:2px solid var(--link);outline-offset:2px}
 .masthead{display:flex;justify-content:space-between;align-items:center;
 gap:var(--s4);flex-wrap:wrap;padding-block:var(--s4)}
 .masthead .wordmark{font-family:"Fraunces",Georgia,"Times New Roman",serif;
@@ -313,39 +334,35 @@ fn masthead(locale: Locale) -> String {
         ));
     }
 
-    // Inline SVG rather than an emoji or an icon font. An emoji renders as a
-    // colour picture on some platforms and a black glyph on others, so it cannot
-    // be made to follow the text colour; an icon font is a subresource the CSP
-    // forbids. These are three paths that inherit `currentColor`.
-    const ICON_AUTO: &str = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">\
-<rect x=\"2\" y=\"4\" width=\"20\" height=\"13\" rx=\"2\"/><path d=\"M8 21h8M12 17v4\"/></svg>";
-    const ICON_LIGHT: &str = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">\
-<circle cx=\"12\" cy=\"12\" r=\"4.2\"/>\
-<path d=\"M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2\
-M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4\"/></svg>";
-    const ICON_DARK: &str = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">\
-<path d=\"M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z\"/></svg>";
-
+    // **Two checkboxes, not three radios.** The OS default needs no control of
+    // its own: with neither box ticked the `prefers-color-scheme` rules apply,
+    // which *is* following the system. Ticking one overrides it in that
+    // direction, and the pair is what makes the override reversible — a lone
+    // checkbox cannot express "the other one", and a radio cannot be un-ticked.
+    //
+    // Only one is ever reachable at a time: the label sits over whichever
+    // direction the page is not currently showing, so the reader always presses
+    // the same pill and it always means "switch".
     format!(
-        "<input type=\"radio\" name=\"theme\" id=\"theme-os\" class=\"theme-in\" checked>\
-<input type=\"radio\" name=\"theme\" id=\"theme-light\" class=\"theme-in\">\
-<input type=\"radio\" name=\"theme\" id=\"theme-dark\" class=\"theme-in\">\
+        "<input type=\"checkbox\" id=\"theme-light\" class=\"theme-in\">\
+<input type=\"checkbox\" id=\"theme-dark\" class=\"theme-in\">\
 <header class=\"bar\"><div class=\"bar-inner masthead\">\
 <a class=\"wordmark\" href=\"/public\">{brand}</a>\
 <div class=\"controls\">\
-<div class=\"theme\" role=\"group\" aria-label=\"{theme_label}\">\
-<label for=\"theme-os\" title=\"{auto}\">{ICON_AUTO}<span class=\"theme-in\">{auto}</span></label>\
-<label for=\"theme-light\" title=\"{light}\">{ICON_LIGHT}<span class=\"theme-in\">{light}</span></label>\
-<label for=\"theme-dark\" title=\"{dark}\">{ICON_DARK}<span class=\"theme-in\">{dark}</span></label>\
-</div>\
+<label class=\"theme to-dark\" for=\"theme-dark\" title=\"{dark}\">\
+<span class=\"theme-in\">{dark}</span>\
+<span class=\"knob\" aria-hidden=\"true\"><span class=\"sun\">\u{2600}</span>\
+<span class=\"moon\">\u{263e}</span></span></label>\
+<label class=\"theme to-light\" for=\"theme-light\" title=\"{light}\">\
+<span class=\"theme-in\">{light}</span>\
+<span class=\"knob\" aria-hidden=\"true\"><span class=\"sun\">\u{2600}</span>\
+<span class=\"moon\">\u{263e}</span></span></label>\
 <form class=\"lang\" method=\"post\" action=\"/public/language\" id=\"langform\">\
 <label for=\"lang\" class=\"theme-in\">{lang_label}</label>\
 <select id=\"lang\" name=\"lang\">{options}</select>\
 <button type=\"submit\">{apply}</button></form>\
 </div></div></header>",
         brand = esc(s.brand),
-        theme_label = esc(s.theme_label),
-        auto = esc(s.theme_auto),
         light = esc(s.theme_light),
         dark = esc(s.theme_dark),
         lang_label = esc(s.language_label),
@@ -417,16 +434,36 @@ pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fraunces.woff2");
 /// script sees the language change on selection, which is what everyone expects
 /// a language picker to do.
 pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
+  // The language switcher submits on change instead of needing a second click.
   var form = document.getElementById('langform');
-  if (!form) return;
-  var select = form.querySelector('select');
-  var button = form.querySelector('button');
-  if (!select || !button) return;
-  // Hidden only now, so the button is never missing while it is the only way
-  // to submit — the failure a `display:none` in the stylesheet would cause for
-  // anyone whose script did not load.
-  button.hidden = true;
-  select.addEventListener('change', function () { form.submit(); });
+  if (form) {
+    var select = form.querySelector('select');
+    var button = form.querySelector('button');
+    if (select && button) {
+      // Hidden only now, so the button is never missing while it is the only
+      // way to submit — the failure a `display:none` in the stylesheet would
+      // cause for anyone whose script did not load.
+      button.hidden = true;
+      select.addEventListener('change', function () { form.submit(); });
+    }
+  }
+
+  // The theme pair is two checkboxes, so both can be ticked at once — and then
+  // the stylesheet's colour rules and its which-pill-to-show rules disagree.
+  // Ticking one clears the other, which is the state the CSS is written for.
+  //
+  // Without script the pair still works for the first press in either
+  // direction, which is the common case; this makes the third press behave too.
+  var light = document.getElementById('theme-light');
+  var dark = document.getElementById('theme-dark');
+  if (light && dark) {
+    light.addEventListener('change', function () {
+      if (light.checked) dark.checked = false;
+    });
+    dark.addEventListener('change', function () {
+      if (dark.checked) light.checked = false;
+    });
+  }
 })();
 "#;
 

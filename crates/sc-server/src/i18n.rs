@@ -165,10 +165,6 @@ pub struct Strings {
     /// a name — but present as a field so a language that *does* transliterate it
     /// has somewhere to put that.
     pub brand: &'static str,
-    pub theme_label: &'static str,
-    /// Follow the operating system — the default, and the way back from an
-    /// explicit choice.
-    pub theme_auto: &'static str,
     pub theme_light: &'static str,
     pub theme_dark: &'static str,
     pub language_label: &'static str,
@@ -351,8 +347,6 @@ mod tests {
 
         let values = [
             s.brand,
-            s.theme_label,
-            s.theme_auto,
             s.theme_light,
             s.theme_dark,
             s.language_label,
