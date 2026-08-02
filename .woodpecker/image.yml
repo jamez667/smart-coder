@@ -69,8 +69,27 @@ when:
         # A toolchain change should rebuild and surface that.
         - "rust-toolchain.toml"
 
+# **`auto-tag` and `tags` are mutually exclusive**, so this file has two steps
+# rather than one with both settings.
+#
+# The plugin's documentation is explicit — `tags` "must be left undefined to use
+# auto_tag" — and setting both silently wins for `tags`. This file did set both,
+# so `auto-tag` was dead: every build pushed `:main` and nothing else, including
+# builds from a `v*` tag. `v0.0.2` published no `latest` and no `0.0.2`, while
+# the deployment file told operators to pull `:latest`.
+#
+# Nothing caught it. A successful push of the *wrong* tag looks exactly like a
+# successful push of the right one, so CI was green throughout and the comment
+# here confidently described behaviour that was not happening. The only way to
+# see it was to read the pushed-tag line out of the build log.
+
 steps:
-  - name: image
+  # A push to main publishes `:main` only. `latest` must never move to a commit
+  # nobody chose to release, which is the whole reason this is not one step.
+  - name: image-main
+    when:
+      - event: push
+        branch: main
     # The **plugin**, not the raw kaniko image. A raw `gcr.io/kaniko-project/
     # executor:*-debug` step fails with exit 2 and *no output at all*: the image
     # has no ordinary shell where Woodpecker expects one, so the command wrapper
@@ -89,13 +108,24 @@ steps:
       # the secret rather than reading the path.
       repo: ${CI_REPO_OWNER}/sc-server
       dockerfile: Dockerfile
-      # On a `v*` tag, `auto-tag` expands to Major, Major.Minor,
-      # Major.Minor.Patch **and** `latest` from one build — so those tags cannot
-      # point at different bits, which a second build would allow. On a push to
-      # main there is no tag to expand, and `tags` names `main` explicitly, so
-      # `latest` never silently moves to a commit nobody chose to release.
-      auto-tag: true
       tags: main
+      username: ${CI_REPO_OWNER}
+      password:
+        from_secret: jcnash-woodpecker
+
+  # A `v*` tag publishes Major, Major.Minor, Major.Minor.Patch **and** `latest`
+  # from one build, so those tags cannot point at different bits — which two
+  # builds would allow. `tags` is absent here, and must stay absent.
+  - name: image-release
+    when:
+      - event: tag
+        ref: refs/tags/v*
+    image: woodpeckerci/plugin-kaniko:2.3.2
+    settings:
+      registry: ghcr.io
+      repo: ${CI_REPO_OWNER}/sc-server
+      dockerfile: Dockerfile
+      auto-tag: true
       username: ${CI_REPO_OWNER}
       password:
         from_secret: jcnash-woodpecker
