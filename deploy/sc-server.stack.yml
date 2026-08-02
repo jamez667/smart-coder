@@ -61,12 +61,17 @@ services:
       # Optional. When unset, a single-use enrolment code is generated and
       # printed to the container log on first start — so a fresh install is
       # usable without pre-configuration but is never open.
-      # SC_SERVER_ENROL_CODE: ""
+      SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
 
-      # Optional; these are the defaults.
-      # SC_SERVER_BIND: "0.0.0.0"
-      # SC_SERVER_PORT: "8420"
-      # SC_SERVER_DATA: "/data"
+      # These carry their defaults *inside the image*, so they are substituted
+      # to their real values rather than to an empty string. Passing an empty
+      # one is not the same as leaving it unset: `SC_SERVER_DATA=""` overrides
+      # the image's `ENV SC_SERVER_DATA=/data` and the server tries to write to
+      # `/`, which fails with a bare "Permission denied" that says nothing about
+      # the cause.
+      SC_SERVER_BIND: ${SC_SERVER_BIND:-0.0.0.0}
+      SC_SERVER_PORT: ${SC_SERVER_PORT:-8420}
+      SC_SERVER_DATA: ${SC_SERVER_DATA:-/data}
 
       # ---------------------------------------------------------------------
       # The PUBLIC surface — anyone with an email address can file a request.
@@ -83,18 +88,18 @@ services:
       # your daemon against its own configured set. Point it at a scratch repo
       # rather than your main one: public work also queues behind your own work
       # in that repository.
-      # SC_SERVER_PUBLIC_REPO: "intake"
+      SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
 
       # https, absolute. Sign-in links are built from it, and it is NOT inferred
       # from the Host header — that is attacker-controlled, so a link built from
       # it would send the filer to whatever host the request claimed to be.
-      # SC_SERVER_PUBLIC_BASE_URL: "https://specs.example.com"
+      SC_SERVER_PUBLIC_BASE_URL: ${SC_SERVER_PUBLIC_BASE_URL:-}
 
       # brevo | resend | postmark
-      # SC_SERVER_MAIL_PROVIDER: "brevo"
-      # SC_SERVER_MAIL_KEY: "..."
-      # SC_SERVER_MAIL_FROM: "noreply@example.com"
-      # SC_SERVER_MAIL_FROM_NAME: "Smart Coder"
+      SC_SERVER_MAIL_PROVIDER: ${SC_SERVER_MAIL_PROVIDER:-}
+      SC_SERVER_MAIL_KEY: ${SC_SERVER_MAIL_KEY:-}
+      SC_SERVER_MAIL_FROM: ${SC_SERVER_MAIL_FROM:-}
+      SC_SERVER_MAIL_FROM_NAME: ${SC_SERVER_MAIL_FROM_NAME:-}
 
       # ---------------------------------------------------------------------
       # LOCAL ONLY. Prints sign-in links to the container log instead of
@@ -105,7 +110,7 @@ services:
       # PUBLIC_BASE_URL is a loopback address — it cannot be switched on here by
       # accident. With it on, the MAIL_ settings above are not needed.
       # ---------------------------------------------------------------------
-      # SC_SERVER_MAIL_TO_CONSOLE: "1"
+      SC_SERVER_MAIL_TO_CONSOLE: ${SC_SERVER_MAIL_TO_CONSOLE:-}
 
       # The spam screener. ABSENT means filings are not screened at all, which
       # is honest — a server that pretends to screen is worse than one that
@@ -117,12 +122,12 @@ services:
       # screener that breaks cannot become an off-switch for your intake.
       #
       # Turning it on does NOT screen filings already in the queue.
-      # SC_SERVER_SCREEN_KEY: "..."
+      SC_SERVER_SCREEN_KEY: ${SC_SERVER_SCREEN_KEY:-}
 
       # Both optional; these are the defaults. Any OpenAI-compatible endpoint
       # works, so a different provider is a URL and a model name.
-      # SC_SERVER_SCREEN_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
-      # SC_SERVER_SCREEN_MODEL: "gemini-2.5-flash-lite"
+      SC_SERVER_SCREEN_URL: ${SC_SERVER_SCREEN_URL:-}
+      SC_SERVER_SCREEN_MODEL: ${SC_SERVER_SCREEN_MODEL:-}
 
       # Spend ceilings. These are what stand between a hostile signup and your
       # model bill, so the defaults are deliberately not generous.
@@ -147,15 +152,15 @@ services:
       # a revoked address can never be re-created, so counting only live
       # accounts would let an attacker's burned identities be swapped one for
       # one under a wall that looks intact.
-      # SC_SERVER_PUBLIC_MAX_DAILY: "20"
-      # SC_SERVER_PUBLIC_MAX_ACCOUNTS: "1000"
-      # SC_SERVER_PUBLIC_MAX_LINKS: "200"
+      SC_SERVER_PUBLIC_MAX_DAILY: ${SC_SERVER_PUBLIC_MAX_DAILY:-}
+      SC_SERVER_PUBLIC_MAX_ACCOUNTS: ${SC_SERVER_PUBLIC_MAX_ACCOUNTS:-}
+      SC_SERVER_PUBLIC_MAX_LINKS: ${SC_SERVER_PUBLIC_MAX_LINKS:-}
 
       # Whether a filer reads the spec drafted from their request. Defaults ON.
       # That spec is model output produced by reading your repository, and the
       # filer wrote the prompt that produced it — turn it off for a repository
       # whose contents should not be described to strangers.
-      # SC_SERVER_PUBLIC_SHOW_SPEC: "0"
+      SC_SERVER_PUBLIC_SHOW_SPEC: ${SC_SERVER_PUBLIC_SHOW_SPEC:-}
 
       # There is no setting for the claim timeout, and that is on purpose.
       #

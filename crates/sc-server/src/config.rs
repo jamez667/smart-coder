@@ -265,7 +265,10 @@ impl Config {
             ));
         }
 
-        let port = match get(env::PORT) {
+        // `opt` for the same reason as `bind` and `data_dir` below: a stack
+        // editor passes unconfigured settings through as empty strings, and an
+        // empty port is "not set", not a parse error.
+        let port = match opt(&get, env::PORT) {
             Some(p) => p
                 .trim()
                 .parse::<u16>()
@@ -277,9 +280,16 @@ impl Config {
         }
 
         Ok(Config {
-            bind: get(env::BIND).unwrap_or_else(|| "0.0.0.0".to_string()),
+            // `opt`, not `get`: **an empty value must mean "unset"**, not
+            // "this is the value". A Compose file written for a stack editor
+            // passes every setting through as `${NAME:-}`, so unconfigured ones
+            // arrive as empty strings rather than as absent — and an empty
+            // `SC_SERVER_DATA` overrides the image's own `/data` default, after
+            // which the server tries to write to `/` and dies with a bare
+            // "Permission denied" that names nothing.
+            bind: opt(&get, env::BIND).unwrap_or_else(|| "0.0.0.0".to_string()),
             port,
-            data_dir: get(env::DATA_DIR)
+            data_dir: opt(&get, env::DATA_DIR)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/data")),
             daemon_key,
@@ -625,10 +635,24 @@ mod tests {
         // Falling back to the default would leave the container listening
         // somewhere the user did not ask for, which they discover by the service
         // being unreachable.
-        for bad in ["", "http", "70000", "-1"] {
+        //
+        // **Blank is not in this list**, and the distinction is the point: a
+        // *typo* is a value that was meant to be a port and is not, while an
+        // empty string is an unfilled box in a stack editor. Compose passes
+        // every unconfigured setting through as `${NAME:-}`, so refusing blanks
+        // here would make a bare deploy fail to start. See
+        // `an_empty_value_means_unset_for_every_setting`.
+        for bad in ["http", "70000", "-1", "8420 8421", "84.20"] {
             let err = load(&[(env::DAEMON_KEY, GOOD_KEY), (env::PORT, bad)]).unwrap_err();
             assert!(err.contains(env::PORT), "{bad:?}: {err}");
         }
+        // Whitespace is blank too — a box somebody typed a space into.
+        assert_eq!(
+            load(&[(env::DAEMON_KEY, GOOD_KEY), (env::PORT, "  ")])
+                .expect("whitespace is unset")
+                .port,
+            8420
+        );
     }
 
     /// The minimum a working public surface needs.
@@ -707,6 +731,48 @@ mod tests {
     }
 
     // -- console mail, the local-only escape hatch ---------------------------
+
+    #[test]
+    fn an_empty_value_means_unset_for_every_setting() {
+        // **How a stack editor actually passes configuration.** A Compose file
+        // written for Portainer lists every setting as `${NAME:-}` so the box
+        // for it exists in the UI, which means unconfigured settings arrive as
+        // empty strings rather than as absent.
+        //
+        // Getting this wrong was not theoretical: an empty SC_SERVER_DATA
+        // overrode the image's own `/data`, and the server tried to write to `/`
+        // and died with a bare "Permission denied" naming nothing. The others
+        // fail more loudly but just as wrongly — an empty port is a parse error.
+        let empties: Vec<(&str, &str)> = vec![
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::BIND, ""),
+            (env::PORT, ""),
+            (env::DATA_DIR, ""),
+            (env::ENROL_CODE, ""),
+            (env::PUBLIC_REPO, ""),
+            (env::PUBLIC_BASE_URL, ""),
+            (env::MAIL_PROVIDER, ""),
+            (env::MAIL_KEY, ""),
+            (env::MAIL_FROM, ""),
+            (env::MAIL_TO_CONSOLE, ""),
+            (env::SCREEN_KEY, ""),
+            (env::PUBLIC_MAX_DAILY, ""),
+            (env::PUBLIC_MAX_ACCOUNTS, ""),
+            (env::PUBLIC_MAX_LINKS, ""),
+            (env::PUBLIC_SHOW_SPEC, ""),
+        ];
+        let cfg = load(&empties).expect("every blank is treated as unset");
+
+        // Each falls back to what it would have been with the variable absent.
+        assert_eq!(cfg.bind, "0.0.0.0");
+        assert_eq!(cfg.port, 8420);
+        assert_eq!(cfg.data_dir, PathBuf::from("/data"));
+        assert_eq!(cfg.enrol_code, None);
+        assert!(!cfg.mail_to_console);
+        // And a blank PUBLIC_REPO leaves the public surface off rather than
+        // turning it on with an empty repository name.
+        assert!(cfg.public.is_none());
+    }
 
     #[test]
     fn a_private_network_address_is_told_apart_from_the_internet() {
