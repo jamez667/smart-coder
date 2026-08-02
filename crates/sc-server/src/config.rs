@@ -372,7 +372,7 @@ fn public_from(
             env::PUBLIC_REPO
         )
     })?;
-    if !base_url.starts_with("https://") && !is_loopback(&base_url) {
+    if !base_url.starts_with("https://") && !is_private_host(&base_url) {
         return Err(format!(
             "{} must be https:// — a sign-in link is a credential in a URL, and \
              plain HTTP puts it in the clear. (http://localhost is allowed for \
@@ -388,7 +388,7 @@ fn public_from(
     // Validated here rather than in `Config::from_vars` so that the base URL —
     // which is what the guard tests — is already parsed and checked.
     let to_console = flag(get, env::MAIL_TO_CONSOLE);
-    if to_console && !is_loopback(&base_url) {
+    if to_console && !is_private_host(&base_url) {
         return Err(format!(
             "{} prints sign-in links to the log, which hands an account to anyone \
              who can read it. It is honoured only when {} is a loopback address, \
@@ -402,7 +402,7 @@ fn public_from(
         repo,
         // Computed before `base_url` is moved, and from the same value the
         // `https://` check above ran on.
-        secure_cookies: !is_loopback(&base_url),
+        secure_cookies: !is_private_host(&base_url),
         base_url: base_url.trim_end_matches('/').to_string(),
         mail: if to_console {
             None
@@ -492,19 +492,63 @@ fn screen_from(
     }))
 }
 
-/// Is this URL pointing at the machine it is running on?
-fn is_loopback(url: &str) -> bool {
+/// The host part of a URL, without scheme, port or path.
+///
+/// Handles the bracketed form (`http://[::1]:8420`), because splitting an IPv6
+/// authority on `:` otherwise returns an empty host and quietly fails open.
+fn host_of(url: &str) -> &str {
     let authority = url
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .split('/')
         .next()
         .unwrap_or("");
-    let host = match authority.strip_prefix('[') {
+    match authority.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or(""),
         None => authority.split(':').next().unwrap_or(""),
-    };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    }
+}
+
+/// Is this URL somewhere a plain-HTTP sign-in link cannot leak from?
+///
+/// **Loopback, or a private network address.** The rule this relaxes is that a
+/// sign-in link is a credential in a URL, so plain HTTP puts it in the clear —
+/// true on the internet, and not true on a link that cannot be routed off the
+/// network it was issued on. Somebody running this on their own LAN to try it
+/// is not exposing anything to anyone who was not already on that LAN.
+///
+/// The ranges are the private ones from RFC 1918 and RFC 4193, plus link-local:
+/// `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, and IPv6 `fc00::/7` and
+/// `fe80::/10`. Anything else — a public IP, a hostname, a DNS name that happens
+/// to resolve privately — is treated as the internet, because this function only
+/// sees a string and a name is not a promise about where it points.
+fn is_private_host(url: &str) -> bool {
+    let host = host_of(url);
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return true;
+    }
+
+    // IPv4 private ranges. Parsed rather than prefix-matched: "10.0.0.1" is
+    // private and "100.0.0.1" is not, and `starts_with("10.")` gets that right
+    // only by accident of the dot.
+    let octets: Vec<u8> = host
+        .split('.')
+        .filter_map(|o| o.parse::<u8>().ok())
+        .collect();
+    if octets.len() == 4 && host.split('.').count() == 4 {
+        return match (octets[0], octets[1]) {
+            (10, _) => true,
+            (172, b) => (16..=31).contains(&b),
+            (192, 168) => true,
+            // Link-local, which is what a machine gives itself with no DHCP.
+            (169, 254) => true,
+            _ => false,
+        };
+    }
+
+    // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+    let lower = host.to_ascii_lowercase();
+    lower.starts_with("fc") || lower.starts_with("fd") || lower.starts_with("fe80:")
 }
 
 #[cfg(test)]
@@ -635,19 +679,110 @@ mod tests {
             );
         }
 
+        // Consumed by **Compose**, not by the server: it substitutes the image
+        // tag before the container exists. Named individually rather than
+        // matched by a pattern, so the next addition has to be a deliberate
+        // entry here instead of quietly slipping through a prefix rule.
+        const NOT_THE_SERVERS: [&str; 1] = ["SC_SERVER_TAG"];
+
         // The reverse direction, by scanning the file for anything that looks
         // like one of ours.
         for word in stack.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            if word.starts_with("SC_SERVER_") {
+            if word.starts_with("SC_SERVER_") && !NOT_THE_SERVERS.contains(&word) {
                 assert!(
                     declared.contains(&word),
                     "{word} is in the stack file but the server never reads it"
                 );
             }
         }
+
+        // And the exception list itself must stay honest: an entry that *is* a
+        // real setting would silently exempt it from the check above.
+        for name in NOT_THE_SERVERS {
+            assert!(
+                !declared.contains(&name),
+                "{name} is a real setting, so it does not belong in NOT_THE_SERVERS"
+            );
+        }
     }
 
     // -- console mail, the local-only escape hatch ---------------------------
+
+    #[test]
+    fn a_private_network_address_is_told_apart_from_the_internet() {
+        // The rule being relaxed is "plain HTTP puts a sign-in link in the
+        // clear", which is true on the internet and not true of a link that
+        // cannot be routed off the network it was issued on. So the boundary
+        // has to be exact: an address one digit outside a private range is the
+        // internet, and treating it as private would leak credentials.
+        for private in [
+            "http://localhost:8420",
+            "http://127.0.0.1",
+            "http://[::1]:8420",
+            "http://10.0.0.1:8420",
+            "http://10.255.255.255",
+            "http://172.16.0.1",
+            "http://172.31.255.1",
+            "http://192.168.0.100:8420",
+            "http://169.254.1.1",
+            "http://[fd00::1]:8420",
+            "http://[fe80::1]",
+        ] {
+            assert!(is_private_host(private), "{private} should be private");
+        }
+
+        for public in [
+            "https://specs.example.com",
+            "http://8.8.8.8",
+            // Just outside 172.16/12 on both sides — the range a prefix match
+            // gets wrong.
+            "http://172.15.0.1",
+            "http://172.32.0.1",
+            // `starts_with("10.")` says private; parsing says otherwise.
+            "http://100.0.0.1",
+            // Not 192.168.
+            "http://192.169.0.1",
+            // A name is not a promise about where it resolves.
+            "http://internal.example.com",
+            // Craftable lookalikes.
+            "http://10.0.0.1.example.com",
+            "http://192.168.0.1.attacker.test",
+        ] {
+            assert!(!is_private_host(public), "{public} should NOT be private");
+        }
+    }
+
+    #[test]
+    fn a_lan_deployment_may_serve_the_public_surface_over_plain_http() {
+        // Running it on your own LAN to try it out is a real case, and neither
+        // localhost nor the internet. Refusing it forced a choice between not
+        // trying the feature and putting a self-signed certificate in front.
+        let cfg = load(&[
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::PUBLIC_REPO, "intake"),
+            (env::PUBLIC_BASE_URL, "http://192.168.0.100:8420"),
+            (env::MAIL_TO_CONSOLE, "1"),
+        ])
+        .expect("a private address may serve plain HTTP");
+        let public = cfg.public.unwrap();
+        // And cookies drop `Secure` there for the same reason they do on
+        // localhost: a browser discards a `Secure` cookie sent over plain HTTP,
+        // so keeping it would make sign-in appear to silently do nothing.
+        assert!(!public.secure_cookies);
+    }
+
+    #[test]
+    fn plain_http_on_a_public_address_is_still_refused() {
+        // The guard that must not have been weakened by the above.
+        let err = load(&[
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::PUBLIC_REPO, "intake"),
+            (env::PUBLIC_BASE_URL, "http://specs.example.com"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("https://"), "{err}");
+        assert!(err.contains("in the clear"), "{err}");
+    }
 
     #[test]
     fn console_mail_is_refused_on_a_deployed_base_url() {

@@ -30,8 +30,14 @@
 services:
   sc-server:
     # `latest` moves only on a `v*` tag, never on a push to main — so pulling it
-    # gets a version somebody chose to release. Pin `:0.0.3` instead if you would
-    # rather decide when to move.
+    # gets a version somebody chose to release, not whatever landed last.
+    #
+    # **Set SC_SERVER_TAG if you deployed this stack from a git tag.** Portainer
+    # can pin the stack to `refs/tags/v0.0.3`, and doing so is the careful
+    # instinct — but the *image* reference here would still float, so the next
+    # release moves your container while the stack reference says it did not.
+    # Pinning one without the other is the mismatch worth avoiding: set
+    # SC_SERVER_TAG to the same version and the two agree.
     #
     # A `manifest unknown` or `unauthorized` here means the package is PRIVATE.
     # GitHub Packages does not inherit repository visibility: a package linked to
@@ -42,7 +48,7 @@ services:
     #
     # Note that public is one-way: GitHub does not allow a public package to be
     # made private again.
-    image: ghcr.io/jamez667/sc-server:latest
+    image: ghcr.io/jamez667/sc-server:${SC_SERVER_TAG:-latest}
     container_name: sc-server
     restart: unless-stopped
 

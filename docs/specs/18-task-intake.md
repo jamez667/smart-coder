@@ -716,6 +716,29 @@ The guard tests the **base URL**, not the bind address. Inside a container the
 bind is `0.0.0.0` whether or not anything outside can reach it, so a
 loopback-*bind* check would reject exactly the case this exists for.
 
+**Amended: a private network address counts too**
+<!--@ sc_server::config::PublicConfig -->.
+Both guards originally accepted only `localhost`, which refused a real case
+found the first time this was deployed to Portainer on a LAN: `http://192.168.
+0.100:8420` is neither localhost nor the internet, and the server would not start
+the public surface there at all. The choice it forced — put a certificate in
+front of a machine on your own network, or do not try the feature — is not one
+worth imposing.
+
+The rule being relaxed is *"a sign-in link is a credential in a URL, so plain
+HTTP puts it in the clear"*. That is true on the internet and **not** true of a
+link that cannot be routed off the network it was issued on. So the ranges are
+RFC 1918 and RFC 4193 plus link-local, and nothing else: `10/8`, `172.16/12`,
+`192.168/16`, `169.254/16`, `fc00::/7`, `fe80::/10`.
+
+The boundary is exact rather than approximate, because an address one digit
+outside a private range is the public internet and treating it as private would
+leak credentials. Addresses are **parsed, not prefix-matched** —
+`starts_with("10.")` calls `100.0.0.1` private, and `172.15` and `172.32` sit
+just outside `172.16/12` on either side. A **name** is never private however it
+resolves, since this sees a string and a hostname is not a promise about where it
+points; `10.0.0.1.attacker.test` is a public host.
+
 **Daemon transport is long-polling.** The daemon asks "is there work for me?" and
 the server holds the request open until there is, or until a timeout of about
 thirty seconds. That gives near-instant pickup with almost no idle traffic, and it
