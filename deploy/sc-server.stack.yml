@@ -74,6 +74,34 @@ services:
     container_name: sc-server
     restart: unless-stopped
 
+    # ------------------------------------------------------------------------
+    # LOGS
+    #
+    # The server writes **one JSON object per line to stdout**. Docker captures
+    # it, and whatever scrapes Docker logs on this host picks it up with no
+    # configuration here.
+    #
+    # There is deliberately no `logging:` block. A scraper reads the `json-file`
+    # driver's files on disk, so setting the driver to anything else here would
+    # silently break a pipeline this file cannot see — and this file has no way
+    # to know what the host runs.
+    #
+    # QUERY ON `svc`, NOT THE CONTAINER NAME. Every line carries
+    # `"svc":"sc-server"`. Under Swarm the container name includes a task id
+    # that changes on every redeploy, so a dashboard pinned to it quietly stops
+    # matching the next time this deploys. The field does not move.
+    #
+    #   {container=~"sc-server.*"} | json | svc="sc-server"
+    #   {container=~"sc-server.*"} | json | msg="request" | poll="false"
+    #   {container=~"sc-server.*"} | json | level=~"warn|error"
+    #
+    # Access lines carry a route *label* from a fixed set — never the URL as
+    # sent. Sign-in tokens, query strings, cookies, addresses and client IPs are
+    # deliberately absent; see `route_label` in `crates/sc-server/src/serve.rs`.
+    #
+    # THE LOG IS AS PUBLIC AS WHATEVER READS IT — see SC_SERVER_ENROL_CODE.
+    # ------------------------------------------------------------------------
+
     environment:
       # REQUIRED. Without it the server refuses to start rather than running
       # open — an unauthenticated intake surface on the public internet is the
@@ -81,8 +109,15 @@ services:
       SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:?set this to 32+ random characters}
 
       # Optional. When unset, a single-use enrolment code is generated and
-      # printed to the container log on first start — so a fresh install is
-      # usable without pre-configuration but is never open.
+      # logged on first start — so a fresh install is usable without
+      # pre-configuration but is never open.
+      #
+      # THAT LOG LINE IS A CREDENTIAL. It goes wherever this host ships
+      # container logs, so on a machine running a log aggregator, anyone who can
+      # query the aggregator can enrol a device and reach the review surface.
+      # The code therefore EXPIRES 30 MINUTES after it is minted (a restart arms
+      # a fresh one, so letting it lapse costs nothing). Enrol promptly, or set
+      # this to a value of your own — one set here is never logged.
       SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
 
       # These carry their defaults *inside the image*, so they are substituted
@@ -111,6 +146,14 @@ services:
       # rather than your main one: public work also queues behind your own work
       # in that repository.
       SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
+
+      # What the masthead calls this site. Defaults to PUBLIC_REPO.
+      #
+      # Separate from it because that one is a ROUTING KEY the daemon matches
+      # exactly against its own `queue add-repo` names — a mismatch there is a
+      # queue that silently never drains. A heading wants the name a person
+      # recognises, so set this to `owner/repo` and leave the routing alone.
+      SC_SERVER_PUBLIC_SITE_NAME: ${SC_SERVER_PUBLIC_SITE_NAME:-}
 
       # https, absolute. Sign-in links are built from it, and it is NOT inferred
       # from the Host header — that is attacker-controlled, so a link built from

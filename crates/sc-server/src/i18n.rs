@@ -176,6 +176,9 @@ pub struct Strings {
     /// The masthead's sign-in action, and the account menu.
     pub nav_signin: &'static str,
     pub nav_account: &'static str,
+    /// The dialog's close button, for a screen reader — the glyph itself is
+    /// decorative and hidden from one.
+    pub dialog_close: &'static str,
 
     // -- the landing page ----------------------------------------------------
     //
@@ -371,6 +374,7 @@ mod tests {
             s.footer_tagline,
             s.nav_signin,
             s.nav_account,
+            s.dialog_close,
             s.landing_headline,
             s.landing_sub,
             s.landing_cta,

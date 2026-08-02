@@ -186,9 +186,13 @@ overflow:hidden;clip-path:inset(50%);white-space:nowrap}
    Two states rather than three. Theirs has two, and the third (follow the OS)
    is what the page does before anything is clicked, so nothing is lost that a
    reader can reach. */
-.theme{position:relative;display:inline-block;width:2.75rem;height:1.5rem;
+/* `inline-flex`, not `inline-block`. An inline-block sits on the **text
+   baseline**, so it hangs below the buttons beside it by the depth of a
+   descender — which reads as "not aligned" and is not fixed by centring the
+   knob inside it. A flex item aligns to the row's centre line instead. */
+.theme{position:relative;display:inline-flex;width:2.75rem;height:1.5rem;
 border-radius:var(--pill);border:1px solid var(--line);background:var(--surface-2);
-cursor:pointer;flex:none;transition:border-color .12s}
+cursor:pointer;flex:none;align-self:center;transition:border-color .12s}
 .theme:hover{border-color:var(--dim)}
 /* The knob. `inset-inline-start` rather than `left`, so it sits on the correct
    side when the surface is read right-to-left.
@@ -211,7 +215,7 @@ font-size:.7rem;line-height:1;transition:inset-inline-start .2s}
    box means light; under a light OS the moon pill shows and ticking means dark. */
 .to-light{display:none}
 @media(prefers-color-scheme:dark){
-.to-light{display:inline-block}
+.to-light{display:inline-flex}
 .to-dark{display:none}}
 /* Whichever pill is showing, ticking the box slides its knob across and swaps
    the glyph — so the control always animates towards the state it just entered. */
@@ -308,6 +312,33 @@ font-weight:500;text-decoration:none;cursor:pointer}
 .point{margin-block:var(--s6)}
 .point h2{margin:0 0 var(--s2);border:0;padding:0}
 .point p{margin:0;color:var(--dim);max-width:38rem}
+/* The sign-in dialog. Measurements from the reference: 380px, 1.75rem padding,
+   a 55% black backdrop with a 4px blur.
+   **A real `<dialog>`**, not a div positioned over the page. The element brings
+   focus trapping, Escape-to-close, inertness of the content behind it and a
+   `::backdrop` — every one of which a hand-rolled overlay has to reimplement,
+   and the accessibility half of that list is what such overlays usually skip. */
+dialog{max-width:380px;width:calc(100% - 2rem);padding:1.75rem;
+border:1px solid var(--line);border-radius:var(--radius);
+background:var(--surface);color:var(--fg);box-shadow:var(--shadow)}
+dialog::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
+dialog h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
+dialog p{color:var(--dim);font-size:.9rem}
+dialog .close{position:absolute;inset-block-start:var(--s3);
+inset-inline-end:var(--s3);width:1.75rem;height:1.75rem;padding:0;margin:0;
+display:inline-flex;align-items:center;justify-content:center;
+border:0;border-radius:var(--pill);background:transparent;color:var(--dim);
+font-size:1.1rem;line-height:1;cursor:pointer}
+dialog .close:hover{background:var(--surface-2);color:var(--fg)}
+/* Without script the dialog cannot be opened, so the page must not pretend it
+   can: the trigger is a plain link to the sign-in page, and this only turns it
+   into a dialog opener once the script is there to do it.
+   Its **own** class rather than the document-wide `.js`, because the fallback
+   is also needed on a browser that has script but no `showModal` — and undoing
+   `.js` to express that would drag the language form's button back with it. */
+.modal{display:none}
+.has-dialog .modal{display:inline-flex}
+.has-dialog .modal-fallback{display:none}
 /* Serif headings against a sans body, which is the pairing that makes the
    reference design read as designed rather than as a default stylesheet. */
 h1,h2{font-family:"Fraunces",Georgia,"Times New Roman",serif;font-weight:600}
@@ -452,9 +483,36 @@ fn footer(locale: Locale) -> String {
 fn account_nav(locale: Locale, signed_in: bool) -> String {
     let s = locale.strings();
     if !signed_in {
+        // **Two triggers, one of which is always the wrong one — and the CSS
+        // picks.** Without script the dialog cannot open, so the page must not
+        // offer a button that does nothing: `.modal-fallback` is an ordinary
+        // link to the sign-in page, and `.modal` is the dialog opener, with only
+        // the second shown once the script has marked the document.
+        //
+        // The dialog holds the *same form* posting to the *same route*, so the
+        // two paths differ in presentation and nothing else.
         return format!(
-            "<a class=\"btn\" href=\"/public/signin\">{}</a>",
-            esc(s.nav_signin)
+            "<a class=\"btn modal-fallback\" href=\"/public/signin\">{signin}</a>\
+<button class=\"btn modal\" id=\"signin-open\" type=\"button\">{signin}</button>\
+<dialog id=\"signin-dialog\">\
+<button class=\"close\" id=\"signin-close\" type=\"button\" \
+aria-label=\"{close}\">\u{00d7}</button>\
+<h2>{title}</h2><p>{intro}</p>\
+<form method=\"post\" action=\"/public/signin\">\
+<label for=\"dlg-email\">{email}</label>\
+<input id=\"dlg-email\" name=\"email\" type=\"email\" required \
+autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
+placeholder=\"{placeholder}\">\
+<button type=\"submit\">{submit}</button></form>\
+<p class=\"meta\">{note}</p></dialog>",
+            signin = esc(s.nav_signin),
+            close = esc(s.dialog_close),
+            title = esc(s.signin_title),
+            intro = esc(s.signin_intro),
+            email = esc(s.signin_email_label),
+            placeholder = esc(s.signin_email_placeholder),
+            submit = esc(s.signin_submit),
+            note = esc(s.signin_no_password),
         );
     }
     format!(
@@ -569,6 +627,34 @@ pub const FONT_DISPLAY: &[u8] = include_bytes!("../../assets/fraunces.woff2");
 /// script sees the language change on selection, which is what everyone expects
 /// a language picker to do.
 pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
+  // Marks the document as scripted, which is how the stylesheet decides between
+  // the sign-in *link* (works without script) and the sign-in *dialog* (needs
+  // it). Set first, so the swap happens before anything below can fail.
+  document.documentElement.classList.add('js');
+
+  // The sign-in dialog. `showModal` is what makes it a real modal: focus is
+  // trapped inside it, Escape closes it, and the page behind goes inert —
+  // behaviour a div-with-an-overlay has to reimplement and usually does not.
+  var open = document.getElementById('signin-open');
+  var dialog = document.getElementById('signin-dialog');
+  if (open && dialog && typeof dialog.showModal === 'function') {
+    // Only now is the dialog trigger shown and the plain link hidden, so a
+    // browser without `showModal` keeps a link that works.
+    document.documentElement.classList.add('has-dialog');
+    open.addEventListener('click', function () {
+      dialog.showModal();
+      var email = dialog.querySelector('input[type=email]');
+      if (email) email.focus();
+    });
+    var close = document.getElementById('signin-close');
+    if (close) close.addEventListener('click', function () { dialog.close(); });
+    // Clicking the backdrop closes it. The dialog fills its own box, so a click
+    // whose target IS the dialog element landed outside the content.
+    dialog.addEventListener('click', function (e) {
+      if (e.target === dialog) dialog.close();
+    });
+  }
+
   // The language switcher submits on change. The submit button lives inside
   // `<noscript>`, so there is nothing to hide here — the two paths are exclusive
   // by construction rather than by a class this has to remember to set.

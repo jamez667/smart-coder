@@ -69,7 +69,20 @@ pub struct PublicConfig {
     /// A name from *this* configuration, never from the request body — a
     /// stranger must not be able to aim work at a repository the operator did not
     /// nominate for public intake.
+    ///
+    /// **A routing key, not a label.** The daemon matches it exactly against its
+    /// own `queue add-repo` names, so it is not free text — see
+    /// [`site_name`](Self::site_name) for what the masthead shows.
     pub repo: String,
+    /// What the masthead calls this site. Defaults to [`repo`](Self::repo).
+    ///
+    /// Separate from the routing key because the two answer different questions.
+    /// `repo` has to equal what the daemon was told, exactly; a heading wants
+    /// `jamez667/smart-coder` — the name a person recognises. Folding them into
+    /// one field would mean renaming the heading forces a matching
+    /// `queue add-repo`, and a mismatch there is a queue that silently never
+    /// drains.
+    pub site_name: String,
     /// The absolute base URL sign-in links are built from.
     ///
     /// **Required, and not inferred from the `Host` header**, which is
@@ -208,6 +221,12 @@ pub mod env {
     /// Set to turn the public surface on. Everything below is then required.
     pub const PUBLIC_REPO: &str = "SC_SERVER_PUBLIC_REPO";
     pub const PUBLIC_BASE_URL: &str = "SC_SERVER_PUBLIC_BASE_URL";
+    /// What the masthead calls this site. Defaults to `PUBLIC_REPO`.
+    ///
+    /// Separate from it because that one is a **routing key** the daemon matches
+    /// exactly — a heading wants `owner/repo`, and renaming a heading should not
+    /// force a matching `queue add-repo`.
+    pub const PUBLIC_SITE_NAME: &str = "SC_SERVER_PUBLIC_SITE_NAME";
     pub const PUBLIC_MAX_LINKS: &str = "SC_SERVER_PUBLIC_MAX_LINKS";
     pub const PUBLIC_SHOW_SPEC: &str = "SC_SERVER_PUBLIC_SHOW_SPEC";
     /// Requests one account may file per rolling 24h — the model-spend ceiling.
@@ -409,6 +428,9 @@ fn public_from(
     }
 
     Ok(Some(PublicConfig {
+        // Defaults to the routing key, so an operator who does not care sees a
+        // sensible heading without configuring a second thing.
+        site_name: opt(get, env::PUBLIC_SITE_NAME).unwrap_or_else(|| repo.clone()),
         repo,
         // Computed before `base_url` is moved, and from the same value the
         // `https://` check above ran on.

@@ -22,6 +22,7 @@ pub static STRINGS: Strings = Strings {
 
     nav_signin: "Se connecter",
     nav_account: "Compte",
+    dialog_close: "Fermer",
 
     landing_headline: "Demandez un changement, recevez une spécification.",
     landing_sub: "Décrivez ce qu’il faut faire avec vos propres mots. Vous                   recevez en retour une spécification écrite que le                   développeur lira, approuvera ou renverra pour une nouvelle                   version.",

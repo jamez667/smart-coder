@@ -386,7 +386,7 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // to know it — and **cleared on the way out**, because a thread serves many
     // requests and a name left behind would appear on the next one.
     match ctx.public {
-        Some(p) => crate::page::site::set(&p.repo),
+        Some(p) => crate::page::site::set(&p.site_name),
         None => crate::page::site::clear(),
     }
     let res = handle_inner(ctx, req);
@@ -1441,6 +1441,7 @@ mod tests {
         fn with_public(mut self, screened: bool) -> Fixture {
             self.public = Some(PublicConfig {
                 repo: "intake".into(),
+                site_name: "intake".into(),
                 base_url: "https://specs.example.test".into(),
                 // Matching the base URL above, which is what the real
                 // configuration derives this from.

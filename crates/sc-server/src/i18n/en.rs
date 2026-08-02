@@ -17,6 +17,7 @@ pub static STRINGS: Strings = Strings {
 
     nav_signin: "Sign in",
     nav_account: "Account",
+    dialog_close: "Close",
 
     landing_headline: "Ask for a change — get a spec back.",
     landing_sub: "Describe what needs doing in your own words. It comes back as a                   written specification for the developer to read, approve, or send                   back for another pass.",
