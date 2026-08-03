@@ -325,6 +325,22 @@ leaving the task `Queued` with the reason recorded. A merely *dirty* tree is fin
 and must not block: phases 1–5 write only under `specs/<slug>/`, and refusing on
 uncommitted work would make the daemon useless on any real working repository.
 
+**The two refusals are not the same kind of problem**, and treating them alike
+wedged the queue <!--@ crates/sc-daemon/src/preflight.rs -->:
+
+| | fixes itself? | answer |
+|---|---|---|
+| An interrupted operation | yes, when the developer finishes | **defer** — left `Queued` for a later poll, nothing reported |
+| A path that is not a git repository | no; a typo in `add-repo`, or a moved directory | **hand it back** ([18](18-task-intake.md)) |
+
+Deferring the second left the request `Claimed` on the server, blocking that
+repository for a full claim timeout — and then doing it again, for ever, on a
+condition only a person at a keyboard can clear. The daemon now releases the work
+*and* withdraws that repository from what it offers until it restarts: without
+the withdrawal it would be the only machine declaring the name, so it would claim
+and release the same request every poll. One bounce, then the request shows as
+unserved, which is a state the operator can act on.
+
 ### "Only under `specs/<slug>/`" was not true, and is now
 
 ✅ **Fixed** <!--@ crates/sc-workflow/src/artifact_dir.rs -->. That claim was load

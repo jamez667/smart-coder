@@ -161,6 +161,24 @@ member of the public who may file and read their own requests and nothing else.
   `Authorization: Bearer`. One key per machine, so a lost laptop is revoked
   without locking the developer out of their desktop.
 
+  The server holds them as `label:key` pairs in `SC_SERVER_DAEMON_KEYS`
+  <!--@ crates/sc-server/src/config.rs -->, keeping only a hash of each. **The
+  label is what makes several daemons possible at all**: without it the server
+  cannot tell two machines apart, and three things collapse onto one credential —
+  the rate budget, so a daemon retrying in a loop on one host starves every
+  other; revocation, which becomes all-or-nothing; and the holder of a claim,
+  which is what stops a late report from a machine presumed dead landing on top
+  of a draft another is still writing.
+
+  Labels must be unique and no two daemons may share a key. Both are refused at
+  startup rather than resolved, because either would make "revoke that one
+  machine" quietly untrue.
+
+  The singular `SC_SERVER_DAEMON_KEY` is still read, filed under the label
+  `default`, so a deployment predating this upgrades with no stack edit — and
+  both together are a union, which is how a second machine is added before the
+  first is migrated.
+
   ✅ **Built.** `smart-coder queue link <url> --key <key>` sets it and
   `queue serve` runs the dial-out loop; `queue run` is the offline twin that
   needs no server at all. Two commands rather than one flag, because they fail
@@ -493,9 +511,62 @@ hidden — a repo submitted in the body is discarded.
 The security claim survives intact, because it never rested on the picker: a name
 is not a path, whether it was chosen or typed. What is lost is ergonomic — a
 mistyped name is filed and fails at the daemon rather than being impossible to
-enter. A future pass could have the daemon publish its names on poll, which is
-the right way to get the picker back; inventing a server-side repository list
-would not be.
+enter.
+
+**The daemon now publishes its names on poll**, which this spec previously called
+the right way to get the picker back, and it is — but it was built first for a
+sharper reason. See below.
+
+### Which daemon gets which work
+
+✅ **Built** <!--@ crates/sc-server/src/query.rs -->. A daemon names the
+repositories it serves when it polls, and the server hands it only those.
+
+This exists because the alternative actively destroyed work. Several daemons can
+poll one server — a machine holding one repository, a machine holding another —
+and the claim used to be first-come-first-served regardless of what the asker
+could reach. A daemon handed a repository it does not have reported a *failure*,
+which is terminal, so the wrong machine claiming a request burned it. Not a
+degraded outcome: the request was gone, and the daemon that could have drafted it
+never saw it.
+
+The declaration rides in the **query string**, and that is what makes it safe to
+deploy either half first: a server predating it splits the path on `?` before
+matching, so it ignores the declaration and answers exactly as before. A daemon
+that declares nothing gets everything, which is what it always got. A new route
+would have 404'd and a header would have vanished silently — neither degrades,
+and both would force the two halves to move together.
+
+`PROTOCOL_VERSION` is deliberately **not** bumped. The check is exact equality,
+so a bump breaks every deployed peer — for a change that breaks none of them.
+
+- **The screening gate is unaffected**, and structurally so: `is_claimable` stays
+  a named method and the *first* predicate, with the served-repo filter beside
+  it. Declaring a repository widens which *queued* work a daemon is offered; it
+  can never make unqueued work claimable <!--@ crates/sc-server/src/store.rs -->.
+- **A claim records which daemon holds it.** Guarding a late report on state
+  alone left a real window: a daemon whose claim expired, whose work a second
+  daemon has since claimed but not yet finished, found the request still
+  `Claimed` and its stale draft was accepted over one in progress.
+- **Work can be handed back.** `POST /api/v1/work/:id/released` requeues rather
+  than failing. A failure is a statement about the *request*; a release is a
+  statement about the *daemon*. Rare now that routing exists, but reachable: a
+  daemon's configuration can change between the poll and the draft, and a path
+  that is not a git repository is only discovered when drafting is attempted.
+- **A request nothing serves is visible, not silent.** The server keeps an
+  in-memory register of who polled for what
+  <!--@ crates/sc-server/src/daemons.rs -->, so the review page distinguishes
+  "no daemon has connected" from "one has, but not for this repository" and names
+  the command that fixes each. *Waiting for a daemon to pick it up* is true of
+  both and useless for either.
+
+  Deliberately **not** a `RequestState`: it is a fact about who happens to be
+  polling this minute, so it would flap — and in memory, because persisting it
+  would survive a restart as a confident claim about daemons that are gone.
+
+*Not built:* the picker. The server now has the material for one — it knows which
+names are on offer — but the device form still takes free text. Inventing a
+server-side repository list would still be the wrong way to get there.
 
 Canonicalisation happens at *configuration* time, by the developer at their own
 keyboard. By the time a network request is handled there is only a name to look up.
@@ -828,6 +899,17 @@ claim expired would otherwise overwrite whatever happened since — a spec anoth
 daemon has drafted, a decision a reviewer has made. Reclaiming stale work is only
 safe if the work it reclaimed can no longer write, so both daemon-facing verbs
 require the request to still be `Claimed`.
+
+**State alone was not enough**, and the gap only became reachable once several
+daemons could poll one server. If the first daemon's claim expires, a *second*
+claims the work and is still drafting, the request is `Claimed` — so a state-only
+check passes and the first daemon's stale spec lands on top of one being written
+right now. The original test missed it because its second daemon had already
+finished, which moved the state past `Claimed` and made the check sufficient by
+accident. A claim now records **which daemon holds it**, and a report is refused
+unless it comes from that machine. A record written before the field existed has
+no holder and matches any daemon, so upgrading does not reject a draft that is
+legitimately in flight; the window is one claim timeout.
 
 That guard also revealed two existing tests were exercising a transition the
 state machine already forbade — a daemon redrafting straight over a spec sitting
