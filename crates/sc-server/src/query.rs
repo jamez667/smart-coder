@@ -199,6 +199,18 @@ mod tests {
     }
 
     #[test]
+    fn what_the_daemon_builds_is_what_this_parses() {
+        // The two halves live in different crates and were written apart, so the
+        // round trip is asserted rather than assumed — an encoder and a decoder
+        // that disagree produce a daemon that silently gets no work.
+        let names = ["alpha", "my repo", "a/b", "100%", "dash-and_dot.v2"];
+        let url = sc_proto::wire::route::work_for(&names);
+        let parsed = PollQuery::parse(&url);
+        assert_eq!(parsed.repos, names);
+        assert_eq!(parsed.protocol, Some(sc_proto::wire::PROTOCOL_VERSION));
+    }
+
+    #[test]
     fn an_empty_name_is_not_a_declaration() {
         assert!(PollQuery::parse("/api/v1/work?repo=&repo=")
             .repos

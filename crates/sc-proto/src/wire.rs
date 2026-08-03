@@ -6,13 +6,19 @@
 //!
 //! ## The shape of the conversation
 //!
-//! The daemon **dials out**; the server never calls it. Three exchanges:
+//! The daemon **dials out**; the server never calls it. Four exchanges:
 //!
 //! ```text
-//!   GET  /api/v1/work        long-poll — is there anything for me?
-//!   POST /api/v1/work/:id/drafted    here is the spec I drafted
-//!   POST /api/v1/work/:id/failed     I could not draft it, and why
+//!   GET  /api/v1/work?repo=…  long-poll — anything for the repos I serve?
+//!   POST /api/v1/work/:id/drafted     here is the spec I drafted
+//!   POST /api/v1/work/:id/failed      I could not draft it, and why
+//!   POST /api/v1/work/:id/released    wrong machine — someone else should
 //! ```
+//!
+//! The last two are deliberately different verbs. A *failure* is a statement
+//! about the request and is terminal; a *release* is a statement about the
+//! daemon and returns the work to the queue. Collapsing them is how one daemon
+//! destroys work another could have done.
 //!
 //! That is the whole daemon-facing API. It carries **text only** — a request in,
 //! a drafted spec out. The server has no path to a repository, no model, and no
@@ -170,6 +176,39 @@ impl DraftFailed {
     }
 }
 
+/// Work a daemon claimed and is handing back **undone**.
+///
+/// Distinct from [`DraftFailed`] in the way that matters to whoever filed it: a
+/// failure is a statement about the *request* — it could not be specified, look
+/// at it — where a release is a statement about the *daemon*: this machine
+/// cannot do it, someone else should. Collapsing the two is how a second daemon
+/// serving a different set destroys work it merely could not reach, which is the
+/// failure this exists to end.
+///
+/// Rare once the server hands over only declared repositories, but not
+/// unreachable: a daemon's configuration can change between the poll and the
+/// draft, and a path that is not a git repository is only discovered when the
+/// draft is attempted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkReleased {
+    pub protocol: u32,
+    pub id: String,
+    /// Why this machine could not do it. Recorded as the request's note, so work
+    /// that has bounced says who bounced it rather than reappearing in the queue
+    /// with no explanation.
+    pub reason: String,
+}
+
+impl WorkReleased {
+    pub fn new(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            protocol: PROTOCOL_VERSION,
+            id: id.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
 /// What went wrong with a request, as the server reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireError {
@@ -215,6 +254,49 @@ pub mod route {
     /// Where a failure is posted, for the work item `id`.
     pub fn failed(id: &str) -> String {
         format!("/api/v1/work/{id}/failed")
+    }
+
+    /// Where work is handed back undone, for the work item `id`.
+    ///
+    /// `released` rather than `release`, because the server's own `release`
+    /// already means *un-quarantine* — one verb carrying two unrelated meanings
+    /// in one file is how the wrong one eventually gets called.
+    pub fn released(id: &str) -> String {
+        format!("/api/v1/work/{id}/released")
+    }
+
+    /// The poll URL for a daemon serving `repos`.
+    ///
+    /// A query string rather than a header or a new route, and that is what
+    /// makes it safe to send at a server that predates it: both the router and
+    /// the long-poll check split the path on `?` before matching, so an old
+    /// server ignores the declaration and answers normally. A new route would
+    /// 404 and a header would vanish silently.
+    pub fn work_for(repos: &[&str]) -> String {
+        let mut url = format!("{WORK}?protocol={}", super::PROTOCOL_VERSION);
+        for repo in repos {
+            url.push_str("&repo=");
+            url.push_str(&encode(repo));
+        }
+        url
+    }
+
+    /// Percent-encode a query value, keeping only what is unambiguous.
+    ///
+    /// Deliberately conservative — anything outside the unreserved set is
+    /// escaped rather than judged safe, because a repository name is free text
+    /// on the daemon's side and the cost of over-escaping is nothing.
+    fn encode(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for byte in value.as_bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(*byte as char)
+                }
+                other => out.push_str(&format!("%{other:02X}")),
+            }
+        }
+        out
     }
 }
 
@@ -308,6 +390,49 @@ mod tests {
         let item: WorkItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.kind, IntakeKind::Bug);
         assert!(item.send_back_note.is_none());
+    }
+
+    #[test]
+    fn a_release_payload_round_trips() {
+        let out = WorkReleased::new("srv-1", "no repository named \"alpha\"");
+        let back: WorkReleased =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+        assert_eq!(back, out);
+        assert_eq!(back.protocol, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn a_poll_declaring_repositories_is_still_protocol_one() {
+        // The declaration rides in the QUERY STRING, which a server predating it
+        // splits off before matching — so an old server ignores it and answers
+        // normally rather than 404ing. That is the whole reason not to bump the
+        // version: `check_protocol` is exact equality, so a bump would break
+        // every deployed peer for a change that breaks none of them.
+        assert_eq!(PROTOCOL_VERSION, 1);
+
+        let url = route::work_for(&["alpha", "beta"]);
+        assert!(url.starts_with(route::WORK));
+        assert_eq!(&url[route::WORK.len()..route::WORK.len() + 1], "?");
+        assert!(url.contains("repo=alpha"));
+        assert!(url.contains("repo=beta"));
+    }
+
+    #[test]
+    fn a_declared_repository_name_survives_the_wire() {
+        // Names are free text on the daemon's side, so anything a person can
+        // type has to arrive as the same string — a mangled name matches nothing
+        // and the daemon silently gets no work.
+        let url = route::work_for(&["my repo", "a/b", "100%"]);
+        assert!(url.contains("repo=my%20repo"), "{url}");
+        assert!(url.contains("repo=a%2Fb"), "{url}");
+        assert!(url.contains("repo=100%25"), "{url}");
+    }
+
+    #[test]
+    fn a_daemon_declaring_nothing_still_sends_a_usable_poll_url() {
+        let url = route::work_for(&[]);
+        assert!(url.starts_with(route::WORK));
+        assert!(!url.contains("repo="));
     }
 
     #[test]

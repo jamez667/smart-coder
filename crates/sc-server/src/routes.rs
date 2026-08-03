@@ -14,7 +14,9 @@
 //! [`Store`] has no field for a path and the server has no model and no repository,
 //! so there is nothing here that *could* grow into an execution path (spec 18).
 
-use sc_proto::wire::{self, DraftFailed, DraftedSpec, PollResponse, WireError, WorkItem};
+use sc_proto::wire::{
+    self, DraftFailed, DraftedSpec, PollResponse, WireError, WorkItem, WorkReleased,
+};
 use sc_proto::IntakeKind;
 
 use std::sync::Mutex;
@@ -652,6 +654,19 @@ fn daemon_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str, by: &str
                 return error(400, &msg);
             }
             match ctx.store.record_failed(id, by, &payload.reason) {
+                Ok(_) => Res::json(200, "{\"ok\":true}"),
+                Err(e) => error(404, &e.to_string()),
+            }
+        }
+        "released" => {
+            let payload: WorkReleased = match serde_json::from_str(&req.body) {
+                Ok(p) => p,
+                Err(e) => return error(400, &format!("unreadable payload: {e}")),
+            };
+            if let Err(msg) = wire::check_protocol(payload.protocol, "the daemon") {
+                return error(400, &msg);
+            }
+            match ctx.store.record_released(id, by, &payload.reason) {
                 Ok(_) => Res::json(200, "{\"ok\":true}"),
                 Err(e) => error(404, &e.to_string()),
             }
@@ -1777,6 +1792,24 @@ mod tests {
             Bucket::Credential(auth::hash("laptop")),
             "the label is hashed before it becomes a key"
         );
+    }
+
+    #[test]
+    fn released_work_is_requeued_rather_than_failed() {
+        // The route a daemon uses to say "wrong machine" instead of burning the
+        // request with a failure.
+        let mut f = Fixture::new("released-route");
+        let token = f.enrolled();
+        let id = f.file(&token, "something", "alpha");
+        f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+
+        let payload = serde_json::to_string(&WorkReleased::new(&id, "no such repo here")).unwrap();
+        let res = f.go(&Req::post(&wire::route::released(&id), &payload).with_bearer(KEY));
+        assert_eq!(res.status, 200);
+
+        let r = f.store.get(&id).unwrap().unwrap();
+        assert_eq!(r.state, crate::store::RequestState::Queued);
+        assert!(r.note.unwrap().contains("no such repo here"));
     }
 
     #[test]

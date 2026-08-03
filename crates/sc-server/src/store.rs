@@ -551,6 +551,43 @@ impl Store {
         Ok(req)
     }
 
+    /// Return claimed work to the queue, undone.
+    ///
+    /// **Requeues rather than fails**, which is the whole point: a failure is a
+    /// statement about the request and is terminal, where this says only that
+    /// *this machine* could not do it. Collapsing the two is how a daemon
+    /// destroys work it merely could not reach.
+    ///
+    /// Keeps `send_back_note` for the same reason [`reclaim_stale`] does —
+    /// nothing was drafted, so a reviewer's reason for rejecting still applies
+    /// to whoever picks it up next.
+    ///
+    /// The note names who gave it back. Without that, a request that has bounced
+    /// looks exactly like one nobody ever claimed, and the misconfiguration
+    /// causing it stays invisible.
+    ///
+    /// There is deliberately **no bounce counter**. It would have to be
+    /// persisted and decayed, and the thing it would eventually do is mark the
+    /// request `Failed` — the terminal outcome this route exists to avoid. The
+    /// cases that could loop each have a better answer: a configuration that
+    /// changed is self-healing, because the daemon stops declaring that
+    /// repository on its next poll; a path that is not a repository is withdrawn
+    /// by the daemon rather than re-offered; and a daemon releasing in a tight
+    /// loop is bounded by its own rate budget, which is per-machine.
+    ///
+    /// [`reclaim_stale`]: Self::reclaim_stale
+    pub fn record_released(&self, id: &str, by: &str, reason: &str) -> Result<Request> {
+        let mut req = self.claimed(id, by)?;
+        req.state = RequestState::Queued;
+        // Cleared by `put` for anything not `Claimed`, but set here too so the
+        // value returned to the caller matches what landed on disk.
+        req.claimed_ms = None;
+        req.claimed_by = None;
+        req.note = Some(format!("{by} handed this back: {reason}"));
+        self.put(&req)?;
+        Ok(req)
+    }
+
     /// Load a request, refusing it unless `by` currently holds the claim.
     ///
     /// **State and holder, not state alone.** Checking only the state leaves a
@@ -1105,6 +1142,80 @@ mod tests {
         let req = s.require("r-1").unwrap();
         assert_eq!(req.spec.as_deref(), Some("# The good spec"));
         assert_eq!(req.state, RequestState::AwaitingReview);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn released_work_returns_to_the_queue_and_says_who_gave_it_back() {
+        // The difference that matters: a failure is terminal and says something
+        // about the request, where a release says only that this machine could
+        // not do it — so the work has to survive and be claimable again.
+        let (s, dir) = store("released");
+        file(&s, "r-1", "alpha");
+        s.claim_next(Serves::Anything, "laptop").unwrap();
+
+        let back = s
+            .record_released("r-1", "laptop", "no repository named \"alpha\" here")
+            .unwrap();
+        assert_eq!(back.state, RequestState::Queued);
+        assert_eq!(back.claimed_by, None);
+        assert_eq!(back.claimed_ms, None);
+        let note = back.note.unwrap();
+        assert!(note.contains("laptop"), "it names who: {note}");
+        assert!(note.contains("alpha"), "and why: {note}");
+
+        // And another daemon can pick it straight up — no waiting out a lease.
+        let again = s.claim_next(Serves::Anything, "office").unwrap().unwrap();
+        assert_eq!(again.id, "r-1");
+        assert_eq!(again.claimed_by.as_deref(), Some("office"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_daemon_holding_a_claim_may_release_it() {
+        // Otherwise any daemon could yank work out from under the machine that
+        // is drafting it.
+        let (s, dir) = store("release-holder");
+        file(&s, "r-1", "alpha");
+        s.claim_next(Serves::Anything, "laptop").unwrap();
+
+        assert!(s.record_released("r-1", "office", "not mine").is_err());
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Claimed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn releasing_keeps_the_note_a_reviewer_sent_it_back_with() {
+        // Nothing was drafted, so the reason it was rejected still applies to
+        // whoever picks it up next — the same reasoning as `reclaim_stale`.
+        let (s, dir) = store("release-sendback");
+        file(&s, "r-1", "alpha");
+        let mut r = s.require("r-1").unwrap();
+        r.send_back_note = Some("too vague".into());
+        s.put(&r).unwrap();
+        s.claim_next(Serves::Anything, "laptop").unwrap();
+
+        let back = s.record_released("r-1", "laptop", "wrong machine").unwrap();
+        assert_eq!(back.send_back_note.as_deref(), Some("too vague"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_release_does_not_weaken_the_rule_that_a_failure_is_terminal() {
+        // Two different verbs reaching two different states. A failure stays
+        // final; release is the way to *not* burn a request.
+        let (s, dir) = store("release-vs-fail");
+        file(&s, "r-1", "alpha");
+        s.claim_next(Serves::Anything, "laptop").unwrap();
+        s.record_failed("r-1", "laptop", "could not draft").unwrap();
+
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Failed);
+        assert!(s.claim_next(Serves::Anything, "office").unwrap().is_none());
+        // And a release cannot resurrect it either — it is not claimed by
+        // anyone any more.
+        assert!(s
+            .record_released("r-1", "laptop", "second thoughts")
+            .is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
