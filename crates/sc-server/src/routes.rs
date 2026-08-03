@@ -385,6 +385,13 @@ pub struct Ctx<'a> {
     /// by the poll. In memory and shared, like the rate limiter beside it —
     /// see [`crate::daemons`] for why it is not on disk.
     pub seen: &'a Mutex<crate::daemons::Seen>,
+    /// Set when the HTTP layer is re-checking a long poll it already holds.
+    ///
+    /// The hold re-runs [`handle`] every 250ms looking for work that may have
+    /// arrived. Those passes are the *server's* own polling, not the caller's,
+    /// and charging them to the caller's budget is what made an idle daemon
+    /// rate-limit itself.
+    pub rechecking: bool,
 }
 
 /// Route one request.
@@ -420,7 +427,15 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // rather than at the top: an anonymous caller on the public surface must not
     // share a budget with one guessing enrolment codes, or either can lock the
     // other out.
-    if !ctx.limiter.allow(bucket_for(&caller, &path), ctx.now_ms) {
+    //
+    // **Skipped when the HTTP layer is re-checking a poll it is already
+    // holding.** A held poll re-runs this function every 250ms for up to
+    // `POLL_TIMEOUT`, so counting each pass charged one *request* about 120
+    // times — an idle daemon burnt half its minute's budget every thirty
+    // seconds, and two overlapping polls locked it out of its own server. The
+    // caller has already been admitted once; the re-checks are the server's own
+    // doing, not new traffic.
+    if !ctx.rechecking && !ctx.limiter.allow(bucket_for(&caller, &path), ctx.now_ms) {
         return error(429, "too many requests — wait a minute and try again");
     }
 
@@ -1588,6 +1603,23 @@ mod tests {
                 mailer: &self.mailer,
                 write_lock: &self.write_lock,
                 seen: &self.seen,
+                rechecking: false,
+            };
+            handle(&mut ctx, req)
+        }
+
+        /// As the HTTP layer re-checks a poll it is already holding.
+        fn go_rechecking(&mut self, req: &Req) -> Res {
+            let mut ctx = Ctx {
+                store: &self.store,
+                daemon_keys: &self.daemon_keys,
+                limiter: &mut self.limiter,
+                now_ms: self.now_ms,
+                public: self.public.as_ref(),
+                mailer: &self.mailer,
+                write_lock: &self.write_lock,
+                seen: &self.seen,
+                rechecking: true,
             };
             handle(&mut ctx, req)
         }
@@ -1792,6 +1824,34 @@ mod tests {
             Bucket::Credential(auth::hash("laptop")),
             "the label is hashed before it becomes a key"
         );
+    }
+
+    #[test]
+    fn holding_a_poll_open_does_not_spend_the_daemons_rate_budget() {
+        // The bug this exists for: the HTTP layer re-runs `handle` every 250ms
+        // for the length of a hold, and each pass used to be charged to the
+        // caller. One 30s poll therefore cost ~120 requests out of 240 a minute,
+        // so an idle daemon rate-limited *itself* off its own server within two
+        // polls — and the symptom was a 429 with no traffic to explain it.
+        //
+        // Driven through the fixture rather than by calling the limiter, because
+        // the defect was in who gets charged, not in the counting.
+        let mut f = Fixture::new("poll-budget");
+
+        // Far more re-checks than one hold performs.
+        for i in 0..500 {
+            let res = f.go_rechecking(&Req::get(wire::route::WORK).with_bearer(KEY));
+            assert_ne!(res.status, 429, "re-check {i} was charged to the caller");
+        }
+
+        // And a genuinely new poll is still counted, so the budget still exists.
+        let mut over = 0;
+        for _ in 0..400 {
+            if f.go(&Req::get(wire::route::WORK).with_bearer(KEY)).status == 429 {
+                over += 1;
+            }
+        }
+        assert!(over > 0, "a real request must still be rate limited");
     }
 
     #[test]

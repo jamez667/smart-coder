@@ -289,7 +289,7 @@ fn serve_one(mut request: tiny_http::Request, shared: &Shared) -> Result<()> {
     };
     let is_poll = req.method == "GET" && req.path.split('?').next() == Some(wire::route::WORK);
 
-    let mut res = dispatch(shared, &req);
+    let mut res = dispatch(shared, &req, false);
 
     // The long poll: hold the connection open rather than answering "nothing"
     // immediately, so a request filed on a train is picked up in under a second
@@ -298,7 +298,7 @@ fn serve_one(mut request: tiny_http::Request, shared: &Shared) -> Result<()> {
         let deadline = std::time::Instant::now() + wire::POLL_TIMEOUT;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(POLL_TICK);
-            let again = dispatch(shared, &req);
+            let again = dispatch(shared, &req, true);
             if !again.hold_for_work {
                 res = again;
                 break;
@@ -409,7 +409,14 @@ fn route_label(path: &str) -> &'static str {
     }
 }
 
-fn dispatch(shared: &Shared, req: &Req) -> Res {
+/// Run one request through the routes.
+///
+/// `rechecking` is set only by the long-poll hold below, which re-runs this
+/// every 250ms on a connection it is *already* holding. Those passes must not be
+/// charged to the caller's rate budget: they are the server's own polling, and
+/// counting them made one held poll cost about 120 requests — enough for an idle
+/// daemon to lock itself out of its own server.
+fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
     let now = now_ms();
     let mut guard = match shared.limiter.lock() {
         Ok(g) => g,
@@ -428,6 +435,7 @@ fn dispatch(shared: &Shared, req: &Req) -> Res {
         mailer: shared.mailer.as_ref(),
         write_lock: &shared.write_lock,
         seen: &shared.seen,
+        rechecking,
     };
     routes::handle(&mut ctx, req)
 }
