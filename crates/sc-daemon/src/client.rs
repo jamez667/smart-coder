@@ -25,6 +25,7 @@
 //! the server being briefly unreachable says nothing about the request — so the
 //! loop simply polls again.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use sc_model::ModelBackend;
@@ -34,7 +35,7 @@ use crate::config::DaemonConfig;
 use crate::queue::Queue;
 use crate::runner::{self, Drafted};
 use crate::task::Task;
-use crate::wire::{self, DraftFailed, DraftedSpec, PollResponse, WorkItem};
+use crate::wire::{self, DraftFailed, DraftedSpec, PollResponse, WorkItem, WorkReleased};
 
 /// How the daemon reaches the server.
 ///
@@ -51,21 +52,54 @@ pub trait Transport {
 
     /// Report that a request could not be drafted, and why.
     fn push_failed(&self, failed: &DraftFailed) -> Result<()>;
+
+    /// Hand work back undone, for another daemon to take.
+    ///
+    /// A default that reports it as a failure, so a transport predating this —
+    /// including every test double — keeps compiling and still tells the server
+    /// *something*. The real transport overrides it with the release route.
+    fn push_released(&self, released: &WorkReleased) -> Result<()> {
+        self.push_failed(&DraftFailed::new(&released.id, &released.reason))
+    }
+
+    /// Stop declaring `repo` until this daemon restarts.
+    ///
+    /// For a configured path that is not a git repository. That does not fix
+    /// itself, and re-declaring it every poll means claiming and releasing the
+    /// same work every cycle for ever — so the offer is withdrawn and the
+    /// request becomes visibly unserved, which is a state the operator can act
+    /// on. A no-op by default, because only the real transport has a declaration
+    /// to withdraw.
+    fn withdraw(&self, _repo: &str) {}
 }
 
 /// The real transport: outbound HTTPS with a per-daemon API key.
 pub struct HttpTransport {
     base_url: String,
     api_key: String,
+    /// The repositories this daemon offers, sent on every poll so the server
+    /// hands it only work it can do.
+    ///
+    /// Behind a lock because [`withdraw`](Transport::withdraw) removes one when a
+    /// configured path turns out not to be a repository — a discovery only the
+    /// drafting attempt can make.
+    repos: Mutex<Vec<String>>,
     agent: ureq::Agent,
 }
 
 impl HttpTransport {
-    /// Build a transport for `base_url`, authenticating with `api_key`.
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+    /// Build a transport for `base_url`, authenticating with `api_key` and
+    /// declaring `repos`.
+    ///
+    /// The set is taken at construction rather than passed per poll: it comes
+    /// from `DaemonConfig`, which cannot change while the serve loop holds a
+    /// reference to it, and a per-call parameter would suggest a variability
+    /// that does not exist.
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, repos: &[&str]) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
+            repos: Mutex::new(repos.iter().map(|r| r.to_string()).collect()),
             // Outwaits the server's hold on a long poll, so a healthy idle poll is
             // never mistaken for a hung request.
             agent: ureq::Agent::config_builder()
@@ -92,9 +126,14 @@ impl HttpTransport {
 
 impl Transport for HttpTransport {
     fn poll(&self) -> Result<Option<WorkItem>> {
+        let declared = match self.repos.lock() {
+            Ok(r) => r.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let names: Vec<&str> = declared.iter().map(String::as_str).collect();
         let body = self
             .agent
-            .get(self.url(wire::route::WORK))
+            .get(self.url(&wire::route::work_for(&names)))
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .call()
             .map_err(|e| DcError::Backend(format!("poll: {e}")))?
@@ -121,6 +160,18 @@ impl Transport for HttpTransport {
     fn push_failed(&self, failed: &DraftFailed) -> Result<()> {
         self.post_json(&wire::route::failed(&failed.id), failed)
     }
+
+    fn push_released(&self, released: &WorkReleased) -> Result<()> {
+        self.post_json(&wire::route::released(&released.id), released)
+    }
+
+    fn withdraw(&self, repo: &str) {
+        let mut repos = match self.repos.lock() {
+            Ok(r) => r,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        repos.retain(|r| r != repo);
+    }
 }
 
 /// What one turn of the loop did — returned so a caller can render progress and
@@ -135,6 +186,14 @@ pub enum Turn {
     /// rather than reported as a failure: it fixes itself, and a failure would
     /// make the developer requeue by hand for a transient condition.
     Deferred { id: String, reason: String },
+    /// Handed back undone: this machine was the wrong one, and the server has
+    /// requeued it for another daemon.
+    ///
+    /// Distinct from `Failed`, which is terminal and says something about the
+    /// *request*. Against a server predating the release route this degrades to
+    /// a failure — the default `push_released` reports one — which is the same
+    /// behaviour as before, not a regression.
+    Released { id: String, reason: String },
     /// Could not be drafted, and the server was told.
     Failed { id: String, reason: String },
     /// The server could not be reached. The loop keeps going — a brief outage
@@ -205,6 +264,26 @@ pub fn one_turn(
             id: item.id,
             reason,
         },
+        Ok(Drafted::Released { reason }) => {
+            // A configured path that is not a repository will not fix itself, so
+            // stop offering it: this daemon is the only one declaring it, and it
+            // would otherwise claim and release the same work every poll for
+            // ever. Re-checked here rather than signalled from the runner, which
+            // has no business knowing about the transport.
+            if let Some(repo) = cfg.repo(&item.repo) {
+                if matches!(
+                    crate::preflight::check(&repo.path),
+                    Err(crate::preflight::NotReady::NotARepo)
+                ) {
+                    transport.withdraw(&item.repo);
+                }
+            }
+            let _ = transport.push_released(&WorkReleased::new(&item.id, &reason));
+            Turn::Released {
+                id: item.id,
+                reason,
+            }
+        }
         Ok(Drafted::Failed { reason }) => {
             let _ = transport.push_failed(&DraftFailed::new(&item.id, &reason));
             Turn::Failed {
@@ -267,6 +346,11 @@ mod tests {
         queued: Mutex<Vec<WorkItem>>,
         drafted: Mutex<Vec<DraftedSpec>>,
         failed: Mutex<Vec<DraftFailed>>,
+        /// Work handed back undone. Recorded separately from `failed`, because
+        /// the whole point of the release route is that the two are different.
+        released: Mutex<Vec<WorkReleased>>,
+        /// Repositories this daemon stopped offering.
+        withdrawn: Mutex<Vec<String>>,
         /// When set, every call fails — a server that is down.
         down: bool,
     }
@@ -311,6 +395,16 @@ mod tests {
             }
             self.failed.lock().unwrap().push(f.clone());
             Ok(())
+        }
+        fn push_released(&self, r: &WorkReleased) -> Result<()> {
+            if self.down {
+                return Err(DcError::Backend("connection refused".into()));
+            }
+            self.released.lock().unwrap().push(r.clone());
+            Ok(())
+        }
+        fn withdraw(&self, repo: &str) {
+            self.withdrawn.lock().unwrap().push(repo.to_string());
         }
     }
 
@@ -497,9 +591,16 @@ mod tests {
     }
 
     #[test]
-    fn a_request_for_an_unconfigured_repository_fails_without_a_model_call() {
-        // The daemon resolves the name against ITS OWN set; the server cannot
-        // name a repository this machine does not serve.
+    fn a_request_for_an_unconfigured_repository_is_handed_back_without_a_model_call() {
+        // **Inverted deliberately.** This used to assert a terminal FAILURE, and
+        // with one daemon that was defensible: nobody else was going to do it.
+        // With several — a laptop holding one repository, a server holding
+        // another — whichever polled first DESTROYED work it merely could not
+        // reach. Handing it back is the only answer that does not depend on
+        // which machine happened to ask.
+        //
+        // What has not changed, and is still the point of this test: no model
+        // was called, and the name was resolved against this daemon's OWN set.
         let (q, cfg, qdir, repo) = fixture("unknown-repo");
         let mut i = item("srv-1");
         i.repo = "gamma".into();
@@ -507,11 +608,81 @@ mod tests {
         let turn = one_turn(&server, &Model("#".into()), &q, &cfg);
 
         match &turn {
-            Turn::Failed { reason, .. } => assert!(reason.contains("gamma"), "{reason}"),
-            other => panic!("expected a failure, got {other:?}"),
+            Turn::Released { reason, .. } => assert!(reason.contains("gamma"), "{reason}"),
+            other => panic!("expected a release, got {other:?}"),
         }
-        assert_eq!(server.failed.lock().unwrap().len(), 1);
+        assert_eq!(server.released.lock().unwrap().len(), 1);
+        assert!(
+            server.failed.lock().unwrap().is_empty(),
+            "a repository this machine lacks is not the request's fault"
+        );
+        // Left claimable locally too, so the daemon's record matches the
+        // server's rather than saying `Failed` for something requeued.
+        assert_eq!(q.require("srv-1").unwrap().state, TaskState::Queued);
         cleanup(&[&qdir, &repo]);
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_repository_is_withdrawn_rather_than_bounced_forever() {
+        // The loop this prevents: this daemon is the only one declaring the
+        // repository, so releasing it means claiming and releasing the same work
+        // every poll, for ever, on a condition only a human can clear. Withdrawn
+        // from the offer, it bounces once and then shows up as unserved — a
+        // state the operator can act on.
+        let (q, cfg, qdir, repo) = fixture("not-a-repo");
+        // A configured name whose path is a directory with no `.git`.
+        let hollow = std::env::temp_dir().join(format!("sc-hollow-{}", std::process::id()));
+        std::fs::create_dir_all(&hollow).unwrap();
+        let mut cfg = cfg;
+        cfg.repos.push(crate::config::Repo {
+            name: "hollow".into(),
+            path: hollow.clone(),
+        });
+
+        let mut i = item("srv-1");
+        i.repo = "hollow".into();
+        let server = Scripted::with(vec![i]);
+        let turn = one_turn(&server, &Model("#".into()), &q, &cfg);
+
+        assert!(matches!(turn, Turn::Released { .. }), "{turn:?}");
+        assert_eq!(server.released.lock().unwrap().len(), 1);
+        assert_eq!(server.withdrawn.lock().unwrap().as_slice(), ["hollow"]);
+        cleanup(&[&qdir, &repo, &hollow]);
+    }
+
+    #[test]
+    fn an_interrupted_tree_still_defers_rather_than_handing_work_back() {
+        // The other side of the split. A rebase finishes on its own, so this
+        // machine IS the right one — handing the work back would send it to a
+        // daemon that cannot do it either, or straight back here.
+        let (q, cfg, qdir, repo) = fixture("still-defers");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("MERGE_HEAD"), "abc").unwrap();
+
+        let server = Scripted::with(vec![item("srv-1")]);
+        let turn = one_turn(&server, &Model("#".into()), &q, &cfg);
+
+        assert!(matches!(turn, Turn::Deferred { .. }), "{turn:?}");
+        assert!(server.released.lock().unwrap().is_empty());
+        assert!(server.failed.lock().unwrap().is_empty());
+        assert!(server.withdrawn.lock().unwrap().is_empty());
+        cleanup(&[&qdir, &repo]);
+    }
+
+    #[test]
+    fn a_daemon_declares_the_repositories_it_serves_when_it_polls() {
+        // What makes the server able to route at all. Asserted on the URL the
+        // transport builds, because a declaration that never leaves the machine
+        // is indistinguishable from not having one.
+        let transport = HttpTransport::new("https://example.test", "k", &["alpha", "beta"]);
+        let url = transport.url(&wire::route::work_for(&["alpha", "beta"]));
+        assert!(url.contains("repo=alpha"), "{url}");
+        assert!(url.contains("repo=beta"), "{url}");
+
+        // And withdrawing one takes it out of the offer.
+        transport.withdraw("alpha");
+        let left = transport.repos.lock().unwrap().clone();
+        assert_eq!(left, ["beta"]);
     }
 
     #[test]

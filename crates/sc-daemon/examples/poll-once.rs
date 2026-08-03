@@ -28,7 +28,7 @@ fn main() {
     };
     let spec = args.next();
 
-    let transport = HttpTransport::new(&url, &key);
+    let transport = HttpTransport::new(&url, &key, &[]);
     println!("polling {url}");
 
     let item = match transport.poll() {

@@ -65,6 +65,19 @@ pub enum Drafted {
     /// The repository was not in a state to write into. The task stays `Queued`
     /// so it runs when the developer has finished what they were doing.
     Deferred { reason: String },
+    /// **This machine** cannot do it, but another might. Handed back to the
+    /// server undone rather than reported as a failure.
+    ///
+    /// Separate from [`Failed`](Drafted::Failed) because the two say different
+    /// things to whoever filed the request: a failure means "this could not be
+    /// specified, look at it", where a release means "this machine is the wrong
+    /// one". With several daemons serving different repositories, collapsing
+    /// them destroys work that another machine could have done.
+    ///
+    /// Rare now that the server hands over only declared repositories, but not
+    /// unreachable: the configuration can change between the poll and the draft,
+    /// and a path that is not a git repository is only discovered here.
+    Released { reason: String },
     /// The run could not continue. Kept visible and never retried silently.
     Failed { reason: String },
 }
@@ -98,12 +111,18 @@ pub fn draft(
     let repo = match cfg.repo(&task.repo) {
         Some(r) => r.path.clone(),
         None => {
+            // Handed back, not failed. This says nothing about the request —
+            // only that this machine does not have that repository — and with
+            // several daemons the one that does may be polling right now.
+            //
+            // The local task returns to `Queued` rather than `Failed`, so the
+            // daemon's own record matches the server's.
             let reason = format!(
                 "no repository named {:?} is configured on this daemon",
                 task.repo
             );
-            queue.set_state(&task.id, TaskState::Failed, Some(reason.clone()))?;
-            return Ok(Drafted::Failed { reason });
+            queue.set_state(&task.id, TaskState::Queued, Some(reason.clone()))?;
+            return Ok(Drafted::Released { reason });
         }
     };
 
@@ -113,7 +132,18 @@ pub fn draft(
     if let Err(not_ready) = preflight::check(&repo) {
         let reason = not_ready.reason(&repo);
         queue.set_state(&task.id, TaskState::Queued, Some(reason.clone()))?;
-        return Ok(Drafted::Deferred { reason });
+        return Ok(match not_ready {
+            // A rebase finishes. Deferring costs one poll interval and the
+            // developer never has to requeue anything by hand.
+            preflight::NotReady::Interrupted { .. } => Drafted::Deferred { reason },
+            // A path that is not a git repository does **not** fix itself — it
+            // is a typo in `add-repo`, or a directory that moved. Deferring
+            // leaves the request claimed on the server, blocking that repository
+            // for a full claim timeout, and then does it again, for ever, on a
+            // condition only a human at a keyboard can clear. Hand it back so
+            // the queue keeps moving and the request becomes visible.
+            preflight::NotReady::NotARepo => Drafted::Released { reason },
+        });
     }
 
     // 3. Claim it. Doing this before the model call is what makes the repo busy
@@ -486,14 +516,21 @@ mod tests {
     }
 
     #[test]
-    fn a_task_naming_an_unconfigured_repo_fails_without_touching_anything() {
+    fn a_task_naming_an_unconfigured_repo_is_handed_back_without_touching_anything() {
+        // **Inverted deliberately.** It used to fail terminally, which with
+        // several daemons means the first one to poll destroys work another
+        // machine could have done. "This machine does not have that repository"
+        // says nothing about the request, so it goes back to the queue.
+        //
+        // Unchanged, and still the point: nothing was touched and no model was
+        // called.
         let (q, cfg, qdir, alpha, beta) = fixture("unknown-repo");
         let backend = Scripted::new("# never");
         let task = file_task(&q, "Add seat types", "gamma");
 
         let out = draft(&backend, &q, &cfg, &task).unwrap();
-        assert!(matches!(out, Drafted::Failed { .. }), "{out:?}");
-        assert_eq!(q.require(&task.id).unwrap().state, TaskState::Failed);
+        assert!(matches!(out, Drafted::Released { .. }), "{out:?}");
+        assert_eq!(q.require(&task.id).unwrap().state, TaskState::Queued);
         assert_eq!(*backend.calls.lock().unwrap(), 0);
         cleanup(&[&qdir, &alpha, &beta]);
     }

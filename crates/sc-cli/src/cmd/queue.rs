@@ -198,6 +198,13 @@ fn run(cli: &Cli, q: &sc_daemon::Queue, cfg: &sc_daemon::DaemonConfig) -> ExitCo
                         // Left Queued, so stop rather than spin on it forever.
                         break;
                     }
+                    sc_daemon::Drafted::Released { reason } => {
+                        // Reachable from the *local* queue too, where there is
+                        // no server to hand it back to — so it stops rather
+                        // than spinning, same as a deferral.
+                        eprintln!("  ↩ [{}] not for this machine — {reason}", task.id);
+                        break;
+                    }
                     sc_daemon::Drafted::Failed { reason } => {
                         eprintln!("  ✗ [{}] failed — {reason}", task.id);
                     }
@@ -280,12 +287,24 @@ fn serve(cli: &Cli, q: &sc_daemon::Queue, cfg: &sc_daemon::DaemonConfig) -> Exit
     // and every later request for it would be skipped in silence.
     reclaim_abandoned(q);
 
-    let transport = sc_daemon::HttpTransport::new(&link.url, &link.key);
+    // The names are what the server routes on: it hands this daemon only work
+    // for repositories it declared, so a second machine serving a different set
+    // is never offered work it cannot do.
+    let served = cfg.names();
+    let transport = sc_daemon::HttpTransport::new(&link.url, &link.key, &served);
     println!("● serve  {}", link.url);
     println!(
         "         {} repo(s) · specs only · Ctrl-C to stop",
         cfg.repos.len()
     );
+    if served.is_empty() {
+        // Otherwise this waits for ever, quietly, looking exactly like a server
+        // with nothing to hand out.
+        println!("         ⚠ no repositories configured — this daemon will be offered nothing");
+        println!("           add one with `smart-coder queue add-repo <name> <path>`");
+    } else {
+        println!("         serving {}", served.join(", "));
+    }
 
     // Ctrl-C terminates the process outright — there is no signal handler here,
     // because a dependency for one buys little: the queue is durable, so an
@@ -339,6 +358,12 @@ fn report_turn(turn: &sc_daemon::Turn) {
         }
         sc_daemon::Turn::Deferred { id, reason } => {
             println!("  · [{id}] deferred — {reason}");
+        }
+        sc_daemon::Turn::Released { id, reason } => {
+            // Not an error: the work went back to the queue for a machine that
+            // can do it. Worth printing, because the usual cause is a repository
+            // this daemon was expected to serve and does not.
+            println!("  ↩ [{id}] handed back — {reason}");
         }
         sc_daemon::Turn::Failed { id, reason } => {
             eprintln!("  ✗ [{id}] failed — {reason}");
