@@ -39,6 +39,8 @@ struct Shared {
     mailer: Box<dyn Mailer>,
     /// Serialises read-modify-write on `accounts.json` and `links.json`.
     write_lock: Mutex<()>,
+    /// Who is polling, and for what. Shared like the limiter above.
+    seen: Mutex<crate::daemons::Seen>,
 }
 
 /// How often the screening sweep looks for new filings.
@@ -72,6 +74,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         public: cfg.public.clone(),
         mailer: build_mailer(cfg),
         write_lock: Mutex::new(()),
+        seen: Mutex::new(crate::daemons::Seen::default()),
     });
 
     let server = tiny_http::Server::http(cfg.addr())
@@ -424,6 +427,7 @@ fn dispatch(shared: &Shared, req: &Req) -> Res {
         public: shared.public.as_ref(),
         mailer: shared.mailer.as_ref(),
         write_lock: &shared.write_lock,
+        seen: &shared.seen,
     };
     routes::handle(&mut ctx, req)
 }

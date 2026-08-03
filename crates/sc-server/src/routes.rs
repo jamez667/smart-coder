@@ -377,6 +377,12 @@ pub struct Ctx<'a> {
     /// developer enrolling two devices at once is not a real event. Self-serve
     /// public signup makes it one.
     pub write_lock: &'a Mutex<()>,
+    /// Which daemons have polled recently, and what they offered to serve.
+    ///
+    /// Read by the review page to say *why* a request is not moving, and written
+    /// by the poll. In memory and shared, like the rate limiter beside it —
+    /// see [`crate::daemons`] for why it is not on disk.
+    pub seen: &'a Mutex<crate::daemons::Seen>,
 }
 
 /// Route one request.
@@ -578,9 +584,26 @@ fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
 
 fn daemon_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str, by: &str) -> Res {
     if method == "GET" && path == wire::route::WORK {
-        // `Anything` for now: a later commit teaches the daemon to declare what
-        // it serves, and this is where that declaration will arrive.
-        return match ctx.store.claim_next(Serves::Anything, by) {
+        // Parsed from the **raw** path: `path` arrives already split on `?`,
+        // and the declaration is the part that was cut off.
+        let declared = crate::query::PollQuery::parse(&req.path);
+        // A daemon that named nothing is an older build, and gets what it always
+        // got. `These` only when it actually said something, so "declared
+        // nothing" and "serves nothing" stay different answers.
+        let serves = if declared.repos.is_empty() {
+            Serves::Anything
+        } else {
+            Serves::These(&declared.repos)
+        };
+
+        // Recorded before the claim, so a poll that finds nothing still counts
+        // as evidence this daemon is alive and offering these repositories —
+        // which is exactly the case the review page needs it for.
+        if let Ok(mut seen) = ctx.seen.lock() {
+            seen.saw(by, &declared.repos, !declared.repos.is_empty(), ctx.now_ms);
+        }
+
+        return match ctx.store.claim_next(serves, by) {
             Ok(Some(r)) => Res::ok_json(&PollResponse::work(work_item(&r))),
             // Nothing right now. The HTTP layer holds the connection open and
             // asks again; this body is what it sends if the hold expires.
@@ -720,7 +743,10 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
         ("GET", p) if p.starts_with("/request/") => {
             let id = p.trim_start_matches("/request/");
             match ctx.store.get(id) {
-                Ok(Some(r)) => Res::html(200, crate::page::detail(&r)),
+                Ok(Some(r)) => {
+                    let who = who_serves(ctx, &r.repo);
+                    Res::html(200, crate::page::detail(&r, &who))
+                }
                 Ok(None) => Res::html(404, crate::page::not_found()),
                 Err(e) => error(500, &e.to_string()),
             }
@@ -758,12 +784,32 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
                 _ => return error(404, "no such route"),
             };
             match outcome {
-                Ok(r) => Res::html(200, crate::page::detail(&r)),
+                Ok(r) => {
+                    let who = who_serves(ctx, &r.repo);
+                    Res::html(200, crate::page::detail(&r, &who))
+                }
                 Err(e) => Res::html(400, crate::page::message(&e.to_string())),
             }
         }
 
         _ => Res::html(404, crate::page::not_found()),
+    }
+}
+
+/// What the register says about who could draft work for `repo`.
+///
+/// A poisoned lock means another thread panicked mid-poll. Recovered rather than
+/// propagated, for the same reason the rate limiter recovers its own: this is a
+/// hint shown on a page, and refusing to render the page because the hint is
+/// unavailable would be a worse answer than rendering it without one.
+fn who_serves(ctx: &Ctx<'_>, repo: &str) -> crate::page::Who {
+    let seen = match ctx.seen.lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    crate::page::Who {
+        coverage: seen.coverage(repo, ctx.now_ms),
+        offered: seen.offered(ctx.now_ms),
     }
 }
 
@@ -1424,6 +1470,7 @@ mod tests {
         public: Option<PublicConfig>,
         mailer: crate::mail::testing::Recording,
         write_lock: Mutex<()>,
+        seen: Mutex<crate::daemons::Seen>,
         /// Advanced by tests that need a link to expire.
         now_ms: u64,
         /// One entry by default, so most tests read as a single-daemon server.
@@ -1464,6 +1511,7 @@ mod tests {
                 public: None,
                 mailer: crate::mail::testing::Recording::default(),
                 write_lock: Mutex::new(()),
+                seen: Mutex::new(crate::daemons::Seen::default()),
                 now_ms: 1_000,
                 daemon_keys: one_key("test-daemon", KEY),
             }
@@ -1524,6 +1572,7 @@ mod tests {
                 public: self.public.as_ref(),
                 mailer: &self.mailer,
                 write_lock: &self.write_lock,
+                seen: &self.seen,
             };
             handle(&mut ctx, req)
         }
@@ -1728,6 +1777,119 @@ mod tests {
             Bucket::Credential(auth::hash("laptop")),
             "the label is hashed before it becomes a key"
         );
+    }
+
+    #[test]
+    fn two_daemons_serving_different_repositories_both_get_work() {
+        // The arrangement this whole change exists for: a machine with the code
+        // for one repository and a machine with the code for another, polling
+        // the same server. Before, whichever asked first was handed work it
+        // could not do — and reported it as a terminal failure, destroying a
+        // request it merely could not reach.
+        let mut f = Fixture::new("two-daemons");
+        f.daemon_keys = vec![
+            crate::config::DaemonKey {
+                label: "laptop".into(),
+                key_hash: auth::hash(KEY),
+            },
+            crate::config::DaemonKey {
+                label: "office".into(),
+                key_hash: auth::hash(OTHER_KEY),
+            },
+        ];
+        let token = f.enrolled();
+        let alpha = f.file(&token, "something+for+alpha", "alpha");
+        let beta = f.file(&token, "something+for+beta", "beta");
+
+        let claim = |f: &mut Fixture, key: &str, repo: &str| -> Option<String> {
+            let res =
+                f.go(&Req::get(&format!("{}?repo={repo}", wire::route::WORK)).with_bearer(key));
+            let parsed: PollResponse = serde_json::from_str(&res.body).unwrap();
+            match parsed {
+                PollResponse::Work { item, .. } => Some(item.id),
+                PollResponse::Idle { .. } => None,
+            }
+        };
+
+        // Each takes its own, and neither is offered the other's.
+        assert_eq!(claim(&mut f, OTHER_KEY, "beta").as_deref(), Some(&beta[..]));
+        assert_eq!(
+            claim(&mut f, KEY, "alpha").as_deref(),
+            Some(&alpha[..]),
+            "alpha was still there for the daemon that serves it"
+        );
+    }
+
+    #[test]
+    fn a_daemon_is_never_handed_a_repository_it_did_not_declare() {
+        let mut f = Fixture::new("undeclared");
+        let token = f.enrolled();
+        f.file(&token, "something+for+alpha", "alpha");
+
+        let res = f.go(&Req::get(&format!("{}?repo=beta", wire::route::WORK)).with_bearer(KEY));
+        let parsed: PollResponse = serde_json::from_str(&res.body).unwrap();
+        assert!(
+            matches!(parsed, PollResponse::Idle { .. }),
+            "a daemon serving only beta must not be given alpha"
+        );
+        // And the request is untouched, still waiting for a daemon that can.
+        assert_eq!(
+            f.store.all().unwrap()[0].state,
+            crate::store::RequestState::Queued
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_declares_nothing_still_gets_work() {
+        // An older daemon does not know how to declare, and upgrading the server
+        // must not silently stop it.
+        let mut f = Fixture::new("declares-nothing");
+        let token = f.enrolled();
+        let id = f.file(&token, "anything", "alpha");
+
+        let res = f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+        let parsed: PollResponse = serde_json::from_str(&res.body).unwrap();
+        match parsed {
+            PollResponse::Work { item, .. } => assert_eq!(item.id, id),
+            PollResponse::Idle { .. } => panic!("an un-upgraded daemon must keep working"),
+        }
+    }
+
+    #[test]
+    fn a_request_nothing_serves_says_so_rather_than_waiting_silently() {
+        // "Waiting for a daemon to pick it up" is true and useless for a request
+        // that will never move. The page has to distinguish the two cases,
+        // because they send the operator to different places.
+        let mut f = Fixture::new("unserved-page");
+        let token = f.enrolled();
+        let id = f.file(&token, "something+for+alpha", "alpha");
+
+        // Nothing has polled at all.
+        let html = f
+            .go(&Req::get(&format!("/request/{id}")).with_cookie(&token))
+            .body;
+        assert!(html.contains("No daemon has connected"), "{html}");
+        assert!(html.contains("queue serve"), "it names the fix: {html}");
+
+        // Now a daemon polls, but serves something else entirely.
+        f.go(&Req::get(&format!("{}?repo=beta", wire::route::WORK)).with_bearer(KEY));
+        let html = f
+            .go(&Req::get(&format!("/request/{id}")).with_cookie(&token))
+            .body;
+        assert!(html.contains("No connected daemon serves"), "{html}");
+        assert!(html.contains("add-repo alpha"), "it names the fix: {html}");
+        assert!(
+            html.contains("<code>beta</code>"),
+            "and what is on offer: {html}"
+        );
+
+        // And once something serves it, the ordinary message comes back.
+        f.go(&Req::get(&format!("{}?repo=alpha", wire::route::WORK)).with_bearer(KEY));
+        let id2 = f.file(&token, "another+alpha+thing", "alpha");
+        let html = f
+            .go(&Req::get(&format!("/request/{id2}")).with_cookie(&token))
+            .body;
+        assert!(html.contains("Waiting for a daemon"), "{html}");
     }
 
     #[test]

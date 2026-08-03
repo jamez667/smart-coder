@@ -89,8 +89,35 @@ pub fn filed(r: &Request) -> String {
     )
 }
 
+/// What the server knows about who could draft this, for a request that is
+/// waiting.
+///
+/// Passed in rather than looked up here, because the register lives behind a
+/// lock and a page renderer that takes locks is one that can deadlock a request
+/// while producing HTML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Who {
+    pub coverage: crate::daemons::Coverage,
+    /// What live daemons *do* offer — shown when the wanted repository is not
+    /// among them, because "add it" is only actionable next to the names that
+    /// are already there.
+    pub offered: Vec<String>,
+}
+
+impl Default for Who {
+    /// Assumes a daemon is out there. The fallback for callers that have no
+    /// register to consult, and it produces the message this page showed before
+    /// any of this existed.
+    fn default() -> Self {
+        Who {
+            coverage: crate::daemons::Coverage::Served,
+            offered: Vec::new(),
+        }
+    }
+}
+
 /// One request, and its spec if there is one.
-pub fn detail(r: &Request) -> String {
+pub fn detail(r: &Request, who: &Who) -> String {
     // Half of spec 20's "provenance": *when*. The other half — which agent
     // profile produced it — has nothing to read from yet, and is recorded as
     // unbuilt rather than approximated with a backend name that reads
@@ -142,7 +169,47 @@ pub fn detail(r: &Request) -> String {
             }
         }
         (None, RequestState::Queued) => {
-            body.push_str("<p class=\"meta\">Waiting for a daemon to pick it up.</p>");
+            // "Waiting for a daemon to pick it up" is true of all three of
+            // these, and useless for two of them: a request nothing serves waits
+            // for ever, and the operator can only act if the page says which
+            // case it is. The two answers send them to different places.
+            match who.coverage {
+                crate::daemons::Coverage::Served => {
+                    body.push_str("<p class=\"meta\">Waiting for a daemon to pick it up.</p>");
+                }
+                crate::daemons::Coverage::NoDaemonSeen => {
+                    body.push_str(
+                        "<p class=\"note\">No daemon has connected, so nothing will pick \
+                         this up. Start one with <code>smart-coder queue serve</code>.</p>",
+                    );
+                }
+                crate::daemons::Coverage::Unserved => {
+                    // Each name escaped *before* the markup is joined around
+                    // them — escaping afterwards would escape this file's own
+                    // tags and print them at the reader.
+                    let offered = if who.offered.is_empty() {
+                        String::new()
+                    } else {
+                        let names: Vec<String> = who
+                            .offered
+                            .iter()
+                            .map(|n| format!("<code>{}</code>", esc(n)))
+                            .collect();
+                        format!(
+                            " The daemons that are connected serve {}.",
+                            names.join(", ")
+                        )
+                    };
+                    body.push_str(&format!(
+                        "<p class=\"note\">No connected daemon serves <code>{}</code>, so \
+                         nothing will pick this up.{offered} Add it with \
+                         <code>smart-coder queue add-repo {} &lt;path&gt;</code>, or discard \
+                         this request.</p>",
+                        esc(&r.repo),
+                        esc(&r.repo)
+                    ));
+                }
+            }
         }
         (None, RequestState::Claimed) => {
             body.push_str("<p class=\"meta\">Being drafted now.</p>");
@@ -408,7 +475,7 @@ mod tests {
             "# Spec\n<script>fetch('http://evil')</script>\n![x](http://evil/pixel)".to_string(),
         );
 
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(!html.contains("<script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
         // The Markdown image is inert text, not a request.
@@ -419,7 +486,7 @@ mod tests {
     fn a_request_typed_by_a_person_is_escaped_too() {
         // There is no trusted path: the text came off the public internet.
         let r = req("<b>bold</b> & \"quoted\"");
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("&lt;b&gt;"), "{html}");
         assert!(!html.contains("<b>bold</b>"), "{html}");
     }
@@ -454,7 +521,7 @@ mod tests {
         assert!(send_back < approve, "{actions}");
 
         // And deferring is free, and says so.
-        assert!(detail(&r).contains("decides nothing"));
+        assert!(detail(&r, &Who::default()).contains("decides nothing"));
     }
 
     #[test]
@@ -464,7 +531,7 @@ mod tests {
         let mut r = req("a thing");
         r.state = RequestState::AwaitingReview;
         r.spec = Some("# Spec".to_string());
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("name=\"notes\" required"), "{html}");
     }
 
@@ -477,7 +544,7 @@ mod tests {
         let mut r = req("a thing");
         r.state = RequestState::AwaitingReview;
         r.spec = Some("# Spec\nline\nline".to_string());
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
 
         let spec_ends = html.rfind("</pre>").unwrap();
         assert!(spec_ends < html.find("/send-back").unwrap(), "{html}");
@@ -492,7 +559,7 @@ mod tests {
         let mut r = req("a thing");
         r.state = RequestState::AwaitingReview;
         r.spec = Some("# Spec".to_string());
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
 
         assert!(html.contains("action=\"/request/r-1/approve\""), "{html}");
         assert!(!html.contains("/approve/confirm"), "{html}");
@@ -602,7 +669,10 @@ mod tests {
         r.state = RequestState::AwaitingReview;
         r.spec = Some("# Spec".to_string());
 
-        for html in [detail(&r), confirm_approve(&r, "# Spec", "d")] {
+        for html in [
+            detail(&r, &Who::default()),
+            confirm_approve(&r, "# Spec", "d"),
+        ] {
             for hazard in [
                 "animation-timeline",
                 "scroll-timeline",
@@ -634,7 +704,7 @@ mod tests {
         r.filed_ms = crate::store::now_ms() - 7_200_000;
         r.drafted_ms = Some(crate::store::now_ms() - 120_000);
 
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("filed 2 hr ago"), "{html}");
         assert!(html.contains("drafted 2 min ago"), "{html}");
     }
@@ -642,7 +712,7 @@ mod tests {
     #[test]
     fn an_undrafted_request_shows_no_drafted_time() {
         let r = req("a thing");
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("filed "), "{html}");
         assert!(!html.contains("drafted "), "there is no draft yet: {html}");
     }
@@ -654,7 +724,7 @@ mod tests {
         let mut r = req("a thing");
         r.state = RequestState::AwaitingReview;
         r.spec = Some("# Spec".to_string());
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("href=\"#decide\""), "{html}");
         assert!(html.contains("id=\"decide\""), "the anchor exists: {html}");
     }
@@ -664,7 +734,7 @@ mod tests {
         // Approving a queued request would be signing off a spec that does not
         // exist.
         let r = req("a thing");
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(!html.contains("/approve"), "{html}");
         assert!(html.contains("Waiting for a daemon"), "{html}");
     }
@@ -676,7 +746,7 @@ mod tests {
         r.state = RequestState::Ready;
         r.spec = Some("# Spec".to_string());
         r.artifact_dir = Some("specs/a-thing".to_string());
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("nothing has been built"), "{html}");
         assert!(html.contains("specs/a-thing"), "{html}");
     }
@@ -794,7 +864,7 @@ mod tests {
         // deletion.
         let mut r = req("a thing");
         r.state = RequestState::Quarantined;
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("/request/r-1/release"), "{html}");
         assert!(html.contains("Nothing has run on your machine"), "{html}");
     }
@@ -805,7 +875,7 @@ mod tests {
         // catch-all arm.
         let mut r = req("a thing");
         r.state = RequestState::Screening;
-        let html = detail(&r);
+        let html = detail(&r, &Who::default());
         assert!(html.contains("screened"), "{html}");
     }
 

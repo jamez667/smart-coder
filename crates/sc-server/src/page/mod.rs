@@ -28,7 +28,7 @@ use crate::i18n::Locale;
 // which is what makes this a mechanical move rather than a rewrite.
 pub use private::{
     accounts_page, confirm_approve, detail, enrol_page, enrol_page_with_error, enrolled_page,
-    filed, index, message, not_found,
+    filed, index, message, not_found, Who,
 };
 pub use public::{
     landing_page, public_detail, public_file_page, public_filed, public_message, public_not_found,
@@ -824,7 +824,10 @@ pub(crate) mod corpus {
     pub fn private() -> Vec<(&'static str, String)> {
         vec![
             ("index", index(&[req()])),
-            ("detail", detail(&reviewable())),
+            (
+                "detail",
+                detail(&reviewable(), &crate::page::Who::default()),
+            ),
             ("confirm_approve", confirm_approve(&req(), "# Spec", "d")),
             ("accounts_page", accounts_page(&Accounts::default())),
             ("enrol_page", enrol_page()),
