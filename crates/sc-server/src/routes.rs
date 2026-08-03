@@ -481,6 +481,13 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     }
 
     // Everything else is the developer's own surface.
+    //
+    // **This pattern is what makes the owner role safe.** An owner may decline
+    // work and may not approve it, and that is not enforced by a check inside
+    // the approve handler — it is enforced here, by `Caller::Owner` not being
+    // `Caller::Device`. Every admitting verb lives past this line, so there is
+    // no value of that variant which reaches one. An owner's own surface is
+    // public-side, above.
     let Some(Caller::Device { .. }) = caller else {
         // **The enrolment page lives at `/enrol` and nowhere else.** It used to
         // be what any un-enrolled GET rendered, which made every wrong URL look
@@ -521,6 +528,10 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         // server and costs a confirmed mailbox to obtain — the caller cannot vary
         // it to mint fresh budgets.
         Some(Caller::Account { id }) => Bucket::Credential(auth::hash(id)),
+        // Keyed on the login, so one owner's browser cannot spend another's
+        // budget. Safe to key on for the same reason an account id is: it was
+        // resolved by this server from configuration, not sent by the caller.
+        Some(Caller::Owner { login, .. }) => Bucket::Credential(auth::hash(login)),
         None if is_public_path(path) => {
             // Asking for a link costs an email; spending one costs a disk write.
             // Everything else on the public surface is a page render, and
@@ -588,11 +599,31 @@ fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
     // Only now is the account store read — lazily, and only when a public
     // surface exists at all. It is unbounded and attacker-sized, so parsing it
     // on every request would let a stranger choose how much work each one costs.
-    ctx.public?;
+    let public = ctx.public?;
     let accounts = ctx.store.accounts().ok()?;
-    accounts
-        .session_for(token)
-        .map(|a| Caller::Account { id: a.id.clone() })
+    let account = accounts.session_for(token)?;
+
+    // An account whose identity is a GitHub login the configuration names is an
+    // **owner**. Checked here, after the account lookup and against a value
+    // already in hand, so the order above is untouched: the device store is
+    // still first, the account file is still read once and only where a public
+    // surface exists, and this adds no store access at all.
+    //
+    // The direction matters. An owner is an account the *configuration*
+    // promotes — never one that promotes itself — so deleting the line from
+    // `SC_SERVER_OWNERS` demotes them on their very next request, with no
+    // session to hunt down and no record to rewrite.
+    if let Some(login) = account.github_login.as_deref() {
+        if let Some(owner) = public.owners.iter().find(|o| o.login == login) {
+            return Some(Caller::Owner {
+                login: owner.login.clone(),
+                repos: owner.repos.clone(),
+            });
+        }
+    }
+    Some(Caller::Account {
+        id: account.id.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1613,7 +1644,21 @@ mod tests {
                 max_daily_filings: crate::config::DEFAULT_MAX_DAILY_FILINGS,
                 max_accounts: crate::config::DEFAULT_MAX_ACCOUNTS,
                 show_spec: true,
+                // No owner role unless a test asks for one, which is the
+                // resting state of every deployment.
+                owners: Vec::new(),
             });
+            self
+        }
+
+        /// Name an owner, as the configuration would.
+        fn with_owner(mut self, login: &str, repos: &[&str]) -> Fixture {
+            if let Some(p) = self.public.as_mut() {
+                p.owners.push(crate::config::Owner {
+                    login: login.to_ascii_lowercase(),
+                    repos: repos.iter().map(|r| r.to_string()).collect(),
+                });
+            }
             self
         }
 
@@ -1676,6 +1721,25 @@ mod tests {
         }
 
         /// Sign in as a filer, returning the session cookie.
+        /// Sign in as somebody who authenticated with GitHub, returning the
+        /// session cookie.
+        ///
+        /// Builds the account directly because the OAuth routes do not exist
+        /// yet — this is precisely what their callback will do, so the *rest*
+        /// of the owner behaviour can be proven before the flow that produces
+        /// it. Whether the login is an owner still comes from the configuration,
+        /// which is the property under test.
+        fn signed_in_as_github(&mut self, login: &str) -> String {
+            let mut accounts = self.store.accounts().unwrap();
+            let account =
+                accounts.create(&auth::hash(&format!("github:{login}")), login, self.now_ms);
+            let idx = accounts.accounts.len() - 1;
+            accounts.accounts[idx].github_login = Some(login.to_ascii_lowercase());
+            let session = accounts.open_session(&account.id, self.now_ms);
+            self.store.put_accounts(&accounts).unwrap();
+            session
+        }
+
         fn signed_in(&mut self, email: &str) -> String {
             let asked = self.go(&Req::post(
                 public_route::SIGNIN,
@@ -2828,6 +2892,90 @@ mod tests {
         // Not found, not forbidden: "forbidden" would confirm the id exists.
         assert_eq!(res.status, 404, "{}", res.body);
         assert!(!res.body.contains("alice thing"), "{}", res.body);
+    }
+
+    #[test]
+    fn an_owner_cannot_reach_any_admitting_verb() {
+        // **The property this role turns on.** An owner may decide against work
+        // and may not decide for it — and that is not a check inside the approve
+        // handler, it is `Caller::Owner` failing to match the `Caller::Device`
+        // pattern the private surface is gated on. There is no value of the
+        // variant that gets past it.
+        //
+        // Iterates the shared constant, so a verb added later is covered without
+        // anyone remembering to extend this list. Every one of them is closed to
+        // an owner today; commit 5 opens exactly `send-back` and `discard`, on
+        // the *public* side, and this test keeps guarding the private one.
+        let mut f = Fixture::new("owner-no-approve")
+            .with_public(false)
+            .with_owner("jamez667", &["intake"]);
+        let owner = f.signed_in_as_github("jamez667");
+
+        let filer = f.signed_in("jo@x.com");
+        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&filer));
+        let id = f.store.all().unwrap()[0].id.clone();
+
+        for verb in REVIEW_VERBS {
+            let res = f.go(&Req::post(&format!("/request/{id}/{verb}"), "").with_cookie(&owner));
+            assert_eq!(res.status, 401, "an owner reached {verb}: {}", res.body);
+        }
+        // And the developer's own review surface is not theirs either.
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&owner))
+                .status,
+            404
+        );
+    }
+
+    #[test]
+    fn an_owner_is_recognised_only_because_the_configuration_says_so() {
+        // An owner is an account the configuration *promotes*, never one that
+        // promotes itself — so the same signed-in session is an owner or is not,
+        // depending on a setting the operator controls.
+        let mut f = Fixture::new("owner-from-config").with_public(false);
+        let session = f.signed_in_as_github("jamez667");
+
+        // Not named: an ordinary filer, and the filing form is what they get.
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
+                .status,
+            200
+        );
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            404,
+            "a GitHub login alone grants nothing"
+        );
+    }
+
+    #[test]
+    fn removing_an_owner_from_the_configuration_demotes_a_live_session() {
+        // Why owners live in configuration and not in a record: deleting the
+        // line and redeploying IS revocation, with no session to hunt down.
+        let mut f = Fixture::new("owner-demote")
+            .with_public(false)
+            .with_owner("jamez667", &["intake"]);
+        let session = f.signed_in_as_github("jamez667");
+
+        // Named — and even so, the private surface stays closed to them.
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            404
+        );
+
+        // The operator deletes the entry and redeploys.
+        if let Some(p) = f.public.as_mut() {
+            p.owners.clear();
+        }
+        // Still a working session, still not an owner — no record was rewritten
+        // and nothing had to be revoked.
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
+                .status,
+            200
+        );
     }
 
     #[test]

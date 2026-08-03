@@ -136,6 +136,28 @@ pub enum Caller {
     /// variant rather than a flag on `Device` so the review routes can be
     /// unreachable by *type* rather than by remembering to check a boolean.
     Account { id: String },
+    /// Somebody the configuration names as an owner of particular repositories.
+    ///
+    /// **A third variant, not a flag and not a `Device`.** An owner may decide
+    /// *against* work — send it back, discard it — and may not decide *for* it.
+    /// The verbs that admit work live behind a `Caller::Device` match, so an
+    /// owner cannot reach them: not because a check refuses, but because there
+    /// is no value of this variant that satisfies that pattern.
+    ///
+    /// The asymmetry is not that approving touches the repository — it does not;
+    /// it flips a state and writes one file. It is that **approving is the
+    /// signal a spec is fit to become work on the developer's machine**, and
+    /// that is a decision the developer has not delegated. Declining fails
+    /// towards *lost* work, which the filer can re-file and the developer can
+    /// see; approving fails towards *admitted* work, which is invisible until it
+    /// costs something.
+    ///
+    /// Carries the repositories the configuration says are theirs, resolved once
+    /// when the caller is identified. Passing the *names* rather than the login
+    /// means every filtering site asks "is this request's repository in the
+    /// caller's set?" instead of re-deriving the answer from the login — and a
+    /// site that forgot to re-derive would show an owner everything.
+    Owner { login: String, repos: Vec<String> },
 }
 
 /// Why a request was refused.

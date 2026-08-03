@@ -190,6 +190,29 @@ services:
       # away. Setting either turns the public surface on.
       SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
 
+      # Who may review work, and for which repositories:
+      #
+      #     SC_SERVER_OWNERS=jamez667:smart-coder|memosy,someone:memosy
+      #
+      # `|` between one owner's repositories, `,` between owners. Every name
+      # must appear in SC_SERVER_PUBLIC_REPOS above, or the server refuses to
+      # start — an entry that looks applied and grants nothing is worse than one
+      # that fails loudly.
+      #
+      # An owner signs in with GitHub and may READ the drafted specs for their
+      # own repositories and DECLINE them — send back, discard. They may not
+      # approve: approving is the signal that a spec is fit to become work on
+      # the developer's machine, and that decision stays with the developer.
+      # Declining loses work, which is visible and re-filable; approving admits
+      # work, which is not.
+      #
+      # NOTHING IS CHECKED AGAINST GITHUB. Signing in proves who somebody is;
+      # this list is the only thing deciding what they may see. Treat it the way
+      # you would a repository's collaborator list.
+      #
+      # Empty is the resting state: no owner role at all.
+      SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
+
       # What the masthead calls this site. Defaults to PUBLIC_REPO.
       #
       # Separate from it because that one is a ROUTING KEY the daemon matches

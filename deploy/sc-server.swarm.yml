@@ -66,6 +66,13 @@ services:
       # The single-repository form, still read so an existing install keeps
       # working. Both together are a union.
       SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
+
+      # Who may review work: `login:repo|repo`, comma-separated between owners.
+      # An owner signs in with GitHub and may read and DECLINE their own
+      # repositories' specs, never approve. Nothing is checked against GitHub —
+      # this list is the authorization model, so every name must also appear in
+      # SC_SERVER_PUBLIC_REPOS or the server refuses to start.
+      SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
       # What the masthead calls the site. A label, not the routing key above.
       SC_SERVER_PUBLIC_SITE_NAME: ${SC_SERVER_PUBLIC_SITE_NAME:-}
       # https, absolute. Sign-in links are built from it.

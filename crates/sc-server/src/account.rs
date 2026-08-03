@@ -65,6 +65,22 @@ pub struct Account {
     /// with that?".
     #[serde(default)]
     pub revoked: bool,
+    /// The GitHub login this account signed in with, lowercased, when it did.
+    ///
+    /// **Not a permission.** It says who somebody proved they are, and nothing
+    /// about what they may see — whether this login is an *owner* comes from the
+    /// configuration, checked on every request. So removing a name from
+    /// `SC_SERVER_OWNERS` demotes them immediately, and this field is left
+    /// alone: it remains a true statement about how they signed in.
+    ///
+    /// `None` for an account created by a magic link, which is every account
+    /// that existed before GitHub sign-in — hence `#[serde(default)]`.
+    ///
+    /// Storing the login rather than the numeric id is the same trade the
+    /// configuration makes: the operator writes a name they recognise, and the
+    /// two have to be comparable.
+    #[serde(default)]
+    pub github_login: Option<String>,
 }
 
 /// A signed-in browser.
@@ -230,6 +246,9 @@ impl Accounts {
             email_hint: email_hint.to_string(),
             created_ms: now_ms,
             revoked: false,
+            // A magic-link signup. GitHub sign-in sets this at creation, and it
+            // is the only way an account ever acquires one.
+            github_login: None,
         };
         self.accounts.push(account.clone());
         account

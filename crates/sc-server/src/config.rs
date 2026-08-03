@@ -152,6 +152,50 @@ impl Repos {
     }
 }
 
+/// Somebody who may review work for particular repositories.
+///
+/// **The allowlist is the whole authorization model**, and deliberately so. The
+/// server makes no call to GitHub to ask whether a person has anything to do
+/// with a repository, so this setting is the only thing standing between a
+/// GitHub account and every drafted spec for a project — and a drafted spec is
+/// model output produced by reading the developer's tree.
+///
+/// That is why every entry is validated at startup and why the failures are
+/// refusals rather than empty views: an owner naming a repository this surface
+/// does not serve is a typo that would otherwise look applied and grant nothing.
+///
+/// **Repository access is not checked against GitHub.** Signing in proves who
+/// somebody is and nothing more; what they may see comes from here. Adding the
+/// check later reads this same field and calls the API *in addition* — there is
+/// nothing stored to migrate, which is why owners live in configuration rather
+/// than in a record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    /// The GitHub **login**, lowercased. Not the numeric id.
+    ///
+    /// The id is the stabler identifier, and that argument does not apply here:
+    /// an operator writes this setting by hand from a name they recognise, and
+    /// nobody knows their collaborator's numeric id. A login change makes the
+    /// entry stop matching — a person who cannot sign in and says so, which is
+    /// the safe direction to fail.
+    pub login: String,
+    /// Which repositories this owner may review.
+    ///
+    /// Never empty: an entry naming none is refused at startup rather than
+    /// producing somebody who signs in successfully and looks at a blank page.
+    pub repos: Vec<String>,
+}
+
+impl Owner {
+    /// May this owner see work for `repo`?
+    ///
+    /// Exact, like every other repository comparison in this crate — and this
+    /// one decides whether one person's project is visible to another.
+    pub fn owns(&self, repo: &str) -> bool {
+        self.repos.iter().any(|r| r == repo)
+    }
+}
+
 /// What the public surface needs before it may exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicConfig {
@@ -252,8 +296,18 @@ pub struct PublicConfig {
     /// Defaults **on**, which is a deliberate choice worth understanding: the
     /// drafted spec is model output produced by reading the developer's
     /// repository, and the filer wrote the prompt that produced it. Turn it off
-    /// for a repository whose contents should not be described to strangers.
+    /// where the contents should not be described to strangers.
+    ///
+    /// **Per surface, not per repository** — the phrasing here used to say "for
+    /// a repository", which is no longer accurate and was never quite
+    /// implementable: this is read on the landing page and the list, which show
+    /// several repositories at once and have no single answer.
     pub show_spec: bool,
+    /// Who may review work, and for which repositories.
+    ///
+    /// Empty means the owner role does not exist on this surface — the resting
+    /// state, and what every deployment has until an operator names somebody.
+    pub owners: Vec<Owner>,
 }
 
 /// How the sign-in link is sent.
@@ -320,6 +374,13 @@ pub mod env {
     pub const ENROL_CODE: &str = "SC_SERVER_ENROL_CODE";
 
     /// Set to turn the public surface on. Everything below is then required.
+    /// Who may review work, and for which repositories:
+    /// `jamez667:smart-coder|memosy,someone:memosy`.
+    ///
+    /// **This list is the authorization model.** Nothing is checked against
+    /// GitHub, so an entry here is the only thing granting sight of a project's
+    /// drafted specs.
+    pub const OWNERS: &str = "SC_SERVER_OWNERS";
     /// The repositories the public surface collects for, comma-separated:
     /// `smart-coder,memosy`. Setting this or [`PUBLIC_REPO`] turns the surface
     /// on.
@@ -599,6 +660,91 @@ fn public_repos(
     Ok(Some(Repos(out)))
 }
 
+/// Who may review work, and for what.
+///
+/// `login:repo|repo`, comma-separated between owners:
+///
+/// ```text
+/// SC_SERVER_OWNERS=jamez667:smart-coder|memosy,someone:memosy
+/// ```
+///
+/// **`|` inside an entry and `,` between them**, rather than commas throughout.
+/// With one separator doing both jobs a parser would have to guess whether the
+/// next token started a new owner by looking for a colon — exactly the ambiguity
+/// `split_once(':')` was chosen to avoid.
+///
+/// Every failure here is a refusal to start, because this list *is* the
+/// authorization model: a setting that looks applied and grants the wrong thing
+/// is worse than a server that will not boot.
+fn owners(
+    get: &impl Fn(&str) -> Option<String>,
+    repos: &Repos,
+) -> std::result::Result<Vec<Owner>, String> {
+    let Some(raw) = opt(get, env::OWNERS) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out: Vec<Owner> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let Some((login, names)) = entry.split_once(':') else {
+            return Err(format!(
+                "{} entries are `login:repo|repo`, but {entry:?} has no colon. \
+                 For example: jamez667:smart-coder|memosy",
+                env::OWNERS
+            ));
+        };
+        // Lowercased on the way in so a setting written `Jamez667` matches the
+        // login GitHub reports, rather than silently granting nothing.
+        let login = login.trim().to_ascii_lowercase();
+        if login.is_empty() {
+            return Err(format!(
+                "a {} entry has no login before its colon: {entry:?}",
+                env::OWNERS
+            ));
+        }
+
+        let owned: Vec<String> = names
+            .split('|')
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+            .collect();
+        if owned.is_empty() {
+            return Err(format!(
+                "{login:?} is an owner of no repositories. Name at least one \
+                 after the colon, or leave them out of {} — an owner who may see \
+                 nothing signs in successfully and looks at a blank page.",
+                env::OWNERS
+            ));
+        }
+        for repo in &owned {
+            if !repos.accepts(repo) {
+                return Err(format!(
+                    "{login:?} is an owner of {repo:?}, which this surface does \
+                     not serve. Add it to {} or fix the spelling — otherwise the \
+                     setting looks applied and grants nothing.",
+                    env::PUBLIC_REPOS
+                ));
+            }
+        }
+        // Refused rather than merged. Two entries for one person is a mistake,
+        // and merging them would mean deleting one to revoke somebody left them
+        // with access from the other.
+        if out.iter().any(|o| o.login == login) {
+            return Err(format!(
+                "{login:?} is listed twice in {}. One entry per owner, or \
+                 removing one would not remove them.",
+                env::OWNERS
+            ));
+        }
+        out.push(Owner {
+            login,
+            repos: owned,
+        });
+    }
+    Ok(out)
+}
+
 /// Read a boolean switch. **Off unless plainly turned on.**
 ///
 /// Only the affirmative spellings count, so `SC_SERVER_MAIL_TO_CONSOLE=false`
@@ -691,6 +837,10 @@ fn public_from(
                 ))
             }
         },
+        // Validated against the set below, so an owner of a repository this
+        // surface does not serve is caught here rather than at their first
+        // sign-in. Read before `repos` is moved into the struct.
+        owners: owners(get, &repos)?,
         repos,
         // Computed before `base_url` is moved, and from the same value the
         // `https://` check above ran on.
@@ -1004,6 +1154,80 @@ mod tests {
         vars[1] = (env::PUBLIC_REPOS, Box::leak(entry.into_boxed_str()));
         let err = load(&vars).unwrap_err();
         assert!(err.contains("typo"), "{err}");
+    }
+
+    #[test]
+    fn owners_are_read_with_the_repositories_they_own() {
+        let mut vars = public_vars_multi();
+        vars.push((env::OWNERS, "jamez667:intake|memosy,someone:memosy"));
+        let p = load(&vars).unwrap().public.unwrap();
+
+        assert_eq!(p.owners.len(), 2);
+        assert_eq!(p.owners[0].login, "jamez667");
+        assert_eq!(p.owners[0].repos, ["intake", "memosy"]);
+        assert!(p.owners[1].owns("memosy"));
+        assert!(!p.owners[1].owns("intake"), "not theirs");
+    }
+
+    #[test]
+    fn an_owners_login_is_lowercased_so_the_setting_matches_github() {
+        // GitHub reports a login in its own casing. A setting written the way a
+        // person types a name must still match, or it grants nothing while
+        // looking applied.
+        let mut vars = public_vars_multi();
+        vars.push((env::OWNERS, "JameZ667:intake"));
+        let p = load(&vars).unwrap().public.unwrap();
+        assert_eq!(p.owners[0].login, "jamez667");
+    }
+
+    #[test]
+    fn an_owner_of_a_repository_this_surface_does_not_serve_is_refused() {
+        // The allowlist IS the authorization model, so a typo in it must not be
+        // a silently-empty view somebody investigates weeks later.
+        let mut vars = public_vars_multi();
+        vars.push((env::OWNERS, "jamez667:intake|typo-repo"));
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("does not serve"), "{err}");
+        assert!(
+            err.contains("typo-repo"),
+            "it names the one at fault: {err}"
+        );
+    }
+
+    #[test]
+    fn an_owner_of_no_repositories_is_refused() {
+        // Fails closed: somebody who signs in successfully and sees a blank page
+        // has no way to tell that from a bug.
+        let mut vars = public_vars_multi();
+        vars.push((env::OWNERS, "jamez667:"));
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("no repositories"), "{err}");
+    }
+
+    #[test]
+    fn an_owner_listed_twice_is_refused() {
+        // Merging them would mean deleting one entry to revoke somebody leaves
+        // them with access from the other.
+        let mut vars = public_vars_multi();
+        vars.push((env::OWNERS, "jamez667:intake,jamez667:memosy"));
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn an_owner_entry_without_a_colon_says_what_the_shape_is() {
+        let mut vars = public_vars_multi();
+        vars.push((env::OWNERS, "jamez667"));
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("login:repo"), "{err}");
+    }
+
+    #[test]
+    fn no_owners_is_the_resting_state() {
+        // Every deployment until an operator names somebody, and the surface
+        // works exactly as it did before the role existed.
+        let p = load(&public_vars()).unwrap().public.unwrap();
+        assert!(p.owners.is_empty());
     }
 
     #[test]
