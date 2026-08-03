@@ -111,6 +111,32 @@ pub fn signin_page_in(locale: Locale) -> String {
     )
 }
 
+/// The step before GitHub: what is about to happen, and a link.
+///
+/// **A link, not a redirect.** The reader sees where they are going before they
+/// go, which is the honest version of an OAuth hop — and it needs no `Location`
+/// header, which this server's response type deliberately does not carry.
+///
+/// The URL is built by this crate from configuration, never from anything a
+/// caller sent, so there is no open redirect here to find.
+pub fn github_start_page(authorize_url: &str, locale: Locale) -> String {
+    let s = locale.strings();
+    public_shell(
+        locale,
+        s.github_title,
+        &format!(
+            "<h1>{title}</h1><p>{intro}</p>\
+             <p><a class=\"cta\" href=\"{url}\">{go}</a></p>\
+             <p class=\"meta\">{note}</p>",
+            title = esc(s.github_title),
+            intro = esc(s.github_intro),
+            url = esc(authorize_url),
+            go = esc(s.github_go),
+            note = esc(s.github_note),
+        ),
+    )
+}
+
 /// Shown after asking for a link — **identical whatever actually happened**.
 ///
 /// New address, existing account, revoked account, malformed input, over the

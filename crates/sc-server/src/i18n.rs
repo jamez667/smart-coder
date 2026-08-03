@@ -235,6 +235,12 @@ pub struct Strings {
     /// The repository picker's label. Shown only when the surface serves more
     /// than one — the names themselves are never translated.
     pub file_repo_label: &'static str,
+    pub github_title: &'static str,
+    pub github_intro: &'static str,
+    pub github_go: &'static str,
+    pub github_note: &'static str,
+    pub github_failed: &'static str,
+    pub github_busy: &'static str,
     /// Shown when a filing names a repository this surface does not collect
     /// for. Deliberately says nothing about which ones it *does* — the picker
     /// already lists those to anyone who reached the form honestly.
@@ -421,6 +427,12 @@ mod tests {
             s.file_spec_note,
             s.file_kind_label,
             s.file_repo_label,
+            s.github_title,
+            s.github_intro,
+            s.github_go,
+            s.github_note,
+            s.github_failed,
+            s.github_busy,
             s.file_repo_unknown,
             s.file_mine_heading,
             s.file_nothing_yet,

@@ -31,8 +31,9 @@ pub use private::{
     filed, index, message, not_found, Who,
 };
 pub use public::{
-    landing_page, public_detail, public_file_page, public_filed, public_message, public_not_found,
-    signin_confirm_page, signin_failed_page, signin_page, signin_page_in, signin_sent_page,
+    github_start_page, landing_page, public_detail, public_file_page, public_filed, public_message,
+    public_not_found, signin_confirm_page, signin_failed_page, signin_page, signin_page_in,
+    signin_sent_page,
 };
 
 /// Escape for HTML text content and attributes.
@@ -891,6 +892,10 @@ pub(crate) mod corpus {
                 ("signin_failed_page", signin_failed_page(true, l)),
                 ("signin_failed_page", signin_failed_page(false, l)),
                 (
+                    "github_start_page",
+                    github_start_page("https://github.test/login/oauth/authorize?x=1", l),
+                ),
+                (
                     "public_file_page",
                     public_file_page(&[req()], &crate::config::Repos::new(&["alpha"]), true, l),
                 ),
@@ -944,13 +949,45 @@ mod tests {
         // Script is permitted here; a *remote* subresource is not. One
         // hallucinated remote image in a rendered spec still leaks the page URL
         // through `Referer`, and that argument is unchanged by allowing script.
+        //
+        // **`github_start_page` is the one exception, and only for the URL.** Its
+        // whole purpose is to send a reader to GitHub, and a link they click is
+        // not a subresource: nothing is fetched while rendering, so there is no
+        // silent request and nothing leaks unless they choose to go. The
+        // subresource hazards below still apply to it, which is why the
+        // exemption is one hazard rather than the whole page — a remote `<img>`
+        // appearing on it would still fail here.
         for (name, html) in corpus::public() {
+            let leaving_on_purpose = name == "github_start_page";
             for hazard in [
                 "http://", "https://", "<img", "<link", "@import", "url(http",
             ] {
+                let is_the_url =
+                    leaving_on_purpose && (hazard == "https://" || hazard == "http://");
+                if is_the_url {
+                    continue;
+                }
                 assert!(!html.contains(hazard), "{name} contains {hazard}");
             }
         }
+    }
+
+    #[test]
+    fn the_only_page_that_links_off_site_links_to_one_place() {
+        // The exemption above is narrow, and this is what keeps it honest: the
+        // page may carry a remote URL, and it must be the authorize link and
+        // nothing else. A second remote reference appearing here — an icon, a
+        // stylesheet — would show up as a count greater than one.
+        let html = github_start_page("https://github.test/login/oauth/authorize?x=1", Locale::En);
+        assert_eq!(
+            html.matches("https://").count(),
+            1,
+            "exactly one off-site reference: {html}"
+        );
+        assert!(
+            html.contains("<a class=\"cta\" href=\"https://github.test/"),
+            "{html}"
+        );
     }
 
     #[test]

@@ -77,6 +77,12 @@ pub mod public_route {
     /// `/public/signin/<token>` — `GET` renders and **changes nothing**;
     /// `POST` spends the link.
     pub const SIGNIN_PREFIX: &str = "/public/signin/";
+    /// Start a GitHub sign-in — renders a page with a link, and **changes
+    /// nothing a GET should not**: it mints a state token, which is the one
+    /// write, and is what makes the link single-use.
+    pub const AUTH_GITHUB: &str = "/public/auth/github";
+    /// Where GitHub sends a reader back, with `?code=…&state=…`.
+    pub const AUTH_GITHUB_CALLBACK: &str = "/public/auth/github/callback";
     /// End a session.
     pub const SIGNOUT: &str = "/public/signout";
     /// `/public/request/<id>` — one of the filer's own requests.
@@ -507,6 +513,172 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     browser_route(ctx, req, method, &path)
 }
 
+/// Begin a GitHub sign-in: mint a state token and offer the link.
+///
+/// **A page with a link, not a redirect.** [`Res`] carries no `Location` header
+/// and giving it one means changing the response writer for a single route —
+/// and `set_language` records the standing objection to redirects on a surface
+/// anyone can reach. A link also stays inside the CSP as written, where a form
+/// posting to github.com would be refused by `form-action 'self'`.
+fn start_github(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
+    let Some(github) = ctx.public.and_then(|p| p.github.as_ref()) else {
+        // No application configured: the route does not exist, rather than
+        // existing and failing after a trip to GitHub.
+        return Res::html(404, crate::page::public_not_found(locale));
+    };
+    let client = crate::oauth::HttpGithub::new(&github.client_id, &github.client_secret);
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut states = match ctx.store.oauth_states() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    states.sweep(ctx.now_ms);
+    // Bounded before minting, so the file cannot be grown without limit by
+    // anyone who can reach the start of the flow.
+    if states.outstanding(ctx.now_ms) >= crate::oauth::MAX_OUTSTANDING_STATES {
+        return Res::html(
+            429,
+            crate::page::public_message(locale.strings().github_busy, locale),
+        );
+    }
+    let state = states.issue(ctx.now_ms);
+    if let Err(e) = ctx.store.put_oauth_states(&states) {
+        return error(500, &e.to_string());
+    }
+    drop(_guard);
+
+    Res::html(
+        200,
+        crate::page::github_start_page(&client.authorize_url(&state), locale),
+    )
+}
+
+/// Come back from GitHub: spend the state, exchange the code, open a session.
+///
+/// Every failure renders the same page. The reader can only act on "it did not
+/// work, try again", and distinguishing a forged state from an expired one for
+/// them would tell an attacker which half they got right.
+fn finish_github(ctx: &mut Ctx<'_>, req: &Req, locale: Locale) -> Res {
+    let Some(github) = ctx.public.and_then(|p| p.github.as_ref()) else {
+        return Res::html(404, crate::page::public_not_found(locale));
+    };
+    let client = crate::oauth::HttpGithub::new(&github.client_id, &github.client_secret);
+    finish_github_with(ctx, req, locale, &client)
+}
+
+/// The callback, against any [`Github`](crate::oauth::Github) client.
+///
+/// Split out so a test can drive the whole path with a stub — the alternative is
+/// a test that talks to GitHub, which is not a test.
+fn finish_github_with(
+    ctx: &mut Ctx<'_>,
+    req: &Req,
+    locale: Locale,
+    client: &dyn crate::oauth::Github,
+) -> Res {
+    let failed = || {
+        Res::html(
+            400,
+            crate::page::public_message(locale.strings().github_failed, locale),
+        )
+    };
+
+    let query = crate::query::CallbackQuery::parse(&req.path);
+    let (Some(code), Some(state)) = (query.code, query.state) else {
+        // GitHub sends `?error=access_denied` when somebody declines, and that
+        // is not a failure worth a different page: they chose it.
+        return failed();
+    };
+
+    // The state is spent **before** the code is exchanged. A code that survives
+    // a failed exchange is worth nothing; a state that survives one could be
+    // replayed.
+    {
+        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut states = match ctx.store.oauth_states() {
+            Ok(s) => s,
+            Err(e) => return error(500, &e.to_string()),
+        };
+        if states.consume(&state, ctx.now_ms).is_err() {
+            return failed();
+        }
+        if let Err(e) = ctx.store.put_oauth_states(&states) {
+            return error(500, &e.to_string());
+        }
+    }
+
+    let login = match client.login_for(&code) {
+        Ok(login) => login,
+        Err(e) => {
+            // Logged for the operator, never shown: the page says only that it
+            // did not work. The error names GitHub's complaint, which is the
+            // operator's business and not the reader's.
+            crate::log::warn("github sign-in failed")
+                .text("err", e)
+                .emit();
+            return failed();
+        }
+    };
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut accounts = match ctx.store.accounts() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+
+    // Keyed on the login rather than on an email: a GitHub profile's address is
+    // often absent and can be several, so it is not an identity this can rely
+    // on. The hash keeps the shape every other account has.
+    let email_hash = auth::hash(&format!("github:{login}"));
+    let existing = accounts.any_by_email(&email_hash).cloned();
+    let id = match existing {
+        Some(account) if account.revoked => {
+            // Revoked stays revoked, and says nothing about why — the same
+            // silence a revoked magic-link account gets.
+            return failed();
+        }
+        Some(account) => account.id,
+        None => {
+            let cap = ctx.public.map(|p| p.max_accounts).unwrap_or(0);
+            if accounts.accounts.len() >= cap {
+                crate::log::warn("signup refused")
+                    .with("accounts", accounts.accounts.len() as u64)
+                    .with("cap", cap as u64)
+                    .with("via", "github")
+                    .emit();
+                return failed();
+            }
+            let account = accounts.create(&email_hash, &login, ctx.now_ms);
+            // What makes them recognisable as an owner later — and only that:
+            // whether this login *is* one comes from the configuration, checked
+            // on every request.
+            let idx = accounts.accounts.len() - 1;
+            accounts.accounts[idx].github_login = Some(login.clone());
+            account.id
+        }
+    };
+
+    let session = accounts.open_session(&id, ctx.now_ms);
+    if let Err(e) = ctx.store.put_accounts(&accounts) {
+        return error(500, &e.to_string());
+    }
+    let secure = secure_attr(ctx);
+    drop(_guard);
+
+    let Some(repos) = ctx.public.map(|p| p.repos.clone()) else {
+        return Res::html(404, crate::page::public_not_found(locale));
+    };
+    let mut res = Res::html(
+        200,
+        crate::page::public_file_page(&[], &repos, false, locale),
+    );
+    res.set_cookie = Some(format!(
+        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=31536000"
+    ));
+    res
+}
+
 /// Which budget this request is counted against.
 ///
 /// An authenticated caller is keyed on **who it turned out to be** — a device
@@ -557,6 +729,11 @@ fn is_public_path(path: &str) -> bool {
     path == public_route::LANDING
         || path == public_route::FILE
         || path == public_route::SIGNIN
+        // Both halves of the GitHub flow. Absent from this list they would fall
+        // through to the private device gate and 404, which is a sign-in button
+        // that leads nowhere.
+        || path == public_route::AUTH_GITHUB
+        || path == public_route::AUTH_GITHUB_CALLBACK
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
         || path == public_route::SCRIPT
@@ -926,6 +1103,11 @@ fn public_route(
 
         // Ask for a link. Reachable signed-out — it is how one signs in.
         ("GET", public_route::SIGNIN) => Res::html(200, crate::page::signin_page_in(locale)),
+
+        // Start a GitHub sign-in, and come back from one. Both reachable
+        // signed-out for the same reason.
+        ("GET", public_route::AUTH_GITHUB) => start_github(ctx, locale),
+        ("GET", public_route::AUTH_GITHUB_CALLBACK) => finish_github(ctx, req, locale),
         ("POST", public_route::SIGNIN) => request_sign_in(ctx, req),
 
         ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
@@ -1647,7 +1829,19 @@ mod tests {
                 // No owner role unless a test asks for one, which is the
                 // resting state of every deployment.
                 owners: Vec::new(),
+                github: None,
             });
+            self
+        }
+
+        /// Configure a GitHub application, as an operator would.
+        fn with_github(mut self) -> Fixture {
+            if let Some(p) = self.public.as_mut() {
+                p.github = Some(crate::config::GithubConfig {
+                    client_id: "test-client-id".into(),
+                    client_secret: "test-client-secret".into(),
+                });
+            }
             self
         }
 
@@ -2892,6 +3086,179 @@ mod tests {
         // Not found, not forbidden: "forbidden" would confirm the id exists.
         assert_eq!(res.status, 404, "{}", res.body);
         assert!(!res.body.contains("alice thing"), "{}", res.body);
+    }
+
+    /// A GitHub that answers without a network.
+    struct StubGithub {
+        login: std::result::Result<String, String>,
+    }
+
+    impl crate::oauth::Github for StubGithub {
+        fn login_for(&self, _code: &str) -> sc_proto::Result<String> {
+            self.login.clone().map_err(sc_proto::DcError::Backend)
+        }
+    }
+
+    /// Drive the callback with a stub, as the route would.
+    fn callback(f: &mut Fixture, code: &str, state: &str, gh: &StubGithub) -> Res {
+        let path = format!(
+            "{}?code={code}&state={state}",
+            public_route::AUTH_GITHUB_CALLBACK
+        );
+        let req = Req::get(&path);
+        let mut limiter = RateLimiter::new();
+        let mut ctx = Ctx {
+            store: &f.store,
+            daemon_keys: &f.daemon_keys,
+            limiter: &mut limiter,
+            now_ms: f.now_ms,
+            public: f.public.as_ref(),
+            mailer: &f.mailer,
+            write_lock: &f.write_lock,
+            seen: &f.seen,
+            rechecking: false,
+        };
+        finish_github_with(&mut ctx, &req, Locale::En, gh)
+    }
+
+    /// Start a sign-in and return the state token that was minted.
+    fn start(f: &mut Fixture) -> String {
+        let res = f.go(&Req::get(public_route::AUTH_GITHUB));
+        assert_eq!(res.status, 200, "{}", res.body);
+        // The plaintext exists only in the page — the store keeps a hash.
+        res.body
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the page carries the state")
+            .to_string()
+    }
+
+    #[test]
+    fn signing_in_with_github_opens_a_session() {
+        let mut f = Fixture::new("gh-signin").with_public(false).with_github();
+        let state = start(&mut f);
+
+        let res = callback(
+            &mut f,
+            "the-code",
+            &state,
+            &StubGithub {
+                login: Ok("jamez667".into()),
+            },
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(res.set_cookie.is_some(), "a session was opened");
+
+        // The account records how they signed in — and only that.
+        let accounts = f.store.accounts().unwrap();
+        assert_eq!(accounts.accounts.len(), 1);
+        assert_eq!(
+            accounts.accounts[0].github_login.as_deref(),
+            Some("jamez667")
+        );
+    }
+
+    #[test]
+    fn a_state_token_cannot_be_replayed() {
+        // A callback URL sits in browser history and referrer logs. Spending the
+        // state once is what stops one being reused.
+        let mut f = Fixture::new("gh-replay").with_public(false).with_github();
+        let state = start(&mut f);
+        let gh = StubGithub {
+            login: Ok("jamez667".into()),
+        };
+
+        assert_eq!(callback(&mut f, "code", &state, &gh).status, 200);
+        assert_eq!(
+            callback(&mut f, "code", &state, &gh).status,
+            400,
+            "the second use is refused"
+        );
+    }
+
+    #[test]
+    fn a_forged_callback_signs_nobody_in() {
+        // No state this server issued, so nothing to spend.
+        let mut f = Fixture::new("gh-forged").with_public(false).with_github();
+        let res = callback(
+            &mut f,
+            "code",
+            "never-issued",
+            &StubGithub {
+                login: Ok("jamez667".into()),
+            },
+        );
+        assert_eq!(res.status, 400);
+        assert!(res.set_cookie.is_none(), "no session");
+        assert!(f.store.accounts().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn a_refused_code_signs_nobody_in() {
+        // GitHub declining the exchange — an expired code, or one already spent.
+        let mut f = Fixture::new("gh-refused").with_public(false).with_github();
+        let state = start(&mut f);
+        let res = callback(
+            &mut f,
+            "code",
+            &state,
+            &StubGithub {
+                login: Err("github refused the code".into()),
+            },
+        );
+        assert_eq!(res.status, 400);
+        assert!(res.set_cookie.is_none());
+        assert!(f.store.accounts().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn github_sign_in_does_not_exist_without_an_application() {
+        // The route 404s rather than existing and failing after a trip to
+        // GitHub — a button that always fails is worse than no button.
+        let mut f = Fixture::new("gh-none").with_public(false);
+        assert_eq!(f.go(&Req::get(public_route::AUTH_GITHUB)).status, 404);
+    }
+
+    #[test]
+    fn signing_in_with_github_makes_a_named_owner_an_owner() {
+        // The two halves meeting: GitHub says who, configuration says what they
+        // may see.
+        let mut f = Fixture::new("gh-owner")
+            .with_public(false)
+            .with_github()
+            .with_owner("jamez667", &["intake"]);
+        let state = start(&mut f);
+
+        let res = callback(
+            &mut f,
+            "code",
+            &state,
+            &StubGithub {
+                login: Ok("JameZ667".into()),
+            },
+        );
+        assert_eq!(res.status, 200);
+        let cookie = res
+            .set_cookie
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("sc_device=")
+            .to_string();
+
+        // Recognised as an owner — and still not a device, so the private
+        // surface stays closed.
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&cookie))
+                .status,
+            404
+        );
+        for verb in REVIEW_VERBS {
+            let res = f.go(&Req::post(&format!("/request/r-1/{verb}"), "").with_cookie(&cookie));
+            assert_eq!(res.status, 401, "an owner reached {verb}");
+        }
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub mod daemons;
 pub mod i18n;
 pub mod log;
 pub mod mail;
+pub mod oauth;
 pub mod page;
 pub mod query;
 pub mod ratelimit;
