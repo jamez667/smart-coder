@@ -33,7 +33,7 @@ const POLL_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 /// surface, and five parallel clones is where one eventually gets forgotten.
 struct Shared {
     store: Store,
-    daemon_key: String,
+    daemon_keys: Vec<crate::config::DaemonKey>,
     limiter: Mutex<RateLimiter>,
     public: Option<crate::config::PublicConfig>,
     mailer: Box<dyn Mailer>,
@@ -67,7 +67,7 @@ pub fn run(cfg: &Config) -> Result<()> {
 
     let shared = Arc::new(Shared {
         store: store.clone(),
-        daemon_key: cfg.daemon_key.clone(),
+        daemon_keys: cfg.daemon_keys.clone(),
         limiter: Mutex::new(RateLimiter::new()),
         public: cfg.public.clone(),
         mailer: build_mailer(cfg),
@@ -109,6 +109,34 @@ pub fn run(cfg: &Config) -> Result<()> {
         None => crate::log::info("public intake")
             .with("enabled", false)
             .emit(),
+    }
+    // Named, so an operator can see at a glance which machines may claim work —
+    // and, on an install still holding a single key, learn that the plural
+    // setting exists without being forced onto it.
+    crate::log::info("daemon keys")
+        .with(
+            "labels",
+            cfg.daemon_keys
+                .iter()
+                .map(|d| d.label.clone())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+        .emit();
+    if cfg
+        .daemon_keys
+        .iter()
+        .any(|d| d.label == crate::config::DEFAULT_DAEMON_LABEL)
+    {
+        crate::log::warn("single daemon key")
+            .with("setting", crate::config::env::DAEMON_KEY)
+            .with("instead", crate::config::env::DAEMON_KEYS)
+            .with(
+                "note",
+                "one key for every daemon means one rate budget, and rotating it \
+                 locks out every machine at once",
+            )
+            .emit();
     }
     if let Some(code) = &code {
         // Logged once, at startup, because it is the only way in on a fresh
@@ -390,7 +418,7 @@ fn dispatch(shared: &Shared, req: &Req) -> Res {
     guard.sweep(now);
     let mut ctx = Ctx {
         store: &shared.store,
-        daemon_key: &shared.daemon_key,
+        daemon_keys: &shared.daemon_keys,
         limiter: &mut guard,
         now_ms: now,
         public: shared.public.as_ref(),

@@ -360,7 +360,7 @@ pub fn security_headers(policy: Policy) -> [(&'static str, &'static str); 5] {
 /// Everything a handler needs.
 pub struct Ctx<'a> {
     pub store: &'a Store,
-    pub daemon_key: &'a str,
+    pub daemon_keys: &'a [crate::config::DaemonKey],
     pub limiter: &'a mut RateLimiter,
     pub now_ms: u64,
     /// The public surface, when one is configured. `None` makes every public
@@ -412,17 +412,14 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // rather than at the top: an anonymous caller on the public surface must not
     // share a budget with one guessing enrolment codes, or either can lock the
     // other out.
-    if !ctx
-        .limiter
-        .allow(bucket_for(&caller, &path, ctx), ctx.now_ms)
-    {
+    if !ctx.limiter.allow(bucket_for(&caller, &path), ctx.now_ms) {
         return error(429, "too many requests — wait a minute and try again");
     }
 
     // The daemon-facing API. Its routes are shared constants, so the two ends
     // cannot disagree about the strings.
     if path.starts_with("/api/v1/work") {
-        if caller != Some(Caller::Daemon) {
+        if !matches!(caller, Some(Caller::Daemon { .. })) {
             return error(401, "unauthorized");
         }
         return daemon_route(ctx, req, method, &path);
@@ -478,13 +475,19 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 
 /// Which budget this request is counted against.
 ///
-/// An authenticated caller is keyed on its credential's *hash*. An anonymous one
-/// is keyed on the **route class** — never on anything the caller chooses, since
-/// a per-email or per-`X-Forwarded-For` bucket lets an attacker mint a fresh
-/// budget per value, which is no limit at all.
-fn bucket_for(caller: &Option<Caller>, path: &str, ctx: &Ctx<'_>) -> Bucket {
+/// An authenticated caller is keyed on **who it turned out to be** — a device
+/// id, an account id, or a daemon's label — never on anything the caller
+/// chooses, since a per-email or per-`X-Forwarded-For` bucket lets an attacker
+/// mint a fresh budget per value, which is no limit at all. An anonymous one is
+/// keyed on the route class.
+///
+/// All three identities are hashed before they become a bucket key, so the
+/// limiter's map holds nothing that names a person or a machine.
+fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
     match caller {
-        Some(Caller::Daemon) => Bucket::Credential(auth::hash(ctx.daemon_key)),
+        // Keyed on the label, so each machine has its own budget: a daemon stuck
+        // in a retry loop on one host cannot exhaust the allowance of another.
+        Some(Caller::Daemon { label }) => Bucket::Credential(auth::hash(label)),
         Some(Caller::Device { id }) => Bucket::Credential(auth::hash(id)),
         // A signed-in filer gets their own budget. Safe to key on, unlike an
         // email or a forwarded header, because an account id is minted by this
@@ -534,8 +537,17 @@ fn is_public_path(path: &str) -> bool {
 /// browser never pays for reading the account file.
 fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
     if let Some(bearer) = &req.bearer {
-        if auth::matches(bearer, &auth::hash(ctx.daemon_key)) {
-            return Some(Caller::Daemon);
+        // Walked rather than looked up: `auth::matches` is constant-time over
+        // fixed-width hashes, so the only thing this leaks is *how many* keys
+        // are configured — a count, not a credential.
+        if let Some(daemon) = ctx
+            .daemon_keys
+            .iter()
+            .find(|d| auth::matches(bearer, &d.key_hash))
+        {
+            return Some(Caller::Daemon {
+                label: daemon.label.clone(),
+            });
         }
     }
     let token = req.cookie_token.as_deref()?;
@@ -1394,6 +1406,8 @@ mod tests {
     use std::path::PathBuf;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
+    /// A second daemon's key, for the tests that tell machines apart.
+    const OTHER_KEY: &str = "fedcba9876543210fedcba9876543210";
 
     struct Fixture {
         store: Store,
@@ -1406,6 +1420,17 @@ mod tests {
         write_lock: Mutex<()>,
         /// Advanced by tests that need a link to expire.
         now_ms: u64,
+        /// One entry by default, so most tests read as a single-daemon server.
+        /// A test that cares about telling machines apart replaces it.
+        daemon_keys: Vec<crate::config::DaemonKey>,
+    }
+
+    /// The daemon credentials a fixture starts with.
+    fn one_key(label: &str, key: &str) -> Vec<crate::config::DaemonKey> {
+        vec![crate::config::DaemonKey {
+            label: label.to_string(),
+            key_hash: auth::hash(key),
+        }]
     }
 
     impl Drop for Fixture {
@@ -1434,6 +1459,7 @@ mod tests {
                 mailer: crate::mail::testing::Recording::default(),
                 write_lock: Mutex::new(()),
                 now_ms: 1_000,
+                daemon_keys: one_key("test-daemon", KEY),
             }
         }
 
@@ -1486,7 +1512,7 @@ mod tests {
         fn go(&mut self, req: &Req) -> Res {
             let mut ctx = Ctx {
                 store: &self.store,
-                daemon_key: KEY,
+                daemon_keys: &self.daemon_keys,
                 limiter: &mut self.limiter,
                 now_ms: self.now_ms,
                 public: self.public.as_ref(),
@@ -1609,6 +1635,93 @@ mod tests {
         ] {
             assert_eq!(f.go(&req).status, 401, "{:?}", req.path);
         }
+    }
+
+    #[test]
+    fn each_daemon_authenticates_with_its_own_key() {
+        // The point of per-machine keys: two daemons, two credentials, both
+        // admitted — and each recognised as *itself* rather than as "a daemon".
+        let mut f = Fixture::new("two-keys");
+        f.daemon_keys = vec![
+            crate::config::DaemonKey {
+                label: "laptop".into(),
+                key_hash: auth::hash(KEY),
+            },
+            crate::config::DaemonKey {
+                label: "office".into(),
+                key_hash: auth::hash(OTHER_KEY),
+            },
+        ];
+
+        for key in [KEY, OTHER_KEY] {
+            let res = f.go(&Req::get(wire::route::WORK).with_bearer(key));
+            assert_ne!(res.status, 401, "{key} should be admitted");
+        }
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_bearer("neither"))
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn revoking_one_daemons_key_leaves_the_other_working() {
+        // What a shared key cannot do. Removing one machine's entry — the whole
+        // operation "revoke that laptop" consists of — must not disturb the
+        // others, or an operator has to choose between a lost machine keeping
+        // access and every machine losing it at once.
+        let mut f = Fixture::new("revoke-one");
+        f.daemon_keys = vec![
+            crate::config::DaemonKey {
+                label: "laptop".into(),
+                key_hash: auth::hash(KEY),
+            },
+            crate::config::DaemonKey {
+                label: "office".into(),
+                key_hash: auth::hash(OTHER_KEY),
+            },
+        ];
+
+        // The operator deletes the laptop's pair and redeploys.
+        f.daemon_keys.retain(|d| d.label != "laptop");
+
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_bearer(KEY)).status,
+            401,
+            "the revoked machine is out"
+        );
+        assert_ne!(
+            f.go(&Req::get(wire::route::WORK).with_bearer(OTHER_KEY))
+                .status,
+            401,
+            "the other machine is untouched"
+        );
+    }
+
+    #[test]
+    fn each_daemon_has_its_own_rate_budget() {
+        // A shared key means one budget: a daemon stuck in a retry loop on one
+        // host exhausts the allowance of every other machine. Keyed on the
+        // label, the blast radius is the machine that misbehaved.
+        let laptop = bucket_for(
+            &Some(Caller::Daemon {
+                label: "laptop".into(),
+            }),
+            wire::route::WORK,
+        );
+        let office = bucket_for(
+            &Some(Caller::Daemon {
+                label: "office".into(),
+            }),
+            wire::route::WORK,
+        );
+        assert_ne!(laptop, office);
+        // And the bucket holds a hash, not the machine's name.
+        assert_eq!(
+            laptop,
+            Bucket::Credential(auth::hash("laptop")),
+            "the label is hashed before it becomes a key"
+        );
     }
 
     #[test]
@@ -3007,36 +3120,26 @@ mod tests {
     fn public_traffic_and_enrolment_are_counted_separately() {
         // The property the bucket split exists for, asserted where the
         // classification actually happens rather than only in the limiter.
-        let mut f = Fixture::new("bucket-split").with_public(false);
-        let probe = |f: &mut Fixture, path: &str| -> Bucket {
-            let mut limiter = RateLimiter::new();
-            let ctx = Ctx {
-                store: &f.store,
-                daemon_key: KEY,
-                limiter: &mut limiter,
-                now_ms: f.now_ms,
-                public: f.public.as_ref(),
-                mailer: &f.mailer,
-                write_lock: &f.write_lock,
-            };
-            bucket_for(&None, path, &ctx)
-        };
+        // Anonymous throughout: the split being asserted is the one between
+        // *route classes*, which is the only thing a caller with no credential
+        // can be keyed on.
+        let probe = |path: &str| -> Bucket { bucket_for(&None, path) };
 
         // Sending mail and spending a link cost something; reading a page does
         // not, and starving reads would itself be the denial of service.
-        assert_eq!(probe(&mut f, public_route::SIGNIN), Bucket::PublicWrite);
-        assert_eq!(probe(&mut f, "/public/signin/abc"), Bucket::PublicWrite);
-        assert_eq!(probe(&mut f, public_route::FILE), Bucket::PublicRead);
-        assert_eq!(probe(&mut f, "/public/request/abc"), Bucket::PublicRead);
+        assert_eq!(probe(public_route::SIGNIN), Bucket::PublicWrite);
+        assert_eq!(probe("/public/signin/abc"), Bucket::PublicWrite);
+        assert_eq!(probe(public_route::FILE), Bucket::PublicRead);
+        assert_eq!(probe("/public/request/abc"), Bucket::PublicRead);
 
         // The landing page is a page render like the others, so it shares their
         // budget rather than enrolment's — starving it would take the site down
         // for everyone who has not signed in.
-        assert_eq!(probe(&mut f, public_route::LANDING), Bucket::PublicRead);
+        assert_eq!(probe(public_route::LANDING), Bucket::PublicRead);
 
         // And nothing public shares a budget with enrolment.
-        assert_eq!(probe(&mut f, private_route::ENROL), Bucket::Enrol);
-        assert_eq!(probe(&mut f, private_route::REVIEW), Bucket::Enrol);
+        assert_eq!(probe(private_route::ENROL), Bucket::Enrol);
+        assert_eq!(probe(private_route::REVIEW), Bucket::Enrol);
     }
 
     #[test]

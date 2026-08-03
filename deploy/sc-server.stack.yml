@@ -103,10 +103,34 @@ services:
     # ------------------------------------------------------------------------
 
     environment:
-      # REQUIRED. Without it the server refuses to start rather than running
-      # open — an unauthenticated intake surface on the public internet is the
-      # failure this whole design exists to prevent.
-      SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:?set this to 32+ random characters}
+      # REQUIRED — one of these two. With neither, the server refuses to start
+      # rather than running open: an unauthenticated intake surface on the
+      # public internet is the failure this whole design exists to prevent.
+      #
+      # ONE KEY PER DAEMON, as `label:key` pairs:
+      #
+      #     SC_SERVER_DAEMON_KEYS=laptop:0123…,office:89ab…
+      #
+      # The label is not a secret — it appears in the log and identifies which
+      # machine claimed a piece of work. Labels must be unique and no two
+      # daemons may share a key, because both would make "revoke that one
+      # machine" quietly untrue.
+      #
+      # WHY NOT ONE SHARED KEY. It collapses three things that should be per
+      # machine: the rate budget (a daemon stuck in a retry loop on one host
+      # starves the others), revocation (rotating locks out every machine at
+      # once), and the holder of a claim — a late report from a daemon presumed
+      # dead can otherwise overwrite a draft another machine is still writing.
+      #
+      # Revoke one machine by deleting its pair here and redeploying. Nothing on
+      # the other daemons needs touching.
+      SC_SERVER_DAEMON_KEYS: ${SC_SERVER_DAEMON_KEYS:-}
+
+      # The single-key form, still read so an install that predates the plural
+      # keeps working without a stack edit. It is filed under the label
+      # `default`. Set both while migrating: a second daemon can be added here
+      # before the first one is moved across.
+      SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:-}
 
       # Optional. When unset, a single-use enrolment code is generated and
       # logged on first start — so a fresh install is usable without

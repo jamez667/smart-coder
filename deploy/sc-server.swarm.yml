@@ -40,10 +40,16 @@ services:
     image: ghcr.io/jamez667/sc-server:${SC_SERVER_TAG:-latest}
 
     environment:
-      # REQUIRED. Without it the server refuses to start rather than running
-      # open — an unauthenticated intake surface on the public internet is the
-      # failure this whole design exists to prevent.
-      SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:?set this to 32+ random characters}
+      # REQUIRED — one of these two. With neither, the server refuses to start
+      # rather than running open.
+      #
+      # One key per daemon, `label:key` pairs — so each machine has its own rate
+      # budget, can be revoked alone, and is named in the log when it claims
+      # work: SC_SERVER_DAEMON_KEYS=laptop:0123…,office:89ab…
+      SC_SERVER_DAEMON_KEYS: ${SC_SERVER_DAEMON_KEYS:-}
+      # The single-key form, still read so an existing install keeps working.
+      # Filed under the label `default`.
+      SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:-}
 
       SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
       SC_SERVER_BIND: ${SC_SERVER_BIND:-0.0.0.0}

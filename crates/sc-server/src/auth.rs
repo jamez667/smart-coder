@@ -120,8 +120,14 @@ pub struct Device {
 /// Who a request turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Caller {
-    /// The developer's daemon, holding the API key.
-    Daemon,
+    /// The developer's daemon, holding one of the API keys.
+    ///
+    /// Carries the operator's label for that machine, matching `Device` and
+    /// `Account` rather than being a bare unit variant. Without it the server
+    /// cannot tell two daemons apart, and three things that ought to be
+    /// per-machine collapse onto one credential: the rate budget, the holder of
+    /// a claim, and revocation.
+    Daemon { label: String },
     /// An enrolled browser. **The only caller that may review.**
     Device { id: String },
     /// A signed-in member of the public.

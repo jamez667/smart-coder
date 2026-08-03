@@ -30,11 +30,17 @@ pub struct Config {
     pub port: u16,
     /// The one volume: requests, drafted specs, and credentials.
     pub data_dir: PathBuf,
-    /// The API key a daemon must present. **Required** — the server refuses to
-    /// start without one rather than running open, because an unauthenticated
-    /// intake surface on the public internet is the failure this whole design
-    /// exists to prevent.
-    pub daemon_key: String,
+    /// The keys daemons authenticate with, one per machine. **At least one is
+    /// required** — the server refuses to start with none rather than running
+    /// open, because an unauthenticated intake surface on the public internet is
+    /// the failure this whole design exists to prevent.
+    ///
+    /// A list rather than one key, because a single shared secret collapses
+    /// three things that should be per-machine: the rate budget (a runaway
+    /// laptop starves the office), revocation (rotating locks out everything at
+    /// once), and who holds a claim — a late report from a daemon presumed dead
+    /// can otherwise overwrite a draft another machine is still working on.
+    pub daemon_keys: Vec<DaemonKey>,
     /// The one-time code that enrols a browser. Generated and printed at startup
     /// when unset, so a fresh container is usable without pre-configuration but
     /// is never *open*.
@@ -60,6 +66,26 @@ pub struct Config {
     /// which is the same person who can read the log.
     pub mail_to_console: bool,
 }
+
+/// One daemon's credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonKey {
+    /// What the operator calls this machine: `laptop`, `office`.
+    ///
+    /// Appears in the log and is what a claim records, so a human reading either
+    /// can tell which machine did something. **Not a secret** — that is the
+    /// point of it being separate from the key.
+    pub label: String,
+    /// SHA-256 of the key. **The key itself is not kept**, so a `Config` in a
+    /// debug print, a panic message or a core dump grants nobody anything.
+    pub key_hash: String,
+}
+
+/// The label a lone [`env::DAEMON_KEY`] is filed under.
+///
+/// Named rather than inlined because two places must agree: the fold-in below,
+/// and the startup warning that tells the operator what to migrate to.
+pub const DEFAULT_DAEMON_LABEL: &str = "default";
 
 /// What the public surface needs before it may exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +241,10 @@ pub mod env {
     pub const BIND: &str = "SC_SERVER_BIND";
     pub const PORT: &str = "SC_SERVER_PORT";
     pub const DATA_DIR: &str = "SC_SERVER_DATA";
+    /// One key per daemon, as `label:key` pairs: `laptop:0123…,office:89ab…`.
+    pub const DAEMON_KEYS: &str = "SC_SERVER_DAEMON_KEYS";
+    /// A single daemon's key. Superseded by [`DAEMON_KEYS`], and still read: an
+    /// install that predates the plural keeps working without a stack edit.
     pub const DAEMON_KEY: &str = "SC_SERVER_DAEMON_KEY";
     pub const ENROL_CODE: &str = "SC_SERVER_ENROL_CODE";
 
@@ -261,28 +291,7 @@ impl Config {
     /// Read from an arbitrary lookup — the seam every test uses, so no test has
     /// to mutate the process environment and race every other test.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> std::result::Result<Config, String> {
-        let daemon_key = get(env::DAEMON_KEY)
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "{} is required. Generate one (32+ random characters) and set it on \
-                     both this container and the daemon — without it the server would \
-                     accept work from anyone.",
-                    env::DAEMON_KEY
-                )
-            })?;
-
-        // A short key is worse than no key: it looks configured while being
-        // guessable, which is the failure mode nobody notices.
-        if daemon_key.len() < MIN_SECRET_LEN {
-            return Err(format!(
-                "{} is only {} characters. Use at least {MIN_SECRET_LEN} — a short \
-                 key looks configured while being guessable.",
-                env::DAEMON_KEY,
-                daemon_key.len()
-            ));
-        }
+        let daemon_keys = daemon_keys(&get)?;
 
         // `opt` for the same reason as `bind` and `data_dir` below: a stack
         // editor passes unconfigured settings through as empty strings, and an
@@ -311,7 +320,7 @@ impl Config {
             data_dir: opt(&get, env::DATA_DIR)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/data")),
-            daemon_key,
+            daemon_keys,
             enrol_code: get(env::ENROL_CODE)
                 .map(|c| c.trim().to_string())
                 .filter(|c| !c.is_empty()),
@@ -354,6 +363,93 @@ fn count(
         ));
     }
     Ok(n)
+}
+
+/// The daemon credentials, from either setting.
+///
+/// **Both are read, and that is the migration.** A deployment holding only
+/// [`env::DAEMON_KEY`] keeps working — its key is folded in under
+/// [`DEFAULT_DAEMON_LABEL`] — so upgrading the server never requires touching
+/// every daemon on the same afternoon. Setting both is legal and useful: it is
+/// how a second machine is added before the first one is migrated.
+///
+/// Neither is the same refusal to start as before. Running open is not a
+/// degraded mode; it is the failure this whole design exists to prevent.
+fn daemon_keys(
+    get: &impl Fn(&str) -> Option<String>,
+) -> std::result::Result<Vec<DaemonKey>, String> {
+    let mut keys: Vec<(String, String)> = Vec::new();
+
+    if let Some(raw) = opt(get, env::DAEMON_KEYS) {
+        for pair in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            // `split_once`, not `split`: a key is opaque and may itself contain
+            // a colon, so only the *first* one separates.
+            let Some((label, key)) = pair.split_once(':') else {
+                return Err(format!(
+                    "{} entries are `label:key`, but {pair:?} has no colon. \
+                     For example: laptop:0123…,office:89ab…",
+                    env::DAEMON_KEYS
+                ));
+            };
+            keys.push((label.trim().to_string(), key.trim().to_string()));
+        }
+    }
+
+    if let Some(key) = opt(get, env::DAEMON_KEY) {
+        keys.push((DEFAULT_DAEMON_LABEL.to_string(), key.trim().to_string()));
+    }
+
+    if keys.is_empty() {
+        return Err(format!(
+            "{} is required — set it to `label:key` pairs, one per daemon \
+             (for example laptop:0123…,office:89ab…), with keys of 32+ random \
+             characters. {} still works for a single daemon. Without either, the \
+             server would accept work from anyone.",
+            env::DAEMON_KEYS,
+            env::DAEMON_KEY
+        ));
+    }
+
+    let mut out: Vec<DaemonKey> = Vec::new();
+    for (label, key) in keys {
+        if label.is_empty() {
+            return Err(format!(
+                "a {} entry has an empty label. Name the machine, so the log and \
+                 the review page can say which one it was.",
+                env::DAEMON_KEYS
+            ));
+        }
+        // A short key is worse than no key: it looks configured while being
+        // guessable, which is the failure mode nobody notices.
+        if key.len() < MIN_SECRET_LEN {
+            return Err(format!(
+                "the key for {label:?} is only {} characters. Use at least \
+                 {MIN_SECRET_LEN} — a short key looks configured while being \
+                 guessable.",
+                key.len()
+            ));
+        }
+        // Refused rather than resolved. A duplicate label makes a claim's holder
+        // ambiguous, and deleting one entry to revoke a machine would silently
+        // leave the other working — the exact property per-daemon keys exist to
+        // provide.
+        if out.iter().any(|d| d.label == label) {
+            return Err(format!(
+                "two daemons are both labelled {label:?}. Labels have to be \
+                 unique, or revoking one machine would not revoke it."
+            ));
+        }
+        let key_hash = crate::auth::hash(&key);
+        if let Some(other) = out.iter().find(|d| d.key_hash == key_hash) {
+            return Err(format!(
+                "{:?} and {label:?} share one key. Give each machine its own, or \
+                 revoking either leaves the other able to claim work.",
+                other.label
+            ));
+        }
+        out.push(DaemonKey { label, key_hash });
+    }
+    Ok(out)
 }
 
 /// Read a boolean switch. **Off unless plainly turned on.**
@@ -633,6 +729,102 @@ mod tests {
         // nobody notices until it matters.
         let err = load(&[(env::DAEMON_KEY, "hunter2")]).unwrap_err();
         assert!(err.contains("at least 32"), "{err}");
+    }
+
+    const OTHER_KEY: &str = "fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn several_daemon_keys_are_read_from_one_setting() {
+        let cfg = load(&[(
+            env::DAEMON_KEYS,
+            &format!("laptop:{GOOD_KEY},office:{OTHER_KEY}"),
+        )])
+        .unwrap();
+
+        let labels: Vec<&str> = cfg.daemon_keys.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, ["laptop", "office"]);
+        // Hashed on the way in, so the key itself is not sitting in the config
+        // for a debug print or a panic message to hand out.
+        assert_eq!(cfg.daemon_keys[0].key_hash, crate::auth::hash(GOOD_KEY));
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains(GOOD_KEY), "the key is in {debug}");
+    }
+
+    #[test]
+    fn the_single_setting_still_works_and_is_labelled_default() {
+        // The migration: an install that predates the plural must upgrade
+        // without a stack edit, or a server upgrade means touching every daemon
+        // on the same afternoon.
+        let cfg = load(&[(env::DAEMON_KEY, GOOD_KEY)]).unwrap();
+        assert_eq!(cfg.daemon_keys.len(), 1);
+        assert_eq!(cfg.daemon_keys[0].label, DEFAULT_DAEMON_LABEL);
+    }
+
+    #[test]
+    fn both_settings_together_are_a_union_so_a_daemon_can_be_added_first() {
+        // How the migration is actually performed: add the new machine under
+        // the plural setting while the old one still runs on the singular.
+        let cfg = load(&[
+            (env::DAEMON_KEYS, &format!("office:{OTHER_KEY}")),
+            (env::DAEMON_KEY, GOOD_KEY),
+        ])
+        .unwrap();
+        let labels: Vec<&str> = cfg.daemon_keys.iter().map(|d| d.label.as_str()).collect();
+        assert_eq!(labels, ["office", DEFAULT_DAEMON_LABEL]);
+    }
+
+    #[test]
+    fn a_duplicate_label_is_refused_because_revocation_would_be_ambiguous() {
+        // Two machines under one name means deleting the entry to revoke one
+        // silently leaves the other working — the exact property per-daemon
+        // keys exist to provide.
+        let err = load(&[(
+            env::DAEMON_KEYS,
+            &format!("laptop:{GOOD_KEY},laptop:{OTHER_KEY}"),
+        )])
+        .unwrap_err();
+        assert!(err.contains("unique"), "{err}");
+    }
+
+    #[test]
+    fn two_labels_sharing_one_key_is_refused() {
+        // Revoking either would leave the other able to claim work, so the two
+        // labels would be a fiction.
+        let err = load(&[(
+            env::DAEMON_KEYS,
+            &format!("laptop:{GOOD_KEY},office:{GOOD_KEY}"),
+        )])
+        .unwrap_err();
+        assert!(err.contains("share one key"), "{err}");
+    }
+
+    #[test]
+    fn a_short_key_in_the_list_is_refused_like_a_short_singular_one() {
+        let err = load(&[(env::DAEMON_KEYS, "laptop:hunter2")]).unwrap_err();
+        assert!(err.contains("at least 32"), "{err}");
+        assert!(err.contains("laptop"), "the machine is named: {err}");
+    }
+
+    #[test]
+    fn an_entry_without_a_colon_says_what_the_shape_is() {
+        let err = load(&[(env::DAEMON_KEYS, GOOD_KEY)]).unwrap_err();
+        assert!(err.contains("label:key"), "{err}");
+    }
+
+    #[test]
+    fn a_key_may_contain_a_colon_because_only_the_first_one_separates() {
+        // The key is opaque. Splitting on every colon would corrupt a perfectly
+        // good credential rather than refusing it, which is worse.
+        let key = format!("{GOOD_KEY}:with:colons");
+        let cfg = load(&[(env::DAEMON_KEYS, &format!("laptop:{key}"))]).unwrap();
+        assert_eq!(cfg.daemon_keys[0].key_hash, crate::auth::hash(&key));
+    }
+
+    #[test]
+    fn neither_setting_is_still_a_refusal_to_start() {
+        // Unchanged by the plural: with no key at all the server must not run.
+        let err = load(&[(env::DAEMON_KEYS, "")]).unwrap_err();
+        assert!(err.contains("accept work from anyone"), "{err}");
     }
 
     #[test]
