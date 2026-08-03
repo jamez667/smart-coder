@@ -31,9 +31,9 @@ pub use private::{
     filed, index, message, not_found, Who,
 };
 pub use public::{
-    github_start_page, landing_page, public_detail, public_file_page, public_filed, public_message,
-    public_not_found, signin_confirm_page, signin_failed_page, signin_page, signin_page_in,
-    signin_sent_page,
+    github_start_page, landing_page, owner_detail, owner_page, public_detail, public_file_page,
+    public_filed, public_message, public_not_found, signin_confirm_page, signin_failed_page,
+    signin_page, signin_page_in, signin_sent_page,
 };
 
 /// Escape for HTML text content and attributes.
@@ -895,6 +895,11 @@ pub(crate) mod corpus {
                     "github_start_page",
                     github_start_page("https://github.test/login/oauth/authorize?x=1", l),
                 ),
+                (
+                    "owner_page",
+                    owner_page(&[req()], "jamez667", &["alpha".to_string()], l),
+                ),
+                ("owner_detail", owner_detail(&reviewable(), l)),
                 (
                     "public_file_page",
                     public_file_page(&[req()], &crate::config::Repos::new(&["alpha"]), true, l),

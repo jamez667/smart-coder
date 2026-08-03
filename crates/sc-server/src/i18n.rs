@@ -241,6 +241,13 @@ pub struct Strings {
     pub github_note: &'static str,
     pub github_failed: &'static str,
     pub github_busy: &'static str,
+    pub owner_title: &'static str,
+    pub owner_nothing: &'static str,
+    pub owner_note: &'static str,
+    pub owner_note_label: &'static str,
+    pub owner_note_hint: &'static str,
+    pub owner_send_back: &'static str,
+    pub owner_discard: &'static str,
     /// Shown when a filing names a repository this surface does not collect
     /// for. Deliberately says nothing about which ones it *does* — the picker
     /// already lists those to anyone who reached the form honestly.
@@ -433,6 +440,13 @@ mod tests {
             s.github_note,
             s.github_failed,
             s.github_busy,
+            s.owner_title,
+            s.owner_nothing,
+            s.owner_note,
+            s.owner_note_label,
+            s.owner_note_hint,
+            s.owner_send_back,
+            s.owner_discard,
             s.file_repo_unknown,
             s.file_mine_heading,
             s.file_nothing_yet,

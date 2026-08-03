@@ -111,6 +111,110 @@ pub fn signin_page_in(locale: Locale) -> String {
     )
 }
 
+/// An owner's list: everything filed against the repositories they own.
+///
+/// **Every state**, because "why has nothing happened to this" is a question an
+/// owner asks, and a page showing only what awaits a decision cannot answer it.
+///
+/// **No filer identity.** The email hint exists for the developer's revoke list;
+/// showing it here would turn a repository allowlist into a contact list, and
+/// nothing about declining work needs to know who asked for it.
+pub fn owner_page(all: &[Request], login: &str, repos: &[String], locale: Locale) -> String {
+    let s = locale.strings();
+    let ordered = crate::routes::listing_order(all.to_vec());
+
+    let mut items = String::new();
+    for r in &ordered {
+        items.push_str(&format!(
+            "<a class=\"item\" href=\"/public/request/{id}\">{summary}\
+             <div class=\"meta\"><span class=\"tag\">{state}</span> {repo} · {kind}</div></a>",
+            id = esc(&r.id),
+            summary = esc(r.summary()),
+            // The developer's own vocabulary, not the filer's softened one: an
+            // owner is deciding, so "awaiting review" is the useful word.
+            state = esc(r.state.label()),
+            repo = esc(&r.repo),
+            kind = esc(r.kind.slug()),
+        ));
+    }
+    if ordered.is_empty() {
+        items.push_str(&format!("<p class=\"meta\">{}</p>", esc(s.owner_nothing)));
+    }
+
+    public_shell_as(
+        locale,
+        s.owner_title,
+        &format!(
+            "<h1>{title}</h1>\
+             <p class=\"meta\">{who} · {list}</p>\
+             <p class=\"note\">{note}</p>{items}\
+             <p class=\"meta\"><a href=\"/public/signout\">{signout}</a></p>",
+            title = esc(s.owner_title),
+            who = esc(login),
+            list = esc(&repos.join(", ")),
+            note = esc(s.owner_note),
+            items = items,
+            signout = esc(s.file_signout),
+        ),
+        Signed::In,
+    )
+}
+
+/// One request, as its repository's owner sees it.
+///
+/// Carries the spec and the two verbs that decline it. **No approve**, and not
+/// because it is hidden: the route that would accept one is on the developer's
+/// surface, behind a match no owner satisfies. Absent from the page because
+/// there is nothing for it to post to.
+pub fn owner_detail(r: &Request, locale: Locale) -> String {
+    let s = locale.strings();
+    let mut body = format!(
+        "<h1>{summary}</h1>\
+         <p class=\"meta\"><span class=\"tag\">{state}</span> {repo} · {kind}</p>\
+         <h2>{asked}</h2><pre>{text}</pre>",
+        summary = esc(r.summary()),
+        state = esc(r.state.label()),
+        repo = esc(&r.repo),
+        kind = esc(r.kind.slug()),
+        asked = esc(s.detail_asked_heading),
+        text = esc(&r.text),
+    );
+
+    if let Some(spec) = &r.spec {
+        body.push_str(&format!(
+            "<h2>{}</h2><pre>{}</pre>",
+            esc(s.detail_spec_heading),
+            esc(spec)
+        ));
+    }
+
+    // The verbs, offered only where the state admits them — `send_back` refuses
+    // anything not awaiting review, and a button that always errors is worse
+    // than no button.
+    if r.state == RequestState::AwaitingReview {
+        body.push_str(&format!(
+            "<div class=\"decide\">\
+             <form method=\"post\" action=\"/public/request/{id}/send-back\">\
+             <label for=\"note\">{note_label}</label>\
+             <textarea id=\"note\" name=\"note\" placeholder=\"{note_hint}\"></textarea>\
+             <button type=\"submit\">{send_back}</button></form>\
+             <form method=\"post\" action=\"/public/request/{id}/discard\">\
+             <button type=\"submit\">{discard}</button></form></div>",
+            id = esc(&r.id),
+            note_label = esc(s.owner_note_label),
+            note_hint = esc(s.owner_note_hint),
+            send_back = esc(s.owner_send_back),
+            discard = esc(s.owner_discard),
+        ));
+    }
+
+    body.push_str(&format!(
+        "<p class=\"meta\"><a href=\"/public\">{}</a></p>",
+        esc(s.back)
+    ));
+    public_shell_as(locale, s.owner_title, &body, Signed::In)
+}
+
 /// The step before GitHub: what is about to happen, and a link.
 ///
 /// **A link, not a redirect.** The reader sees where they are going before they

@@ -1072,11 +1072,24 @@ fn public_route(
         Some(Caller::Account { id }) => Some(id.clone()),
         _ => None,
     };
+    // An owner reaches this surface too, and sees something different on it.
+    // Cloned because `ctx` is taken mutably below.
+    let owner = match caller {
+        Some(Caller::Owner { login, repos }) => Some((login.clone(), repos.clone())),
+        _ => None,
+    };
 
     // Decided once here and passed down, rather than re-derived per page. Every
     // response from this surface is in the same language as every other, which
     // is not true if each renderer negotiates for itself.
     let locale = req.locale();
+
+    // An owner's surface, before the filer routes below. Reached with the same
+    // cookie on the same paths — what differs is who the caller turned out to
+    // be, which is decided in `identify` from the configuration.
+    if let Some((login, repos)) = owner {
+        return owner_route(ctx, req, method, path, &login, &repos, locale);
+    }
 
     match (method, path) {
         // The landing page. What the bare address is, and the only page here
@@ -1234,6 +1247,134 @@ fn mine(ctx: &Ctx<'_>, account_id: &str) -> sc_proto::Result<Vec<Request>> {
         .into_iter()
         .filter(|r| r.filed_by(account_id))
         .collect())
+}
+
+/// The verbs an owner may reach.
+///
+/// **Both decide *against* work**, and that is the whole rule. Their failure
+/// mode is lost work — visible on the page, and the filer can file again.
+/// Approving admits work to the developer's machine, and its failure mode is
+/// invisible until it costs something, so it is not here and not reachable:
+/// every admitting verb lives behind the `Caller::Device` match on the private
+/// surface, which no `Caller::Owner` satisfies.
+///
+/// Named beside [`REVIEW_VERBS`] so the two lists can be compared at a glance,
+/// and so a verb added there is *absent* here until somebody decides otherwise —
+/// which is the safe direction for that omission to fall.
+pub const OWNER_VERBS: [&str; 2] = ["send-back", "discard"];
+
+/// Everything filed against the repositories an owner owns.
+///
+/// **Every state**, not just what awaits a decision: an owner asking "why has
+/// nothing happened to this" needs to see it sitting queued or failed, and a
+/// page that showed only `AwaitingReview` could not answer them.
+///
+/// Filtered on the caller's own repository set — resolved once when they were
+/// identified — so the question asked here is "is this request's repository in
+/// their set", never "who are they, and what does the configuration say". A
+/// site that re-derived it could forget to.
+fn owned(ctx: &Ctx<'_>, repos: &[String]) -> sc_proto::Result<Vec<Request>> {
+    Ok(ctx
+        .store
+        .all()?
+        .into_iter()
+        .filter(|r| repos.contains(&r.repo))
+        .collect())
+}
+
+/// What an owner may do: read their repositories' work, and decline it.
+///
+/// Every route here re-checks that the request's repository is one of theirs.
+/// The check is against the set carried on the caller, resolved once at
+/// identification — so a request for somebody else's repository is **not
+/// found**, not forbidden: a 403 would confirm the id is real to somebody with
+/// no business knowing it, which is the same reasoning that makes another
+/// filer's request 404 rather than 401.
+fn owner_route(
+    ctx: &mut Ctx<'_>,
+    req: &Req,
+    method: &str,
+    path: &str,
+    login: &str,
+    repos: &[String],
+    locale: Locale,
+) -> Res {
+    let not_found = || Res::html(404, crate::page::public_not_found(locale));
+
+    match (method, path) {
+        // Their list, wherever they land.
+        ("GET", public_route::LANDING) | ("GET", public_route::FILE) => match owned(ctx, repos) {
+            Ok(list) => Res::html(200, crate::page::owner_page(&list, login, repos, locale)),
+            Err(e) => error(500, &e.to_string()),
+        },
+
+        ("GET", p) if p.starts_with(public_route::REQUEST_PREFIX) => {
+            let id = p.trim_start_matches(public_route::REQUEST_PREFIX);
+            match ctx.store.get(id) {
+                Ok(Some(r)) if repos.contains(&r.repo) => {
+                    Res::html(200, crate::page::owner_detail(&r, locale))
+                }
+                // Theirs or not, the answer to a repository they do not own is
+                // the same as to one that does not exist.
+                Ok(_) => not_found(),
+                Err(e) => error(500, &e.to_string()),
+            }
+        }
+
+        ("POST", p) if p.starts_with(public_route::REQUEST_PREFIX) => {
+            let rest = p.trim_start_matches(public_route::REQUEST_PREFIX);
+            let mut parts = rest.splitn(2, '/');
+            let id = parts.next().unwrap_or("");
+            let verb = parts.next().unwrap_or("");
+
+            // **The allowlist, checked before anything is read.** An owner
+            // reaching `approve` here would be refused even if the private gate
+            // somehow let them through — belt and braces on the property that
+            // matters most in this file.
+            if !OWNER_VERBS.contains(&verb) {
+                return not_found();
+            }
+
+            let owns = match ctx.store.get(id) {
+                Ok(Some(r)) => repos.contains(&r.repo),
+                Ok(None) => false,
+                Err(e) => return error(500, &e.to_string()),
+            };
+            if !owns {
+                return not_found();
+            }
+
+            let form = form_fields(&req.body);
+            let outcome = match verb {
+                "send-back" => {
+                    let note = form.get("note").cloned().unwrap_or_default();
+                    ctx.store.send_back(id, note.trim())
+                }
+                "discard" => ctx.store.discard(id),
+                // Unreachable past the allowlist above; refused rather than
+                // unwrapped so a later edit to `OWNER_VERBS` cannot open a path
+                // through here by accident.
+                _ => return not_found(),
+            };
+            match outcome {
+                Ok(r) => {
+                    crate::log::info("owner decided")
+                        .with("owner", login.to_string())
+                        .with("verb", verb.to_string())
+                        .with("repo", r.repo.clone())
+                        .emit();
+                    Res::html(200, crate::page::owner_detail(&r, locale))
+                }
+                Err(e) => Res::html(400, crate::page::public_message(&e.to_string(), locale)),
+            }
+        }
+
+        // Signing out is the same act for everybody.
+        ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
+        ("POST", public_route::LANGUAGE) => set_language(ctx, req),
+
+        _ => not_found(),
+    }
 }
 
 /// Send a sign-in link, or quietly do nothing.
@@ -3258,6 +3399,117 @@ mod tests {
         for verb in REVIEW_VERBS {
             let res = f.go(&Req::post(&format!("/request/r-1/{verb}"), "").with_cookie(&cookie));
             assert_eq!(res.status, 401, "an owner reached {verb}");
+        }
+    }
+
+    /// An owner signed in and holding a session cookie, with a request filed
+    /// against each of two repositories.
+    fn owner_fixture(tag: &str) -> (Fixture, String, String, String) {
+        let mut f = Fixture::new(tag)
+            .with_public(false)
+            .with_repos(&["intake", "other"])
+            .with_owner("jamez667", &["intake"]);
+        let owner = f.signed_in_as_github("jamez667");
+
+        let filer = f.signed_in("jo@x.com");
+        f.go(
+            &Req::post(public_route::FILE, "text=for+intake&kind=bug&repo=intake")
+                .with_cookie(&filer),
+        );
+        f.go(
+            &Req::post(public_route::FILE, "text=for+other&kind=bug&repo=other")
+                .with_cookie(&filer),
+        );
+
+        let all = f.store.all().unwrap();
+        let mine = all.iter().find(|r| r.repo == "intake").unwrap().id.clone();
+        let theirs = all.iter().find(|r| r.repo == "other").unwrap().id.clone();
+        (f, owner, mine, theirs)
+    }
+
+    #[test]
+    fn an_owner_sees_only_their_own_repositories() {
+        let (mut f, owner, mine, theirs) = owner_fixture("owner-sees");
+
+        let html = f.go(&Req::get(public_route::FILE).with_cookie(&owner)).body;
+        assert!(html.contains("for intake"), "their own: {html}");
+        assert!(!html.contains("for other"), "not somebody else's: {html}");
+
+        // And by id, both directions.
+        assert_eq!(
+            f.go(&Req::get(&format!("{}{mine}", public_route::REQUEST_PREFIX)).with_cookie(&owner))
+                .status,
+            200
+        );
+        assert_eq!(
+            f.go(
+                &Req::get(&format!("{}{theirs}", public_route::REQUEST_PREFIX)).with_cookie(&owner)
+            )
+            .status,
+            404,
+            "not found rather than forbidden — a 403 confirms the id is real"
+        );
+    }
+
+    #[test]
+    fn an_owner_can_decline_but_the_page_offers_no_approve() {
+        // Absent from the page as well as refused on the wire: there is nothing
+        // for an approve to post to, because the route that accepts one is on
+        // the developer's surface.
+        let (mut f, owner, mine, _) = owner_fixture("owner-declines");
+
+        // Get it to a state where a decision is possible.
+        f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+        let payload = serde_json::to_string(&DraftedSpec::new(&mine, "# Spec", "specs/x")).unwrap();
+        f.go(&Req::post(&wire::route::drafted(&mine), &payload).with_bearer(KEY));
+
+        let html = f
+            .go(&Req::get(&format!("{}{mine}", public_route::REQUEST_PREFIX)).with_cookie(&owner))
+            .body;
+        assert!(html.contains("send-back"), "{html}");
+        assert!(html.contains("discard"), "{html}");
+        assert!(!html.contains("approve"), "no approve anywhere: {html}");
+
+        // And the verb works.
+        let res = f.go(&Req::post(
+            &format!("{}{mine}/send-back", public_route::REQUEST_PREFIX),
+            "note=too+vague",
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(
+            f.store.get(&mine).unwrap().unwrap().state,
+            crate::store::RequestState::Queued,
+            "sent back for another pass"
+        );
+    }
+
+    #[test]
+    fn an_owner_cannot_decline_somebody_elses_repository() {
+        let (mut f, owner, _, theirs) = owner_fixture("owner-not-theirs");
+        for verb in OWNER_VERBS {
+            let res = f.go(&Req::post(
+                &format!("{}{theirs}/{verb}", public_route::REQUEST_PREFIX),
+                "",
+            )
+            .with_cookie(&owner));
+            assert_eq!(res.status, 404, "an owner reached {verb} on another repo");
+        }
+    }
+
+    #[test]
+    fn the_owner_verbs_are_a_strict_subset_that_admits_nothing() {
+        // The two lists side by side. Every owner verb is a review verb, and
+        // every verb that ADMITS work is absent — asserted by name, so adding
+        // one to `OWNER_VERBS` without thinking fails here.
+        for verb in OWNER_VERBS {
+            assert!(REVIEW_VERBS.contains(&verb), "{verb} is not a review verb");
+        }
+        for admitting in ["approve", "approve/confirm", "release"] {
+            assert!(
+                !OWNER_VERBS.contains(&admitting),
+                "{admitting} admits work and must not be an owner's to reach"
+            );
         }
     }
 
