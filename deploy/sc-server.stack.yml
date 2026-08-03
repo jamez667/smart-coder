@@ -165,10 +165,29 @@ services:
       # their own requests and nothing else.
       # ---------------------------------------------------------------------
 
-      # The repository public filings are attributed to. A NAME, resolved by
-      # your daemon against its own configured set. Point it at a scratch repo
-      # rather than your main one: public work also queues behind your own work
-      # in that repository.
+      # The repositories public filings may be attributed to, comma separated:
+      #
+      #     SC_SERVER_PUBLIC_REPOS=smart-coder,memosy
+      #
+      # These are NAMES, each resolved by your daemon against its own configured
+      # set — so every one of them needs a matching `queue add-repo` on the
+      # daemon, spelled identically, or filings for it queue and never drain.
+      # (The review page says so when that happens, naming the repository.)
+      #
+      # With more than one, the filing form offers a picker and the filer
+      # chooses; a repository not in this list is refused rather than quietly
+      # filed against another. Setting this also requires
+      # SC_SERVER_PUBLIC_SITE_NAME, since a masthead cannot be derived from a
+      # set.
+      #
+      # Point these at scratch repositories rather than your main ones: public
+      # work queues behind your own work in the same repository.
+      SC_SERVER_PUBLIC_REPOS: ${SC_SERVER_PUBLIC_REPOS:-}
+
+      # The single-repository form, still read so an install that predates the
+      # plural keeps working without a stack edit. Both together are a union,
+      # which is how a second repository is added before this one is tidied
+      # away. Setting either turns the public surface on.
       SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
 
       # What the masthead calls this site. Defaults to PUBLIC_REPO.

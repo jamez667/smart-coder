@@ -87,27 +87,98 @@ pub struct DaemonKey {
 /// and the startup warning that tells the operator what to migrate to.
 pub const DEFAULT_DAEMON_LABEL: &str = "default";
 
+/// The repositories a public surface collects for.
+///
+/// **A type rather than a `Vec<String>`**, for the reason
+/// [`Serves`](crate::store::Serves) is one: an empty vector is what a caller who
+/// forgot produces, and "did the operator nominate this repository?" gets asked
+/// from more than one place. A vector would invite a second `.contains()`
+/// somewhere that spelled the comparison slightly differently — and *that* is
+/// the comparison a stranger's input is checked against.
+///
+/// Non-empty by construction: parsing is the only way to build one from operator
+/// input and it refuses an empty set, so no later reader has to decide what a
+/// public surface serving no repositories would mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repos(Vec<String>);
+
+impl Repos {
+    /// Build a set from names already known to be good.
+    ///
+    /// For tests and for callers holding a validated list. [`public_repos`] is
+    /// what enforces non-emptiness and uniqueness on operator input; this trusts
+    /// its caller, and panics rather than constructing the empty set the rest of
+    /// this type promises cannot exist.
+    pub fn new(names: &[&str]) -> Repos {
+        assert!(
+            !names.is_empty(),
+            "a public surface serving no repositories is what this type exists \
+             to make unrepresentable"
+        );
+        Repos(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    /// The first one — what a form pre-selects, and what a single-repository
+    /// deployment always gets.
+    pub fn first(&self) -> &str {
+        // Safe: neither constructor can produce an empty set.
+        &self.0[0]
+    }
+
+    /// Did the operator nominate this repository for public intake?
+    ///
+    /// Exact and case-sensitive, matching the daemon's own resolution of the
+    /// same name. A fuzzy match would reintroduce the ambiguity a closed set
+    /// exists to remove — and this is the check standing between a stranger's
+    /// form submission and a repository nobody nominated.
+    pub fn accepts(&self, repo: &str) -> bool {
+        self.0.iter().any(|r| r == repo)
+    }
+
+    /// Every nominated name, in the order the operator wrote them — which is the
+    /// order the picker offers.
+    pub fn names(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Is this a surface for exactly one repository?
+    ///
+    /// Asked rather than `len() == 1` at the call sites, and *instead* of a
+    /// `len`: the two questions this type is ever asked are "which names" and
+    /// "is there only one", and a bare `len` invites a companion `is_empty`
+    /// whose only honest answer is a constant `false`.
+    pub fn is_single(&self) -> bool {
+        self.0.len() == 1
+    }
+}
+
 /// What the public surface needs before it may exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicConfig {
-    /// The repository public filings are attributed to.
+    /// The repositories public filings may be attributed to.
     ///
-    /// A name from *this* configuration, never from the request body — a
-    /// stranger must not be able to aim work at a repository the operator did not
-    /// nominate for public intake.
+    /// Names from *this* configuration, never free text from the request body —
+    /// a stranger must not be able to aim work at a repository the operator did
+    /// not nominate for public intake. What the body may do is *choose among*
+    /// these, which is why the form can offer a picker at all.
     ///
-    /// **A routing key, not a label.** The daemon matches it exactly against its
-    /// own `queue add-repo` names, so it is not free text — see
+    /// **Routing keys, not labels.** The daemon matches each exactly against its
+    /// own `queue add-repo` names, so they are not free text — see
     /// [`site_name`](Self::site_name) for what the masthead shows.
-    pub repo: String,
-    /// What the masthead calls this site. Defaults to [`repo`](Self::repo).
+    pub repos: Repos,
+    /// What the masthead calls this site.
     ///
-    /// Separate from the routing key because the two answer different questions.
-    /// `repo` has to equal what the daemon was told, exactly; a heading wants
-    /// `jamez667/smart-coder` — the name a person recognises. Folding them into
-    /// one field would mean renaming the heading forces a matching
-    /// `queue add-repo`, and a mismatch there is a queue that silently never
-    /// drains.
+    /// Separate from the routing keys because the two answer different
+    /// questions. A repository name has to equal what the daemon was told,
+    /// exactly; a heading wants `jamez667/smart-coder` — the name a person
+    /// recognises. Folding them into one field would mean renaming the heading
+    /// forces a matching `queue add-repo`, and a mismatch there is a queue that
+    /// silently never drains.
+    ///
+    /// Defaults to the single repository when there is exactly one, and is
+    /// **required** when there are several: a masthead reading
+    /// `smart-coder · memosy` would appear on the landing and sign-in pages too,
+    /// where nothing has been chosen and the join says nothing.
     pub site_name: String,
     /// The absolute base URL sign-in links are built from.
     ///
@@ -249,6 +320,14 @@ pub mod env {
     pub const ENROL_CODE: &str = "SC_SERVER_ENROL_CODE";
 
     /// Set to turn the public surface on. Everything below is then required.
+    /// The repositories the public surface collects for, comma-separated:
+    /// `smart-coder,memosy`. Setting this or [`PUBLIC_REPO`] turns the surface
+    /// on.
+    pub const PUBLIC_REPOS: &str = "SC_SERVER_PUBLIC_REPOS";
+    /// A single repository. Superseded by [`PUBLIC_REPOS`], and still read: an
+    /// install that predates the plural keeps working without a stack edit, and
+    /// setting both is how a second repository is added before this one is
+    /// tidied away.
     pub const PUBLIC_REPO: &str = "SC_SERVER_PUBLIC_REPO";
     pub const PUBLIC_BASE_URL: &str = "SC_SERVER_PUBLIC_BASE_URL";
     /// What the masthead calls this site. Defaults to `PUBLIC_REPO`.
@@ -358,7 +437,9 @@ fn count(
     if n == 0 {
         return Err(format!(
             "{key} must not be 0 — that would accept nothing while looking \
-             configured. To turn the public surface off, leave {} unset.",
+             configured. To turn the public surface off, leave both {} and {} \
+             unset.",
+            env::PUBLIC_REPOS,
             env::PUBLIC_REPO
         ));
     }
@@ -452,6 +533,72 @@ fn daemon_keys(
     Ok(out)
 }
 
+/// The longest repository name accepted.
+///
+/// The daemon matches these byte-for-byte against its own `queue add-repo`
+/// names, so a name nobody could plausibly have typed there is a typo — and a
+/// long one would also be rendered into a picker on every page.
+const MAX_REPO_NAME: usize = 128;
+
+/// The repositories the public surface collects for, from either setting.
+///
+/// **Both are read, and that is the migration** — the same shape as
+/// [`daemon_keys`]. A deployment holding only [`env::PUBLIC_REPO`] keeps
+/// working, so adding a second repository never requires rewriting the first
+/// setting, and setting both is how one is added before the stack entry is
+/// tidied away.
+///
+/// `None` means the public surface is off, which is the switch this setting has
+/// always been — now with two spellings.
+///
+/// Duplicates are **refused, not deduplicated**. A repeated name is a typo or a
+/// misunderstanding about what the picker will show, and quietly collapsing it
+/// renders a form whose option list is shorter than what the operator wrote —
+/// which reads as the setting having been ignored.
+fn public_repos(
+    get: &impl Fn(&str) -> Option<String>,
+) -> std::result::Result<Option<Repos>, String> {
+    let mut names: Vec<String> = Vec::new();
+
+    if let Some(raw) = opt(get, env::PUBLIC_REPOS) {
+        names.extend(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_string),
+        );
+    }
+    if let Some(one) = opt(get, env::PUBLIC_REPO) {
+        names.push(one.trim().to_string());
+    }
+
+    if names.is_empty() {
+        return Ok(None);
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        if name.len() > MAX_REPO_NAME {
+            return Err(format!(
+                "a {} entry is {} characters. The daemon matches this name \
+                 exactly against its own `queue add-repo` names, so this is a \
+                 typo rather than a repository.",
+                env::PUBLIC_REPOS,
+                name.len()
+            ));
+        }
+        if out.contains(&name) {
+            return Err(format!(
+                "{name:?} is listed twice in {}. Repository names have to be \
+                 unique, or the picker would offer the same one twice.",
+                env::PUBLIC_REPOS
+            ));
+        }
+        out.push(name);
+    }
+    Ok(Some(Repos(out)))
+}
+
 /// Read a boolean switch. **Off unless plainly turned on.**
 ///
 /// Only the affirmative spellings count, so `SC_SERVER_MAIL_TO_CONSOLE=false`
@@ -481,7 +628,7 @@ fn opt(get: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
 fn public_from(
     get: &impl Fn(&str) -> Option<String>,
 ) -> std::result::Result<Option<PublicConfig>, String> {
-    let Some(repo) = opt(get, env::PUBLIC_REPO) else {
+    let Some(repos) = public_repos(get)? else {
         // Not asked for. Every other public setting is ignored rather than
         // half-applied.
         return Ok(None);
@@ -494,7 +641,7 @@ fn public_from(
              attacker-controlled, so a link built from it would send the filer to \
              whatever host the request claimed to be.",
             env::PUBLIC_BASE_URL,
-            env::PUBLIC_REPO
+            env::PUBLIC_REPOS
         )
     })?;
     if !base_url.starts_with("https://") && !is_private_host(&base_url) {
@@ -526,8 +673,25 @@ fn public_from(
     Ok(Some(PublicConfig {
         // Defaults to the routing key, so an operator who does not care sees a
         // sensible heading without configuring a second thing.
-        site_name: opt(get, env::PUBLIC_SITE_NAME).unwrap_or_else(|| repo.clone()),
-        repo,
+        // Defaulted only when there is one repository to default *to*. With
+        // several, a joined heading would read `smart-coder · memosy` on the
+        // landing and sign-in pages as well, where nothing has been chosen and
+        // the join says nothing — so the operator is made to name their site.
+        site_name: match opt(get, env::PUBLIC_SITE_NAME) {
+            Some(name) => name,
+            None if repos.is_single() => repos.first().to_string(),
+            None => {
+                return Err(format!(
+                    "{} is required when {} names more than one repository: the \
+                     masthead appears on every page, including the ones reached \
+                     before a repository is chosen, so it cannot be derived from \
+                     the set.",
+                    env::PUBLIC_SITE_NAME,
+                    env::PUBLIC_REPOS,
+                ))
+            }
+        },
+        repos,
         // Computed before `base_url` is moved, and from the same value the
         // `https://` check above ran on.
         secure_cookies: !is_private_host(&base_url),
@@ -732,6 +896,115 @@ mod tests {
     }
 
     const OTHER_KEY: &str = "fedcba9876543210fedcba9876543210";
+
+    /// The public settings, with the repositories named by the plural setting.
+    fn public_vars_multi() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::PUBLIC_REPOS, "intake,memosy"),
+            (env::PUBLIC_SITE_NAME, "two things"),
+            (env::PUBLIC_BASE_URL, "https://specs.example.com"),
+            (env::MAIL_PROVIDER, "brevo"),
+            (env::MAIL_KEY, GOOD_KEY),
+            (env::MAIL_FROM, "noreply@example.com"),
+        ]
+    }
+
+    #[test]
+    fn several_repositories_are_read_from_one_setting() {
+        let cfg = load(&public_vars_multi()).unwrap();
+        let p = cfg.public.expect("configured");
+        assert_eq!(p.repos.names(), ["intake", "memosy"]);
+        assert!(!p.repos.is_single());
+        // The operator's order, because it is the order the picker offers.
+        assert_eq!(p.repos.first(), "intake");
+    }
+
+    #[test]
+    fn an_old_deployment_naming_one_repository_still_works() {
+        // The migration: an install predating the plural keeps working
+        // untouched, or upgrading the server means editing every stack on the
+        // same afternoon.
+        let cfg = load(&public_vars()).unwrap();
+        let p = cfg.public.expect("configured");
+        assert_eq!(p.repos.names(), ["intake"]);
+        // And the masthead still defaults to it, since there is one to take.
+        assert_eq!(p.site_name, "intake");
+    }
+
+    #[test]
+    fn both_repository_settings_together_are_a_union() {
+        // How a second repository is added before the old setting is tidied
+        // away — the same migration shape as the daemon keys.
+        let mut vars = public_vars();
+        vars.push((env::PUBLIC_REPOS, "memosy"));
+        vars.push((env::PUBLIC_SITE_NAME, "two things"));
+        let cfg = load(&vars).unwrap();
+        assert_eq!(
+            cfg.public.unwrap().repos.names(),
+            ["memosy", "intake"],
+            "the plural is read first, then the singular folds in"
+        );
+    }
+
+    #[test]
+    fn only_a_nominated_repository_is_accepted() {
+        // The check a stranger's form submission is measured against. Exact and
+        // case-sensitive, matching how the daemon resolves the same name.
+        let repos = Repos::new(&["intake", "memosy"]);
+        assert!(repos.accepts("intake"));
+        assert!(repos.accepts("memosy"));
+        for near_miss in ["Intake", "intak", "intakex", " intake", "secret-repo"] {
+            assert!(!repos.accepts(near_miss), "{near_miss:?} is not nominated");
+        }
+    }
+
+    #[test]
+    fn a_repository_listed_twice_is_refused() {
+        // Refused rather than deduplicated: quietly collapsing it renders a
+        // picker shorter than what the operator wrote, which reads as the
+        // setting having been ignored.
+        let mut vars = public_vars_multi();
+        vars[1] = (env::PUBLIC_REPOS, "intake,intake");
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn blank_entries_between_commas_are_skipped() {
+        let mut vars = public_vars_multi();
+        vars[1] = (env::PUBLIC_REPOS, "intake, ,memosy,");
+        let cfg = load(&vars).unwrap();
+        assert_eq!(cfg.public.unwrap().repos.names(), ["intake", "memosy"]);
+    }
+
+    #[test]
+    fn naming_no_repository_leaves_the_public_surface_off() {
+        // Blank is absent, not present-and-empty — a stack editor passes
+        // unconfigured settings through as empty strings.
+        let mut vars = public_vars_multi();
+        vars[1] = (env::PUBLIC_REPOS, "  ");
+        assert!(load(&vars).unwrap().public.is_none());
+    }
+
+    #[test]
+    fn several_repositories_require_the_site_to_be_named() {
+        // The masthead appears on pages reached before any repository is
+        // chosen, so it cannot be derived from the set.
+        let mut vars = public_vars_multi();
+        vars.retain(|(k, _)| *k != env::PUBLIC_SITE_NAME);
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains(env::PUBLIC_SITE_NAME), "{err}");
+    }
+
+    #[test]
+    fn a_repository_name_nobody_could_have_typed_is_refused() {
+        let entry = format!("intake,{}", "a".repeat(129));
+        let mut vars = public_vars_multi();
+        vars[1] = (env::PUBLIC_REPOS, Box::leak(entry.into_boxed_str()));
+        let err = load(&vars).unwrap_err();
+        assert!(err.contains("typo"), "{err}");
+    }
 
     #[test]
     fn several_daemon_keys_are_read_from_one_setting() {
@@ -1168,7 +1441,7 @@ mod tests {
     fn a_fully_configured_public_surface_loads() {
         let cfg = load(&public_vars()).unwrap();
         let p = cfg.public.expect("configured");
-        assert_eq!(p.repo, "intake");
+        assert_eq!(p.repos.names(), ["intake"]);
         assert_eq!(p.base_url, "https://specs.example.com");
         let mail = p.mail.as_ref().expect("a provider is configured");
         assert_eq!(mail.provider, crate::mail::Provider::Brevo);

@@ -1251,7 +1251,12 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
     let Some(public) = ctx.public else {
         return Res::html(404, crate::page::public_not_found(locale));
     };
-    let repo = public.repo.clone();
+    // The form has no repository field yet, so a filing goes to the first
+    // nominated one — which for a single-repository deployment is the only one,
+    // i.e. exactly today's behaviour. The picker and the body validation land
+    // together in the next commit; splitting them would ship a form that offers
+    // a choice the server ignores.
+    let repo = public.repos.first().to_string();
     let screened = public.screen.is_some();
 
     let form = form_fields(&req.body);
@@ -1550,7 +1555,7 @@ mod tests {
         /// Turn the public surface on, as a configured deployment would.
         fn with_public(mut self, screened: bool) -> Fixture {
             self.public = Some(PublicConfig {
-                repo: "intake".into(),
+                repos: crate::config::Repos::new(&["intake"]),
                 site_name: "intake".into(),
                 base_url: "https://specs.example.test".into(),
                 // Matching the base URL above, which is what the real

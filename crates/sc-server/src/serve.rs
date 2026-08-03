@@ -90,7 +90,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         Some(p) => {
             crate::log::info("public intake")
                 .with("enabled", true)
-                .with("repo", p.repo.clone())
+                .with("repos", p.repos.names().join(","))
                 .with("base_url", p.base_url.clone())
                 .with("screening", p.screen.is_some())
                 .emit();
