@@ -62,6 +62,8 @@ pub static STRINGS: Strings = Strings {
                      not copied from it.",
     file_spec_note: " You will be able to read the spec that comes back.",
     file_kind_label: "Kind",
+    file_repo_label: "Project",
+    file_repo_unknown: "That project does not take requests here.",
     file_mine_heading: "What you have filed",
     file_nothing_yet: "You have not filed anything yet.",
     file_signout: "Sign out",

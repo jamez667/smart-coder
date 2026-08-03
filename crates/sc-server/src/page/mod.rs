@@ -769,6 +769,38 @@ pub(crate) fn kind_field_in(locale: Locale) -> String {
     )
 }
 
+/// The repository picker, when the surface serves more than one.
+///
+/// **Rendered from the configured set, never from anything the caller sent** —
+/// which is what lets a public form carry a repository field at all. The server
+/// checks the submitted name against the same set, so the field is a *choice
+/// among* nominated repositories rather than a place to name one.
+///
+/// Returns nothing for a single-repository surface: a select with one option is
+/// a question with one answer, and the filer has nothing to decide.
+///
+/// The option text is the **untranslated name**, for the same reason
+/// [`kind_field_in`] gives: it is what the form submits and what the developer
+/// reads on the review page, so translating it would have a filer and a reviewer
+/// naming the same repository differently. Only the label is translated.
+pub(crate) fn repo_field_in(repos: &crate::config::Repos, locale: Locale) -> String {
+    if repos.is_single() {
+        return String::new();
+    }
+    let mut opts = String::new();
+    for name in repos.names() {
+        opts.push_str(&format!(
+            "<option value=\"{name}\">{name}</option>",
+            name = esc(name)
+        ));
+    }
+    format!(
+        "<label for=\"repo\">{label}</label>\
+         <select id=\"repo\" name=\"repo\">{opts}</select>",
+        label = esc(locale.strings().file_repo_label),
+    )
+}
+
 /// A timestamp, as something a human reads, on the private surface.
 ///
 /// Deliberately coarse. The reader's question is "is this fresh, or did it sit
@@ -858,7 +890,10 @@ pub(crate) mod corpus {
                 ("signin_confirm_page", signin_confirm_page("abc123", l)),
                 ("signin_failed_page", signin_failed_page(true, l)),
                 ("signin_failed_page", signin_failed_page(false, l)),
-                ("public_file_page", public_file_page(&[req()], true, l)),
+                (
+                    "public_file_page",
+                    public_file_page(&[req()], &crate::config::Repos::new(&["alpha"]), true, l),
+                ),
                 ("public_detail", public_detail(&reviewable(), true, l)),
                 ("public_filed", public_filed(&req(), l)),
                 ("public_not_found", public_not_found(l)),

@@ -878,14 +878,16 @@ fn public_route(
         // read the pitch, and the thing they came back for is what they filed.
         ("GET", public_route::LANDING) => match &account_id {
             Some(id) => match mine(ctx, id) {
-                Ok(list) => Res::html(
-                    200,
-                    crate::page::public_file_page(
-                        &list,
-                        ctx.public.map(|p| p.show_spec).unwrap_or(false),
-                        locale,
+                Ok(list) => match ctx.public {
+                    Some(p) => Res::html(
+                        200,
+                        crate::page::public_file_page(&list, &p.repos, p.show_spec, locale),
                     ),
-                ),
+                    // Unreachable past `is_public_path`, which only matches when
+                    // a surface exists — but the surface is what holds the set,
+                    // so this asks rather than unwrapping.
+                    None => Res::html(404, crate::page::public_not_found(locale)),
+                },
                 Err(e) => error(500, &e.to_string()),
             },
             None => Res::html(200, crate::page::landing_page(locale)),
@@ -947,11 +949,19 @@ fn signed_in_route(
     locale: Locale,
 ) -> Res {
     let show_spec = ctx.public.map(|p| p.show_spec).unwrap_or(false);
+    // Cloned rather than borrowed: `ctx` is taken mutably by the handlers below,
+    // and a set of a few short names is cheaper than restructuring the match
+    // around a borrow that only one arm needs.
+    let repos = ctx.public.map(|p| p.repos.clone());
 
     match (method, path) {
-        ("GET", public_route::FILE) => match mine(ctx, account_id) {
-            Ok(list) => Res::html(200, crate::page::public_file_page(&list, show_spec, locale)),
-            Err(e) => error(500, &e.to_string()),
+        ("GET", public_route::FILE) => match (mine(ctx, account_id), repos) {
+            (Ok(list), Some(repos)) => Res::html(
+                200,
+                crate::page::public_file_page(&list, &repos, show_spec, locale),
+            ),
+            (Ok(_), None) => Res::html(404, crate::page::public_not_found(locale)),
+            (Err(e), _) => error(500, &e.to_string()),
         },
         ("POST", public_route::FILE) => file_publicly(ctx, req, account_id),
 
@@ -1152,8 +1162,16 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
         return error(500, &e.to_string());
     }
     let secure = secure_attr(ctx);
+    let Some(repos) = ctx.public.map(|p| p.repos.clone()) else {
+        // Unreachable: signing in is a public route and only exists when a
+        // surface does.
+        return Res::html(404, crate::page::public_not_found(locale));
+    };
 
-    let mut res = Res::html(200, crate::page::public_file_page(&[], false, locale));
+    let mut res = Res::html(
+        200,
+        crate::page::public_file_page(&[], &repos, false, locale),
+    );
     res.set_cookie = Some(format!(
         "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
     ));
@@ -1251,15 +1269,34 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
     let Some(public) = ctx.public else {
         return Res::html(404, crate::page::public_not_found(locale));
     };
-    // The form has no repository field yet, so a filing goes to the first
-    // nominated one — which for a single-repository deployment is the only one,
-    // i.e. exactly today's behaviour. The picker and the body validation land
-    // together in the next commit; splitting them would ship a form that offers
-    // a choice the server ignores.
-    let repo = public.repos.first().to_string();
     let screened = public.screen.is_some();
 
     let form = form_fields(&req.body);
+
+    // **Checked against the configured set, never trusted.** The picker renders
+    // from that same set, so an honest filer always sends one of these; anything
+    // else was hand-crafted, and the answer is to refuse rather than to fall
+    // back on a default.
+    //
+    // Falling back would file the request against a repository the filer did not
+    // choose, and nothing on the page would say so — the work would simply land
+    // somewhere else. A refusal is the honest failure, and it keeps this the one
+    // place a repository name is decided.
+    //
+    // A surface serving one repository renders no field, so an absent name is
+    // normal there and takes the only one. With several, absent means the form
+    // was not the thing that sent this.
+    let repo = match form.get("repo").map(|r| r.trim()) {
+        None | Some("") if public.repos.is_single() => public.repos.first().to_string(),
+        Some(named) if public.repos.accepts(named) => named.to_string(),
+        _ => {
+            return Res::html(
+                400,
+                crate::page::public_message(locale.strings().file_repo_unknown, locale),
+            )
+            .with_policy(Policy::PublicScript)
+        }
+    };
     let text = form.get("text").cloned().unwrap_or_default();
     let text = text.trim();
     let kind = form
@@ -1577,6 +1614,15 @@ mod tests {
                 max_accounts: crate::config::DEFAULT_MAX_ACCOUNTS,
                 show_spec: true,
             });
+            self
+        }
+
+        /// Serve a second repository, so the picker and its validation are
+        /// reachable.
+        fn with_repos(mut self, names: &[&str]) -> Fixture {
+            if let Some(p) = self.public.as_mut() {
+                p.repos = crate::config::Repos::new(names);
+            }
             self
         }
 
@@ -2657,9 +2703,16 @@ mod tests {
     }
 
     #[test]
-    fn a_public_filing_uses_the_configured_repo_whatever_the_body_says() {
-        // Proves the repository field is *ignored*, not merely hidden — a
-        // stranger must not be able to aim work at a repo nobody nominated.
+    fn a_public_filing_cannot_name_a_repository_nobody_nominated() {
+        // **The property is unchanged; the mechanism is not.** This used to
+        // prove the body's repository was *ignored*, which is how a surface
+        // serving exactly one kept a stranger from aiming work anywhere. Now the
+        // form offers a choice, so an unnominated name is *refused* instead —
+        // and refusing is what keeps the property.
+        //
+        // Rejected rather than quietly filed against the default: a fallback
+        // would put the work somewhere the filer did not choose, with nothing on
+        // the page saying so.
         let mut f = Fixture::new("public-repo").with_public(false);
         let session = f.signed_in("jo@x.com");
 
@@ -2667,14 +2720,61 @@ mod tests {
             &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=secret-repo")
                 .with_cookie(&session),
         );
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(
+            f.store.all().unwrap().is_empty(),
+            "nothing was filed anywhere"
+        );
+    }
+
+    #[test]
+    fn a_filer_chooses_among_the_nominated_repositories() {
+        // The whole point of the set: one surface, several projects, and the
+        // filer says which.
+        let mut f = Fixture::new("public-pick")
+            .with_public(false)
+            .with_repos(&["intake", "memosy"]);
+        let session = f.signed_in("jo@x.com");
+
+        let res = f.go(
+            &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=memosy")
+                .with_cookie(&session),
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(f.store.all().unwrap()[0].repo, "memosy");
+    }
+
+    #[test]
+    fn a_filing_naming_nothing_is_refused_when_there_is_a_choice() {
+        // With a picker on the form, an absent name did not come from the form —
+        // and guessing which project somebody meant is exactly the fallback this
+        // refuses to make.
+        let mut f = Fixture::new("public-pick-none")
+            .with_public(false)
+            .with_repos(&["intake", "memosy"]);
+        let session = f.signed_in("jo@x.com");
+
+        let res =
+            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(f.store.all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_public_filing_takes_the_only_repository_when_there_is_one() {
+        // A one-repository surface renders no picker, so an absent name is
+        // normal there — and must still work exactly as it did before the set
+        // existed.
+        let mut f = Fixture::new("public-one-repo").with_public(false);
+        let session = f.signed_in("jo@x.com");
+
+        let res =
+            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
         assert_eq!(res.status, 200, "{}", res.body);
 
         let filed = f.store.all().unwrap();
         assert_eq!(filed.len(), 1);
-        assert_eq!(
-            filed[0].repo, "intake",
-            "the configured repo, not the body's"
-        );
+        assert_eq!(filed[0].repo, "intake");
     }
 
     #[test]

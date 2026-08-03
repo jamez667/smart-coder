@@ -85,7 +85,12 @@ fn main() {
             ),
             (
                 format!("file-{code}.html"),
-                page::public_file_page(&mine, true, locale),
+                page::public_file_page(
+                    &mine,
+                    &sc_server::config::Repos::new(&["alpha", "memosy"]),
+                    true,
+                    locale,
+                ),
             ),
             (
                 format!("detail-{code}.html"),

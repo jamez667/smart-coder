@@ -69,6 +69,8 @@ pub static STRINGS: Strings = Strings {
                      à partir de ce que vous écrivez, elle n'en est pas la copie.",
     file_spec_note: " Vous pourrez lire la spécification qui en résultera.",
     file_kind_label: "Type",
+    file_repo_label: "Projet",
+    file_repo_unknown: "Ce projet ne reçoit pas de demandes ici.",
     file_mine_heading: "Ce que vous avez déposé",
     file_nothing_yet: "Vous n'avez encore rien déposé.",
     file_signout: "Se déconnecter",

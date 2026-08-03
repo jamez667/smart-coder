@@ -232,6 +232,13 @@ pub struct Strings {
     pub file_cap_after: &'static str,
     pub file_spec_note: &'static str,
     pub file_kind_label: &'static str,
+    /// The repository picker's label. Shown only when the surface serves more
+    /// than one — the names themselves are never translated.
+    pub file_repo_label: &'static str,
+    /// Shown when a filing names a repository this surface does not collect
+    /// for. Deliberately says nothing about which ones it *does* — the picker
+    /// already lists those to anyone who reached the form honestly.
+    pub file_repo_unknown: &'static str,
     pub file_mine_heading: &'static str,
     pub file_nothing_yet: &'static str,
     pub file_signout: &'static str,
@@ -413,6 +420,8 @@ mod tests {
             s.file_cap_after,
             s.file_spec_note,
             s.file_kind_label,
+            s.file_repo_label,
+            s.file_repo_unknown,
             s.file_mine_heading,
             s.file_nothing_yet,
             s.file_signout,

@@ -187,10 +187,22 @@ pub fn signin_failed_page(already_used: bool, locale: Locale) -> String {
 
 /// The public filing form, plus what this filer has already sent.
 ///
-/// **No repository field.** Public filings go to the repository the operator
-/// configured, so a stranger cannot aim work at one that was never nominated for
-/// public intake. Absent from the form *and* ignored in the body.
-pub fn public_file_page(mine: &[Request], show_spec: bool, locale: Locale) -> String {
+/// **A repository is chosen from a closed set, never typed.** The picker is
+/// rendered from the operator's own configuration and the submitted name is
+/// checked against the same set, so a stranger can choose *among* nominated
+/// repositories and cannot name one that was never nominated. A surface serving
+/// one repository shows no field at all — there is nothing to decide.
+///
+/// Still **names, never paths**. The server holds no path to any repository and
+/// this field does not change that: a name is resolved by the daemon against its
+/// own configured set, one hop later, which is where the closed set is really
+/// enforced.
+pub fn public_file_page(
+    mine: &[Request],
+    repos: &crate::config::Repos,
+    show_spec: bool,
+    locale: Locale,
+) -> String {
     let s = locale.strings();
     let mut items = String::new();
     for r in crate::routes::listing_order(mine.to_vec()) {
@@ -219,7 +231,7 @@ pub fn public_file_page(mine: &[Request], show_spec: bool, locale: Locale) -> St
              <label for=\"text\">{prompt}</label>\
              <textarea id=\"text\" name=\"text\" required maxlength=\"{bytes}\" \
              placeholder=\"{placeholder}\"></textarea>\
-             {kind}\
+             {repo}{kind}\
              <button type=\"submit\">{submit}</button></form>\
              <p class=\"meta\">{cap_before}{words}{cap_after}{spec_note}</p>\
              <h2>{mine_heading}</h2>{items}\
@@ -228,6 +240,7 @@ pub fn public_file_page(mine: &[Request], show_spec: bool, locale: Locale) -> St
             prompt = esc(s.file_prompt),
             bytes = crate::routes::MAX_BYTES,
             placeholder = esc(s.file_placeholder),
+            repo = super::repo_field_in(repos, locale),
             kind = kind_field_in(locale),
             submit = esc(s.file_submit),
             cap_before = esc(s.file_cap_before),
@@ -366,15 +379,39 @@ mod tests {
     }
 
     #[test]
-    fn the_public_form_offers_no_repository_field() {
-        // A stranger must not be able to aim work at a repository the operator
-        // did not nominate. Absent from the form, and ignored in the body.
-        let html = public_file_page(&[], true, Locale::En);
-        for path_ish in ["name=\"repo\"", "name=\"path\"", "name=\"workspace\""] {
+    fn the_public_form_offers_only_nominated_repositories() {
+        // **The property is unchanged; the mechanism is not.** This used to
+        // assert the form had no repository field at all, which was how a single
+        // -repository surface kept a stranger from aiming work anywhere. With a
+        // set, the field exists — and what protects the property is that its
+        // options come from the operator's configuration and the submitted name
+        // is checked against the same set.
+        let repos = crate::config::Repos::new(&["alpha", "beta"]);
+        let html = public_file_page(&[], &repos, true, Locale::En);
+
+        assert!(html.contains("name=\"repo\""), "the picker renders: {html}");
+        assert!(html.contains("<option value=\"alpha\">"), "{html}");
+        assert!(html.contains("<option value=\"beta\">"), "{html}");
+        assert!(!html.contains("gamma"), "only what was nominated: {html}");
+
+        // And **still no path**, which is the half of the old assertion that
+        // never stopped mattering: the server holds names, never locations.
+        for path_ish in ["name=\"path\"", "name=\"workspace\"", "name=\"dir\""] {
             assert!(!html.contains(path_ish), "{path_ish}: {html}");
         }
         assert!(html.contains("name=\"text\""), "{html}");
         assert!(html.contains("name=\"kind\""), "{html}");
+    }
+
+    #[test]
+    fn one_repository_needs_no_picker() {
+        // A select with one option is a question with one answer. The filer has
+        // nothing to decide, so the field is not rendered at all — which is also
+        // what keeps a single-repository deployment's form exactly as it was.
+        let repos = crate::config::Repos::new(&["alpha"]);
+        let html = public_file_page(&[], &repos, true, Locale::En);
+        assert!(!html.contains("name=\"repo\""), "{html}");
+        assert!(html.contains("name=\"text\""), "{html}");
     }
 
     #[test]
@@ -460,7 +497,12 @@ mod tests {
             signin_confirm_page("t", Locale::Fr),
             signin_failed_page(true, Locale::Fr),
             signin_failed_page(false, Locale::Fr),
-            public_file_page(&[r.clone()], true, Locale::Fr),
+            public_file_page(
+                &[r.clone()],
+                &crate::config::Repos::new(&["alpha"]),
+                true,
+                Locale::Fr,
+            ),
             public_detail(&r, true, Locale::Fr),
             public_filed(&r, Locale::Fr),
             public_not_found(Locale::Fr),
