@@ -148,10 +148,35 @@ report went through when it did not; a false negative costs one wasted drafting
 run, visible in the queue and cheap to discard. The runner exits non-zero on a
 false positive and not on a miss, for exactly that reason.
 
-There are **three parties** now, and conflating them is the mistake to avoid.
+There are **four parties** now, and conflating them is the mistake to avoid.
 They authenticate differently because they are different things: a daemon is a
-long-lived machine credential, a *device* is the developer, and an *account* is a
-member of the public who may file and read their own requests and nothing else.
+long-lived machine credential, a *device* is the developer, an *account* is a
+member of the public who may file and read their own requests and nothing else,
+and an *owner* is somebody the operator has named as responsible for a
+repository.
+
+The last is the newest and the one whose boundary matters most:
+
+| | may file | may read others' specs | may decline | may **approve** |
+| --- | --- | --- | --- | --- |
+| Account | own repo's | no | no | no |
+| Owner | — | their repositories' | yes | **no** |
+| Device | yes | all | yes | yes |
+
+**Approving is the one an owner does not get**, and the reason is not that it
+reaches the repository — it does not, it flips a state and writes one file
+<!--@ crates/sc-server/src/store.rs -->. It is that approving is the *signal* a
+spec is fit to become work on the developer's machine, and that decision has not
+been delegated. Declining fails towards **lost** work: visible on the page, and
+the filer can file again. Approving fails towards **admitted** work, which is
+invisible until it costs something. `release` sits on the developer's side for
+the same reason — it overrules the screener, so it admits.
+
+That rule is **structural**. The private surface is entered through
+`let Some(Caller::Device { .. }) = caller` <!--@ crates/sc-server/src/routes.rs -->
+and every admitting verb lives past that line, so there is no value of
+`Caller::Owner` which reaches one. Not a check inside the approve handler that a
+later reader could tidy away.
 
 ### The daemon → server
 
@@ -441,6 +466,54 @@ an *unspent* code's life; it does not add a way to arm a new one.
 > listens on nothing — it is an HTTPS client, which is the whole reason this
 > architecture needs no tunnel, no reverse proxy, and no bind-address discipline.
 
+### The owner → server
+
+✅ **Built** <!--@ crates/sc-server/src/oauth.rs -->. An owner signs in with
+GitHub and reads the drafted specs for the repositories the operator named as
+theirs. Magic links stay for filers: the two are different roles, not two
+spellings of one, and they need not share an identity.
+
+**The allowlist is the entire authorization model**, and that is worth stating
+plainly rather than discovering. Nothing is checked against GitHub's API, so
+`SC_SERVER_OWNERS` is the only thing standing between a GitHub account and every
+drafted spec for a project — and a drafted spec is model output produced by
+reading the developer's tree. Signing in proves *who somebody is*; this setting
+decides *what that is worth*.
+
+So every entry is validated at startup and every failure is a refusal to boot: an
+owner naming a repository the surface does not serve, an owner naming none,
+duplicate logins, owners with no GitHub application to sign in with. A setting
+that looks applied and grants the wrong thing is worse than a server that will
+not start.
+
+Owners live in **configuration, with no record on disk**. An allowlist that is
+both config and store has two sources of truth, and the failure is somebody
+removed from the config who still holds a live session. This way deleting the
+line and redeploying *is* revocation — the property per-daemon keys already have.
+It also leaves nothing to migrate if repository access is ever checked against
+GitHub for real: that gate reads the same field and calls the API in addition.
+
+Keyed on the **login**, lowercased, not the numeric id. The id is stabler, and
+that argument does not reach here: an operator writes this by hand from a name
+they recognise, and nobody knows their collaborator's numeric id. A rename makes
+the entry stop matching — somebody who cannot sign in and says so, which is the
+safe direction.
+
+The flow itself is an **interstitial page with a link**, not a redirect. `Res`
+carries no `Location` header, and this surface already records an objection to
+redirects on routes anyone can reach. A link also stays inside the CSP as
+written, where `form-action 'self'` would refuse a form posting to github.com.
+The state token is spent **before** the code is exchanged: a code surviving a
+failed exchange is worth nothing, where a state surviving one could be replayed
+out of browser history.
+
+Every callback failure renders one page. A reader can only act on "that did not
+work"; telling them whether the state was forged or merely expired would tell an
+attacker which half they got right. The operator gets the real reason in the log.
+
+*Not built:* the GitHub API is never asked whether a login can actually see a
+repository. `SC_SERVER_OWNERS` is asserted by the operator, not verified.
+
 ## Filing a request
 
 A request is a small, deliberately boring record:
@@ -509,13 +582,33 @@ and the public surface serves exactly one. Asserted as *ignored*, not merely
 hidden — a repo submitted in the body is discarded.
 
 The security claim survives intact, because it never rested on the picker: a name
-is not a path, whether it was chosen or typed. What is lost is ergonomic — a
-mistyped name is filed and fails at the daemon rather than being impossible to
-enter.
+is not a path, whether it was chosen or typed.
 
-**The daemon now publishes its names on poll**, which this spec previously called
-the right way to get the picker back, and it is — but it was built first for a
-sharper reason. See below.
+**The picker is back**, and on the surface that lost it. ✅ **Built**
+<!--@ crates/sc-server/src/config.rs -->: `SC_SERVER_PUBLIC_REPOS` names a set,
+the form offers exactly those, and a submitted name is checked against the same
+set.
+
+The property this protects was always a **closed set**, never a
+*set of size one* — the scalar was how the closed set happened to be
+implemented, not what made it safe. So one server can collect for several
+projects, which is what a second deployment per repository was previously the
+only way to do: another stack, volume, hostname, certificate and daemon, none of
+which paid for itself by the third repository.
+
+A name outside the set is **refused**, not filed against a default. A fallback
+would put work somewhere the filer did not choose with nothing on the page
+saying so; a refusal is the honest failure. One repository renders no field at
+all — a select with one option is a question with one answer.
+
+This makes the public surface the first place this server holds a closed set of
+repository *names*. Still names, never paths, and the daemon still resolves each
+against its own configured set one hop later — which is where the closed set is
+really enforced.
+
+**The daemon also publishes its names on poll**, which this spec previously
+called the right way to get the picker back, and it is — but it was built first
+for a sharper reason. See below.
 
 ### Which daemon gets which work
 
