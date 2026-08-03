@@ -25,7 +25,7 @@ use crate::config::PublicConfig;
 use crate::i18n::Locale;
 use crate::mail::Mailer;
 use crate::ratelimit::{Bucket, RateLimiter};
-use crate::store::{new_id, Request, RequestState, Store};
+use crate::store::{new_id, Request, RequestState, Serves, Store};
 
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
@@ -419,10 +419,14 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // The daemon-facing API. Its routes are shared constants, so the two ends
     // cannot disagree about the strings.
     if path.starts_with("/api/v1/work") {
-        if !matches!(caller, Some(Caller::Daemon { .. })) {
+        // The label is taken from the *resolved* caller, so what a daemon claims
+        // and reports under is the machine whose key it presented — never
+        // anything it sent.
+        let Some(Caller::Daemon { label }) = &caller else {
             return error(401, "unauthorized");
-        }
-        return daemon_route(ctx, req, method, &path);
+        };
+        let label = label.clone();
+        return daemon_route(ctx, req, method, &path, &label);
     }
 
     // Enrolment is the one route reachable without a credential — it is how a
@@ -572,9 +576,11 @@ fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
 // The daemon side
 // ---------------------------------------------------------------------------
 
-fn daemon_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
+fn daemon_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str, by: &str) -> Res {
     if method == "GET" && path == wire::route::WORK {
-        return match ctx.store.claim_next() {
+        // `Anything` for now: a later commit teaches the daemon to declare what
+        // it serves, and this is where that declaration will arrive.
+        return match ctx.store.claim_next(Serves::Anything, by) {
             Ok(Some(r)) => Res::ok_json(&PollResponse::work(work_item(&r))),
             // Nothing right now. The HTTP layer holds the connection open and
             // asks again; this body is what it sends if the hold expires.
@@ -608,7 +614,7 @@ fn daemon_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             }
             match ctx
                 .store
-                .record_drafted(id, &payload.spec, &payload.artifact_dir)
+                .record_drafted(id, by, &payload.spec, &payload.artifact_dir)
             {
                 Ok(_) => Res::json(200, "{\"ok\":true}"),
                 Err(e) => error(404, &e.to_string()),
@@ -622,7 +628,7 @@ fn daemon_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             if let Err(msg) = wire::check_protocol(payload.protocol, "the daemon") {
                 return error(400, &msg);
             }
-            match ctx.store.record_failed(id, &payload.reason) {
+            match ctx.store.record_failed(id, by, &payload.reason) {
                 Ok(_) => Res::json(200, "{\"ok\":true}"),
                 Err(e) => error(404, &e.to_string()),
             }
@@ -2421,7 +2427,10 @@ mod tests {
         let filed = f.store.all().unwrap();
         assert_eq!(filed[0].state, RequestState::Screening);
         assert!(
-            f.store.claim_next().unwrap().is_none(),
+            f.store
+                .claim_next(Serves::Anything, "d-test")
+                .unwrap()
+                .is_none(),
             "no daemon may claim it yet"
         );
     }
@@ -2435,7 +2444,11 @@ mod tests {
         f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
 
         assert_eq!(f.store.all().unwrap()[0].state, RequestState::Queued);
-        assert!(f.store.claim_next().unwrap().is_some());
+        assert!(f
+            .store
+            .claim_next(Serves::Anything, "d-test")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

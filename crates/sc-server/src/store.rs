@@ -145,6 +145,37 @@ impl RequestState {
     }
 }
 
+/// Which repositories a daemon will accept work for.
+///
+/// A type rather than a `&[String]`, because the two cases mean opposite things
+/// and an empty slice is exactly what a caller that *forgot* to fill one in
+/// produces. [`Anything`](Serves::Anything) can only be written on purpose; a
+/// declared-but-empty set is a daemon serving nothing, which claims nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Serves<'a> {
+    /// The daemon named no repositories — an older build, which does not know
+    /// how to. It gets everything, which is exactly the behaviour before this
+    /// existed, so an un-upgraded daemon keeps working.
+    Anything,
+    /// The daemon named the repositories it has a working tree for. Only those
+    /// are handed over.
+    These(&'a [String]),
+}
+
+impl Serves<'_> {
+    /// Would this daemon take work for `repo`?
+    ///
+    /// Exact and case-sensitive, matching how a daemon resolves a name against
+    /// its own configured set: a fuzzy match here would reintroduce the
+    /// ambiguity a closed set of names exists to remove.
+    pub fn accepts(&self, repo: &str) -> bool {
+        match self {
+            Serves::Anything => true,
+            Serves::These(names) => names.iter().any(|n| n == repo),
+        }
+    }
+}
+
 /// One filed request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -201,6 +232,21 @@ pub struct Request {
     /// one more timeout for a claim that was already stuck.
     #[serde(default)]
     pub claimed_ms: Option<u64>,
+    /// Which daemon holds the current claim — the operator's **label** for that
+    /// machine, never its key.
+    ///
+    /// Guarding a late report on state alone leaves a real window: a daemon
+    /// whose claim expired, whose work a *second* daemon has since claimed but
+    /// not yet finished, finds the request still `Claimed` and its stale draft
+    /// is accepted on top of one in progress. Reclaiming work is only safe if
+    /// the daemon it was taken from cannot still write, and "still `Claimed`" is
+    /// not that guarantee — "still claimed *by you*" is.
+    ///
+    /// `Option` for the same two reasons as `claimed_ms`: records written before
+    /// this field existed have none, and it is dropped alongside it for anything
+    /// not `Claimed`, so a stale holder is as unrepresentable as a stale stamp.
+    #[serde(default)]
+    pub claimed_by: Option<String>,
 }
 
 impl Request {
@@ -224,6 +270,7 @@ impl Request {
             drafted_ms: None,
             account_id: None,
             claimed_ms: None,
+            claimed_by: None,
         }
     }
 
@@ -330,12 +377,18 @@ impl Store {
     /// the one write everything funnels through makes a stale stamp
     /// unrepresentable on disk rather than merely unlikely.
     pub fn put(&self, req: &Request) -> Result<()> {
-        let json = if req.state == RequestState::Claimed || req.claimed_ms.is_none() {
-            serde_json::to_string_pretty(req)
-        } else {
+        let stale = req.state != RequestState::Claimed
+            && (req.claimed_ms.is_some() || req.claimed_by.is_some());
+        let json = if stale {
+            // Both together: a holder left behind on something not `Claimed`
+            // says a machine is working on it when none is, which is exactly as
+            // misleading as a stale timestamp.
             let mut cleaned = req.clone();
             cleaned.claimed_ms = None;
+            cleaned.claimed_by = None;
             serde_json::to_string_pretty(&cleaned)
+        } else {
+            serde_json::to_string_pretty(req)
         }
         .map_err(|e| DcError::Eval(e.to_string()))?;
         write_atomic(&self.request_path(&req.id), json.as_bytes())
@@ -385,7 +438,7 @@ impl Store {
     /// skipped, a daemon that dies mid-draft would otherwise hold its repository
     /// for ever: nothing else for that repo could ever be claimed, and no error
     /// would be reported anywhere. See [`CLAIM_TIMEOUT_MS`].
-    pub fn claim_next(&self) -> Result<Option<Request>> {
+    pub fn claim_next(&self, serves: Serves<'_>, by: &str) -> Result<Option<Request>> {
         self.reclaim_stale(now_ms())?;
 
         let all = self.all()?;
@@ -394,17 +447,19 @@ impl Store {
             .filter(|r| r.state == RequestState::Claimed)
             .map(|r| r.repo.clone())
             .collect();
-        // `is_claimable` rather than `== Queued`, so the guarantee lives in one
-        // named place: a state added later is excluded unless someone
-        // deliberately opts it in.
+        // `is_claimable` **first**, and rather than `== Queued`, so the guarantee
+        // lives in one named place and reads as the leading condition: a state
+        // added later is excluded unless someone deliberately opts it in, and a
+        // later edit cannot make the served-repo filter the deciding predicate.
         let Some(mut next) = all
             .into_iter()
-            .find(|r| r.state.is_claimable() && !busy.contains(&r.repo))
+            .find(|r| r.state.is_claimable() && serves.accepts(&r.repo) && !busy.contains(&r.repo))
         else {
             return Ok(None);
         };
         next.state = RequestState::Claimed;
         next.claimed_ms = Some(now_ms());
+        next.claimed_by = Some(by.to_string());
         self.put(&next)?;
         Ok(Some(next))
     }
@@ -443,6 +498,7 @@ impl Store {
             }
             req.state = RequestState::Queued;
             req.claimed_ms = None;
+            req.claimed_by = None;
             // Said plainly, because the developer's page shows it and "why did
             // this go back to queued" is otherwise unanswerable.
             req.note = Some(
@@ -463,8 +519,14 @@ impl Store {
     /// since — a spec another daemon has since drafted, a decision a reviewer
     /// has since made. Reclaiming stale work is only safe if the work it
     /// reclaimed cannot still write.
-    pub fn record_drafted(&self, id: &str, spec: &str, artifact_dir: &str) -> Result<Request> {
-        let mut req = self.claimed(id)?;
+    pub fn record_drafted(
+        &self,
+        id: &str,
+        by: &str,
+        spec: &str,
+        artifact_dir: &str,
+    ) -> Result<Request> {
+        let mut req = self.claimed(id, by)?;
         req.state = RequestState::AwaitingReview;
         req.spec = Some(spec.to_string());
         req.artifact_dir = Some(artifact_dir.to_string());
@@ -481,20 +543,33 @@ impl Store {
     /// Same guard as [`record_drafted`](Self::record_drafted): a late failure
     /// report must not mark something `Failed` that has already been reclaimed
     /// and successfully drafted by somebody else.
-    pub fn record_failed(&self, id: &str, reason: &str) -> Result<Request> {
-        let mut req = self.claimed(id)?;
+    pub fn record_failed(&self, id: &str, by: &str, reason: &str) -> Result<Request> {
+        let mut req = self.claimed(id, by)?;
         req.state = RequestState::Failed;
         req.note = Some(reason.to_string());
         self.put(&req)?;
         Ok(req)
     }
 
-    /// Load a request, refusing it unless a daemon currently holds the claim.
+    /// Load a request, refusing it unless `by` currently holds the claim.
+    ///
+    /// **State and holder, not state alone.** Checking only the state leaves a
+    /// real window: a daemon whose claim expired, whose work a *second* daemon
+    /// has since claimed but not yet finished, finds the request still
+    /// `Claimed` — so a state-only guard passes and its stale draft lands on top
+    /// of one being written right now. Reclaiming work is only safe if the
+    /// daemon it was taken from cannot still write, and "still `Claimed`" is not
+    /// that guarantee.
+    ///
+    /// A record written before `claimed_by` existed has no holder, and is
+    /// treated as matching **any** daemon: on upgrade the alternative would
+    /// reject the in-flight report of a draft that began under the previous
+    /// build. The window is one claim timeout.
     ///
     /// The error says *reclaimed* rather than "not found", because the daemon on
     /// the other end did real work and the log it writes is the only place that
     /// will ever explain where the work went.
-    fn claimed(&self, id: &str) -> Result<Request> {
+    fn claimed(&self, id: &str, by: &str) -> Result<Request> {
         let req = self.require(id)?;
         if req.state != RequestState::Claimed {
             return Err(DcError::Eval(format!(
@@ -504,6 +579,16 @@ impl Store {
                 req.state.label(),
                 CLAIM_TIMEOUT_MS / 60_000
             )));
+        }
+        if let Some(holder) = &req.claimed_by {
+            if holder != by {
+                return Err(DcError::Eval(format!(
+                    "request {id:?} is claimed by {holder:?}, not by {by:?} — \
+                     this claim was reclaimed after {} minutes and another daemon \
+                     took it, so this report arrived too late to be recorded",
+                    CLAIM_TIMEOUT_MS / 60_000
+                )));
+            }
         }
         Ok(req)
     }
@@ -829,11 +914,11 @@ mod tests {
         file(&s, "r-1", "alpha");
         file(&s, "r-2", "alpha");
 
-        let claimed = s.claim_next().unwrap().unwrap();
+        let claimed = s.claim_next(Serves::Anything, "d-test").unwrap().unwrap();
         assert_eq!(claimed.id, "r-1");
         assert_eq!(claimed.state, RequestState::Claimed);
         // The repo is now busy, so the second waits.
-        assert!(s.claim_next().unwrap().is_none());
+        assert!(s.claim_next(Serves::Anything, "d-test").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -845,9 +930,18 @@ mod tests {
         file(&s, "r-2", "alpha");
         file(&s, "r-3", "beta");
 
-        assert_eq!(s.claim_next().unwrap().unwrap().id, "r-1");
         assert_eq!(
-            s.claim_next().unwrap().unwrap().id,
+            s.claim_next(Serves::Anything, "d-test")
+                .unwrap()
+                .unwrap()
+                .id,
+            "r-1"
+        );
+        assert_eq!(
+            s.claim_next(Serves::Anything, "d-test")
+                .unwrap()
+                .unwrap()
+                .id,
             "r-3",
             "alpha is busy, beta is free"
         );
@@ -866,11 +960,11 @@ mod tests {
         file(&s, "r-1", "alpha");
         file(&s, "r-2", "alpha");
 
-        let claimed = s.claim_next().unwrap().unwrap();
+        let claimed = s.claim_next(Serves::Anything, "d-test").unwrap().unwrap();
         assert_eq!(claimed.id, "r-1");
         assert!(claimed.claimed_ms.is_some(), "the claim is stamped");
         // The daemon now dies. Nothing else for alpha can be claimed.
-        assert!(s.claim_next().unwrap().is_none());
+        assert!(s.claim_next(Serves::Anything, "d-test").unwrap().is_none());
 
         // Age the claim past the timeout.
         let mut stuck = s.require("r-1").unwrap();
@@ -879,7 +973,7 @@ mod tests {
 
         // The next daemon to ask gets r-1 back — the abandoned one, oldest
         // first — rather than finding the repo permanently wedged.
-        let again = s.claim_next().unwrap().unwrap();
+        let again = s.claim_next(Serves::Anything, "d-test").unwrap().unwrap();
         assert_eq!(again.id, "r-1");
         assert_eq!(again.state, RequestState::Claimed);
         assert!(
@@ -896,7 +990,7 @@ mod tests {
         // two daemons on the same tree.
         let (s, dir) = store("stale-fresh");
         file(&s, "r-1", "alpha");
-        let claimed = s.claim_next().unwrap().unwrap();
+        let claimed = s.claim_next(Serves::Anything, "d-test").unwrap().unwrap();
         // Measured from the **stamp**, not from `now_ms()`: the claim was taken
         // a moment ago, so "now plus the timeout" is already past it.
         let at = claimed.claimed_ms.unwrap();
@@ -921,7 +1015,7 @@ mod tests {
         // this whole timeout is careful about.
         let (s, dir) = store("stale-clock");
         file(&s, "r-1", "alpha");
-        let claimed = s.claim_next().unwrap().unwrap();
+        let claimed = s.claim_next(Serves::Anything, "d-test").unwrap().unwrap();
 
         let long_before = claimed.claimed_ms.unwrap().saturating_sub(86_400_000);
         assert_eq!(s.reclaim_stale(long_before).unwrap(), 0);
@@ -961,14 +1055,14 @@ mod tests {
         let (s, dir) = store("stale-drop");
         for (id, finish) in [("r-1", true), ("r-2", false)] {
             file(&s, id, id); // one repo each, so both are claimable
-            s.claim_next().unwrap();
+            s.claim_next(Serves::Anything, "d-test").unwrap();
             assert!(s.require(id).unwrap().claimed_ms.is_some());
 
             if finish {
-                s.record_drafted(id, "# Spec", "specs/x").unwrap();
+                s.record_drafted(id, "d-test", "# Spec", "specs/x").unwrap();
                 assert_eq!(s.require(id).unwrap().state, RequestState::AwaitingReview);
             } else {
-                s.record_failed(id, "could not draft").unwrap();
+                s.record_failed(id, "d-test", "could not draft").unwrap();
                 assert_eq!(s.require(id).unwrap().state, RequestState::Failed);
             }
             assert_eq!(
@@ -988,24 +1082,24 @@ mod tests {
         // drafted, or a decision a reviewer has since made.
         let (s, dir) = store("late-report");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
+        s.claim_next(Serves::Anything, "laptop").unwrap();
 
         // Its claim expires and a second daemon picks the work up and finishes.
         let mut stale = s.require("r-1").unwrap();
         stale.claimed_ms = Some(now_ms() - CLAIM_TIMEOUT_MS - 1);
         s.put(&stale).unwrap();
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# The good spec", "specs/x")
+        s.claim_next(Serves::Anything, "office").unwrap();
+        s.record_drafted("r-1", "office", "# The good spec", "specs/x")
             .unwrap();
 
         // Now the first daemon wakes up and reports. Both verbs are refused.
         let err = s
-            .record_drafted("r-1", "# The stale spec", "specs/y")
+            .record_drafted("r-1", "laptop", "# The stale spec", "specs/y")
             .expect_err("a late report must not be recorded")
             .to_string();
         assert!(err.contains("too late"), "{err}");
         assert!(err.contains("reclaimed"), "{err}");
-        assert!(s.record_failed("r-1", "gave up").is_err());
+        assert!(s.record_failed("r-1", "laptop", "gave up").is_err());
 
         // The good spec survives untouched, still awaiting its reviewer.
         let req = s.require("r-1").unwrap();
@@ -1015,13 +1109,107 @@ mod tests {
     }
 
     #[test]
+    fn a_daemon_cannot_report_on_a_claim_another_daemon_now_holds() {
+        // The window a state-only guard leaves open, and the reason a claim has
+        // to record *who* holds it.
+        //
+        // The test above only passes because the second daemon had already
+        // FINISHED — the state had moved past `Claimed`, so checking the state
+        // was enough. Here the second daemon is still drafting: the request is
+        // `Claimed`, a state-only check sees nothing wrong, and the first
+        // daemon's stale spec lands on top of work in progress.
+        let (s, dir) = store("wrong-holder");
+        file(&s, "r-1", "alpha");
+        s.claim_next(Serves::Anything, "laptop").unwrap();
+
+        // The laptop's claim expires; the office picks it up and is still
+        // working — nothing has been reported yet.
+        let mut stale = s.require("r-1").unwrap();
+        stale.claimed_ms = Some(now_ms() - CLAIM_TIMEOUT_MS - 1);
+        s.put(&stale).unwrap();
+        s.claim_next(Serves::Anything, "office").unwrap();
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Claimed);
+
+        let err = s
+            .record_drafted("r-1", "laptop", "# Stale", "specs/y")
+            .expect_err("the laptop no longer holds this claim")
+            .to_string();
+        assert!(err.contains("office"), "it names the real holder: {err}");
+        assert!(s.record_failed("r-1", "laptop", "gave up").is_err());
+
+        // And the daemon that does hold it is unaffected.
+        s.record_drafted("r-1", "office", "# The good spec", "specs/x")
+            .unwrap();
+        assert_eq!(
+            s.require("r-1").unwrap().spec.as_deref(),
+            Some("# The good spec")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_written_before_claimed_by_existed_still_loads() {
+        // The upgrade case. A claim taken under the previous build has no
+        // holder, and rejecting its report would throw away a draft that is
+        // legitimately in flight — so an absent holder matches any daemon. The
+        // window is one claim timeout.
+        let (s, dir) = store("no-holder");
+        file(&s, "r-1", "alpha");
+        let mut mid_flight = s.require("r-1").unwrap();
+        mid_flight.state = RequestState::Claimed;
+        mid_flight.claimed_ms = Some(now_ms());
+        mid_flight.claimed_by = None;
+        s.put(&mid_flight).unwrap();
+
+        s.record_drafted("r-1", "whoever", "# Spec", "specs/x")
+            .expect("an in-flight draft from before the upgrade is still recorded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_claim_records_the_daemon_holding_it_and_lets_go_when_it_ends() {
+        let (s, dir) = store("holder-lifecycle");
+        file(&s, "r-1", "alpha");
+        let claimed = s.claim_next(Serves::Anything, "laptop").unwrap().unwrap();
+        assert_eq!(claimed.claimed_by.as_deref(), Some("laptop"));
+
+        // Dropped when the state moves on, so nothing says a machine is working
+        // on something when none is.
+        s.record_drafted("r-1", "laptop", "# Spec", "specs/x")
+            .unwrap();
+        assert_eq!(s.require("r-1").unwrap().claimed_by, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reclaimed_request_forgets_who_held_it() {
+        // A holder left on a requeued request would name a daemon that is not
+        // working on it — as misleading as a stale timestamp, and dropped for
+        // the same reason.
+        let (s, dir) = store("reclaim-holder");
+        file(&s, "r-1", "alpha");
+        s.claim_next(Serves::Anything, "laptop").unwrap();
+
+        let mut stale = s.require("r-1").unwrap();
+        stale.claimed_ms = Some(now_ms() - CLAIM_TIMEOUT_MS - 1);
+        s.put(&stale).unwrap();
+        assert_eq!(s.reclaim_stale(now_ms()).unwrap(), 1);
+
+        let req = s.require("r-1").unwrap();
+        assert_eq!(req.state, RequestState::Queued);
+        assert_eq!(req.claimed_by, None);
+        assert_eq!(req.claimed_ms, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_drafted_spec_comes_back_and_waits_for_a_human() {
         let (s, dir) = store("drafted");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
 
         let req = s
-            .record_drafted("r-1", "# The spec", "specs/the-thing")
+            .record_drafted("r-1", "d-test", "# The spec", "specs/the-thing")
             .unwrap();
         assert_eq!(req.state, RequestState::AwaitingReview);
         assert_eq!(req.spec.as_deref(), Some("# The spec"));
@@ -1035,8 +1223,9 @@ mod tests {
         // up in their IDE when they choose.
         let (s, dir) = store("approve");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
+            .unwrap();
 
         let digest = s.require("r-1").unwrap().spec_digest().unwrap();
         let req = s.approve("r-1", &digest).unwrap();
@@ -1054,16 +1243,18 @@ mod tests {
         // consent attaches to bytes, not to an id.
         let (s, dir) = store("stale-digest");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# Version one", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# Version one", "specs/x")
+            .unwrap();
         let read_this = s.require("r-1").unwrap().spec_digest().unwrap();
 
         // A redraft lands under the reviewer. Through the real path — sent back,
         // requeued, claimed again — since a daemon may only report on a claim it
         // currently holds. The reviewer is still holding v1's digest throughout.
         s.send_back("r-1", "redo").unwrap();
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# Version two", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# Version two", "specs/x")
+            .unwrap();
 
         let err = s
             .approve("r-1", &read_this)
@@ -1089,8 +1280,9 @@ mod tests {
         // would make the reviewer re-read something that did not change.
         let (s, dir) = store("same-digest");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
+            .unwrap();
         let digest = s.require("r-1").unwrap().spec_digest().unwrap();
 
         // The real redraft path — sent back, requeued, claimed again — rather
@@ -1098,8 +1290,9 @@ mod tests {
         // a claim it currently holds, so the shortcut no longer models anything
         // that can happen.
         s.send_back("r-1", "change it").unwrap();
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
+            .unwrap();
         assert!(s.approve("r-1", &digest).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1123,16 +1316,16 @@ mod tests {
         file(&s, "r-1", "alpha");
         assert!(s.require("r-1").unwrap().drafted_ms.is_none());
 
-        s.claim_next().unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
         let first = s
-            .record_drafted("r-1", "# v1", "specs/x")
+            .record_drafted("r-1", "d-test", "# v1", "specs/x")
             .unwrap()
             .drafted_ms
             .expect("stamped on receipt");
         s.send_back("r-1", "more detail").unwrap();
-        s.claim_next().unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
         let second = s
-            .record_drafted("r-1", "# v2", "specs/x")
+            .record_drafted("r-1", "d-test", "# v2", "specs/x")
             .unwrap()
             .drafted_ms
             .expect("restamped");
@@ -1157,8 +1350,9 @@ mod tests {
         // would be showing a dead artifact.
         let (s, dir) = store("send-back");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# Too vague", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# Too vague", "specs/x")
+            .unwrap();
 
         let req = s.send_back("r-1", "name the actual roles").unwrap();
         assert_eq!(req.state, RequestState::Queued);
@@ -1166,7 +1360,7 @@ mod tests {
         assert!(req.spec.is_none(), "the rejected draft is dropped");
 
         // And it is claimable again, carrying its note.
-        let again = s.claim_next().unwrap().unwrap();
+        let again = s.claim_next(Serves::Anything, "d-test").unwrap().unwrap();
         assert_eq!(
             again.send_back_note.as_deref(),
             Some("name the actual roles")
@@ -1178,8 +1372,9 @@ mod tests {
     fn a_send_back_needs_a_note() {
         let (s, dir) = store("send-back-empty");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# Spec", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# Spec", "specs/x")
+            .unwrap();
         assert!(s.send_back("r-1", "  ").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1190,12 +1385,15 @@ mod tests {
         // ground the *next* one too, on feedback already acted upon.
         let (s, dir) = store("note-spent");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# v1", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# v1", "specs/x")
+            .unwrap();
         s.send_back("r-1", "more detail").unwrap();
-        s.claim_next().unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
 
-        let req = s.record_drafted("r-1", "# v2", "specs/x").unwrap();
+        let req = s
+            .record_drafted("r-1", "d-test", "# v2", "specs/x")
+            .unwrap();
         assert!(req.send_back_note.is_none(), "the note is spent");
         assert_eq!(req.spec.as_deref(), Some("# v2"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1234,13 +1432,121 @@ mod tests {
             assert!(!state.is_claimable(), "{state:?}");
         }
         assert!(
-            s.claim_next().unwrap().is_none(),
+            s.claim_next(Serves::Anything, "d-test").unwrap().is_none(),
             "no daemon may claim any of these"
+        );
+
+        // Not even to a daemon that declares every one of those repositories.
+        // Asserted with the served-repo filter WIDE OPEN, so an edit that made
+        // it the deciding predicate rather than an extra one is caught here
+        // rather than in review.
+        let every_repo: Vec<String> = (0..7).map(|i| format!("repo-{i}")).collect();
+        assert!(
+            s.claim_next(Serves::These(&every_repo), "d-test")
+                .unwrap()
+                .is_none(),
+            "declaring a repository widens which queued work you get, never \
+             whether unqueued work becomes claimable"
         );
 
         // And the one state that is claimable still is.
         file_in(&s, "r-ok", "repo-ok", RequestState::Queued);
-        assert_eq!(s.claim_next().unwrap().unwrap().id, "r-ok");
+        assert_eq!(
+            s.claim_next(Serves::Anything, "d-test")
+                .unwrap()
+                .unwrap()
+                .id,
+            "r-ok"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_daemon_only_gets_work_for_a_repository_it_serves() {
+        // The failure this whole change exists to end: with two daemons serving
+        // different repositories, whichever polled first used to be handed work
+        // it could not do — and reported it as a terminal failure, destroying a
+        // request it merely could not reach.
+        let (s, dir) = store("serves-filter");
+        file(&s, "r-1", "alpha");
+        file(&s, "r-2", "beta");
+
+        let beta_only = vec!["beta".to_string()];
+        let claimed = s
+            .claim_next(Serves::These(&beta_only), "office")
+            .unwrap()
+            .expect("the beta daemon takes beta work");
+        assert_eq!(claimed.id, "r-2");
+        assert_eq!(claimed.claimed_by.as_deref(), Some("office"));
+
+        // And it is never offered the one it cannot do, even though that one is
+        // older and would otherwise be first.
+        assert!(
+            s.claim_next(Serves::These(&beta_only), "office")
+                .unwrap()
+                .is_none(),
+            "alpha is not this daemon's to take"
+        );
+
+        // The daemon that does serve it still gets it.
+        let alpha_only = vec!["alpha".to_string()];
+        assert_eq!(
+            s.claim_next(Serves::These(&alpha_only), "laptop")
+                .unwrap()
+                .unwrap()
+                .id,
+            "r-1"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_daemon_declaring_nothing_gets_everything_so_an_old_one_keeps_working() {
+        // `Anything` is what a daemon that does not know how to declare sends,
+        // and it must mean "as before" rather than "nothing" — otherwise
+        // upgrading the server silently stops every existing daemon.
+        let (s, dir) = store("serves-anything");
+        file(&s, "r-1", "alpha");
+        assert_eq!(
+            s.claim_next(Serves::Anything, "old-daemon")
+                .unwrap()
+                .unwrap()
+                .id,
+            "r-1"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_daemon_declaring_an_empty_set_claims_nothing() {
+        // The other half of why `Serves` is a type: an empty list means a daemon
+        // serving nothing, and must not collapse into "everything". `Anything`
+        // can only be written deliberately.
+        let (s, dir) = store("serves-empty");
+        file(&s, "r-1", "alpha");
+        assert!(s
+            .claim_next(Serves::These(&[]), "serves-nothing")
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_served_repository_is_matched_exactly() {
+        // The same rule the daemon uses to resolve a name against its own set. A
+        // fuzzy match would reintroduce exactly the ambiguity a closed set of
+        // names exists to remove.
+        let (s, dir) = store("serves-exact");
+        file(&s, "r-1", "alpha");
+        for near_miss in ["Alpha", "alph", "alphax", " alpha"] {
+            let names = vec![near_miss.to_string()];
+            assert!(
+                s.claim_next(Serves::These(&names), "d-test")
+                    .unwrap()
+                    .is_none(),
+                "{near_miss:?} is not alpha"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1340,8 +1646,9 @@ mod tests {
         // disagreeing with the working tree. Spec 09 has no such transition.
         let (s, dir) = store("discard-ready");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
-        s.record_drafted("r-1", "# The spec", "specs/x").unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
+        s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
+            .unwrap();
         let digest = s.require("r-1").unwrap().spec_digest().unwrap();
         s.approve("r-1", &digest).unwrap();
 
@@ -1359,8 +1666,8 @@ mod tests {
         for (id, prepare) in [("r-1", false), ("r-2", true)] {
             file(&s, id, id); // one repo each, so neither blocks the other
             if prepare {
-                s.claim_next().unwrap();
-                s.record_drafted(id, "# Spec", "specs/x").unwrap();
+                s.claim_next(Serves::Anything, "d-test").unwrap();
+                s.record_drafted(id, "d-test", "# Spec", "specs/x").unwrap();
             }
             assert_eq!(
                 s.discard(id).unwrap().state,
@@ -1378,14 +1685,17 @@ mod tests {
         // Spec 19: a failed run stays failed and visible.
         let (s, dir) = store("failed");
         file(&s, "r-1", "alpha");
-        s.claim_next().unwrap();
+        s.claim_next(Serves::Anything, "d-test").unwrap();
 
         let req = s
-            .record_failed("r-1", "the backend was unreachable")
+            .record_failed("r-1", "d-test", "the backend was unreachable")
             .unwrap();
         assert_eq!(req.state, RequestState::Failed);
         assert_eq!(req.note.as_deref(), Some("the backend was unreachable"));
-        assert!(s.claim_next().unwrap().is_none(), "not picked back up");
+        assert!(
+            s.claim_next(Serves::Anything, "d-test").unwrap().is_none(),
+            "not picked back up"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
