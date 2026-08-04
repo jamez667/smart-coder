@@ -92,6 +92,45 @@ pub struct Session {
     pub issued_ms: u64,
     #[serde(default)]
     pub revoked: bool,
+    /// Unix ms when this browser last proved itself against GitHub.
+    ///
+    /// Equal to `issued_ms` on a session the callback just opened, and moved
+    /// forward when a re-authentication lands on it.
+    ///
+    /// **Per session, not per account.** Proving it again on a laptop must not
+    /// privilege a phone that has been sitting signed in for a month — that is
+    /// the entire meaning of proving it again, and an account-level stamp would
+    /// quietly grant it everywhere.
+    ///
+    /// `#[serde(default)]` reads as 0 on a session written before this existed,
+    /// which [`Session::fresh`] treats as stale. An upgrade therefore asks for
+    /// the hop rather than honouring an old session as freshly proved — the safe
+    /// direction for that default to fall.
+    #[serde(default)]
+    pub authed_ms: u64,
+}
+
+/// How recently a browser must have proved itself to change a secret.
+///
+/// Five minutes, not ten and not an hour. GitHub's own prompt is a few seconds
+/// when you already hold a session there, so the window only has to cover
+/// clicking through, coming back, and typing. Long enough that changing two
+/// settings does not mean two hops; short enough that a laptop walked away from
+/// is not a standing key to the secrets.
+///
+/// Deliberately not [`crate::oauth::STATE_TTL_MS`], which is ten minutes and
+/// covers a *human deciding* whether to authorise an application — a different
+/// event that happens to be adjacent.
+pub const FRESH_AUTH_MS: u64 = 5 * 60 * 1000;
+
+impl Session {
+    /// Has this browser proved itself recently enough to change a secret?
+    pub fn fresh(&self, now_ms: u64) -> bool {
+        // `saturating_sub` for the same reason every other expiry here uses it:
+        // a clock stepping backwards must not make an old session read as
+        // freshly proved.
+        now_ms.saturating_sub(self.authed_ms) <= FRESH_AUTH_MS
+    }
 }
 
 /// An outstanding sign-in link.
@@ -262,6 +301,9 @@ impl Accounts {
             token_hash: hash(&token),
             issued_ms: now_ms,
             revoked: false,
+            // A session the callback just opened *is* freshly proved: the
+            // browser came back from GitHub a moment ago.
+            authed_ms: now_ms,
         });
         token
     }
@@ -280,6 +322,38 @@ impl Accounts {
         self.accounts
             .iter()
             .find(|a| a.id == session.account_id && !a.revoked)
+    }
+
+    /// Was this token's session proved against GitHub recently?
+    ///
+    /// Separate from [`session_for`](Accounts::session_for), which answers *who*
+    /// — this answers *how recently*, and the two are wanted at different
+    /// moments by different callers. Folding them together would make every
+    /// route that only needs an identity carry a freshness it does not use.
+    pub fn session_fresh(&self, token: &str, now_ms: u64) -> bool {
+        self.sessions
+            .iter()
+            .find(|s| !s.revoked && matches(token, &s.token_hash))
+            .is_some_and(|s| s.fresh(now_ms))
+    }
+
+    /// Record that this session has just proved itself again.
+    ///
+    /// `true` when a live session was found and stamped. Called by the OAuth
+    /// callback when a re-authentication lands on a browser that already holds
+    /// a session, so proving it again does not have to mean signing out first.
+    pub fn refresh_session(&mut self, token: &str, now_ms: u64) -> bool {
+        match self
+            .sessions
+            .iter_mut()
+            .find(|s| !s.revoked && matches(token, &s.token_hash))
+        {
+            Some(s) => {
+                s.authed_ms = now_ms;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Revoke an account. `true` if one was live and now is not.
@@ -596,5 +670,91 @@ mod tests {
         accts.open_session(&a.id, 1);
         let json = serde_json::to_string(&accts).unwrap();
         assert_eq!(serde_json::from_str::<Accounts>(&json).unwrap(), accts);
+    }
+
+    #[test]
+    fn a_session_the_callback_just_opened_is_freshly_proved() {
+        // The browser came back from GitHub a moment ago, which is the whole
+        // definition of proved.
+        let mut accounts = Accounts::default();
+        let account = accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
+        let token = accounts.open_session(&account.id, 1_000);
+        assert!(accounts.session_fresh(&token, 1_000));
+        assert!(accounts.session_fresh(&token, 1_000 + FRESH_AUTH_MS));
+        assert!(!accounts.session_fresh(&token, 1_001 + FRESH_AUTH_MS));
+    }
+
+    #[test]
+    fn proving_it_again_refreshes_the_same_session_rather_than_opening_another() {
+        // Otherwise proving yourself again would mean signing out and back in,
+        // and the stale session would stay live beside the new one -- two
+        // credentials where the point was to refresh one.
+        let mut accounts = Accounts::default();
+        let account = accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
+        let token = accounts.open_session(&account.id, 1_000);
+        let later = 1_000 + FRESH_AUTH_MS * 4;
+        assert!(!accounts.session_fresh(&token, later));
+
+        assert!(accounts.refresh_session(&token, later));
+        assert!(accounts.session_fresh(&token, later));
+        assert_eq!(accounts.sessions.len(), 1, "no second session");
+        assert!(
+            accounts.session_for(&token).is_some(),
+            "and the same cookie still works"
+        );
+    }
+
+    #[test]
+    fn freshness_is_per_session_and_not_per_account() {
+        // **The entire meaning of proving it again.** A re-authentication on a
+        // laptop must not privilege a phone that has sat signed in for a month.
+        let mut accounts = Accounts::default();
+        let account = accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
+        let laptop = accounts.open_session(&account.id, 1_000);
+        let phone = accounts.open_session(&account.id, 1_000);
+
+        let later = 1_000 + FRESH_AUTH_MS * 4;
+        accounts.refresh_session(&laptop, later);
+        assert!(accounts.session_fresh(&laptop, later));
+        assert!(
+            !accounts.session_fresh(&phone, later),
+            "the phone was privileged by the laptop"
+        );
+    }
+
+    #[test]
+    fn a_revoked_session_is_never_fresh_and_cannot_be_refreshed() {
+        let mut accounts = Accounts::default();
+        let account = accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
+        let token = accounts.open_session(&account.id, 1_000);
+        assert!(accounts.revoke(&account.id));
+
+        // Revocation is derived from the account, so the session itself is not
+        // flipped -- which is exactly why this is worth asserting.
+        accounts.sessions[0].revoked = true;
+        assert!(!accounts.session_fresh(&token, 1_000));
+        assert!(!accounts.refresh_session(&token, 1_000));
+    }
+
+    #[test]
+    fn a_session_written_before_freshness_existed_reads_as_stale() {
+        // Fails closed: an upgrade asks for the hop rather than honouring a
+        // month-old session as freshly proved.
+        let old = r#"{"accounts":[],"sessions":[{"account_id":"acc-1",
+                      "token_hash":"deadbeef","issued_ms":1}],"links":[]}"#;
+        let accounts: Accounts = serde_json::from_str(old).unwrap();
+        assert_eq!(accounts.sessions[0].authed_ms, 0);
+        assert!(!accounts.sessions[0].fresh(1_000_000));
+    }
+
+    #[test]
+    fn a_clock_stepping_backwards_does_not_make_a_session_fresh() {
+        let mut accounts = Accounts::default();
+        let account = accounts.create(&hash("a@b.test"), "a***@b.test", 10_000_000);
+        let token = accounts.open_session(&account.id, 10_000_000);
+        // "Now" is long before the stamp. `saturating_sub` gives 0, which reads
+        // as fresh -- correct, since the stamp is in the future and the session
+        // was proved more recently than now.
+        assert!(accounts.session_fresh(&token, 1));
     }
 }

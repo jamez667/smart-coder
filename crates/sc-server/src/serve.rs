@@ -574,6 +574,8 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         roster: &shared.roster,
         settings: &shared.settings,
         seal_key: shared.seal_key.as_ref(),
+        // Filled in by `handle` before dispatch, beside the caller.
+        fresh_auth: false,
         rechecking,
     };
     routes::handle(&mut ctx, req)

@@ -432,6 +432,14 @@ pub struct Ctx<'a> {
     /// server given a wrong key refuses to boot rather than arriving here, so
     /// `None` here really is "no key", not "the wrong one".
     pub seal_key: Option<&'a crate::seal::SealKey>,
+    /// Set when this request's session proved itself against GitHub within
+    /// [`FRESH_AUTH_MS`](crate::account::FRESH_AUTH_MS).
+    ///
+    /// **Not a field on `Caller::Owner`**, and not a second caller variant. Two
+    /// variants for one identity would multiply the gate; a boolean on the
+    /// variant is a check somebody has to remember. Kept here, read only by the
+    /// handlers that change a secret, and ignored by every other route.
+    pub fresh_auth: bool,
     /// Set when the HTTP layer is re-checking a long poll it already holds.
     ///
     /// The hold re-runs [`handle`] every 250ms looking for work that may have
@@ -462,6 +470,9 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         Err(e) => return error(500, &format!("the credential store is unreadable: {e}")),
     };
     let caller = identify(ctx, req, &creds);
+    // Resolved once, beside the caller, so a handler cannot forget to ask and
+    // cannot ask a second time and get a different answer within one request.
+    ctx.fresh_auth = fresh_auth(ctx, req);
 
     let path = req.path.split('?').next().unwrap_or("").to_string();
     let method = req.method.as_str();
@@ -797,7 +808,18 @@ fn finish_github_with(
         }
     };
 
-    let session = accounts.open_session(&id, ctx.now_ms);
+    // **A re-authentication lands on the browser's existing session** rather
+    // than opening a second one. Otherwise proving yourself again would mean
+    // signing out and back in, and the old session would stay live and stale
+    // beside the new one — two credentials where the point was to refresh one.
+    let session = match req
+        .cookie_token
+        .as_deref()
+        .filter(|t| accounts.refresh_session(t, ctx.now_ms))
+    {
+        Some(existing) => existing.to_string(),
+        None => accounts.open_session(&id, ctx.now_ms),
+    };
     if let Err(e) = ctx.store.put_accounts(&accounts) {
         return error(500, &e.to_string());
     }
@@ -888,6 +910,21 @@ fn is_public_path(path: &str) -> bool {
 /// constructs. Which thing a token authenticates is decided by which store it
 /// matches, and the **device store is checked first**, so the developer's own
 /// browser never pays for reading the account file.
+/// Was this request's session proved against GitHub recently enough to change a
+/// secret?
+///
+/// Read from the session rather than the caller, because it is a property of
+/// *this browser's* proof and not of the person holding it.
+fn fresh_auth(ctx: &Ctx<'_>, req: &Req) -> bool {
+    let Some(token) = req.cookie_token.as_deref() else {
+        return false;
+    };
+    ctx.store
+        .accounts()
+        .map(|a| a.session_fresh(token, ctx.now_ms))
+        .unwrap_or(false)
+}
+
 fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
     if let Some(bearer) = &req.bearer {
         // Walked rather than looked up: `auth::matches` is constant-time over
@@ -2732,6 +2769,8 @@ mod tests {
                 roster: &self.roster,
                 settings: &self.settings,
                 seal_key: self.seal_key.as_ref(),
+                // Filled in by `handle` before dispatch, beside the caller.
+                fresh_auth: false,
                 rechecking: false,
             };
             handle(&mut ctx, req)
@@ -2751,6 +2790,7 @@ mod tests {
                 roster: &self.roster,
                 settings: &self.settings,
                 seal_key: self.seal_key.as_ref(),
+                fresh_auth: false,
                 rechecking: true,
             };
             handle(&mut ctx, req)
@@ -3959,6 +3999,8 @@ mod tests {
             roster: &f.roster,
             settings: &f.settings,
             seal_key: f.seal_key.as_ref(),
+            // Filled in by `handle` before dispatch, beside the caller.
+            fresh_auth: false,
             rechecking: false,
         };
         finish_github_with(&mut ctx, &req, Locale::En, gh)
@@ -4154,6 +4196,82 @@ mod tests {
             !f.store.admin().unwrap().claimed(),
             "an ordinary sign-in claimed the server"
         );
+    }
+
+    #[test]
+    fn a_github_hop_stamps_the_browser_it_came_back_to() {
+        // The freshness that guards secret changes, driven through the real
+        // callback rather than asserted on the store. A stale session that goes
+        // round again comes back fresh, on the SAME cookie.
+        let mut f = Fixture::new("fresh-auth").with_public(false).with_github();
+
+        let state = start(&mut f);
+        let res = callback(
+            &mut f,
+            "code",
+            &state,
+            &StubGithub {
+                login: Ok("jamez667".into()),
+            },
+        );
+        let cookie = cookie_token(&res).expect("a session was opened");
+        assert!(f.store.accounts().unwrap().session_fresh(&cookie, f.now_ms));
+
+        // Time passes; the session still signs in and is no longer fresh.
+        f.now_ms += crate::account::FRESH_AUTH_MS * 4;
+        let accounts = f.store.accounts().unwrap();
+        assert!(accounts.session_for(&cookie).is_some(), "still signed in");
+        assert!(
+            !accounts.session_fresh(&cookie, f.now_ms),
+            "no longer fresh"
+        );
+
+        // Round again, carrying the cookie this time.
+        let res = f.go(&Req::get(public_route::AUTH_GITHUB).with_cookie(&cookie));
+        let state = res
+            .body
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the page carries the state")
+            .to_string();
+        let path = format!(
+            "{}?code=code&state={state}",
+            public_route::AUTH_GITHUB_CALLBACK
+        );
+        let req = Req::get(&path).with_cookie(&cookie);
+        let mut limiter = RateLimiter::new();
+        let mut ctx = Ctx {
+            store: &f.store,
+            daemon_keys: &f.daemon_keys,
+            limiter: &mut limiter,
+            now_ms: f.now_ms,
+            public: f.public.as_ref(),
+            mailer: &f.mailer,
+            write_lock: &f.write_lock,
+            seen: &f.seen,
+            roster: &f.roster,
+            settings: &f.settings,
+            seal_key: f.seal_key.as_ref(),
+            fresh_auth: false,
+            rechecking: false,
+        };
+        let res = finish_github_with(
+            &mut ctx,
+            &req,
+            Locale::En,
+            &StubGithub {
+                login: Ok("jamez667".into()),
+            },
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        let accounts = f.store.accounts().unwrap();
+        assert!(
+            accounts.session_fresh(&cookie, f.now_ms),
+            "the same cookie came back fresh"
+        );
+        assert_eq!(accounts.sessions.len(), 1, "and no second session");
     }
 
     #[test]
