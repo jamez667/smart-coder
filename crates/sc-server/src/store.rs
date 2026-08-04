@@ -382,7 +382,9 @@ impl Store {
         self.root.join("requests").join(format!("{id}.json"))
     }
 
-    fn accounts_path(&self) -> PathBuf {
+    /// Public, because [`AccountsCache`](crate::account::AccountsCache) stats
+    /// this file on every request and reads it only when it has changed.
+    pub fn accounts_path(&self) -> PathBuf {
         self.root.join("accounts.json")
     }
 

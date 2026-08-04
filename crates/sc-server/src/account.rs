@@ -133,6 +133,63 @@ impl Session {
     }
 }
 
+/// The accounts, and the file state they were read from.
+///
+/// **Why this exists now and did not before.** `identify` used to check the
+/// small, developer-sized credentials file first and read this one lazily, only
+/// where a public surface existed. That ordering was the defence: a stranger
+/// could not make an unauthenticated request cost a parse of an attacker-sized
+/// file.
+///
+/// Signing the administrator in with GitHub removed it. This is the only
+/// credential store left, so every cookie-bearing request reaches it — including
+/// one carrying a cookie that matches nothing, which is what a guesser sends,
+/// and which is resolved *before* the rate limiter runs.
+///
+/// So the same mtime-keyed cache the roster uses: a `stat` on every request and
+/// a parse only when the file has actually changed. `max_accounts` still bounds
+/// how large it can get; this bounds how often anyone pays for it.
+#[derive(Debug, Default)]
+pub struct AccountsCache {
+    mtime: Option<std::time::SystemTime>,
+    value: std::sync::Arc<Accounts>,
+}
+
+impl AccountsCache {
+    /// The accounts as they are on disk right now.
+    ///
+    /// A failed read yields whatever was last good rather than an empty set: a
+    /// transient error must not sign everybody out at once, which would look
+    /// exactly like a revocation nobody performed.
+    pub fn current(&mut self, path: &std::path::Path) -> std::sync::Arc<Accounts> {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if mtime != self.mtime {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(parsed) = serde_json::from_str::<Accounts>(&text) {
+                    self.value = std::sync::Arc::new(parsed);
+                }
+            } else if mtime.is_none() {
+                // No file yet — a fresh install, where an empty set is the right
+                // answer rather than a stale one.
+                self.value = std::sync::Arc::new(Accounts::default());
+            }
+            self.mtime = mtime;
+        }
+        std::sync::Arc::clone(&self.value)
+    }
+
+    /// Forget what was read, so the next look re-parses.
+    ///
+    /// Called after every write. **Revocation is the reason this is not left to
+    /// the mtime alone**: a filesystem with coarse timestamps can record a write
+    /// inside the same tick as the read before it, and a developer who revokes
+    /// somebody and watches them keep filing would reasonably conclude it had
+    /// not worked.
+    pub fn invalidate(&mut self) {
+        self.mtime = None;
+    }
+}
+
 /// An outstanding sign-in link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicLink {
@@ -756,5 +813,76 @@ mod tests {
         // as fresh -- correct, since the stamp is in the future and the session
         // was proved more recently than now.
         assert!(accounts.session_fresh(&token, 1));
+    }
+
+    #[test]
+    fn the_cache_sees_a_revocation_on_the_next_look() {
+        // **The property that makes caching a credential store safe at all.**
+        // Revocation has to take effect on the request after it; a cache that
+        // held its answer would keep a revoked filer signed in until something
+        // else happened to change the file.
+        let dir = std::env::temp_dir().join(format!(
+            "sc-accounts-{}-{}",
+            std::process::id(),
+            &crate::auth::mint_secret()[..12]
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accounts.json");
+
+        let mut accounts = Accounts::default();
+        let account = accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
+        let id = account.id.clone();
+        let token = accounts.open_session(&id, 1_000);
+        std::fs::write(&path, serde_json::to_string(&accounts).unwrap()).unwrap();
+
+        let mut cache = AccountsCache::default();
+        assert!(cache.current(&path).session_for(&token).is_some());
+
+        accounts.revoke(&id);
+        std::fs::write(&path, serde_json::to_string(&accounts).unwrap()).unwrap();
+        cache.invalidate();
+
+        assert!(
+            cache.current(&path).session_for(&token).is_none(),
+            "a revoked account was still signed in"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_accounts_file_is_an_empty_set_and_not_an_error() {
+        // The resting state of every fresh install.
+        let mut cache = AccountsCache::default();
+        let nowhere = std::env::temp_dir().join("sc-accounts-does-not-exist.json");
+        assert!(cache.current(&nowhere).accounts.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_file_keeps_the_last_good_answer() {
+        // A transient error must not sign everybody out at once, which would
+        // look exactly like a revocation nobody performed.
+        let dir = std::env::temp_dir().join(format!(
+            "sc-accounts-bad-{}-{}",
+            std::process::id(),
+            &crate::auth::mint_secret()[..12]
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accounts.json");
+
+        let mut accounts = Accounts::default();
+        accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
+        std::fs::write(&path, serde_json::to_string(&accounts).unwrap()).unwrap();
+
+        let mut cache = AccountsCache::default();
+        assert_eq!(cache.current(&path).accounts.len(), 1);
+
+        std::fs::write(&path, "{ this is not json").unwrap();
+        cache.invalidate();
+        assert_eq!(
+            cache.current(&path).accounts.len(),
+            1,
+            "a bad parse emptied the store"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

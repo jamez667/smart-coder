@@ -46,6 +46,8 @@ struct Shared {
     roster: Mutex<crate::roster::RosterCache>,
     /// What this server does. Same mtime cache, same reasoning.
     settings: Mutex<crate::settings::SettingsCache>,
+    /// Who is signed in. On the hot path — see `AccountsCache`.
+    accounts: Mutex<crate::account::AccountsCache>,
     seal_key: Option<crate::seal::SealKey>,
 }
 
@@ -157,6 +159,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         seen: Mutex::new(crate::daemons::Seen::default()),
         roster: Mutex::new(crate::roster::RosterCache::default()),
         settings: Mutex::new(crate::settings::SettingsCache::default()),
+        accounts: Mutex::new(crate::account::AccountsCache::default()),
         seal_key: cfg.seal_key.clone(),
     });
 
@@ -532,6 +535,7 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         seen: &shared.seen,
         roster: &shared.roster,
         settings: &shared.settings,
+        accounts: &shared.accounts,
         seal_key: shared.seal_key.as_ref(),
         // Filled in by `handle` before dispatch, beside the caller.
         fresh_auth: false,

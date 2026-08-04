@@ -424,6 +424,13 @@ pub struct Ctx<'a> {
     pub roster: &'a Mutex<crate::roster::RosterCache>,
     /// What this server does, re-read from the volume when it changes.
     pub settings: &'a Mutex<crate::settings::SettingsCache>,
+    /// Who is signed in, re-read from the volume when it changes.
+    ///
+    /// **On the hot path**, unlike the roster: this is the only credential store,
+    /// so every cookie-bearing request consults it — including one carrying a
+    /// cookie that matches nothing, resolved before the rate limiter runs. See
+    /// [`crate::account::AccountsCache`].
+    pub accounts: &'a Mutex<crate::account::AccountsCache>,
     /// The key sealed settings are read with, when one is configured.
     ///
     /// `None` means nothing can be sealed or opened — see [`crate::seal`]. A
@@ -820,6 +827,7 @@ fn finish_github_with(
     if let Err(e) = ctx.store.put_accounts(&accounts) {
         return error(500, &e.to_string());
     }
+    invalidate_accounts(ctx);
     let secure = secure_attr(ctx);
     drop(_guard);
 
@@ -910,6 +918,31 @@ fn is_public_path(path: &str) -> bool {
 /// constructs. Which thing a token authenticates is decided by which store it
 /// matches, and the **device store is checked first**, so the developer's own
 /// browser never pays for reading the account file.
+/// The accounts as they are right now.
+///
+/// Through the cache, so the steady state is a `stat` rather than a parse of a
+/// file a stranger can make grow. A poisoned lock recovers the guard rather than
+/// failing the request: this is a read, and the worst a partial update costs is
+/// one stale answer.
+fn accounts_now(ctx: &Ctx<'_>) -> std::sync::Arc<crate::account::Accounts> {
+    let path = ctx.store.accounts_path();
+    match ctx.accounts.lock() {
+        Ok(mut cache) => cache.current(&path),
+        Err(p) => p.into_inner().current(&path),
+    }
+}
+
+/// Make the next request re-read the accounts.
+///
+/// **Called after every write**, because revocation has to take effect on the
+/// request after it — the same property the roster keeps, and the reason the
+/// mtime alone is not trusted.
+fn invalidate_accounts(ctx: &Ctx<'_>) {
+    if let Ok(mut cache) = ctx.accounts.lock() {
+        cache.invalidate();
+    }
+}
+
 /// Was this request's session proved against GitHub recently enough to change a
 /// secret?
 ///
@@ -919,10 +952,7 @@ fn fresh_auth(ctx: &Ctx<'_>, req: &Req) -> bool {
     let Some(token) = req.cookie_token.as_deref() else {
         return false;
     };
-    ctx.store
-        .accounts()
-        .map(|a| a.session_fresh(token, ctx.now_ms))
-        .unwrap_or(false)
+    accounts_now(ctx).session_fresh(token, ctx.now_ms)
 }
 
 fn identify(ctx: &Ctx<'_>, req: &Req) -> Option<Caller> {
@@ -952,7 +982,7 @@ fn identify(ctx: &Ctx<'_>, req: &Req) -> Option<Caller> {
     // file only where signup exists — is therefore gone. `max_accounts` is what
     // bounds this now, and it does double duty: it caps signup *and* caps what
     // one request can be made to parse.
-    let accounts = ctx.store.accounts().ok()?;
+    let accounts = accounts_now(ctx);
     let account = accounts.session_for(token)?;
 
     // A GitHub login is required for anything above a filer. A magic-link
@@ -1473,6 +1503,7 @@ fn revoke_account(ctx: &mut Ctx<'_>, id: &str) -> Res {
     if let Err(e) = ctx.store.put_accounts(&accounts) {
         return error(500, &e.to_string());
     }
+    invalidate_accounts(ctx);
     Res::html(200, crate::page::accounts_page(&accounts))
 }
 
@@ -2010,6 +2041,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     if let Err(e) = ctx.store.put_accounts(&accounts) {
         return error(500, &e.to_string());
     }
+    invalidate_accounts(ctx);
     let secure = secure_attr(ctx);
     let Some(repos) = ctx.public.map(|p| p.repos.clone()) else {
         // Unreachable: signing in is a public route and only exists when a
@@ -2040,6 +2072,7 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
             {
                 s.revoked = true;
                 let _ = ctx.store.put_accounts(&accounts);
+                invalidate_accounts(ctx);
             }
         }
     }
@@ -2590,6 +2623,7 @@ mod tests {
         seen: Mutex<crate::daemons::Seen>,
         roster: Mutex<crate::roster::RosterCache>,
         settings: Mutex<crate::settings::SettingsCache>,
+        accounts: Mutex<crate::account::AccountsCache>,
         seal_key: Option<crate::seal::SealKey>,
         /// Advanced by tests that need a link to expire.
         now_ms: u64,
@@ -2634,6 +2668,7 @@ mod tests {
                 seen: Mutex::new(crate::daemons::Seen::default()),
                 roster: Mutex::new(crate::roster::RosterCache::default()),
                 settings: Mutex::new(crate::settings::SettingsCache::default()),
+                accounts: Mutex::new(crate::account::AccountsCache::default()),
                 // Every fixture can seal, so a test never has to think about
                 // it unless it is the thing under test.
                 seal_key: crate::seal::SealKey::parse(&crate::auth::mint_secret()).ok(),
@@ -2760,6 +2795,7 @@ mod tests {
                 seen: &self.seen,
                 roster: &self.roster,
                 settings: &self.settings,
+                accounts: &self.accounts,
                 seal_key: self.seal_key.as_ref(),
                 // Filled in by `handle` before dispatch, beside the caller.
                 fresh_auth: false,
@@ -2781,6 +2817,7 @@ mod tests {
                 seen: &self.seen,
                 roster: &self.roster,
                 settings: &self.settings,
+                accounts: &self.accounts,
                 seal_key: self.seal_key.as_ref(),
                 fresh_auth: false,
                 rechecking: true,
@@ -3214,6 +3251,69 @@ mod tests {
     }
 
     // -- the browser side ---------------------------------------------------
+
+    #[test]
+    fn revoking_a_filer_stops_them_on_the_very_next_request() {
+        // Revocation is the lever that makes self-serve signup acceptable, and
+        // a cache must not blunt it. Driven through the real routes, so a
+        // missed `invalidate_accounts` at any write site would show up here.
+        //
+        // **Note what this does and does not prove.** On a filesystem with fine
+        // timestamps the mtime alone would catch the write, so this passes even
+        // with invalidation disabled — the direct test in `account.rs` is what
+        // pins the cache's own behaviour. This one pins the route.
+        let mut f = Fixture::new("revoke-cached").with_public(false);
+        let session = f.signed_in("jo@x.com");
+        let admin = f.as_admin();
+
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
+                .status,
+            200
+        );
+
+        let id = f
+            .store
+            .accounts()
+            .unwrap()
+            .live()
+            .iter()
+            .find(|a| a.email_hint.contains("jo"))
+            .expect("the filer")
+            .id
+            .clone();
+        let res = f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        let after = f.go(&Req::get(public_route::FILE).with_cookie(&session));
+        assert!(
+            after.body.contains("Sign in"),
+            "a revoked filer was still signed in: {}",
+            after.body
+        );
+    }
+
+    #[test]
+    fn a_session_opened_this_instant_works_immediately() {
+        // A signup and its first request can land inside one filesystem
+        // timestamp tick, on a filesystem whose timestamps are coarse enough —
+        // and then the mtime has not moved and only `invalidate_accounts` makes
+        // this work.
+        //
+        // **Honest about what it proves.** On the filesystems this suite runs
+        // on the mtime does move, so this passes with invalidation disabled: it
+        // pins the route's behaviour, not the invalidation. What makes the
+        // invalidation non-negotiable is that its absence is a bug that appears
+        // only on somebody else's disk.
+        let mut f = Fixture::new("signup-cached").with_public(false);
+        let session = f.signed_in("new@x.com");
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
+                .status,
+            200,
+            "a session opened this instant did not work"
+        );
+    }
 
     #[test]
     fn an_owner_who_is_also_the_administrator_is_the_administrator() {
@@ -4024,6 +4124,7 @@ mod tests {
             seen: &f.seen,
             roster: &f.roster,
             settings: &f.settings,
+            accounts: &f.accounts,
             seal_key: f.seal_key.as_ref(),
             // Filled in by `handle` before dispatch, beside the caller.
             fresh_auth: false,
@@ -4278,6 +4379,7 @@ mod tests {
             seen: &f.seen,
             roster: &f.roster,
             settings: &f.settings,
+            accounts: &f.accounts,
             seal_key: f.seal_key.as_ref(),
             fresh_auth: false,
             rechecking: false,
