@@ -130,6 +130,8 @@ pub mod private_route {
     pub const SETUP_GITHUB: &str = "/setup/github";
     /// What this server does. Device-only, like every other admin page.
     pub const SETTINGS: &str = "/settings";
+    /// Which machines may claim work.
+    pub const DAEMONS: &str = "/daemons";
     /// The address and the three secrets. **Needs a fresh sign-in** — see
     /// [`SENSITIVE_VERBS`](super::SENSITIVE_VERBS).
     pub const SETTINGS_SECRET: &str = "/settings/secret";
@@ -1223,6 +1225,21 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             revoke_owner(ctx, login)
         }
 
+        // Which machines may claim work.
+        ("GET", private_route::DAEMONS) => daemons_page(ctx, None),
+
+        ("POST", private_route::DAEMONS) => {
+            let form = form_fields(&req.body);
+            mint_daemon_key(ctx, form.get("label").map(|l| l.trim()).unwrap_or_default())
+        }
+
+        ("POST", p) if p.starts_with("/daemons/") && p.ends_with("/revoke") => {
+            let label = p
+                .trim_start_matches("/daemons/")
+                .trim_end_matches("/revoke");
+            revoke_daemon(ctx, label)
+        }
+
         // What this server does.
         ("GET", private_route::SETTINGS) => show_settings(ctx, None, None),
         ("POST", p) if p.starts_with("/settings") => settings_write(ctx, req, p),
@@ -2306,6 +2323,78 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
     }
 }
 
+/// Which machines may claim work.
+fn daemons_page(ctx: &Ctx<'_>, minted: Option<(&str, &str)>) -> Res {
+    match ctx.store.roster() {
+        Ok(r) => Res::html(200, crate::page::daemons_page(&r, minted)),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Mint a credential for a machine.
+///
+/// **The server generates it and shows it once.** That is strictly better than
+/// an environment variable, which sits in plaintext in a stack editor for as
+/// long as the deployment lives: this is unrecoverable rather than permanently
+/// readable, and only its hash reaches the volume.
+///
+/// Minting for a label that already has a key **replaces** it, which is how a
+/// key is rotated. That machine stops being able to claim until it is updated,
+/// and the page says so — true of a stack edit too, but a button does not look
+/// like a deploy.
+fn mint_daemon_key(ctx: &mut Ctx<'_>, label: &str) -> Res {
+    if label.is_empty() || label.len() > 64 {
+        return error(400, "a machine needs a name");
+    }
+    // The label lands in a URL for revocation and in every log line about this
+    // machine, so it is kept to what reads back unambiguously.
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return error(400, "letters, numbers, dashes and underscores");
+    }
+
+    let key = auth::mint_secret();
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    roster.set_daemon(label, &auth::hash(&key), ctx.now_ms);
+    roster.seeded = true;
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    crate::log::info("daemon key minted")
+        .with("label", label.to_string())
+        .emit();
+    Res::html(200, crate::page::daemons_page(&roster, Some((label, &key))))
+}
+
+/// Stop trusting a machine.
+///
+/// Takes effect on that daemon's **next poll** rather than at the next restart,
+/// because the poll path reads the roster through its cache.
+fn revoke_daemon(ctx: &mut Ctx<'_>, label: &str) -> Res {
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if roster.revoke_daemon(label) {
+        if let Err(e) = ctx.store.put_roster(&roster) {
+            return error(500, &e.to_string());
+        }
+        invalidate_roster(ctx);
+        crate::log::warn("daemon key revoked")
+            .with("label", label.to_string())
+            .emit();
+    }
+    Res::html(200, crate::page::daemons_page(&roster, None))
+}
+
 /// The routes that change a secret, and therefore need a fresh sign-in.
 ///
 /// Named once so the test proving each one refuses a stale session iterates this
@@ -2967,9 +3056,19 @@ mod tests {
         }
 
         fn go(&mut self, req: &Req) -> Res {
+            // **Mirrors `dispatch`.** Production reads the live keys from the
+            // roster on every request; this fixture builds `Ctx` by hand, so it
+            // does that step here. Falling back to the configured list keeps
+            // every test that predates minting working unchanged.
+            let minted = self.store.roster().unwrap().daemon_keys();
+            let daemon_keys = if minted.is_empty() {
+                self.daemon_keys.clone()
+            } else {
+                minted
+            };
             let mut ctx = Ctx {
                 store: &self.store,
-                daemon_keys: &self.daemon_keys,
+                daemon_keys: &daemon_keys,
                 limiter: &mut self.limiter,
                 now_ms: self.now_ms,
                 public: self.public.as_ref(),
@@ -3496,6 +3595,159 @@ mod tests {
             200,
             "a session opened this instant did not work"
         );
+    }
+
+    #[test]
+    fn a_minted_key_is_shown_once_and_then_only_its_hash_is_kept() {
+        // **The one place this server prints a secret.** Shown on the page that
+        // made it and never again, which is strictly better than an environment
+        // variable sitting in a stack editor for the life of the deployment.
+        let mut f = Fixture::new("daemon-mint").with_public(false);
+        let admin = f.as_admin();
+
+        let res = f.go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        // The key is in the page exactly once, and the page says so.
+        let roster = f.store.roster().unwrap();
+        let record = roster
+            .daemons
+            .iter()
+            .find(|d| d.label == "laptop")
+            .expect("minted");
+        assert!(!record.revoked);
+        assert!(
+            !res.body.contains(&record.key_hash),
+            "the hash is not shown"
+        );
+        assert!(
+            res.body.contains("only time it is shown"),
+            "the page does not warn: {}",
+            res.body
+        );
+
+        // Reloading the page does not show it again.
+        let again = f.go(&Req::get(private_route::DAEMONS).with_cookie(&admin));
+        assert!(
+            !again.body.contains("only time it is shown"),
+            "the key was shown a second time"
+        );
+
+        // And nothing reversible reached the volume.
+        let raw = std::fs::read_to_string(f.store.roster_path()).unwrap();
+        assert!(raw.contains(&record.key_hash), "the hash is stored");
+    }
+
+    #[test]
+    fn a_minted_key_lets_that_machine_claim_and_a_revoked_one_cannot() {
+        // Driven through the real poll route, because "the key works" is the
+        // only claim that matters and the store shape is incidental to it.
+        let mut f = Fixture::new("daemon-claim").with_public(false);
+        let admin = f.as_admin();
+        // The fixture starts with a configured key; clear it so only the minted
+        // one can possibly be what answers.
+        f.daemon_keys = Vec::new();
+
+        let res = f.go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin));
+        let key = res
+            .body
+            .split("<pre>")
+            .nth(1)
+            .and_then(|rest| rest.split("</pre>").next())
+            .expect("the page carries the key")
+            .to_string();
+
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_bearer(&key)).status,
+            200,
+            "a freshly minted key could not claim"
+        );
+
+        let res = f.go(&Req::post("/daemons/laptop/revoke", "").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        // **The next poll**, not the next restart.
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_bearer(&key)).status,
+            401,
+            "a revoked machine could still claim"
+        );
+    }
+
+    #[test]
+    fn re_minting_rotates_rather_than_adding_a_second_credential() {
+        // Two live keys for one machine would make "revoke that machine"
+        // ambiguous, and revoking one would leave the other working.
+        let mut f = Fixture::new("daemon-rotate").with_public(false);
+        let admin = f.as_admin();
+        f.daemon_keys = Vec::new();
+
+        let first = f
+            .go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin))
+            .body
+            .split("<pre>")
+            .nth(1)
+            .and_then(|r| r.split("</pre>").next())
+            .unwrap()
+            .to_string();
+        let second = f
+            .go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin))
+            .body
+            .split("<pre>")
+            .nth(1)
+            .and_then(|r| r.split("</pre>").next())
+            .unwrap()
+            .to_string();
+        assert_ne!(first, second);
+
+        let roster = f.store.roster().unwrap();
+        assert_eq!(roster.daemons.len(), 1, "two records for one machine");
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_bearer(&second))
+                .status,
+            200
+        );
+        assert_eq!(
+            f.go(&Req::get(wire::route::WORK).with_bearer(&first))
+                .status,
+            401,
+            "the rotated-away key still worked"
+        );
+    }
+
+    #[test]
+    fn an_owner_cannot_mint_or_revoke_a_machine() {
+        // A daemon key claims work on the developer's machine. Past the gate,
+        // so no value of `Caller::Owner` reaches it.
+        let (mut f, session, _mine, _theirs) = owner_fixture("daemon-owner");
+        assert_eq!(
+            f.go(&Req::get(private_route::DAEMONS).with_cookie(&session))
+                .status,
+            404
+        );
+        for (path, body) in [
+            (private_route::DAEMONS, "label=theirs"),
+            ("/daemons/laptop/revoke", ""),
+        ] {
+            let res = f.go(&Req::post(path, body).with_cookie(&session));
+            assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
+        }
+    }
+
+    #[test]
+    fn a_machine_name_that_would_not_read_back_is_refused() {
+        // The label lands in a revocation URL and in every log line about this
+        // machine, so it is kept to what reads back unambiguously.
+        let mut f = Fixture::new("daemon-label").with_public(false);
+        let admin = f.as_admin();
+        for bad in ["", "has spaces", "slash/es", "../..", &"x".repeat(65)] {
+            let res =
+                f.go(
+                    &Req::post(private_route::DAEMONS, &format!("label={bad}")).with_cookie(&admin)
+                );
+            assert_eq!(res.status, 400, "accepted {bad:?}: {}", res.body);
+        }
+        assert!(f.store.roster().unwrap().daemons.is_empty());
     }
 
     #[test]

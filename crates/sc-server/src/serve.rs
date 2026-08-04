@@ -33,7 +33,7 @@ const POLL_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 /// surface, and five parallel clones is where one eventually gets forgotten.
 struct Shared {
     store: Store,
-    daemon_keys: Vec<crate::config::DaemonKey>,
+
     limiter: Mutex<RateLimiter>,
     /// Console mail, when the loopback-guarded switch is on. Otherwise the
     /// mailer is built per request from the settings — see `mailer_for`.
@@ -90,7 +90,7 @@ fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
         .unwrap_or_default();
 
     let mut roster = store.roster()?;
-    if !roster.seed(&configured, &repos, now_ms()) {
+    if !roster.seed(&configured, &repos, &cfg.daemon_keys, now_ms()) {
         // Said out loud, because a setting that is present and ignored is one
         // somebody will edit expecting an effect. Both are named: an operator
         // adding a repository to the stack and seeing nothing happen needs to
@@ -112,6 +112,7 @@ fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
     crate::log::info("roster seeded")
         .with("owners", configured.len() as u64)
         .with("repos", repos.len() as u64)
+        .with("daemons", cfg.daemon_keys.len() as u64)
         .emit();
     Ok(())
 }
@@ -206,7 +207,7 @@ pub fn run(cfg: &Config) -> Result<()> {
 
     let shared = Arc::new(Shared {
         store: store.clone(),
-        daemon_keys: cfg.daemon_keys.clone(),
+
         limiter: Mutex::new(RateLimiter::new()),
         mail_to_console: cfg.mail_to_console,
         write_lock: Mutex::new(()),
@@ -674,10 +675,21 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
     // calls and no parsing.
     let public = public_now(shared);
     let mailer = mailer_for(shared, public.as_ref());
+    // **Read per request, like everything else administered from a page.**
+    // Revoking a machine has to stop it claiming on its next poll rather
+    // than at the next restart — and a poll is the one request that arrives
+    // every few seconds, so this goes through the same mtime cache.
+    let daemon_keys = match shared.roster.lock() {
+        Ok(mut c) => c.current(&shared.store.roster_path()).daemon_keys(),
+        Err(p) => p
+            .into_inner()
+            .current(&shared.store.roster_path())
+            .daemon_keys(),
+    };
 
     let mut ctx = Ctx {
         store: &shared.store,
-        daemon_keys: &shared.daemon_keys,
+        daemon_keys: &daemon_keys,
         limiter: &mut guard,
         now_ms: now,
         public: public.as_ref(),

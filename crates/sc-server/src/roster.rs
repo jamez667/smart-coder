@@ -46,6 +46,18 @@ pub struct Roster {
     /// the page that fixes it unreachable exactly when it is needed.
     #[serde(default)]
     pub repos: Vec<RepoRecord>,
+    /// The credentials daemons authenticate with, one per machine.
+    ///
+    /// **Hashed, so nothing here is reversible** — which is what made these the
+    /// safest secret to move off the environment. The server only ever asks "is
+    /// this the same", never "what was it", so the volume can hold the answer
+    /// and grant nobody anything.
+    ///
+    /// Minted here rather than invented by an operator: the server generates the
+    /// key, shows it once, and keeps only the hash. That is strictly better than
+    /// a stack variable, which sits in plaintext in an editor forever.
+    #[serde(default)]
+    pub daemons: Vec<DaemonRecord>,
     /// Set the first time a seed is applied.
     ///
     /// Without it the environment would re-apply on every boot, and an owner
@@ -78,6 +90,24 @@ pub struct OwnerRecord {
     /// Kept rather than deleted, so the page can say somebody *was* an owner —
     /// the same reasoning as a revoked device. A list that silently shrinks
     /// cannot answer "did I already deal with that?".
+    #[serde(default)]
+    pub revoked: bool,
+}
+
+/// One machine's credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonRecord {
+    /// What the developer calls this machine: `laptop`, `office`.
+    ///
+    /// **Not a secret**, which is the point of it being separate from the key:
+    /// it appears in the log and on a claim, so a human reading either can tell
+    /// which machine did something.
+    pub label: String,
+    /// SHA-256 of the key. The key itself is never stored.
+    pub key_hash: String,
+    pub added_ms: u64,
+    /// Kept rather than deleted, so the page can say a machine *was* trusted —
+    /// the same reasoning as a revoked owner.
     #[serde(default)]
     pub revoked: bool,
 }
@@ -160,10 +190,19 @@ impl Roster {
         &mut self,
         owners: &[(String, Vec<String>)],
         repos: &[String],
+        daemons: &[crate::config::DaemonKey],
         now_ms: u64,
     ) -> bool {
         if self.seeded {
             return false;
+        }
+        // **Hashes carry straight across.** The environment already holds these
+        // hashed, so seeding copies the hash rather than re-deriving anything —
+        // which is what lets a running daemon keep working across the upgrade
+        // without touching its own configuration. Getting this wrong would
+        // strand it, and the symptom would be work silently not being drafted.
+        for key in daemons {
+            self.set_daemon(&key.label, &key.key_hash, now_ms);
         }
         for name in repos {
             // `served_by: None` — no daemon has polled yet at startup, and
@@ -214,6 +253,49 @@ impl Roster {
         {
             Some(r) => {
                 r.disabled = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The live daemon credentials, in the shape the poll path compares against.
+    pub fn daemon_keys(&self) -> Vec<crate::config::DaemonKey> {
+        self.daemons
+            .iter()
+            .filter(|d| !d.revoked)
+            .map(|d| crate::config::DaemonKey {
+                label: d.label.clone(),
+                key_hash: d.key_hash.clone(),
+            })
+            .collect()
+    }
+
+    /// Record a machine's credential.
+    ///
+    /// Takes the hash, never the key — the caller mints and shows the key, and
+    /// this never sees it. Replaces by label, so re-minting for a machine
+    /// rotates rather than accumulating two live credentials for one name.
+    pub fn set_daemon(&mut self, label: &str, key_hash: &str, now_ms: u64) {
+        let label = label.trim().to_string();
+        self.daemons.retain(|d| d.label != label);
+        self.daemons.push(DaemonRecord {
+            label,
+            key_hash: key_hash.to_string(),
+            added_ms: now_ms,
+            revoked: false,
+        });
+    }
+
+    /// Stop trusting a machine. `true` if one was live and now is not.
+    pub fn revoke_daemon(&mut self, label: &str) -> bool {
+        match self
+            .daemons
+            .iter_mut()
+            .find(|d| d.label == label && !d.revoked)
+        {
+            Some(d) => {
+                d.revoked = true;
                 true
             }
             None => false,
@@ -388,7 +470,10 @@ mod tests {
         let repos = vec!["intake".to_string()];
 
         let mut roster = Roster::default();
-        assert!(roster.seed(&configured, &repos, 1), "the first boot seeds");
+        assert!(
+            roster.seed(&configured, &repos, &[], 1),
+            "the first boot seeds"
+        );
         assert!(roster.owner_for("jamez667").is_some());
         assert_eq!(roster.enabled(), ["intake"]);
 
@@ -398,7 +483,7 @@ mod tests {
         assert!(roster.revoke("jamez667"));
         assert!(roster.disable("intake"));
         assert!(
-            !roster.seed(&configured, &repos, 2),
+            !roster.seed(&configured, &repos, &[], 2),
             "a later boot does not"
         );
         assert!(
@@ -412,17 +497,73 @@ mod tests {
     }
 
     #[test]
+    fn seeding_carries_the_daemon_hashes_across_untouched() {
+        // **Getting this wrong strands a running daemon**, and the symptom is
+        // work silently not being drafted rather than an error anybody sees.
+        // The environment already holds these hashed, so the seed copies the
+        // hash rather than re-deriving anything.
+        let hash = crate::auth::hash("the-real-key");
+        let configured = vec![crate::config::DaemonKey {
+            label: "laptop".into(),
+            key_hash: hash.clone(),
+        }];
+
+        let mut roster = Roster::default();
+        assert!(roster.seed(&[], &[], &configured, 1));
+
+        let live = roster.daemon_keys();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].label, "laptop");
+        assert_eq!(
+            live[0].key_hash, hash,
+            "the hash changed, so the daemon is locked out"
+        );
+        assert!(
+            crate::auth::matches("the-real-key", &live[0].key_hash),
+            "the key that worked before no longer does"
+        );
+    }
+
+    #[test]
+    fn a_revoked_machine_is_kept_and_claims_nothing() {
+        let mut roster = Roster::default();
+        roster.set_daemon("laptop", &crate::auth::hash("k"), 1);
+        roster.set_daemon("office", &crate::auth::hash("j"), 1);
+        assert_eq!(roster.daemon_keys().len(), 2);
+
+        assert!(roster.revoke_daemon("laptop"));
+        let live = roster.daemon_keys();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].label, "office", "revoking one took the other");
+        // Kept, so the page can say a machine *was* trusted.
+        assert_eq!(roster.daemons.len(), 2);
+        // And revoking twice is not a second event.
+        assert!(!roster.revoke_daemon("laptop"));
+    }
+
+    #[test]
+    fn no_daemon_key_is_ever_serialized_in_the_clear() {
+        // The rule every store here keeps. These are hashed, which is what made
+        // them the safest secret to move off the environment.
+        let mut roster = Roster::default();
+        roster.set_daemon("laptop", &crate::auth::hash("the-real-key"), 1);
+        let json = serde_json::to_string(&roster).unwrap();
+        assert!(!json.contains("the-real-key"), "{json}");
+        assert!(json.contains(&crate::auth::hash("the-real-key")));
+    }
+
+    #[test]
     fn an_empty_seed_still_marks_the_volume_administered() {
         // Otherwise the first boot *with* something configured would seed a
         // volume somebody had already administered — and "I removed the last
         // one and it came back" is the same bug with more steps.
         let mut roster = Roster::default();
-        assert!(roster.seed(&[], &[], 1));
+        assert!(roster.seed(&[], &[], &[], 1));
         assert!(roster.seeded);
 
         let configured = vec![("jamez667".to_string(), vec!["intake".to_string()])];
         assert!(
-            !roster.seed(&configured, &["intake".to_string()], 2),
+            !roster.seed(&configured, &["intake".to_string()], &[], 2),
             "already administered"
         );
         assert!(roster.owner_for("jamez667").is_none());

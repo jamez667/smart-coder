@@ -764,6 +764,73 @@ fn blank_repo_form() -> String {
         .to_string()
 }
 
+/// Which machines may claim work.
+///
+/// `minted` is a key this request just generated. **It is shown exactly once**,
+/// on the page that made it, and only its hash is kept — so this is the only
+/// moment it can be copied, and the page says so before you navigate away.
+pub fn daemons_page(roster: &crate::roster::Roster, minted: Option<(&str, &str)>) -> String {
+    let mut rows = String::new();
+    for d in &roster.daemons {
+        let action = if d.revoked {
+            "<span class=\"meta\">revoked</span>".to_string()
+        } else {
+            format!(
+                "<form method=\"post\" action=\"/daemons/{}/revoke\">\
+                 <button type=\"submit\">Revoke</button></form>",
+                esc(&d.label)
+            )
+        };
+        rows.push_str(&format!(
+            "<div class=\"item\"><strong>{label}</strong>\
+             <div class=\"meta\">added {when}</div>{action}</div>",
+            label = esc(&d.label),
+            when = esc(&ago(d.added_ms, crate::store::now_ms())),
+            action = action,
+        ));
+    }
+    if roster.daemons.is_empty() {
+        rows.push_str(
+            "<p class=\"meta\">No machine can claim work yet. Mint a key below \
+             and put it in that machine's <code>daemon.json</code>.</p>",
+        );
+    }
+
+    // The one place this server prints a secret, and only the once.
+    let shown = match minted {
+        Some((label, key)) => format!(
+            "<div class=\"decide\"><h2>The key for {label}</h2>\
+             <pre>{key}</pre>\
+             <p class=\"note\"><strong>This is the only time it is shown.</strong> \
+             Copy it into that machine now — the server keeps only a hash of it, \
+             so it cannot be shown again. Losing it means minting another.</p></div>",
+            label = esc(label),
+            key = esc(key),
+        ),
+        None => String::new(),
+    };
+
+    shell(
+        "Machines",
+        &format!(
+            "<h1>Machines</h1>\
+             <p class=\"meta\">A daemon authenticates with one of these. One key \
+             per machine, so each has its own rate budget, can be revoked alone, \
+             and is named in the log when it claims work.</p>{rows}{shown}\
+             <h2>Mint a key</h2>\
+             <form method=\"post\" action=\"/daemons\">\
+             <label for=\"label\">What is this machine?</label>\
+             <input id=\"label\" name=\"label\" required autocapitalize=\"off\" \
+             autocorrect=\"off\" spellcheck=\"false\" placeholder=\"laptop\">\
+             <button type=\"submit\">Mint</button></form>\
+             <p class=\"meta\">Minting for a name that already has a key replaces \
+             it, which is how a key is rotated. <strong>That machine stops being \
+             able to claim until you update it.</strong></p>\
+             <p><a href=\"/\">Back to the queue</a></p>"
+        ),
+    )
+}
+
 /// Not found, with the way back in named.
 ///
 /// **A bare 404 is a confusing answer to the developer whose cookie used to

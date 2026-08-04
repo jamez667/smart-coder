@@ -27,8 +27,9 @@ use crate::i18n::Locale;
 // as they did before the split. Every call site in `routes.rs` is unchanged,
 // which is what makes this a mechanical move rather than a rewrite.
 pub use private::{
-    accounts_page, confirm_accept, detail, filed, index, message, not_found, not_found_for_admin,
-    owners_page, repos_page, settings_page, setup_github_page, setup_page, Who,
+    accounts_page, confirm_accept, daemons_page, detail, filed, index, message, not_found,
+    not_found_for_admin, owners_page, repos_page, settings_page, setup_github_page, setup_page,
+    Who,
 };
 pub use public::{
     github_start_page, landing_page, owner_detail, owner_page, public_detail, public_file_page,
