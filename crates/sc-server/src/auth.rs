@@ -144,13 +144,13 @@ pub enum Caller {
     /// owner cannot reach them: not because a check refuses, but because there
     /// is no value of this variant that satisfies that pattern.
     ///
-    /// The asymmetry is not that approving touches the repository — it does not;
-    /// it flips a state and writes one file. It is that **approving is the
-    /// signal a spec is fit to become work on the developer's machine**, and
-    /// that is a decision the developer has not delegated. Declining fails
-    /// towards *lost* work, which the filer can re-file and the developer can
-    /// see; approving fails towards *admitted* work, which is invisible until it
-    /// costs something.
+    /// The asymmetry is not that accepting touches the repository — it does
+    /// not; it flips a state and writes one file, and the web never builds
+    /// anything. It is that **accepting is the signal a spec is settled and fit
+    /// to be picked up in the IDE**, and that is a decision the developer has
+    /// not delegated. Declining fails towards *lost* work, which the filer can
+    /// re-file and the developer can see; accepting fails towards work taken as
+    /// agreed by somebody who did not have to build it.
     ///
     /// Carries the repositories the configuration says are theirs, resolved once
     /// when the caller is identified. Passing the *names* rather than the login

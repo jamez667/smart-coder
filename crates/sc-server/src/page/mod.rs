@@ -27,8 +27,8 @@ use crate::i18n::Locale;
 // as they did before the split. Every call site in `routes.rs` is unchanged,
 // which is what makes this a mechanical move rather than a rewrite.
 pub use private::{
-    accounts_page, confirm_approve, detail, enrol_page, enrol_page_with_error, enrolled_page,
-    filed, index, message, not_found, Who,
+    accounts_page, confirm_accept, detail, enrol_page, enrol_page_with_error, enrolled_page, filed,
+    index, message, not_found, Who,
 };
 pub use public::{
     github_start_page, landing_page, owner_detail, owner_page, public_detail, public_file_page,
@@ -861,7 +861,7 @@ pub(crate) mod corpus {
                 "detail",
                 detail(&reviewable(), &crate::page::Who::default()),
             ),
-            ("confirm_approve", confirm_approve(&req(), "# Spec", "d")),
+            ("confirm_accept", confirm_accept(&req(), "# Spec", "d")),
             ("accounts_page", accounts_page(&Accounts::default())),
             ("enrol_page", enrol_page()),
             ("enrol_page_with_error", enrol_page_with_error()),

@@ -120,8 +120,8 @@ pub mod private_route {
 /// this list rather than a hand-written copy that goes stale the moment a verb
 /// is added.
 pub const REVIEW_VERBS: [&str; 5] = [
-    "approve",
-    "approve/confirm",
+    "accept",
+    "accept/confirm",
     "send-back",
     "discard",
     "release",
@@ -1021,8 +1021,8 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             // Asking is not deciding: this renders the confirmation and changes
             // nothing. Handled apart from the others because it alone returns a
             // page rather than a settled request.
-            if verb == "approve" {
-                return ask_to_approve(ctx, id);
+            if verb == "accept" {
+                return ask_to_accept(ctx, id);
             }
 
             // The two verbs that put a request back in the claimable queue cost
@@ -1038,9 +1038,9 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             }
 
             let outcome = match verb {
-                "approve/confirm" => {
+                "accept/confirm" => {
                     let digest = form.get("digest").cloned().unwrap_or_default();
-                    ctx.store.approve(id, &digest)
+                    ctx.store.accept(id, &digest)
                 }
                 "send-back" => {
                     let notes = form.get("notes").cloned().unwrap_or_default();
@@ -1816,7 +1816,7 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
 /// [`Store::approve`](crate::store::Store::approve) re-checks on submit — so the
 /// approval binds to bytes the reviewer saw rather than to whatever is on disk
 /// when the second POST lands.
-fn ask_to_approve(ctx: &mut Ctx<'_>, id: &str) -> Res {
+fn ask_to_accept(ctx: &mut Ctx<'_>, id: &str) -> Res {
     let req = match ctx.store.get(id) {
         Ok(Some(r)) => r,
         Ok(None) => return Res::html(404, crate::page::not_found()),
@@ -1837,7 +1837,7 @@ fn ask_to_approve(ctx: &mut Ctx<'_>, id: &str) -> Res {
             crate::page::message("There is no drafted spec to approve yet."),
         );
     };
-    Res::html(200, crate::page::confirm_approve(&req, &spec, &digest))
+    Res::html(200, crate::page::confirm_accept(&req, &spec, &digest))
 }
 
 /// The longest a request may be.
@@ -2771,32 +2771,32 @@ mod tests {
     fn approving_takes_two_deliberate_posts_and_the_first_decides_nothing() {
         // Spec 20: approve is a deliberate action taken below the full artifact.
         // The first POST asks; only the second settles.
-        let mut f = Fixture::new("approve");
+        let mut f = Fixture::new("accept");
         let token = f.enrolled();
         let id = f.file(&token, "a+thing", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
 
-        let asked = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
+        let asked = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
         assert_eq!(asked.status, 200, "{}", asked.body);
         assert_eq!(
             f.store.require(&id).unwrap().state,
             RequestState::AwaitingReview,
             "the first post asks, it does not decide"
         );
-        assert!(asked.body.contains("/approve/confirm"), "{}", asked.body);
+        assert!(asked.body.contains("/accept/confirm"), "{}", asked.body);
 
         let digest = digest_from(&asked.body);
         let settled = f.go(&Req::post(
-            &format!("/request/{id}/approve/confirm"),
+            &format!("/request/{id}/accept/confirm"),
             &format!("digest={digest}"),
         )
         .with_cookie(&token));
         assert_eq!(settled.status, 200, "{}", settled.body);
         // `Ready` is not `Done`: nothing was built, and the developer picks it up
         // in their IDE on their own schedule.
-        assert_eq!(f.store.require(&id).unwrap().state, RequestState::Ready);
+        assert_eq!(f.store.require(&id).unwrap().state, RequestState::Accepted);
     }
 
     #[test]
@@ -2811,7 +2811,7 @@ mod tests {
         let v1 = serde_json::to_string(&DraftedSpec::new(&id, "# Version one", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &v1).with_bearer(KEY));
 
-        let asked = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
+        let asked = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
         let stale = digest_from(&asked.body);
 
         // The daemon redrafts under them. Through the real path — sent back,
@@ -2823,7 +2823,7 @@ mod tests {
         f.go(&Req::post(&wire::route::drafted(&id), &v2).with_bearer(KEY));
 
         let refused = f.go(&Req::post(
-            &format!("/request/{id}/approve/confirm"),
+            &format!("/request/{id}/accept/confirm"),
             &format!("digest={stale}"),
         )
         .with_cookie(&token));
@@ -2848,10 +2848,8 @@ mod tests {
         f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
 
         for body in ["", "digest=", "digest=nonsense"] {
-            let res =
-                f.go(
-                    &Req::post(&format!("/request/{id}/approve/confirm"), body).with_cookie(&token)
-                );
+            let res = f
+                .go(&Req::post(&format!("/request/{id}/accept/confirm"), body).with_cookie(&token));
             assert_eq!(res.status, 400, "{body:?}: {}", res.body);
         }
         assert_eq!(
@@ -2868,9 +2866,9 @@ mod tests {
         let token = f.enrolled();
         let id = f.file(&token, "a+thing", "alpha");
 
-        let res = f.go(&Req::post(&format!("/request/{id}/approve"), "").with_cookie(&token));
+        let res = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
         assert_eq!(res.status, 400, "{}", res.body);
-        let missing = f.go(&Req::post("/request/nope/approve", "").with_cookie(&token));
+        let missing = f.go(&Req::post("/request/nope/accept", "").with_cookie(&token));
         assert_eq!(missing.status, 404);
     }
 
@@ -3649,7 +3647,7 @@ mod tests {
             .body;
         assert!(html.contains("send-back"), "{html}");
         assert!(html.contains("discard"), "{html}");
-        assert!(!html.contains("approve"), "no approve anywhere: {html}");
+        assert!(!html.contains("accept"), "no approve anywhere: {html}");
 
         // And the verb works.
         let res = f.go(&Req::post(
@@ -3686,7 +3684,7 @@ mod tests {
         for verb in OWNER_VERBS {
             assert!(REVIEW_VERBS.contains(&verb), "{verb} is not a review verb");
         }
-        for admitting in ["approve", "approve/confirm", "release"] {
+        for admitting in ["accept", "accept/confirm", "release"] {
             assert!(
                 !OWNER_VERBS.contains(&admitting),
                 "{admitting} admits work and must not be an owner's to reach"

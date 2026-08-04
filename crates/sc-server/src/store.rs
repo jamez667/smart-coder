@@ -86,8 +86,19 @@ pub enum RequestState {
     Claimed,
     /// A spec came back and is waiting for a human.
     AwaitingReview,
-    /// Approved. The spec is settled in the repository; nothing was built.
-    Ready,
+    /// Accepted: read, judged good, and done with here.
+    ///
+    /// **Nothing was built, and nothing will be by this server.** The spec was
+    /// already written into the repository when it was drafted; accepting marks
+    /// it settled so it leaves the review list. Building it means opening the
+    /// IDE and running the pipeline, on the machine that holds the code.
+    ///
+    /// `alias = "ready"` because records already on the volume were written
+    /// under the older name. Read-compatible, write-forward — no migration pass,
+    /// because a migration that runs at startup is one that can fail at startup,
+    /// on the one directory the developer cannot lose.
+    #[serde(alias = "ready")]
+    Accepted,
     /// The screener judged it spam. **Not claimable** — but kept, visible, and
     /// releasable in one click.
     ///
@@ -109,7 +120,7 @@ impl RequestState {
             RequestState::Queued => "queued",
             RequestState::Claimed => "drafting",
             RequestState::AwaitingReview => "awaiting review",
-            RequestState::Ready => "ready",
+            RequestState::Accepted => "ready",
             RequestState::Quarantined => "quarantined",
             RequestState::Discarded => "discarded",
             RequestState::Failed => "failed",
@@ -129,7 +140,7 @@ impl RequestState {
             RequestState::Screening => 3,
             RequestState::Quarantined => 4,
             RequestState::Failed => 5,
-            RequestState::Ready => 6,
+            RequestState::Accepted => 6,
             RequestState::Discarded => 7,
         }
     }
@@ -671,7 +682,7 @@ impl Store {
     ///
     /// The check lives here rather than in the route so the CLI and desktop gates
     /// inherit the same guarantee rather than each re-deriving it.
-    pub fn approve(&self, id: &str, expected_digest: &str) -> Result<Request> {
+    pub fn accept(&self, id: &str, expected_digest: &str) -> Result<Request> {
         let mut req = self.require(id)?;
         if req.state != RequestState::AwaitingReview {
             return Err(DcError::Eval(format!(
@@ -690,7 +701,7 @@ impl Store {
                     .to_string(),
             ));
         }
-        req.state = RequestState::Ready;
+        req.state = RequestState::Accepted;
         self.put(&req)?;
         Ok(req)
     }
@@ -828,7 +839,7 @@ impl Store {
     /// is the state the caller asked for, and erroring would be pedantry.
     pub fn discard(&self, id: &str) -> Result<Request> {
         let mut req = self.require(id)?;
-        if matches!(req.state, RequestState::Ready) {
+        if matches!(req.state, RequestState::Accepted) {
             return Err(DcError::Eval(format!(
                 "request {id} was approved — its spec is settled in the \
                  repository. Discarding here would erase the decision without \
@@ -1321,6 +1332,29 @@ mod tests {
     }
 
     #[test]
+    fn a_request_written_before_the_rename_still_loads() {
+        // **The live volume already holds these.** `Ready` became `Accepted`
+        // because the old name read as "built", which is the one thing this
+        // state does not mean — but every record written under it is still on
+        // disk, and losing them to a rename would be the worst possible outcome
+        // of a cosmetic change.
+        //
+        // A serde alias rather than a migration pass: a migration that runs at
+        // startup is one that can fail at startup, on the one directory the
+        // developer cannot lose.
+        let older = r#"{"id":"r-1","text":"a thing","repo":"alpha","kind":"bug",
+                        "state":"ready","filed_ms":0}"#;
+        let r: Request = serde_json::from_str(older).expect("an older record still loads");
+        assert_eq!(r.state, RequestState::Accepted);
+
+        // And writes forward under the new name, so the old spelling ages out
+        // of the volume on its own.
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"accepted\""), "{json}");
+        assert!(!json.contains("\"ready\""), "{json}");
+    }
+
+    #[test]
     fn a_record_written_before_claimed_by_existed_still_loads() {
         // The upgrade case. A claim taken under the previous build has no
         // holder, and rejecting its report would throw away a draft that is
@@ -1394,15 +1428,15 @@ mod tests {
     fn approving_settles_the_request_and_starts_nothing() {
         // `Ready` is not "done": nothing was built, and the developer picks it
         // up in their IDE when they choose.
-        let (s, dir) = store("approve");
+        let (s, dir) = store("accept");
         file(&s, "r-1", "alpha");
         s.claim_next(Serves::Anything, "d-test").unwrap();
         s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
             .unwrap();
 
         let digest = s.require("r-1").unwrap().spec_digest().unwrap();
-        let req = s.approve("r-1", &digest).unwrap();
-        assert_eq!(req.state, RequestState::Ready);
+        let req = s.accept("r-1", &digest).unwrap();
+        assert_eq!(req.state, RequestState::Accepted);
         // The spec is still readable after approval — it is the record of what
         // was agreed.
         assert_eq!(req.spec.as_deref(), Some("# The spec"));
@@ -1430,7 +1464,7 @@ mod tests {
             .unwrap();
 
         let err = s
-            .approve("r-1", &read_this)
+            .accept("r-1", &read_this)
             .expect_err("the text changed")
             .to_string();
         assert!(err.contains("changed after you opened it"), "{err}");
@@ -1442,7 +1476,7 @@ mod tests {
         );
         // Reading the new one and approving that works.
         let now = s.require("r-1").unwrap().spec_digest().unwrap();
-        assert_eq!(s.approve("r-1", &now).unwrap().state, RequestState::Ready);
+        assert_eq!(s.accept("r-1", &now).unwrap().state, RequestState::Accepted);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1466,7 +1500,7 @@ mod tests {
         s.claim_next(Serves::Anything, "d-test").unwrap();
         s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
             .unwrap();
-        assert!(s.approve("r-1", &digest).is_ok());
+        assert!(s.accept("r-1", &digest).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1475,7 +1509,7 @@ mod tests {
         // Approving a queued request would sign off a spec that does not exist.
         let (s, dir) = store("guards");
         file(&s, "r-1", "alpha");
-        assert!(s.approve("r-1", "any-digest").is_err());
+        assert!(s.accept("r-1", "any-digest").is_err());
         assert!(s.send_back("r-1", "change it").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1593,7 +1627,7 @@ mod tests {
             RequestState::Quarantined,
             RequestState::Claimed,
             RequestState::AwaitingReview,
-            RequestState::Ready,
+            RequestState::Accepted,
             RequestState::Discarded,
             RequestState::Failed,
         ]
@@ -1770,7 +1804,7 @@ mod tests {
             RequestState::Queued,
             RequestState::Claimed,
             RequestState::AwaitingReview,
-            RequestState::Ready,
+            RequestState::Accepted,
             RequestState::Discarded,
             RequestState::Failed,
         ]
@@ -1823,11 +1857,11 @@ mod tests {
         s.record_drafted("r-1", "d-test", "# The spec", "specs/x")
             .unwrap();
         let digest = s.require("r-1").unwrap().spec_digest().unwrap();
-        s.approve("r-1", &digest).unwrap();
+        s.accept("r-1", &digest).unwrap();
 
         let err = s.discard("r-1").expect_err("already settled").to_string();
         assert!(err.contains("was approved"), "{err}");
-        assert_eq!(s.require("r-1").unwrap().state, RequestState::Ready);
+        assert_eq!(s.require("r-1").unwrap().state, RequestState::Accepted);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1908,7 +1942,7 @@ mod tests {
     #[test]
     fn a_list_shows_what_needs_a_human_first() {
         let mut states = [
-            RequestState::Ready,
+            RequestState::Accepted,
             RequestState::Queued,
             RequestState::AwaitingReview,
             RequestState::Failed,

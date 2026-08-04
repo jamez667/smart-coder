@@ -404,7 +404,7 @@ fn public_state_label(state: RequestState, locale: Locale) -> &'static str {
         }
         RequestState::Claimed => s.state_writing,
         RequestState::AwaitingReview => s.state_reviewing,
-        RequestState::Ready => s.state_accepted,
+        RequestState::Accepted => s.state_accepted,
         RequestState::Discarded | RequestState::Failed => s.state_closed,
     }
 }

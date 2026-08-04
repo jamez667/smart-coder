@@ -228,16 +228,19 @@ pub fn detail(r: &Request, who: &Who) -> String {
         // error here, not a page that renders its header and then silently
         // stops. That is exactly how the two states above were nearly missed.
         (None, RequestState::AwaitingReview)
-        | (None, RequestState::Ready)
+        | (None, RequestState::Accepted)
         | (None, RequestState::Discarded)
         | (None, RequestState::Failed) => {}
     }
 
-    if r.state == RequestState::Ready {
-        // Saying so plainly, because "ready" could easily read as "built".
+    if r.state == RequestState::Accepted {
+        // Saying so plainly. The old state was called "ready", which read as
+        // "built" — the rename to "accepted" is most of the fix, and this line
+        // says the rest of it out loud.
         body.push_str(
-            "<p class=\"note\">Approved. The spec is settled in the repository — \
-             nothing has been built. Pick it up in your IDE when you choose to.</p>",
+            "<p class=\"note\">Accepted. The spec is settled in the repository — \
+             nothing has been built. Open your IDE and run the pipeline when you \
+             choose to.</p>",
         );
     }
 
@@ -251,8 +254,8 @@ const EXTRACT_LINES: usize = 40;
 /// Split a spec into its opening and closing lines, and how many were elided.
 ///
 /// The confirmation restates *both* ends rather than a summary: a summary of an
-/// artifact is a second artifact nobody verified, and approving it means
-/// approving something the developer did not read (spec 20).
+/// artifact is a second artifact nobody verified, and accepting it means
+/// accepting something the developer did not read (spec 20).
 ///
 /// The tail matters most. It is the part a flick-to-the-bottom reviewer nominally
 /// "reached", so reprinting it puts the end of the document in front of them a
@@ -269,14 +272,14 @@ fn head_and_tail(spec: &str, n: usize) -> (String, String, usize) {
     )
 }
 
-/// The confirmation page: restate what is being approved, and bind to its bytes.
+/// The confirmation page: restate what is being accepted, and bind to its bytes.
 ///
 /// The `digest` is carried in a hidden field and re-checked on submit by
-/// [`Store::approve`](crate::store::Store::approve). That is what turns a second
-/// tap from ceremony into a real guarantee: the approval attaches to the exact
+/// [`Store::accept`](crate::store::Store::accept). That is what turns a second
+/// tap from ceremony into a real guarantee: the acceptance attaches to the exact
 /// text shown here, so a redraft landing mid-review is refused rather than
-/// silently approved on the strength of reading the previous one.
-pub fn confirm_approve(r: &Request, spec: &str, digest: &str) -> String {
+/// silently accepted on the strength of reading the previous one.
+pub fn confirm_accept(r: &Request, spec: &str, digest: &str) -> String {
     let (head, tail, elided) = head_and_tail(spec, EXTRACT_LINES);
     let mut extract = format!("<pre>{}</pre>", esc(&head));
     if elided > 0 {
@@ -288,18 +291,19 @@ pub fn confirm_approve(r: &Request, spec: &str, digest: &str) -> String {
     }
 
     shell(
-        "Confirm approval",
+        "Confirm",
         &format!(
-            "<h1>Approve this spec?</h1>\
-             <p>Approving settles <strong>{summary}</strong> for \
-             <strong>{repo}</strong>. The spec stays in the repository as the \
-             record of what was agreed. <strong>Nothing is built</strong> — you \
-             pick it up in your IDE when you choose to.</p>\
-             <h2>What you are approving</h2>{extract}\
+            "<h1>Accept this spec?</h1>\
+             <p>Accepting records that <strong>{summary}</strong> for \
+             <strong>{repo}</strong> is settled. The spec is already in the \
+             repository — this marks it done here so it drops out of your review \
+             list. <strong>To build it, open your IDE and run the \
+             pipeline.</strong></p>\
+             <h2>What you are accepting</h2>{extract}\
              <div class=\"decide\">\
-             <form method=\"post\" action=\"/request/{id}/approve/confirm\">\
+             <form method=\"post\" action=\"/request/{id}/accept/confirm\">\
              <input type=\"hidden\" name=\"digest\" value=\"{digest}\">\
-             <button type=\"submit\">Yes — approve this spec</button></form>\
+             <button type=\"submit\">Yes — accept this spec</button></form>\
              <form method=\"get\" action=\"/request/{id}\">\
              <button type=\"submit\">No — take me back to read it</button></form>\
              </div>\
@@ -328,7 +332,7 @@ fn review_actions(id: &str) -> String {
          <textarea id=\"notes\" name=\"notes\" required \
          placeholder=\"The redraft grounds on this, so be specific.\"></textarea>\
          <button type=\"submit\">Send back</button></form>\
-         <form method=\"post\" action=\"/request/{id}/approve\">\
+         <form method=\"post\" action=\"/request/{id}/accept\">\
          <button type=\"submit\">Approve this spec</button></form>\
          <form method=\"post\" action=\"/request/{id}/discard\">\
          <button type=\"submit\">Discard</button></form>\
@@ -500,7 +504,7 @@ mod tests {
         r.state = RequestState::AwaitingReview;
         r.spec = Some("# Spec".to_string());
         let actions = review_actions("r-1");
-        assert!(actions.contains("/request/r-1/approve"), "{actions}");
+        assert!(actions.contains("/request/r-1/accept"), "{actions}");
         assert!(actions.contains("/request/r-1/send-back"), "{actions}");
 
         // Every button is bare: no class, no inline style, so none is the one a
@@ -517,7 +521,7 @@ mod tests {
         }
         // Send-back comes first, so the effortful choice is the one in reach.
         let send_back = actions.find("send-back").unwrap();
-        let approve = actions.find("approve").unwrap();
+        let approve = actions.find("accept").unwrap();
         assert!(send_back < approve, "{actions}");
 
         // And deferring is free, and says so.
@@ -548,12 +552,12 @@ mod tests {
 
         let spec_ends = html.rfind("</pre>").unwrap();
         assert!(spec_ends < html.find("/send-back").unwrap(), "{html}");
-        assert!(spec_ends < html.find("/approve").unwrap(), "{html}");
+        assert!(spec_ends < html.find("/accept").unwrap(), "{html}");
     }
 
     #[test]
     fn the_detail_pages_approve_button_asks_rather_than_decides() {
-        // The mechanism is that /approve renders a confirmation. If the detail
+        // The mechanism is that /accept renders a confirmation. If the detail
         // page ever posted straight to the committing route, the second step is
         // gone and nothing in the routing tests would notice.
         let mut r = req("a thing");
@@ -561,8 +565,8 @@ mod tests {
         r.spec = Some("# Spec".to_string());
         let html = detail(&r, &Who::default());
 
-        assert!(html.contains("action=\"/request/r-1/approve\""), "{html}");
-        assert!(!html.contains("/approve/confirm"), "{html}");
+        assert!(html.contains("action=\"/request/r-1/accept\""), "{html}");
+        assert!(!html.contains("/accept/confirm"), "{html}");
     }
 
     #[test]
@@ -572,13 +576,17 @@ mod tests {
         // reviewer.
         let r = req("a thing");
         let spec = "# Spec\nthe first line\nthe last line";
-        let html = confirm_approve(&r, spec, "deadbeef");
+        let html = confirm_accept(&r, spec, "deadbeef");
 
         assert!(html.contains("the first line"), "{html}");
         assert!(html.contains("the last line"), "{html}");
-        assert!(html.contains("a thing"), "names what is approved: {html}");
+        assert!(html.contains("a thing"), "names what is accepted: {html}");
         assert!(html.contains("alpha"), "names the repository: {html}");
-        assert!(html.contains("Nothing is built"), "{html}");
+        // **Says where building actually happens.** The old copy said "nothing
+        // is built", which left the reader to wonder what would build it; the
+        // page now names the IDE, which is the whole point of the rename.
+        assert!(html.contains("run the pipeline"), "{html}");
+        assert!(html.contains("IDE"), "{html}");
     }
 
     #[test]
@@ -586,12 +594,12 @@ mod tests {
         // Without the digest the reviewer consents to "whatever is on disk when
         // the POST lands", which a redraft arriving mid-review silently changes.
         let r = req("a thing");
-        let html = confirm_approve(&r, "# Spec", "deadbeef");
+        let html = confirm_accept(&r, "# Spec", "deadbeef");
         assert!(
             html.contains("name=\"digest\" value=\"deadbeef\""),
             "{html}"
         );
-        assert!(html.contains("/request/r-1/approve/confirm"), "{html}");
+        assert!(html.contains("/request/r-1/accept/confirm"), "{html}");
     }
 
     #[test]
@@ -599,7 +607,7 @@ mod tests {
         // If "yes" is a button and "no" is a text link, the confirm page is a
         // funnel rather than a decision.
         let r = req("a thing");
-        let html = confirm_approve(&r, "# Spec", "deadbeef");
+        let html = confirm_accept(&r, "# Spec", "deadbeef");
 
         let buttons: Vec<&str> = html
             .match_indices("<button")
@@ -624,7 +632,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let r = req("a thing");
-        let html = confirm_approve(&r, &spec, "d");
+        let html = confirm_accept(&r, &spec, "d");
 
         assert!(html.contains("line 1\n"), "the head: {html}");
         assert!(html.contains("line 200"), "the tail: {html}");
@@ -638,7 +646,7 @@ mod tests {
     #[test]
     fn a_short_spec_is_shown_whole_with_no_elision_marker() {
         let r = req("a thing");
-        let html = confirm_approve(&r, "# Spec\nshort", "d");
+        let html = confirm_accept(&r, "# Spec\nshort", "d");
         assert!(html.contains("short"), "{html}");
         assert!(!html.contains("not shown"), "nothing was elided: {html}");
     }
@@ -671,7 +679,7 @@ mod tests {
 
         for html in [
             detail(&r, &Who::default()),
-            confirm_approve(&r, "# Spec", "d"),
+            confirm_accept(&r, "# Spec", "d"),
         ] {
             for hazard in [
                 "animation-timeline",
@@ -735,7 +743,7 @@ mod tests {
         // exist.
         let r = req("a thing");
         let html = detail(&r, &Who::default());
-        assert!(!html.contains("/approve"), "{html}");
+        assert!(!html.contains("/accept"), "{html}");
         assert!(html.contains("Waiting for a daemon"), "{html}");
     }
 
@@ -743,7 +751,7 @@ mod tests {
     fn ready_says_plainly_that_nothing_was_built() {
         // "Ready" reads as "built" unless the page says otherwise.
         let mut r = req("a thing");
-        r.state = RequestState::Ready;
+        r.state = RequestState::Accepted;
         r.spec = Some("# Spec".to_string());
         r.artifact_dir = Some("specs/a-thing".to_string());
         let html = detail(&r, &Who::default());

@@ -64,7 +64,7 @@ fn main() {
         "alpha",
         IntakeKind::Improvement,
     );
-    done.state = RequestState::Ready;
+    done.state = RequestState::Accepted;
 
     let mine = [bug.clone(), feature, done];
 

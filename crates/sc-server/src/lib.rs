@@ -10,7 +10,7 @@
 //! owns, and no route that builds. That is not a policy the handlers enforce —
 //! there is simply nothing here that could reach them. The whole vocabulary is:
 //!
-//! > file a request · watch it draft · read the spec · approve or send back.
+//! > file a request · watch it draft · read the spec · accept or send back.
 //!
 //! ## The inversion that makes it safe to expose
 //!
@@ -23,7 +23,7 @@
 //!                    (public)                 (the developer's machine)
 //! ```
 //!
-//! Approving marks a spec `Ready` and **starts nothing**: the developer picks it
+//! Accepting marks a spec `Accepted` and **starts nothing**: the developer picks it
 //! up in their IDE when they choose to.
 
 pub mod account;
