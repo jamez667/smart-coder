@@ -669,26 +669,18 @@ const MAX_REPO_NAME: usize = 128;
 fn public_repos(
     get: &impl Fn(&str) -> Option<String>,
 ) -> std::result::Result<Option<Repos>, String> {
-    let mut names: Vec<String> = Vec::new();
-
-    if let Some(raw) = opt(get, env::PUBLIC_REPOS) {
-        names.extend(
+    let plural: Vec<String> = opt(get, env::PUBLIC_REPOS)
+        .map(|raw| {
             raw.split(',')
                 .map(str::trim)
                 .filter(|r| !r.is_empty())
-                .map(str::to_string),
-        );
-    }
-    if let Some(one) = opt(get, env::PUBLIC_REPO) {
-        names.push(one.trim().to_string());
-    }
-
-    if names.is_empty() {
-        return Ok(None);
-    }
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut out: Vec<String> = Vec::new();
-    for name in names {
+    for name in plural {
         if name.len() > MAX_REPO_NAME {
             return Err(format!(
                 "a {} entry is {} characters. The daemon matches this name \
@@ -698,6 +690,9 @@ fn public_repos(
                 name.len()
             ));
         }
+        // **Within this one setting only.** A name written twice in the same
+        // list is a typo, and collapsing it silently would render a picker
+        // shorter than what the operator wrote.
         if out.contains(&name) {
             return Err(format!(
                 "{name:?} is listed twice in {}. Repository names have to be \
@@ -706,6 +701,22 @@ fn public_repos(
             ));
         }
         out.push(name);
+    }
+
+    // The singular setting folds in, and **a name already in the plural is not
+    // an error** — it is the migration working. Setting both is how a second
+    // repository is added before the first entry is tidied away, which this
+    // file recommends; refusing the overlap would refuse exactly the state that
+    // advice produces. It cost a live server a start-up before it was noticed.
+    if let Some(one) = opt(get, env::PUBLIC_REPO) {
+        let one = one.trim().to_string();
+        if !one.is_empty() && !out.contains(&one) {
+            out.push(one);
+        }
+    }
+
+    if out.is_empty() {
+        return Ok(None);
     }
     Ok(Some(Repos(out)))
 }
@@ -1209,6 +1220,38 @@ mod tests {
         for near_miss in ["Intake", "intak", "intakex", " intake", "secret-repo"] {
             assert!(!repos.accepts(near_miss), "{near_miss:?} is not nominated");
         }
+    }
+
+    #[test]
+    fn the_singular_setting_overlapping_the_plural_is_the_migration_working() {
+        // **This took a live server down.** The migration advice is to set both
+        // while moving across — and the duplicate check then refused exactly
+        // the state that advice produces, so the server would not boot on a
+        // configuration its own documentation recommends.
+        //
+        // An overlap between the two settings is not a typo. It is one name
+        // written in two places by somebody following the instructions.
+        let mut vars = public_vars_multi();
+        vars[1] = (env::PUBLIC_REPOS, "intake,memosy");
+        vars.push((env::PUBLIC_REPO, "intake"));
+
+        let p = load(&vars).unwrap().public.unwrap();
+        assert_eq!(
+            p.repos.names(),
+            ["intake", "memosy"],
+            "the overlap collapses rather than refusing"
+        );
+    }
+
+    #[test]
+    fn the_singular_setting_still_adds_a_repository_the_plural_omits() {
+        // The other half of the union, which must keep working: a name only in
+        // the singular is still served.
+        let mut vars = public_vars_multi();
+        vars[1] = (env::PUBLIC_REPOS, "memosy");
+        vars.push((env::PUBLIC_REPO, "intake"));
+        let p = load(&vars).unwrap().public.unwrap();
+        assert_eq!(p.repos.names(), ["memosy", "intake"]);
     }
 
     #[test]
