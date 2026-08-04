@@ -604,6 +604,30 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // Behind `ctx.ui` so both surfaces can be run while the move is staged. The
     // flag and this branch both disappear when the pages do.
     if ctx.ui && method == "GET" && wants_document(&path) {
+        // **`PublicScript`, including on the administrative addresses**, and
+        // this is where spec 18's amendment actually lands. The private surface
+        // ran no script at all, and the argument was that a page there renders
+        // every filer's model-authored spec at once — a cross-tenant leak with
+        // no equivalent on the other side. That argument has not stopped being
+        // true; the cost is accepted and recorded rather than answered.
+        //
+        // What still holds, and is doing the work now:
+        //
+        // - `default-src 'none'` is unchanged, so no remote subresource is
+        //   reachable. The exfiltration argument is about *remotes*, and it is
+        //   untouched — a renderer bug can corrupt the page and cannot phone
+        //   home.
+        // - `script-src 'self'` and never `'unsafe-inline'`. The bundle is a
+        //   served file; there is no inline hydration payload, because an
+        //   inline allowance is what a successful injection needs.
+        // - `connect-src 'self'`, so the interface can reach this server and
+        //   nothing else.
+        //
+        // The residual risk, stated plainly: a bug in the client-side renderer
+        // is now a cross-tenant XSS on the administrator's surface, where it
+        // would previously have been a rendering glitch. The ban on `innerHTML`
+        // and the browser harness are what bound it, and neither is as strong as
+        // "no script runs".
         return Res::html(200, crate::api::ui::INDEX).with_policy(Policy::PublicScript);
     }
 
@@ -1256,6 +1280,33 @@ fn wants_document(path: &str) -> bool {
         || path == public_route::FILE
         || path == public_route::SIGNIN
         || path.starts_with(public_route::REQUEST_PREFIX)
+        // The administrative addresses. **Answering the document here does not
+        // grant anything**: every one of them is still a `Caller::Admin` check
+        // at the API, and the interface draws its menu from what `/me` returned.
+        // What this decides is only whether a reader who types `/settings` gets
+        // the application or a 404 — and a 404 at an address that works when
+        // navigated to from inside the application is the kind of inconsistency
+        // that reads as a broken server.
+        //
+        // **This does change one thing, and it is worth naming.** The private
+        // surface answers a stranger 404 today, and the reason is recorded: a
+        // door they can see is worse than one they cannot, because it tells them
+        // the addresses are real. Serving the document means a guessed address
+        // returns 200.
+        //
+        // What that reasoning actually protects is the *naming* of the
+        // addresses, and that survives: the menu is drawn from `/me`, so a
+        // stranger is shown nothing, and the test asserting it still passes. A
+        // guesser now learns an address is served — which the open-source
+        // interface already tells them — and still learns nothing about whether
+        // it holds anything, because every API call behind it 404s.
+        || path == private_route::REVIEW
+        || path == private_route::SETTINGS
+        || path == private_route::REPOS
+        || path == private_route::OWNERS
+        || path == private_route::DAEMONS
+        || path == private_route::ACCOUNTS
+        || path.starts_with("/request/")
 }
 
 /// Who is calling, if anyone.
@@ -6008,8 +6059,17 @@ mod tests {
         assert!(wants_document(public_route::FILE));
         assert!(wants_document("/public/request/r-1"));
         assert!(!wants_document("/api/v1/ui/nope"));
-        assert!(!wants_document("/settings"));
         assert!(!wants_document("/ui/app.js"));
+
+        // **The administrative addresses answer the document too**, and that is
+        // a deliberate change from when this test was written. Serving it grants
+        // nothing: every API call behind these is still a `Caller::Admin` check,
+        // and the menu is drawn from `/me`, so a stranger is shown no door. What
+        // it buys is that typing `/settings` and navigating to it from inside
+        // the application behave the same.
+        assert!(wants_document(private_route::SETTINGS));
+        assert!(wants_document(private_route::REVIEW));
+        assert!(wants_document("/request/r-1"));
     }
 
     #[test]

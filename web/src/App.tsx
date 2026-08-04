@@ -1,37 +1,85 @@
-import { useEffect, useState } from "react";
-import { api, ApiError, type FiledRequest, type Me } from "./api";
+import { useCallback, useEffect, useState } from "react";
+import {
+  api,
+  ApiError,
+  type FiledRequest,
+  type Me,
+  type ReviewRequest,
+} from "./api";
 import { Masthead } from "./Masthead";
 import { SignInDialog } from "./SignInDialog";
+import { ReviewDetail, ReviewList } from "./Review";
 
-/// The public surface.
+/// The whole interface.
 ///
-/// **What the server rendered as `landing_page`, `public_file_page` and
-/// `public_detail`.** One `GET /` used to answer three different pages depending
-/// on who asked; here that is one component reading `me.role`, which is the same
-/// decision made in the same place — the server still decides, this just draws
-/// the answer.
+/// **One `GET /` answered three different pages depending on who asked**, and
+/// that has not changed — the server still decides, by returning a different
+/// `me` and a different shape of request. This draws the answer.
+///
+/// Routing is `history.pushState` over `window.location.pathname`, with no
+/// router library: there are four addresses. A router would be a dependency and
+/// a concept in service of a `switch`.
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [mine, setMine] = useState<FiledRequest[]>([]);
+  const [review, setReview] = useState<ReviewRequest[]>([]);
+  const [open, setOpen] = useState<ReviewRequest | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
+  const [path, setPath] = useState(window.location.pathname);
+
+  // The back button has to work. Without this it silently does nothing, which
+  // is the failure people notice first and complain about last.
+  useEffect(() => {
+    const pop = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", pop);
+    return () => window.removeEventListener("popstate", pop);
+  }, []);
+
+  const go = useCallback((to: string) => {
+    window.history.pushState({}, "", to);
+    setPath(to);
+  }, []);
+
+  const load = useCallback(async () => {
+    const who = await api.me();
+    setMe(who);
+    if (who.can.review) {
+      setReview(await api.requests<ReviewRequest[]>());
+    } else if (who.can.file) {
+      setMine(await api.requests<FiledRequest[]>());
+    }
+  }, []);
 
   useEffect(() => {
     // **`/me` first, always.** Nothing can be drawn before knowing whether
     // anybody is signed in — including the front door a stranger needs.
-    api
-      .me()
-      .then((who) => {
-        setMe(who);
-        if (who.can.file) {
-          return api
-            .requests<FiledRequest[]>()
-            .then(setMine)
-            .catch((e: ApiError) => setProblem(e.message));
-        }
-      })
-      .catch((e: ApiError) => setProblem(e.message));
-  }, []);
+    load().catch((e: ApiError) => setProblem(e.message));
+  }, [load]);
+
+  // A request opened by id: fetch it rather than reusing the list entry, because
+  // the list carries a summary and the detail carries the spec and its digest.
+  const openRequest = useCallback(
+    (id: string) => {
+      go(`/request/${id}`);
+      api
+        .request<ReviewRequest>(id)
+        .then(setOpen)
+        .catch((e: ApiError) => setProblem(e.message));
+    },
+    [go],
+  );
+
+  useEffect(() => {
+    const m = path.match(/^\/request\/([^/]+)$/);
+    if (m && !open) {
+      api
+        .request<ReviewRequest>(m[1])
+        .then(setOpen)
+        .catch((e: ApiError) => setProblem(e.message));
+    }
+    if (!m && open) setOpen(null);
+  }, [path, open]);
 
   if (!me) {
     // Deliberately blank rather than a spinner: on the connection this surface
@@ -41,10 +89,25 @@ export function App() {
 
   return (
     <>
-      <Masthead me={me} onSignIn={() => setSigningIn(true)} />
+      <Masthead me={me} onSignIn={() => setSigningIn(true)} onGo={go} />
       <main>
         {problem && <p className="note">{problem}</p>}
-        {me.can.file ? <Filing mine={mine} /> : <Landing />}
+        {open ? (
+          <ReviewDetail
+            request={open}
+            me={me}
+            onDone={(r) => {
+              setOpen(r);
+              load().catch(() => undefined);
+            }}
+          />
+        ) : me.can.review ? (
+          <ReviewList requests={review} onOpen={openRequest} />
+        ) : me.can.file ? (
+          <Filing mine={mine} />
+        ) : (
+          <Landing />
+        )}
       </main>
       <footer className="bar footer">
         <div className="bar-inner">
@@ -91,7 +154,7 @@ function Landing() {
   );
 }
 
-/// A filer's own surface: the form, and what they have filed.
+/// A filer's own surface: what they have filed.
 function Filing({ mine }: { mine: FiledRequest[] }) {
   return (
     <>
@@ -101,9 +164,6 @@ function Filing({ mine }: { mine: FiledRequest[] }) {
           <h2>What you have filed</h2>
           {mine.map((r) => (
             <a className="item" key={r.id} href={`/public/request/${r.id}`}>
-              {/* Rendered as a child, so React escapes it. The summary is text
-                  somebody typed on the internet; the server used to escape it
-                  and this is what replaces that. */}
               <span className="tag">{r.state}</span> {r.summary}
             </a>
           ))}

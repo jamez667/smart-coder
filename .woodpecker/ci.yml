@@ -65,3 +65,27 @@ steps:
       # `cargo test` run stays deterministic and self-contained — no backend, no
       # interpreter, no network.
       - cargo test --workspace
+
+  # The browser harness, in its own step because it needs a browser and a
+  # running server — the two things `scripts/check.sh` deliberately does not.
+  #
+  # **It carries the tests the move to a client-rendered surface would otherwise
+  # lose**: that the two review decisions are styled identically, that the
+  # controls sit below the artifact they decide on, that the bypass is visible,
+  # and that a signed-out stranger is shown no administrative route. Those were
+  # asserted against rendered HTML in Rust and cannot be asserted against JSON.
+  #
+  # It builds the image and drives it, so what is tested is what ships.
+  - name: browser
+    image: mcr.microsoft.com/playwright:v1.49.1-jammy
+    # **Needs the repository's `volumes` trust flag.** The harness stands up the
+    # real image and drives it, so what is tested is what ships — the same
+    # binary, the same embedded bundle, the same CSP. Without the flag Woodpecker
+    # rejects this pipeline before any step runs, and the failure has no step
+    # logs to read, so if this ever reports `error` rather than `failure` the
+    # flag is the first thing to check.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - cd web && npm ci
+      - npx playwright test
