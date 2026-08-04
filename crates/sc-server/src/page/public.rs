@@ -91,25 +91,51 @@ pub fn signin_page() -> String {
 /// the choice and before the cookie has been read back — the only caller that
 /// knows the locale from something other than the request.
 pub fn signin_page_in(locale: Locale, github: bool) -> String {
+    signin_page_full(locale, github, true)
+}
+
+/// The sign-in page, knowing whether this server can actually send an email.
+///
+/// **A surface with no mail provider says so** rather than rendering a form
+/// that takes an address and sends nothing. Same treatment as a surface with no
+/// repositories enabled, and for the same reason: the honest failure is the one
+/// somebody can act on, and a form that silently swallows a request teaches
+/// people the site is broken in a way they cannot report.
+///
+/// The administrator is unaffected — they sign in with GitHub — so the page
+/// that configures mail stays reachable while mail is what is broken.
+pub fn signin_page_full(locale: Locale, github: bool, mail: bool) -> String {
     let s = locale.strings();
-    public_shell(
-        locale,
-        s.signin_title,
-        &format!(
-            "<h1>{title}</h1><p>{intro}</p>\
-             <form method=\"post\" action=\"/public/signin\">\
+    let form = if mail {
+        format!(
+            "<form method=\"post\" action=\"/public/signin\">\
              <label for=\"email\">{email}</label>\
              <input id=\"email\" name=\"email\" type=\"email\" required \
              autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
              placeholder=\"{placeholder}\">\
              <button type=\"submit\">{submit}</button></form>\
-             <p class=\"meta\">{note}</p>{owner}",
-            title = esc(s.signin_title),
-            intro = esc(s.signin_intro),
+             <p class=\"meta\">{note}</p>",
             email = esc(s.signin_email_label),
             placeholder = esc(s.signin_email_placeholder),
             submit = esc(s.signin_submit),
             note = esc(s.signin_no_password),
+        )
+    } else {
+        String::new()
+    };
+
+    public_shell(
+        locale,
+        s.signin_title,
+        &format!(
+            "<h1>{title}</h1><p>{intro}</p>{form}{owner}",
+            title = esc(s.signin_title),
+            intro = esc(if mail {
+                s.signin_intro
+            } else {
+                s.signin_no_mail
+            }),
+            form = form,
             owner = github_link_in(locale, github),
         ),
     )

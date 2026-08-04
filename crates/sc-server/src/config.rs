@@ -65,18 +65,6 @@ pub struct Config {
     /// `daemon_key` required — the unsafe configuration should be impossible to
     /// express, not merely discouraged.
     pub public: Option<PublicConfig>,
-    /// Print sign-in links to the log instead of emailing them.
-    ///
-    /// **For looking at the surface locally.** A sign-in link is a credential, so
-    /// this hands an account to anyone who can read the log.
-    ///
-    /// Guarded by the *base URL* rather than by the bind address: inside a
-    /// container the bind is `0.0.0.0` whether or not anyone outside can reach
-    /// it, so a loopback-bind check would reject exactly the case this exists
-    /// for. The base URL is the address links are actually built from — if that
-    /// is `localhost`, the links only work for somebody already on the machine,
-    /// which is the same person who can read the log.
-    pub mail_to_console: bool,
 }
 
 /// One daemon's credential.
@@ -511,13 +499,6 @@ pub mod env {
     pub const MAIL_FROM: &str = "SC_SERVER_MAIL_FROM";
     pub const MAIL_FROM_NAME: &str = "SC_SERVER_MAIL_FROM_NAME";
 
-    /// Print sign-in links to the log instead of sending them — **local only**.
-    ///
-    /// Honoured solely when `PUBLIC_BASE_URL` is a loopback address, so setting
-    /// it on a deployed server is a startup error rather than a quiet downgrade
-    /// to "anyone reading the log can sign in as anyone".
-    pub const MAIL_TO_CONSOLE: &str = "SC_SERVER_MAIL_TO_CONSOLE";
-
     /// Optional. Absent means filings are not screened at all.
     pub const SCREEN_KEY: &str = "SC_SERVER_SCREEN_KEY";
     pub const SCREEN_URL: &str = "SC_SERVER_SCREEN_URL";
@@ -576,7 +557,6 @@ impl Config {
             // Read again here rather than threaded out of `public_from`, which
             // returns `None` when the public surface is off — and the switch is
             // meaningless in that case anyway, since nothing sends mail.
-            mail_to_console: flag(&get, env::MAIL_TO_CONSOLE),
             public: public_from(&get)?,
         })
     }
@@ -912,18 +892,6 @@ fn owners(
     Ok(out)
 }
 
-/// Read a boolean switch. **Off unless plainly turned on.**
-///
-/// Only the affirmative spellings count, so `SC_SERVER_MAIL_TO_CONSOLE=false`
-/// means false rather than "a non-empty string, therefore true" — which is the
-/// classic way a safety switch ends up on.
-fn flag(get: &impl Fn(&str) -> Option<String>, key: &str) -> bool {
-    matches!(
-        opt(get, key).map(|v| v.to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
 /// Read a trimmed, non-blank setting. Blank is *absent*, not present-and-empty.
 fn opt(get: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
     get(key)
@@ -958,23 +926,6 @@ fn public_from(
         )
     })?;
     check_base_url(&base_url).map_err(|e| format!("{}: {e}", env::PUBLIC_BASE_URL))?;
-
-    // Console mail waives the provider settings, because supplying a Brevo key
-    // to a server that will not call Brevo is a hurdle with no purpose. The
-    // placeholder below is never read: `build_mailer` picks `Console` first.
-    //
-    // Validated here rather than in `Config::from_vars` so that the base URL —
-    // which is what the guard tests — is already parsed and checked.
-    let to_console = flag(get, env::MAIL_TO_CONSOLE);
-    if to_console && !is_private_host(&base_url) {
-        return Err(format!(
-            "{} prints sign-in links to the log, which hands an account to anyone \
-             who can read it. It is honoured only when {} is a loopback address, \
-             and this one is {base_url:?}. Configure a real mail provider.",
-            env::MAIL_TO_CONSOLE,
-            env::PUBLIC_BASE_URL
-        ));
-    }
 
     // Read before the struct so the GitHub application can be checked against
     // it: owners with no way to sign in is a setting that looks applied and
@@ -1018,11 +969,10 @@ fn public_from(
         // `https://` check above ran on.
         secure_cookies: !is_private_host(&base_url),
         base_url: base_url.trim_end_matches('/').to_string(),
-        mail: if to_console {
-            None
-        } else {
-            Some(mail_from(get)?)
-        },
+        // **Optional, where it used to be required.** A surface with no mail
+        // provider serves and says sign-in is unavailable, the same way one
+        // with no repositories enabled says it cannot take a filing.
+        mail: mail_from(get)?,
         screen: screen_from(get)?,
         max_outstanding_links: count(get, env::PUBLIC_MAX_LINKS, DEFAULT_MAX_OUTSTANDING_LINKS)?,
         max_daily_filings: count(get, env::PUBLIC_MAX_DAILY, DEFAULT_MAX_DAILY_FILINGS)?,
@@ -1040,19 +990,18 @@ fn public_from(
     }))
 }
 
-fn mail_from(get: &impl Fn(&str) -> Option<String>) -> std::result::Result<MailConfig, String> {
-    let raw = opt(get, env::MAIL_PROVIDER).ok_or_else(|| {
-        format!(
-            "{} is required when the public surface is on: signing in needs an \
-             email. One of: {}.",
-            env::MAIL_PROVIDER,
-            Provider::ALL
-                .iter()
-                .map(|p| p.slug())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })?;
+fn mail_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> std::result::Result<Option<MailConfig>, String> {
+    // **No provider is not an error.** It seeds a surface that cannot send
+    // sign-in links yet and says so on the page, the same way one with no
+    // repositories enabled says it cannot take a filing. Refusing to start
+    // would put the settings page that fixes it out of reach — and it is
+    // reachable, because the administrator signs in with GitHub rather than by
+    // email.
+    let Some(raw) = opt(get, env::MAIL_PROVIDER) else {
+        return Ok(None);
+    };
     let provider = Provider::parse(&raw).ok_or_else(|| {
         format!(
             "unknown mail provider {raw:?}. One of: {}.",
@@ -1073,13 +1022,13 @@ fn mail_from(get: &impl Fn(&str) -> Option<String>) -> std::result::Result<MailC
         )
     })?;
 
-    Ok(MailConfig {
+    Ok(Some(MailConfig {
         provider,
         api_key,
         from,
         from_name: opt(get, env::MAIL_FROM_NAME)
             .unwrap_or_else(|| DEFAULT_MAIL_FROM_NAME.to_string()),
-    })
+    }))
 }
 
 fn screen_from(
@@ -1760,7 +1709,6 @@ mod tests {
             (env::MAIL_PROVIDER, ""),
             (env::MAIL_KEY, ""),
             (env::MAIL_FROM, ""),
-            (env::MAIL_TO_CONSOLE, ""),
             (env::SCREEN_KEY, ""),
             (env::PUBLIC_MAX_DAILY, ""),
             (env::PUBLIC_MAX_ACCOUNTS, ""),
@@ -1773,7 +1721,6 @@ mod tests {
         assert_eq!(cfg.bind, "0.0.0.0");
         assert_eq!(cfg.port, 8420);
         assert_eq!(cfg.data_dir, PathBuf::from("/data"));
-        assert!(!cfg.mail_to_console);
         // And a blank PUBLIC_REPO leaves the public surface off rather than
         // turning it on with an empty repository name.
         assert!(cfg.public.is_none());
@@ -1832,7 +1779,6 @@ mod tests {
             (env::DAEMON_KEY, GOOD_KEY),
             (env::PUBLIC_REPO, "intake"),
             (env::PUBLIC_BASE_URL, "http://192.168.0.100:8420"),
-            (env::MAIL_TO_CONSOLE, "1"),
         ])
         .expect("a private address may serve plain HTTP");
         let public = cfg.public.unwrap();
@@ -1856,65 +1802,6 @@ mod tests {
     }
 
     #[test]
-    fn console_mail_is_refused_on_a_deployed_base_url() {
-        // The guard that keeps this out of production. It prints sign-in links —
-        // which are credentials — so on a reachable host it would hand an
-        // account to anyone who can read the log.
-        let err = load(&[
-            (env::DAEMON_KEY, GOOD_KEY),
-            (env::PUBLIC_REPO, "intake"),
-            (env::PUBLIC_BASE_URL, "https://specs.example.com"),
-            (env::MAIL_TO_CONSOLE, "1"),
-        ])
-        .unwrap_err();
-        assert!(err.contains(env::MAIL_TO_CONSOLE), "{err}");
-        assert!(err.contains("read it"), "{err}");
-    }
-
-    #[test]
-    fn console_mail_waives_the_provider_settings_on_loopback() {
-        // The point of the switch: looking at the surface locally must not
-        // require an API key for a third party.
-        let cfg = load(&[
-            (env::DAEMON_KEY, GOOD_KEY),
-            (env::PUBLIC_REPO, "intake"),
-            (env::PUBLIC_BASE_URL, "http://localhost:8420"),
-            (env::MAIL_TO_CONSOLE, "true"),
-        ])
-        .unwrap();
-        assert!(cfg.mail_to_console);
-        // `None`, not a placeholder: there is no provider to fall back to, so no
-        // later branch can quietly construct an `HttpMailer` with an empty key.
-        assert!(cfg.public.unwrap().mail.is_none());
-    }
-
-    #[test]
-    fn console_mail_is_off_unless_plainly_turned_on() {
-        // The classic way a safety switch ends up on is "non-empty means true",
-        // which reads `MAIL_TO_CONSOLE=false` as yes.
-        //
-        // Asserted on a **loopback** base URL deliberately. With a deployed one
-        // the guard would reject a wrong reading with an error, and this test
-        // would pass on the panic rather than on the property — reporting the
-        // right result for the wrong reason.
-        for value in ["false", "0", "no", "off", "", "  ", "maybe"] {
-            let cfg = load(&[
-                (env::DAEMON_KEY, GOOD_KEY),
-                (env::PUBLIC_REPO, "intake"),
-                (env::PUBLIC_BASE_URL, "http://localhost:8420"),
-                (env::MAIL_PROVIDER, "brevo"),
-                (env::MAIL_KEY, GOOD_KEY),
-                (env::MAIL_FROM, "noreply@example.com"),
-                (env::MAIL_TO_CONSOLE, value),
-            ])
-            .unwrap_or_else(|e| panic!("{value:?} was read as on: {e}"));
-            assert!(!cfg.mail_to_console, "{value:?} turned it on");
-            // And the real provider is still required and read.
-            assert!(cfg.public.unwrap().mail.is_some(), "{value:?}");
-        }
-    }
-
-    #[test]
     fn the_public_surface_is_off_unless_asked_for() {
         // A fresh container must not be an open intake form by accident.
         let cfg = load(&[(env::DAEMON_KEY, GOOD_KEY)]).unwrap();
@@ -1923,15 +1810,15 @@ mod tests {
 
     #[test]
     fn the_server_refuses_to_start_half_public() {
-        // Accepting filings while unable to send a sign-in link looks configured
-        // while being broken — the failure nobody notices until a stranger
-        // reports that nothing arrived.
-        for missing in [
-            env::PUBLIC_BASE_URL,
-            env::MAIL_PROVIDER,
-            env::MAIL_KEY,
-            env::MAIL_FROM,
-        ] {
+        // **HALF a mail provider is the failure**, not the absence of one.
+        // Naming a provider without a key looks configured while being broken —
+        // the failure nobody notices until a stranger reports that nothing
+        // arrived. Naming none at all is a legal, visible state: the page says
+        // sign-in is unavailable, and `/settings` fixes it without a restart.
+        //
+        // `PUBLIC_BASE_URL` stays required because sign-in links, and the
+        // GitHub callback the administrator needs, are built from it.
+        for missing in [env::PUBLIC_BASE_URL, env::MAIL_KEY, env::MAIL_FROM] {
             let vars: Vec<_> = public_vars()
                 .into_iter()
                 .filter(|(k, _)| *k != missing)
@@ -2071,5 +1958,23 @@ mod tests {
         ])
         .expect("no public repo means no public surface, and no validation of it");
         assert!(cfg.public.is_none());
+    }
+
+    #[test]
+    fn a_public_surface_with_no_mail_provider_still_loads() {
+        // **Replaces the console-mail waiver.** Looking at the surface locally
+        // must not require an API key for a third party, and refusing to start
+        // would put the settings page that configures mail out of reach. The
+        // page says sign-in is unavailable instead.
+        let cfg = load(&[
+            (env::DAEMON_KEY, GOOD_KEY),
+            (env::PUBLIC_REPO, "intake"),
+            (env::PUBLIC_BASE_URL, "http://localhost:8420"),
+        ])
+        .unwrap();
+        let public = cfg.public.expect("the surface exists");
+        // `None`, not a placeholder: no later branch can quietly construct an
+        // `HttpMailer` with an empty key.
+        assert!(public.mail.is_none());
     }
 }

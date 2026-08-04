@@ -34,7 +34,7 @@ pub use private::{
 pub use public::{
     github_start_page, landing_page, owner_detail, owner_page, public_detail, public_file_page,
     public_filed, public_message, public_not_found, signin_confirm_page, signin_failed_page,
-    signin_page, signin_page_in, signin_sent_page,
+    signin_page, signin_page_full, signin_page_in, signin_sent_page,
 };
 
 /// Escape for HTML text content and attributes.
@@ -896,6 +896,9 @@ pub(crate) mod corpus {
                 ("landing_page", landing_page(l)),
                 ("signin_page", signin_page()),
                 ("signin_page_in", signin_page_in(l, true)),
+                // The no-mail variant, which is a real state now that a
+                // surface can exist before a provider is configured.
+                ("signin_page_full", signin_page_full(l, true, false)),
                 ("signin_sent_page", signin_sent_page(l)),
                 ("signin_confirm_page", signin_confirm_page("abc123", l)),
                 ("signin_failed_page", signin_failed_page(true, l)),

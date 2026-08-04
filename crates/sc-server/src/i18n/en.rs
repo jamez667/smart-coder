@@ -37,6 +37,7 @@ pub static STRINGS: Strings = Strings {
     signin_other_ways: "Reviewing a project you own? Sign in another way",
     signin_owner_note: "Reviewing a project you own?",
     signin_owner_link: "Sign in with GitHub",
+    signin_no_mail: "This site cannot send sign-in links just now, so there is no way to sign in. Try again later.",
     signin_no_password: "No password. We send a link that works once, for fifteen minutes.",
 
     sent_title: "Check your email",

@@ -1412,9 +1412,10 @@ fn public_route(
         },
 
         // Ask for a link. Reachable signed-out — it is how one signs in.
-        ("GET", public_route::SIGNIN) => {
-            Res::html(200, crate::page::signin_page_in(locale, has_github(ctx)))
-        }
+        ("GET", public_route::SIGNIN) => Res::html(
+            200,
+            crate::page::signin_page_full(locale, has_github(ctx), has_mail(ctx)),
+        ),
 
         // Start a GitHub sign-in, and come back from one. Both reachable
         // signed-out for the same reason.
@@ -1460,7 +1461,10 @@ fn public_route(
         // Everything below needs a signed-in filer.
         _ => match account_id {
             Some(id) => signed_in_route(ctx, req, method, path, &id, locale),
-            None => Res::html(200, crate::page::signin_page_in(locale, has_github(ctx))),
+            None => Res::html(
+                200,
+                crate::page::signin_page_full(locale, has_github(ctx), has_mail(ctx)),
+            ),
         },
     }
 }
@@ -1942,6 +1946,25 @@ fn owner_route(
 /// what gets *sent* differs, so this cannot be used to discover whether an
 /// address has an account.
 fn request_sign_in(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    // **Refused outright when nothing can send.** Every other failure here is
+    // deliberately indistinguishable — the page looks the same whether or not
+    // mail went out, so it cannot be used to test whether an address has an
+    // account. That argument does not reach this one: "this server has no mail
+    // provider" is not a fact about any person, and silently accepting an
+    // address nobody will ever act on is the worse answer.
+    //
+    // It is reachable because the masthead dialog is rendered by the shell,
+    // which does not know what is configured. Rather than thread that through
+    // fourteen callers, the honest refusal lives here, where the answer is
+    // known.
+    if !has_mail(ctx) {
+        return Res::html(
+            503,
+            crate::page::public_message(req.locale().strings().signin_no_mail, req.locale()),
+        )
+        .with_policy(Policy::PublicScript);
+    }
+
     let form = form_fields(&req.body);
     let raw = form.get("email").cloned().unwrap_or_default();
     let sent = try_send_link(ctx, &raw);
@@ -2111,7 +2134,7 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     let secure = secure_attr(ctx);
     let mut res = Res::html(
         200,
-        crate::page::signin_page_in(req.locale(), has_github(ctx)),
+        crate::page::signin_page_full(req.locale(), has_github(ctx), has_mail(ctx)),
     );
     // Max-Age=0 so the browser drops it rather than carrying a dead token.
     res.set_cookie = Some(format!(
@@ -2164,7 +2187,10 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
         .unwrap_or_default();
 
     let secure = secure_attr(ctx);
-    let mut res = Res::html(200, crate::page::signin_page_in(locale, has_github(ctx)));
+    let mut res = Res::html(
+        200,
+        crate::page::signin_page_full(locale, has_github(ctx), has_mail(ctx)),
+    );
     // Not `HttpOnly`: this is a preference, not a credential, and the public
     // surface's script may read it. `SameSite=Lax` rather than `Strict` so that
     // arriving from an external link — which is how somebody reaches a filing
@@ -2183,6 +2209,14 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
 /// built and reachable and no page linked to it, so the only way in was to know
 /// the URL. Offering a link where the route 404s is the same bug pointing the
 /// other way.
+/// Can this server send a sign-in link?
+///
+/// Rendered on, so a surface with no provider says so rather than offering a
+/// form that accepts an address and sends nothing.
+fn has_mail(ctx: &Ctx<'_>) -> bool {
+    ctx.public.is_some_and(|p| p.mail.is_some())
+}
+
 fn has_github(ctx: &Ctx<'_>) -> bool {
     github_app(ctx).is_some()
 }
@@ -3749,6 +3783,46 @@ mod tests {
             assert_eq!(res.status, 400, "accepted {bad:?}: {}", res.body);
         }
         assert!(f.store.roster().unwrap().daemons.is_empty());
+    }
+
+    #[test]
+    fn a_surface_with_no_mail_provider_says_so_rather_than_taking_an_address() {
+        // **Replaces the console mailer.** Printing sign-in links to the log was
+        // how you looked at this surface without a Brevo account; a link is a
+        // credential, so that is gone. What is left is the honest failure: the
+        // page says it cannot send, rather than accepting an address and
+        // silently dropping it.
+        let mut f = Fixture::new("no-mail").with_public(false);
+        if let Some(p) = f.public.as_mut() {
+            p.mail = None;
+        }
+
+        let res = f.go(&Req::get(public_route::SIGNIN));
+        assert_eq!(res.status, 200, "the page still serves");
+        assert!(res.body.contains("cannot send"), "{}", res.body);
+        // The page's OWN form is gone. The masthead dialog is rendered by the
+        // shell and still carries one — it is on every page and knows nothing
+        // about what is configured — which is why the POST refuses below.
+        assert!(
+            !res.body.contains("id=\"email\""),
+            "a form that sends nothing was offered: {}",
+            res.body
+        );
+
+        // **And the POST refuses.** The masthead dialog is rendered by the
+        // shell, which does not know what is configured, so its form is still
+        // on the page — the refusal has to be where the answer is known.
+        let res = f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        assert_eq!(res.status, 503, "{}", res.body);
+        assert!(
+            f.store.links().unwrap().links.is_empty(),
+            "a link was minted"
+        );
+
+        // And with a provider it is an ordinary sign-in page again.
+        let mut f = Fixture::new("with-mail").with_public(false);
+        let res = f.go(&Req::get(public_route::SIGNIN));
+        assert!(res.body.contains("id=\"email\""), "{}", res.body);
     }
 
     #[test]

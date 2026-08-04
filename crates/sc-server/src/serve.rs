@@ -35,9 +35,6 @@ struct Shared {
     store: Store,
 
     limiter: Mutex<RateLimiter>,
-    /// Console mail, when the loopback-guarded switch is on. Otherwise the
-    /// mailer is built per request from the settings — see `mailer_for`.
-    mail_to_console: bool,
     /// Serialises read-modify-write on `accounts.json` and `links.json`.
     write_lock: Mutex<()>,
     /// Who is polling, and for what. Shared like the limiter above.
@@ -208,7 +205,6 @@ pub fn run(cfg: &Config) -> Result<()> {
         store: store.clone(),
 
         limiter: Mutex::new(RateLimiter::new()),
-        mail_to_console: cfg.mail_to_console,
         write_lock: Mutex::new(()),
         seen: Mutex::new(crate::daemons::Seen::default()),
         roster: Mutex::new(crate::roster::RosterCache::default()),
@@ -321,13 +317,13 @@ pub fn run(cfg: &Config) -> Result<()> {
 /// human-paced, and already bounded by `max_outstanding_links`. It would not be
 /// affordable on the poll path.
 ///
-/// `mail_to_console` is checked **first** and stays in the environment: it
-/// prints sign-in links to the log, and its loopback guard runs at load time
-/// where a runtime write could not be covered by it.
-fn mailer_for(shared: &Shared, public: Option<&crate::config::PublicConfig>) -> Arc<dyn Mailer> {
-    if shared.mail_to_console {
-        return Arc::new(crate::mail::Console);
-    }
+/// **There is no console mailer.** Printing sign-in links to the log used to be
+/// a switch for looking at the surface locally, guarded so it could not be
+/// honoured on a deployed server. It is gone: a sign-in link is a credential,
+/// the guard was the whole safety of it, and a setting whose failure mode is
+/// "anyone who can read the log can sign in as anyone" is not worth keeping for
+/// convenience. A surface with no provider says sign-in is unavailable instead.
+fn mailer_for(public: Option<&crate::config::PublicConfig>) -> Arc<dyn Mailer> {
     match public.and_then(|p| p.mail.as_ref()) {
         Some(m) => Arc::new(HttpMailer::new(
             m.provider,
@@ -673,7 +669,7 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
     // Both reads go through mtime caches, so the steady state is two `stat`
     // calls and no parsing.
     let public = public_now(shared);
-    let mailer = mailer_for(shared, public.as_ref());
+    let mailer = mailer_for(public.as_ref());
     // **Read per request, like everything else administered from a page.**
     // Revoking a machine has to stop it claiming on its next poll rather
     // than at the next restart — and a poll is the one request that arrives

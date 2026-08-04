@@ -1091,23 +1091,30 @@ symptom reads as a bug in the feature rather than a property of the cookie.
 Nothing else relaxes with it — `HttpOnly` and `SameSite` are unchanged, and a
 test asserts that, since "drop `Secure` locally" is an easy edit to over-apply.
 
-**`SC_SERVER_MAIL_TO_CONSOLE` writes sign-in links to the log**
-<!--@ sc_server::mail::Console -->, so trying the surface does not require an API
-key for a third party. A sign-in link is a credential, so this hands an account
-to anyone who can read the log — which is why it is **refused unless the base URL
-is loopback**, and why it is deliberately *not* a [`Provider`] variant: a variant
-would sit in the same setting that names Brevo or Resend, one typo from
-production. In this mode `PublicConfig::mail` is `None` rather than a
-placeholder, so there is no provider for a later branch to fall back to.
+**Console mail is gone, and its concession with it.** A switch used to print
+sign-in links to the container log so that trying the surface did not need an
+API key for a third party. A sign-in link is a credential, so it was refused
+unless the base URL was loopback — the containment being the *address*, not the
+audience: the link pointed at `127.0.0.1`, which a reader of the log cannot
+reach.
 
-The loopback rule is worth stating precisely, because "local only" is the wrong
-reading: the log ships wherever the host's logs ship either way. What the rule
-buys is that the *link* is worthless — it points at `127.0.0.1`, an address the
-reader cannot reach. The containment is the address, not the audience.
+That was a sound guard and it is still the wrong shape of thing to keep. It made
+"anyone who can read this log can sign in as anyone" one mistaken base URL away,
+and the mistake was a stack edit rather than a code change. What replaced it
+costs nothing: **a surface with no mail provider serves and says it cannot send
+sign-in links**, the same way one with no repositories enabled says it cannot
+take a filing. Configure mail at `/settings` afterwards, which is reachable
+because the administrator signs in with GitHub rather than by email.
 
-The guard tests the **base URL**, not the bind address. Inside a container the
-bind is `0.0.0.0` whether or not anything outside can reach it, so a
-loopback-*bind* check would reject exactly the case this exists for.
+The POST refuses too, with a `503`
+<!--@ crates/sc-server/src/routes.rs -->. Every other failure on that route is
+deliberately indistinguishable — the page looks the same whether or not mail
+went out, so it cannot be used to test whether an address has an account — and
+that argument does not reach this one. "This server has no mail provider" is not
+a fact about any person, and accepting an address nobody will act on is the
+worse answer. It has to be refused there rather than merely hidden, because the
+masthead's sign-in dialog is rendered by the shell on every page and knows
+nothing about what is configured.
 
 **Amended: a private network address counts too**
 <!--@ sc_server::config::PublicConfig -->.
@@ -1295,12 +1302,9 @@ Both deployment files are checked against the config's environment module in
 both directions <!--@ crates/sc-server/src/config.rs -->, so a setting cannot be added to one
 and forgotten in the other — which would leave an operator on the Swarm stack
 with no box for a cap that exists.
-- **Five environment variables, and the rest is administered from the server's
+- **Four environment variables, and the rest is administered from the server's
   own pages** <!--@ crates/sc-server/src/settings.rs -->. Where to listen, which
-  volume, the key the rest is sealed with, and `SC_SERVER_MAIL_TO_CONSOLE` —
-  which stays because its loopback guard runs at *load* time, and a runtime
-  write could not be covered by it. It prints sign-in links to the log, so the
-  guard is the whole safety of it.
+  volume, and the key the rest is sealed with. Nothing else.
 
   **This spec used to argue the opposite**, and the reversal is worth recording
   rather than quietly overwriting. It said configuration belonged in the stack

@@ -43,6 +43,7 @@ pub static STRINGS: Strings = Strings {
     signin_other_ways: "Vous relisez un projet dont vous êtes responsable ? Autre méthode",
     signin_owner_note: "Vous relisez un projet dont vous êtes responsable ?",
     signin_owner_link: "Se connecter avec GitHub",
+    signin_no_mail: "Ce site ne peut pas envoyer de liens de connexion pour le moment. Réessayez plus tard.",
     signin_no_password: "Pas de mot de passe. Nous envoyons un lien à usage unique, \
                          valable quinze minutes.",
 

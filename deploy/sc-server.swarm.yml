@@ -133,11 +133,6 @@ services:
       SC_SERVER_PUBLIC_MAX_LINKS: ${SC_SERVER_PUBLIC_MAX_LINKS:-}
       SC_SERVER_PUBLIC_SHOW_SPEC: ${SC_SERVER_PUBLIC_SHOW_SPEC:-}
 
-      # LOCAL ONLY. The server refuses to start with this set unless the base
-      # URL is a loopback or private address, so it cannot reach production by
-      # being forgotten here.
-      SC_SERVER_MAIL_TO_CONSOLE: ${SC_SERVER_MAIL_TO_CONSOLE:-}
-
     ports:
       # Terminate TLS at the proxy. `mode: host` keeps the client's own address
       # visible rather than the ingress mesh's — worth having where a rate

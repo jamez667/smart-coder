@@ -205,6 +205,11 @@ pub struct Strings {
     pub signin_email_placeholder: &'static str,
     pub signin_submit: &'static str,
     pub signin_no_password: &'static str,
+    /// Shown instead of the email form when no mail provider is configured.
+    ///
+    /// Names nobody and blames nothing: a filer cannot act on it and does not
+    /// need a culprit, only to know that coming back later is the answer.
+    pub signin_no_mail: &'static str,
     /// Names the other role, so somebody who is an owner knows this page has
     /// a second way in and everybody else can ignore it.
     /// The way out of the dialog, to the page that knows whether there is a
@@ -436,6 +441,7 @@ mod tests {
             s.signin_email_placeholder,
             s.signin_submit,
             s.signin_no_password,
+            s.signin_no_mail,
             s.signin_other_ways,
             s.signin_owner_note,
             s.signin_owner_link,

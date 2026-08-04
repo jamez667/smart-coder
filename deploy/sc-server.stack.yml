@@ -314,17 +314,6 @@ services:
       SC_SERVER_MAIL_FROM: ${SC_SERVER_MAIL_FROM:-}
       SC_SERVER_MAIL_FROM_NAME: ${SC_SERVER_MAIL_FROM_NAME:-}
 
-      # ---------------------------------------------------------------------
-      # LOCAL ONLY. Prints sign-in links to the container log instead of
-      # emailing them, so you can try the surface without a mail provider.
-      #
-      # A sign-in link is a credential, so this hands an account to anyone who
-      # can read the log. The server REFUSES TO START with it set unless
-      # PUBLIC_BASE_URL is a loopback address — it cannot be switched on here by
-      # accident. With it on, the MAIL_ settings above are not needed.
-      # ---------------------------------------------------------------------
-      SC_SERVER_MAIL_TO_CONSOLE: ${SC_SERVER_MAIL_TO_CONSOLE:-}
-
       # The spam screener. ABSENT means filings are not screened at all, which
       # is honest — a server that pretends to screen is worse than one that
       # plainly does not. It runs here, so it never sees your machine or code.
