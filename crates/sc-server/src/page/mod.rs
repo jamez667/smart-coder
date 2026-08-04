@@ -28,7 +28,7 @@ use crate::i18n::Locale;
 // which is what makes this a mechanical move rather than a rewrite.
 pub use private::{
     accounts_page, confirm_accept, detail, enrol_page, enrol_page_with_error, enrolled_page, filed,
-    index, message, not_found, Who,
+    index, message, not_found, owners_page, Who,
 };
 pub use public::{
     github_start_page, landing_page, owner_detail, owner_page, public_detail, public_file_page,

@@ -112,6 +112,14 @@ pub mod private_route {
     pub const REVIEW: &str = "/review";
     /// Where a device is enrolled. `GET` renders the form, `POST` spends a code.
     pub const ENROL: &str = "/enrol";
+    /// Who may file, and the switch that stops them.
+    pub const ACCOUNTS: &str = "/accounts";
+    /// Who may review, and for what.
+    ///
+    /// **Device-only by virtue of living past the gate** — which is the whole
+    /// argument that an owner cannot promote an owner. It is not a check inside
+    /// the handler that somebody could forget to write.
+    pub const OWNERS: &str = "/owners";
 }
 
 /// The verbs that decide a request's fate.
@@ -399,6 +407,13 @@ pub struct Ctx<'a> {
     /// by the poll. In memory and shared, like the rate limiter beside it —
     /// see [`crate::daemons`] for why it is not on disk.
     pub seen: &'a Mutex<crate::daemons::Seen>,
+    /// Who may review what, re-read from the volume when it changes.
+    ///
+    /// A `Mutex` around a cache rather than a snapshot passed in: **revocation
+    /// has to take effect on the request after it**, which is the property that
+    /// made owners-in-configuration right and had to survive the move off it.
+    /// See [`crate::roster::RosterCache`].
+    pub roster: &'a Mutex<crate::roster::RosterCache>,
     /// Set when the HTTP layer is re-checking a long poll it already holds.
     ///
     /// The hold re-runs [`handle`] every 250ms looking for work that may have
@@ -799,22 +814,44 @@ fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
     let accounts = ctx.store.accounts().ok()?;
     let account = accounts.session_for(token)?;
 
-    // An account whose identity is a GitHub login the configuration names is an
-    // **owner**. Checked here, after the account lookup and against a value
-    // already in hand, so the order above is untouched: the device store is
-    // still first, the account file is still read once and only where a public
-    // surface exists, and this adds no store access at all.
+    // An account whose identity is a GitHub login **the roster names** is an
+    // owner. Checked here, after the account lookup and against a value already
+    // in hand, so the order above is untouched: the device store is still
+    // first, and the account file is still read once and only where a public
+    // surface exists.
     //
-    // The direction matters. An owner is an account the *configuration*
-    // promotes — never one that promotes itself — so deleting the line from
-    // `SC_SERVER_OWNERS` demotes them on their very next request, with no
-    // session to hunt down and no record to rewrite.
+    // The roster is on the volume rather than in configuration, and the reading
+    // costs a `stat` — not a parse — on the requests that get this far. That
+    // ordering argument is about who pays to parse an *attacker-sized* file;
+    // `accounts.json` is one because signup is self-serve, and this is
+    // administrator-sized and reached only after the account branch succeeded.
+    //
+    // The direction matters, and survives the move intact. An owner is an
+    // account the *developer* promotes — never one that promotes itself, since
+    // the only writer is behind the device gate — so revoking demotes them on
+    // their very next request, with no session to hunt down.
     if let Some(login) = account.github_login.as_deref() {
-        if let Some(owner) = public.owners.iter().find(|o| o.login == login) {
-            return Some(Caller::Owner {
-                login: owner.login.clone(),
-                repos: owner.repos.clone(),
-            });
+        let roster = {
+            let mut cache = ctx.roster.lock().ok()?;
+            cache.current(&ctx.store.roster_path())
+        };
+        if let Some(owner) = roster.owner_for(login) {
+            // **Intersected with what this surface actually serves.** The
+            // roster and the repository list are separately editable, so a
+            // record can name something no longer collected here. Granting it
+            // would be a permission that looks applied and reaches nothing.
+            let repos: Vec<String> = owner
+                .repos
+                .iter()
+                .filter(|r| public.repos.accepts(r))
+                .cloned()
+                .collect();
+            if !repos.is_empty() {
+                return Some(Caller::Owner {
+                    login: owner.login.clone(),
+                    repos,
+                });
+            }
         }
     }
     Some(Caller::Account {
@@ -995,6 +1032,22 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
                 .trim_start_matches("/accounts/")
                 .trim_end_matches("/revoke");
             revoke_account(ctx, id)
+        }
+
+        // Who may review, and for what. **Device-only by virtue of living
+        // here**, past the gate — which is what makes "an owner cannot promote
+        // an owner" structural rather than a check somebody has to remember.
+        ("GET", private_route::OWNERS) => owners_page(ctx),
+
+        ("POST", private_route::OWNERS) => {
+            let form = form_fields(&req.body);
+            let login = form.get("login").map(|l| l.trim()).unwrap_or_default();
+            set_owner(ctx, login, &form_values(&req.body, "repos"))
+        }
+
+        ("POST", p) if p.starts_with("/owners/") && p.ends_with("/revoke") => {
+            let login = p.trim_start_matches("/owners/").trim_end_matches("/revoke");
+            revoke_owner(ctx, login)
         }
 
         ("GET", p) if p.starts_with("/request/") => {
@@ -1268,6 +1321,100 @@ fn revoke_account(ctx: &mut Ctx<'_>, id: &str) -> Res {
         return error(500, &e.to_string());
     }
     Res::html(200, crate::page::accounts_page(&accounts))
+}
+
+/// Render the roster.
+///
+/// **404 with no public surface**, like every other page that only means
+/// something when one exists: an owner reviews public filings, so a
+/// private-only server has nothing for this page to administer.
+fn owners_page(ctx: &Ctx<'_>) -> Res {
+    let Some(public) = ctx.public else {
+        return Res::html(404, crate::page::not_found());
+    };
+    match ctx.store.roster() {
+        Ok(r) => Res::html(200, crate::page::owners_page(&r, &public.repos)),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Promote somebody, or change what they own.
+///
+/// **Repository names are matched against what this surface serves**, never
+/// taken on trust — the same rule as a public filing, for the same reason. A
+/// name that matches nothing would be a permission that looks applied and
+/// grants nothing, which is precisely what the configuration used to refuse to
+/// boot on and a record cannot.
+fn set_owner(ctx: &mut Ctx<'_>, login: &str, repos: &[String]) -> Res {
+    let Some(public) = ctx.public else {
+        return Res::html(404, crate::page::not_found());
+    };
+    if login.is_empty() || login.len() > 64 {
+        return error(400, "a GitHub username is required");
+    }
+    // GitHub's own rule, so a typo is refused here rather than becoming a
+    // record that can never match anybody.
+    if !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return error(400, "that is not a GitHub username");
+    }
+    let known: Vec<String> = repos
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| public.repos.accepts(r))
+        .collect();
+    if known.is_empty() {
+        // Not silently written as an owner of nothing: that reads on the page
+        // as promoted and grants nothing at all.
+        return error(400, "pick at least one repository this server serves");
+    }
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    roster.set_owner(login, &known, ctx.now_ms);
+    // Seeding is a first-use thing, and this volume has now been administered.
+    // Without it a restart would re-apply the setting over a hand-made roster.
+    roster.seeded = true;
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    Res::html(200, crate::page::owners_page(&roster, &public.repos))
+}
+
+/// Demote somebody.
+fn revoke_owner(ctx: &mut Ctx<'_>, login: &str) -> Res {
+    let Some(public) = ctx.public else {
+        return Res::html(404, crate::page::not_found());
+    };
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    // Already revoked, or never there. Not an error worth a page: the caller
+    // asked for a state that now holds.
+    if roster.revoke(login) {
+        if let Err(e) = ctx.store.put_roster(&roster) {
+            return error(500, &e.to_string());
+        }
+        invalidate_roster(ctx);
+    }
+    Res::html(200, crate::page::owners_page(&roster, &public.repos))
+}
+
+/// Make the next identification re-read the roster.
+///
+/// The mtime would usually catch it anyway. A filesystem with coarse timestamps
+/// can record this write inside the same tick as the read before it — and a
+/// developer who revokes somebody, reloads, and sees no change would reasonably
+/// conclude it had not worked.
+fn invalidate_roster(ctx: &Ctx<'_>) {
+    if let Ok(mut cache) = ctx.roster.lock() {
+        cache.invalidate();
+    }
 }
 
 /// This filer's own requests, newest first.
@@ -1704,9 +1851,15 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
 
 /// File a request from the public surface.
 ///
-/// The repository comes from **configuration**, never the body — so a stranger
-/// cannot aim work at a repository the operator did not nominate for public
-/// intake. The form has no such field, and one submitted anyway is ignored.
+/// The repository is **chosen from the configured set, never taken from the
+/// body on trust** — so a stranger cannot aim work at a repository the operator
+/// did not nominate for public intake.
+///
+/// A surface serving several repositories has to let the filer say which, so
+/// the body does carry a name. What keeps the guarantee is that the name is
+/// only ever *matched* against the configured set: it selects, it does not
+/// introduce. One that matches nothing is refused rather than defaulted, for
+/// the reason set out at the check itself.
 fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
     let locale = req.locale();
     let Some(public) = ctx.public else {
@@ -1923,6 +2076,25 @@ fn form_fields(body: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
+/// Every value submitted under one name, in order.
+///
+/// [`form_fields`] collects into a map and so keeps only the last of a repeated
+/// name. That is right for every field that is a single input and wrong for a
+/// checkbox group, where "repos=a&repos=b" is one answer with two parts —
+/// silently keeping `b` would grant an owner one repository of the two ticked.
+fn form_values(body: &str, name: &str) -> Vec<String> {
+    body.split('&')
+        .filter(|p| !p.is_empty())
+        .filter_map(|pair| {
+            let mut kv = pair.splitn(2, '=');
+            let k = kv.next()?;
+            let v = kv.next().unwrap_or("");
+            (percent_decode(k) == name).then(|| percent_decode(v))
+        })
+        .filter(|v| !v.trim().is_empty())
+        .collect()
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -1986,6 +2158,7 @@ mod tests {
         mailer: crate::mail::testing::Recording,
         write_lock: Mutex<()>,
         seen: Mutex<crate::daemons::Seen>,
+        roster: Mutex<crate::roster::RosterCache>,
         /// Advanced by tests that need a link to expire.
         now_ms: u64,
         /// One entry by default, so most tests read as a single-daemon server.
@@ -2027,6 +2200,7 @@ mod tests {
                 mailer: crate::mail::testing::Recording::default(),
                 write_lock: Mutex::new(()),
                 seen: Mutex::new(crate::daemons::Seen::default()),
+                roster: Mutex::new(crate::roster::RosterCache::default()),
                 now_ms: 1_000,
                 daemon_keys: one_key("test-daemon", KEY),
             }
@@ -2076,14 +2250,17 @@ mod tests {
             self
         }
 
-        /// Name an owner, as the configuration would.
-        fn with_owner(mut self, login: &str, repos: &[&str]) -> Fixture {
-            if let Some(p) = self.public.as_mut() {
-                p.owners.push(crate::config::Owner {
-                    login: login.to_ascii_lowercase(),
-                    repos: repos.iter().map(|r| r.to_string()).collect(),
-                });
-            }
+        /// Promote an owner, as the developer would from the admin page.
+        ///
+        /// Onto the **roster on the volume**, which is where the answer now
+        /// comes from. A test that wrote to the configuration instead would
+        /// pass while granting nothing in production.
+        fn with_owner(self, login: &str, repos: &[&str]) -> Fixture {
+            let mut roster = self.store.roster().unwrap();
+            let repos: Vec<String> = repos.iter().map(|r| r.to_string()).collect();
+            roster.set_owner(login, &repos, self.now_ms);
+            roster.seeded = true;
+            self.store.put_roster(&roster).unwrap();
             self
         }
 
@@ -2133,6 +2310,7 @@ mod tests {
                 mailer: &self.mailer,
                 write_lock: &self.write_lock,
                 seen: &self.seen,
+                roster: &self.roster,
                 rechecking: false,
             };
             handle(&mut ctx, req)
@@ -2149,6 +2327,7 @@ mod tests {
                 mailer: &self.mailer,
                 write_lock: &self.write_lock,
                 seen: &self.seen,
+                roster: &self.roster,
                 rechecking: true,
             };
             handle(&mut ctx, req)
@@ -3354,6 +3533,7 @@ mod tests {
             mailer: &f.mailer,
             write_lock: &f.write_lock,
             seen: &f.seen,
+            roster: &f.roster,
             rechecking: false,
         };
         finish_github_with(&mut ctx, &req, Locale::En, gh)
@@ -3748,32 +3928,151 @@ mod tests {
     }
 
     #[test]
-    fn removing_an_owner_from_the_configuration_demotes_a_live_session() {
-        // Why owners live in configuration and not in a record: deleting the
-        // line and redeploying IS revocation, with no session to hunt down.
-        let mut f = Fixture::new("owner-demote")
-            .with_public(false)
-            .with_owner("jamez667", &["intake"]);
-        let session = f.signed_in_as_github("jamez667");
+    fn revoking_an_owner_demotes_a_live_session_on_the_very_next_request() {
+        // **The property that had to survive the move off configuration.**
+        // Deleting a line and redeploying was complete revocation — no session
+        // to hunt down, no record that might disagree. The roster is a record,
+        // so this is the test that says the mtime cache actually carries it.
+        let (mut f, session, _mine, _theirs) = owner_fixture("owner-demote");
 
-        // Named — and even so, the private surface stays closed to them.
+        // An owner: somebody else's filing for their repository is on the page.
+        let html = f
+            .go(&Req::get(public_route::FILE).with_cookie(&session))
+            .body;
+        assert!(html.contains("for intake"), "an owner sees it: {html}");
+        // And even so, the private surface stays closed to them.
         assert_eq!(
             f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
             404
         );
 
-        // The operator deletes the entry and redeploys.
-        if let Some(p) = f.public.as_mut() {
-            p.owners.clear();
-        }
-        // Still a working session, still not an owner — no record was rewritten
-        // and nothing had to be revoked.
+        // The developer revokes them.
+        let mut roster = f.store.roster().unwrap();
+        assert!(roster.revoke("jamez667"));
+        f.store.put_roster(&roster).unwrap();
+
+        // **The next request**, with no restart and no redeploy. A cache that
+        // held a startup snapshot would still say owner here, which is exactly
+        // the failure the move off configuration must not introduce.
+        let html = f
+            .go(&Req::get(public_route::FILE).with_cookie(&session))
+            .body;
+        assert!(
+            !html.contains("for intake"),
+            "a revoked owner still reviews: {html}"
+        );
+        // Demoted, not signed out. They were an account before they were an
+        // owner, and revocation returns them to being one — the page still
+        // renders, and the filing form on it is theirs.
         assert_eq!(
             f.go(&Req::get(public_route::FILE).with_cookie(&session))
                 .status,
             200
         );
+    }
+
+    #[test]
+    fn an_owner_of_a_repository_this_surface_stopped_serving_is_not_one_here() {
+        // The roster and the repository list are separately editable, so a
+        // record can name something no longer collected here. `identify`
+        // intersects the two, because granting it would be a permission that
+        // looks applied and reaches nothing — what the configuration used to
+        // refuse at boot, and what a record cannot.
+        let mut f = Fixture::new("owner-stale-repo")
+            .with_public(false)
+            .with_repos(&["intake"])
+            .with_owner("jamez667", &["something-else"]);
+        let owner = f.signed_in_as_github("jamez667");
+
+        let filer = f.signed_in("jo@x.com");
+        f.go(
+            &Req::post(public_route::FILE, "text=for+intake&kind=bug&repo=intake")
+                .with_cookie(&filer),
+        );
+
+        let html = f.go(&Req::get(public_route::FILE).with_cookie(&owner)).body;
+        assert!(
+            !html.contains("for intake"),
+            "owner of nothing this surface serves: {html}"
+        );
+    }
+
+    #[test]
+    fn an_owner_cannot_promote_anybody_including_themselves() {
+        // Somebody who may promote may promote an accomplice, and revoking the
+        // first would then not revoke the second. Proven structurally: the
+        // roster's only writer lives past the device gate, which no
+        // `Caller::Owner` satisfies.
+        let (mut f, session, _mine, _theirs) = owner_fixture("owner-no-promote");
+
+        for body in [
+            "login=jamez667&repos=intake&repos=other",
+            "login=accomplice&repos=intake",
+        ] {
+            let res = f.go(&Req::post(private_route::OWNERS, body).with_cookie(&session));
+            // 401: they are somebody, and not a device. The gate refuses before
+            // `set_owner` is ever reached — which is the point. There is no
+            // check inside the handler that a later edit could drop.
+            assert_eq!(
+                res.status, 401,
+                "an owner reached the roster with {body}: {}",
+                res.body
+            );
+        }
+        // The roster is untouched: no accomplice, and no second repository.
+        let roster = f.store.roster().unwrap();
+        assert!(roster.owner_for("accomplice").is_none());
+        assert_eq!(roster.owner_for("jamez667").unwrap().repos, ["intake"]);
+    }
+
+    #[test]
+    fn the_developer_promotes_and_revokes_from_the_owners_page() {
+        let mut f = Fixture::new("owners-admin")
+            .with_public(false)
+            .with_repos(&["intake", "other"]);
+        let device = f.enrolled();
+
+        // Two repositories ticked arrive as a repeated field. A map keeps only
+        // the last, which would grant one of the two — hence `form_values`.
+        let res = f.go(&Req::post(
+            private_route::OWNERS,
+            "login=JameZ667&repos=intake&repos=other",
+        )
+        .with_cookie(&device));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let roster = f.store.roster().unwrap();
+        let owner = roster.owner_for("jamez667").expect("promoted");
+        assert_eq!(owner.repos, ["intake", "other"], "both ticked repositories");
+
+        // And revoking from the same page.
+        let res = f.go(&Req::post("/owners/jamez667/revoke", "").with_cookie(&device));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(f.store.roster().unwrap().owner_for("jamez667").is_none());
+    }
+
+    #[test]
+    fn a_repository_this_server_does_not_serve_cannot_be_owned() {
+        // Matched against the served set, never taken on trust — the same rule
+        // as a public filing. A record naming something unserved would be a
+        // permission that looks applied and grants nothing.
+        let mut f = Fixture::new("owners-unknown-repo")
+            .with_public(false)
+            .with_repos(&["intake"]);
+        let device = f.enrolled();
+
+        let res = f.go(
+            &Req::post(private_route::OWNERS, "login=jamez667&repos=not-served")
+                .with_cookie(&device),
+        );
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(f.store.roster().unwrap().owners.is_empty());
+
+        // Nor an owner of nothing at all, which reads as promoted on the page
+        // and grants nothing.
+        let res = f.go(&Req::post(private_route::OWNERS, "login=jamez667").with_cookie(&device));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(f.store.roster().unwrap().owners.is_empty());
     }
 
     #[test]

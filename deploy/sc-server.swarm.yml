@@ -67,11 +67,15 @@ services:
       # working. Both together are a union.
       SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
 
-      # Who may review work: `login:repo|repo`, comma-separated between owners.
-      # An owner signs in with GitHub and may read and DECLINE their own
-      # repositories' specs, never approve. Nothing is checked against GitHub —
-      # this list is the authorization model, so every name must also appear in
-      # SC_SERVER_PUBLIC_REPOS or the server refuses to start.
+      # A SEED for the owner list, applied ONCE on a fresh volume:
+      # `login:repo|repo`, comma-separated between owners. Owners live on the
+      # volume and are administered at /owners from an enrolled device; this
+      # exists so an existing install keeps its owners and a fresh one can start
+      # without a browser. Applied once and then ignored, with a log line saying
+      # so — re-applying every boot would resurrect a revoked owner on restart.
+      # An owner signs in with GitHub and may read, send back, discard and
+      # release their own repositories' work — never accept, and never add
+      # another owner. Nothing is checked against GitHub.
       SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
 
       # The GitHub OAuth application owners sign in with. Callback URL is

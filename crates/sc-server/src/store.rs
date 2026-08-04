@@ -399,6 +399,16 @@ impl Store {
         self.root.join("oauth-states.json")
     }
 
+    /// Where the roster lives.
+    ///
+    /// Public, unlike its siblings, because [`RosterCache`](crate::roster::RosterCache)
+    /// stats this file on every identification and reads it only when it has
+    /// changed. That is the whole mechanism by which revocation takes effect on
+    /// the next request, and it needs the path rather than the contents.
+    pub fn roster_path(&self) -> PathBuf {
+        self.root.join("owners.json")
+    }
+
     /// Write a request.
     ///
     /// **Drops `claimed_ms` on anything not `Claimed`.** There are ten places a
@@ -906,6 +916,21 @@ impl Store {
         let json =
             serde_json::to_string_pretty(states).map_err(|e| DcError::Eval(e.to_string()))?;
         write_atomic(&self.oauth_states_path(), json.as_bytes())
+    }
+
+    /// Read the roster.
+    ///
+    /// Callers on the request path should go through
+    /// [`RosterCache`](crate::roster::RosterCache) instead — this parses
+    /// unconditionally, which is right for a write and wasteful for a read.
+    pub fn roster(&self) -> Result<crate::roster::Roster> {
+        read_json(&self.roster_path())
+    }
+
+    pub fn put_roster(&self, roster: &crate::roster::Roster) -> Result<()> {
+        let json =
+            serde_json::to_string_pretty(roster).map_err(|e| DcError::Eval(e.to_string()))?;
+        write_atomic(&self.roster_path(), json.as_bytes())
     }
 }
 

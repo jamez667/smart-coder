@@ -37,6 +37,7 @@ pub mod oauth;
 pub mod page;
 pub mod query;
 pub mod ratelimit;
+pub mod roster;
 pub mod routes;
 pub mod screen;
 pub mod screen_eval;

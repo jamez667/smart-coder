@@ -152,23 +152,29 @@ impl Repos {
     }
 }
 
-/// Somebody who may review work for particular repositories.
+/// Somebody who may review work for particular repositories — **as seeded from
+/// configuration**.
+///
+/// The authoritative list is [`crate::roster::Roster`] on the volume; this is
+/// applied once on a fresh volume and ignored thereafter, so an existing
+/// install keeps its owners and a fresh one can start without a browser. What
+/// grants anything at runtime is the roster, never this.
 ///
 /// **The allowlist is the whole authorization model**, and deliberately so. The
 /// server makes no call to GitHub to ask whether a person has anything to do
-/// with a repository, so this setting is the only thing standing between a
-/// GitHub account and every drafted spec for a project — and a drafted spec is
-/// model output produced by reading the developer's tree.
+/// with a repository, so it is the only thing standing between a GitHub account
+/// and every drafted spec for a project — and a drafted spec is model output
+/// produced by reading the developer's tree.
 ///
 /// That is why every entry is validated at startup and why the failures are
 /// refusals rather than empty views: an owner naming a repository this surface
-/// does not serve is a typo that would otherwise look applied and grant nothing.
+/// does not serve is a typo that would otherwise look applied and grant
+/// nothing. A record read at runtime cannot refuse to boot, so the roster
+/// intersects instead and the admin page marks what no longer matches.
 ///
 /// **Repository access is not checked against GitHub.** Signing in proves who
-/// somebody is and nothing more; what they may see comes from here. Adding the
-/// check later reads this same field and calls the API *in addition* — there is
-/// nothing stored to migrate, which is why owners live in configuration rather
-/// than in a record.
+/// somebody is and nothing more; what they may see comes from the roster.
+/// Adding the check later reads the same field and calls the API *in addition*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owner {
     /// The GitHub **login**, lowercased. Not the numeric id.

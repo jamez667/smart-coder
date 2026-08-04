@@ -401,6 +401,85 @@ pub fn accounts_page(accounts: &Accounts) -> String {
     )
 }
 
+/// Who may review, and for what.
+///
+/// **Shows an owner's repositories the surface no longer serves**, marked as
+/// such. `identify` intersects the two and would simply grant less, and a
+/// permission that looks applied and reaches nothing is the failure a setting
+/// used to refuse at boot. A record cannot refuse, so the page has to say it.
+pub fn owners_page(roster: &crate::roster::Roster, served: &crate::config::Repos) -> String {
+    let mut rows = String::new();
+    for o in &roster.owners {
+        let action = if o.revoked {
+            "<span class=\"meta\">revoked</span>".to_string()
+        } else {
+            format!(
+                "<form method=\"post\" action=\"/owners/{}/revoke\">\
+                 <button type=\"submit\">Revoke</button></form>",
+                esc(&o.login)
+            )
+        };
+        let repos = o
+            .repos
+            .iter()
+            .map(|r| {
+                if served.accepts(r) {
+                    esc(r)
+                } else {
+                    format!("{} <span class=\"meta\">(not served here)</span>", esc(r))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let repos = if repos.is_empty() {
+            "<span class=\"meta\">nothing</span>".to_string()
+        } else {
+            repos
+        };
+        rows.push_str(&format!(
+            "<div class=\"item\"><strong>{login}</strong>\
+             <div class=\"meta\">{repos} · added {when}</div>{action}</div>",
+            login = esc(&o.login),
+            repos = repos,
+            when = esc(&ago(o.added_ms, crate::store::now_ms())),
+            action = action,
+        ));
+    }
+    if roster.owners.is_empty() {
+        rows.push_str("<p class=\"meta\">Nobody reviews but you.</p>");
+    }
+
+    let mut opts = String::new();
+    for name in served.names() {
+        opts.push_str(&format!(
+            "<label class=\"check\"><input type=\"checkbox\" name=\"repos\" \
+             value=\"{name}\"> {name}</label>",
+            name = esc(name)
+        ));
+    }
+
+    shell(
+        "Owners",
+        &format!(
+            "<h1>Owners</h1>\
+             <p class=\"meta\">An owner signs in with GitHub and reviews requests \
+             for the repositories you name here. They can send work back, release \
+             it and discard it — they cannot accept it, and they cannot add an \
+             owner. Revoking one takes effect on their very next request.</p>{rows}\
+             <h2>Add an owner</h2>\
+             <form method=\"post\" action=\"/owners\">\
+             <label for=\"login\">GitHub username</label>\
+             <input id=\"login\" name=\"login\" required autocapitalize=\"off\" \
+             autocorrect=\"off\" spellcheck=\"false\">\
+             {opts}\
+             <button type=\"submit\">Add</button></form>\
+             <p class=\"meta\">Adding somebody already listed replaces their \
+             repositories rather than adding a second entry.</p>\
+             <p><a href=\"/\">Back to the queue</a></p>"
+        ),
+    )
+}
+
 /// The enrolment page, shown to a browser that is not enrolled.
 pub fn enrol_page() -> String {
     shell(

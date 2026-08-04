@@ -41,6 +41,55 @@ struct Shared {
     write_lock: Mutex<()>,
     /// Who is polling, and for what. Shared like the limiter above.
     seen: Mutex<crate::daemons::Seen>,
+    /// Who may review what. Re-read from the volume when the file changes —
+    /// see [`crate::roster::RosterCache`] for why not a startup snapshot.
+    roster: Mutex<crate::roster::RosterCache>,
+}
+
+/// Apply `SC_SERVER_OWNERS` **once**, the first time this volume is used.
+///
+/// The setting is kept so an existing deployment keeps working and a fresh one
+/// can be bootstrapped without a browser. It is a seed and not a source of
+/// truth: re-applying it every boot would resurrect an owner revoked through
+/// the UI, which is the failure "revocation takes effect on the next request"
+/// exists to prevent, arriving by the back door of a restart.
+///
+/// The flag is set even when the setting is empty. Otherwise the first boot
+/// *with* owners configured would seed a volume that had already been
+/// administered, and "I removed the last owner and one came back" is the same
+/// bug with more steps.
+fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
+    let configured: Vec<(String, Vec<String>)> = cfg
+        .public
+        .as_ref()
+        .map(|p| {
+            p.owners
+                .iter()
+                .map(|o| (o.login.clone(), o.repos.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut roster = store.roster()?;
+    if !roster.seed(&configured, now_ms()) {
+        if !configured.is_empty() {
+            // Said out loud, because a setting that is present and ignored is
+            // one somebody will edit expecting an effect.
+            crate::log::warn("owners setting ignored")
+                .with(
+                    "note",
+                    "the roster on the volume is authoritative; edit owners at /owners",
+                )
+                .with("count", configured.len() as u64)
+                .emit();
+        }
+        return Ok(());
+    }
+    store.put_roster(&roster)?;
+    crate::log::info("roster seeded")
+        .with("owners", configured.len() as u64)
+        .emit();
+    Ok(())
 }
 
 /// How often the screening sweep looks for new filings.
@@ -67,6 +116,8 @@ pub fn run(cfg: &Config) -> Result<()> {
     // pre-configuration but is never *open*.
     let code = arm_enrolment(&store, cfg)?;
 
+    seed_roster(&store, cfg)?;
+
     let shared = Arc::new(Shared {
         store: store.clone(),
         daemon_keys: cfg.daemon_keys.clone(),
@@ -75,6 +126,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         mailer: build_mailer(cfg),
         write_lock: Mutex::new(()),
         seen: Mutex::new(crate::daemons::Seen::default()),
+        roster: Mutex::new(crate::roster::RosterCache::default()),
     });
 
     let server = tiny_http::Server::http(cfg.addr())
@@ -435,6 +487,7 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         mailer: shared.mailer.as_ref(),
         write_lock: &shared.write_lock,
         seen: &shared.seen,
+        roster: &shared.roster,
         rechecking,
     };
     routes::handle(&mut ctx, req)
