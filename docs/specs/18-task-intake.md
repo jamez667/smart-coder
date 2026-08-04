@@ -35,10 +35,12 @@ someone else's cloud. The separation is architectural — the server has no
 diff is never small.
 
 **Scope of this first pass: specs only.** The public surface drafts Phase 1 and
-nothing else. Approving marks a spec `Ready` and writes it into the repository;
-the developer builds it in their IDE when they choose. A *private* surface with
-the full agent is a separate, later thing, and it does not get built by widening
-this one.
+nothing else. The spec is written into the repository when it is *drafted*, by
+the daemon on the developer's own machine; accepting marks it `Accepted` and
+settles it, so it leaves the review list. **Accepting builds nothing** — the
+developer opens their IDE and runs the pipeline when they choose. A *private*
+surface with the full agent is a separate, later thing, and it does not get
+built by widening this one.
 
 ## The trust boundary
 
@@ -152,31 +154,53 @@ There are **four parties** now, and conflating them is the mistake to avoid.
 They authenticate differently because they are different things: a daemon is a
 long-lived machine credential, a *device* is the developer, an *account* is a
 member of the public who may file and read their own requests and nothing else,
-and an *owner* is somebody the operator has named as responsible for a
-repository.
+and an *owner* is somebody the developer has promoted, from `/owners` on an
+enrolled device, as responsible for a repository.
 
 The last is the newest and the one whose boundary matters most:
 
-| | may file | may read others' specs | may decline | may **approve** |
-| --- | --- | --- | --- | --- |
-| Account | own repo's | no | no | no |
-| Owner | — | their repositories' | yes | **no** |
-| Device | yes | all | yes | yes |
+| | may file | may read others' specs | may decline | may release | may **accept** | may administer |
+| --- | --- | --- | --- | --- | --- | --- |
+| Account | own repo's | no | no | no | no | no |
+| Owner | — | their repositories' | yes | their repositories' | **no** | no |
+| Device | yes | all | yes | yes | yes | yes |
 
-**Approving is the one an owner does not get**, and the reason is not that it
-reaches the repository — it does not, it flips a state and writes one file
-<!--@ crates/sc-server/src/store.rs -->. It is that approving is the *signal* a
-spec is fit to become work on the developer's machine, and that decision has not
-been delegated. Declining fails towards **lost** work: visible on the page, and
-the filer can file again. Approving fails towards **admitted** work, which is
-invisible until it costs something. `release` sits on the developer's side for
-the same reason — it overrules the screener, so it admits.
+**Accepting is the one an owner does not get** <!--@ sc_server::routes::OWNER_VERBS -->,
+and the reason is not that it reaches the repository. It does not: the spec was
+already written there when it was drafted, and accepting flips a state and
+writes one file <!--@ crates/sc-server/src/store.rs -->.
+
+The reason is that **nothing here builds anything**. Accepting *settles* a
+request — it says this is done and drops it out of the review list. Turning a
+spec into work means opening the IDE and running the pipeline, on the
+developer's machine, by hand. That is the one decision the web has never been
+able to make and the one this design does not try to delegate.
+
+**The line is not "an owner may not admit work."** It used to be, and `release`
+broke it: releasing a quarantined request puts it back in the claimable queue,
+so a daemon *will* draft it. Owners have it deliberately — the screener is a
+model reading a stranger's text, so it holds things it should not, and an owner
+who can see their repository's queue but not unblock it has to ask the developer
+about every false positive, which makes the role decorative. What makes it
+affordable is that re-admitting is bounded per repository rather than trusted:
+see the third ceiling below.
+
+Declining still fails towards **lost** work — visible on the page, and the filer
+can file again. Releasing fails towards **spent** work, which is what the
+ceiling is for.
 
 That rule is **structural**. The private surface is entered through
 `let Some(Caller::Device { .. }) = caller` <!--@ crates/sc-server/src/routes.rs -->
-and every admitting verb lives past that line, so there is no value of
-`Caller::Owner` which reaches one. Not a check inside the approve handler that a
-later reader could tidy away.
+and `accept` lives past that line, so there is no value of `Caller::Owner` which
+reaches it. Not a check inside a handler that a later reader could tidy away.
+
+The same line does the same work twice more. Administering **owners**
+<!--@ crates/sc-server/src/routes.rs --> and **repositories**
+<!--@ sc_server::routes::private_route::REPOS --> lives past it too, which is
+what makes "an owner cannot promote an owner" a property of the type rather than
+a rule somebody has to remember. It matters more than it looks: somebody who may
+promote may promote an accomplice, and revoking the first would not revoke the
+second.
 
 ### The daemon → server
 
@@ -293,11 +317,11 @@ revocation being *the* lever, and a lever reachable only by hand-editing
 `accounts.json` on the volume is not one anybody pulls at the moment they need
 it.
 
-✅ **Two spend ceilings, built in the order they actually bite.**
+✅ **Three spend ceilings, built in the order they actually bite.**
 
 **A per-account filing cap** — 20 requests per rolling 24 hours by default
-<!--@ crates/sc-server/src/routes.rs -->. This is the ceiling on *model* spend:
-every filing that clears the screener costs a full drafting run on the
+<!--@ crates/sc-server/src/routes.rs -->. This is the ceiling on what *filing*
+spends: every filing that clears the screener costs a full drafting run on the
 developer's machine, and the per-credential rate limit (240/min) is no defence
 against something that expensive.
 
@@ -338,12 +362,38 @@ counting only live accounts would let an attacker's burned identities be swapped
 one for one under a wall that looks intact. At the ceiling the lever is raising
 `PUBLIC_MAX_ACCOUNTS`, not revoking.
 
-A cap of `0` is **refused at startup**: a public surface that accepts nothing
-reads as a broken feature rather than a setting, and "off" is expressed by
-leaving `PUBLIC_REPO` unset, which turns the whole surface off honestly.
+A cap of `0` is **refused at startup**: a surface that accepts nothing reads as
+a broken feature rather than a setting, and "off" is expressed by leaving
+`SC_SERVER_PUBLIC_REPOS` unset, which turns the whole surface off honestly.
+(Disabling every *repository* from the admin page reaches a similar-looking
+state deliberately and says why — see [below](#a-repository-is-named-never-pathed).
+The difference is that one is a configuration nobody meant and the other is a
+developer between configurations, with a page saying so.)
 
-*Still reactive:* revocation remains the answer to an account that is inside both
-ceilings and still unwelcome, and the developer finds that one by looking. What
+**A per-repository drafting cap** — 60 re-admissions per rolling 24 hours by
+default <!--@ sc_server::routes::drafting_budget -->. The filing cap does not
+reach this: it is checked when something is *filed*, keyed on the filer, and a
+request already filed has paid its filing. Every **re-admission** after that is
+free — and `send-back` and `release` both put a request back in the claimable
+queue, so each one buys another full drafting run.
+
+That loop was open. An owner could send back, wait for the redraft, and send it
+back again for ever, and the cost lands on somebody else's laptop.
+
+**Keyed on the repository, not on the caller**, and the three obvious
+alternatives are all wrong for the same reason: they key on who pressed the
+button, and the owner is the trusted party. What is being spent is drafting runs
+against a project, which is the number the developer actually cares about — and
+it stays true when a second owner is added. The developer's own verbs are inside
+it too, deliberately: the cap states what a project may cost in a day, and a
+send-back loop from a stuck redraft is as easy for the developer to cause.
+
+Counted from the request records for the same reason the filing cap is, and
+taken by one helper every re-admitting verb calls, so a fourth added later either
+calls it or visibly does not.
+
+*Still reactive:* revocation remains the answer to an account that is inside every
+ceiling and still unwelcome, and the developer finds that one by looking. What
 the ceilings buy is that the finding-out is not a bill.
 
 ### The browser → server
@@ -469,35 +519,72 @@ an *unspent* code's life; it does not add a way to arm a new one.
 ### The owner → server
 
 ✅ **Built** <!--@ crates/sc-server/src/oauth.rs -->. An owner signs in with
-GitHub and reads the drafted specs for the repositories the operator named as
-theirs. Magic links stay for filers: the two are different roles, not two
-spellings of one, and they need not share an identity.
+GitHub and reads the drafted specs for the repositories the developer named as
+theirs, and may send them back, discard them, or release ones the screener held.
+Magic links stay for filers: the two are different roles, not two spellings of
+one, and they need not share an identity.
 
 **The allowlist is the entire authorization model**, and that is worth stating
-plainly rather than discovering. Nothing is checked against GitHub's API, so
-`SC_SERVER_OWNERS` is the only thing standing between a GitHub account and every
-drafted spec for a project — and a drafted spec is model output produced by
-reading the developer's tree. Signing in proves *who somebody is*; this setting
-decides *what that is worth*.
+plainly rather than discovering. Nothing is checked against GitHub's API, so it
+is the only thing standing between a GitHub account and every drafted spec for a
+project — and a drafted spec is model output produced by reading the developer's
+tree. Signing in proves *who somebody is*; the roster decides *what that is
+worth*.
 
-So every entry is validated at startup and every failure is a refusal to boot: an
-owner naming a repository the surface does not serve, an owner naming none,
-duplicate logins, owners with no GitHub application to sign in with. A setting
-that looks applied and grants the wrong thing is worse than a server that will
-not start.
+#### The roster lives on the volume
 
-Owners live in **configuration, with no record on disk**. An allowlist that is
-both config and store has two sources of truth, and the failure is somebody
-removed from the config who still holds a live session. This way deleting the
-line and redeploying *is* revocation — the property per-daemon keys already have.
-It also leaves nothing to migrate if repository access is ever checked against
-GitHub for real: that gate reads the same field and calls the API in addition.
+✅ **Built** <!--@ crates/sc-server/src/roster.rs -->. Owners are a record in
+`owners.json`, administered at `/owners` from an enrolled device.
+
+**They used to be an environment variable**, and that was defensible while the
+only writer was somebody editing a Portainer stack. It is a bad fit for a list
+that changes when people join and leave: every edit meant a redeploy, which
+restarts the server and drops whatever was in flight.
+
+**The property that had to survive the move** is the one that made configuration
+right in the first place: *revocation takes effect on the next request*. Deleting
+a line and redeploying was complete revocation — no session to hunt down, no
+record that might disagree. A snapshot read at startup would lose that, and a
+parse on every request would pay for it on every request. So the file's modified
+time is checked each time and the contents parsed only when it has actually
+changed — a `stat`, not a parse, on the requests that get that far.
+
+The direction of promotion survives intact. The old guarantee was *"an owner is
+an account the configuration promotes — never one that promotes itself"*.
+Substituting **the developer** for the configuration keeps it exactly, because
+the only writer is past the device gate.
+
+`SC_SERVER_OWNERS` is kept as a **seed applied once**, so an existing deployment
+keeps its owners across the move and a fresh one can be bootstrapped without a
+browser. It is guarded by a flag and the server logs that it is ignoring it
+afterwards <!--@ crates/sc-server/src/serve.rs -->: re-applying it every boot
+would resurrect an owner revoked through the UI, which is the failure
+revocation-on-the-next-request exists to prevent arriving by the back door of a
+restart. The flag is set even when the seed is empty, or the first boot *with*
+owners configured would seed a volume somebody had already administered.
+
+**Two things a record cannot do that a setting could**, and both had to be
+answered rather than dropped.
+
+The startup refusals are still there and still refuse — an owner naming a
+repository this surface does not serve, an owner naming none, a duplicate login,
+owners with no GitHub application to sign in with. What changed is their
+*reach*: they validate the seed, which is the only part still coming from
+configuration. A record read at runtime cannot refuse to boot, because the boot
+already happened.
+
+So the same two failures are answered where the record is read instead. An owner
+naming something no longer served is **intersected** away — the roster and the
+enabled set are separately editable, so a record can name something this surface
+stopped collecting for, and granting it would be a permission that looks applied
+and reaches nothing. The admin page marks the difference rather than hiding it.
+And an owner of nothing reads on the page as promoted while granting nothing, so
+the form refuses to write one.
 
 Keyed on the **login**, lowercased, not the numeric id. The id is stabler, and
-that argument does not reach here: an operator writes this by hand from a name
-they recognise, and nobody knows their collaborator's numeric id. A rename makes
-the entry stop matching — somebody who cannot sign in and says so, which is the
-safe direction.
+that argument does not reach here: somebody types a name they recognise, and
+nobody knows their collaborator's numeric id. A rename makes the entry stop
+matching — somebody who cannot sign in and says so, which is the safe direction.
 
 The flow itself is an **interstitial page with a link**, not a redirect. `Res`
 carries no `Location` header, and this surface already records an objection to
@@ -512,7 +599,9 @@ work"; telling them whether the state was forged or merely expired would tell an
 attacker which half they got right. The operator gets the real reason in the log.
 
 *Not built:* the GitHub API is never asked whether a login can actually see a
-repository. `SC_SERVER_OWNERS` is asserted by the operator, not verified.
+repository. The roster is **asserted by the developer, not verified** — the same
+gap as before the move, now behind a device-only page rather than a stack edit.
+Adding the check later reads the same record and calls the API in addition.
 
 ## Filing a request
 
@@ -522,13 +611,13 @@ A request is a small, deliberately boring record:
 | --- | --- |
 | **Text** | The request, free-form. The same string an interactive user would type. |
 | **Kind** | `bug` / `feature` / `improvement` / `feedback` (below). |
-| **Repository** | A name the daemon resolves against its configured set — never a free path. Typed, not picked: the server holds no copy of that set. |
+| **Repository** | A name the daemon resolves against its configured set — never a free path. Picked from the enabled set on the public form, typed on the device form; a name either way, and the daemon still resolves it. |
 | **Agent profile** | Chosen from a named list (below). |
 
 Three of these are closed sets, and that is the security-relevant part.
 
 A filed request can also be **discarded** from the surface
-<!--@ crates/sc-server/src/routes.rs -->, which drops it before approval. That is
+<!--@ crates/sc-server/src/routes.rs -->, which drops it before it is accepted. That is
 a queue operation on the request, not a fifth gate decision — [19](19-queue-and-runner.md)
 already separates the two — so [20](20-remote-review.md)'s four review decisions
 are unchanged by it.
@@ -571,23 +660,18 @@ being *mitigated* and being *unreachable* — there is no path-handling code on 
 request path at all, because a request carries no path.
 
 **The heading used to say "chosen, never typed", and the hosted architecture
-broke the first half of that.** The server holds no configuration and no copy of
-the repository set — that is the property that makes it safe to expose — so it
-cannot render a picker. The *device* form asks for a free-text **name**
+broke the first half of that.** The server held no copy of the repository set —
+that was the property that made it safe to expose — so it could not render a
+picker. The *device* form asks for a free-text **name**
 <!--@ crates/sc-server/src/page -->, and the closed set is enforced one hop
-later, when the daemon resolves it. The **public** form has no repository field
-at all: a public filing takes `PUBLIC_REPO` from the server's own configuration
-<!--@ crates/sc-server/src/config.rs -->, so a stranger cannot name a repository
-and the public surface serves exactly one. Asserted as *ignored*, not merely
-hidden — a repo submitted in the body is discarded.
+later, when the daemon resolves it.
 
 The security claim survives intact, because it never rested on the picker: a name
 is not a path, whether it was chosen or typed.
 
-**The picker is back**, and on the surface that lost it. ✅ **Built**
-<!--@ crates/sc-server/src/config.rs -->: `SC_SERVER_PUBLIC_REPOS` names a set,
-the form offers exactly those, and a submitted name is checked against the same
-set.
+**The picker is back**, and on the surface that lost it. ✅ **Built**: the public
+form offers exactly the enabled set and a submitted name is checked against the
+same set <!--@ sc_server::config::Repos -->.
 
 The property this protects was always a **closed set**, never a
 *set of size one* — the scalar was how the closed set happened to be
@@ -605,6 +689,59 @@ This makes the public surface the first place this server holds a closed set of
 repository *names*. Still names, never paths, and the daemon still resolves each
 against its own configured set one hop later — which is where the closed set is
 really enforced.
+
+#### The set is administered here, and a daemon has to be serving one
+
+✅ **Built** <!--@ sc_server::routes::private_route::REPOS -->. Repositories are
+enabled and disabled at `/repos`, beside the owners and on the same volume.
+
+**Naming one in `SC_SERVER_PUBLIC_REPOS` still turns the surface on**, and that
+switch stays in configuration deliberately: a server that could open its own
+public surface from a UI is a different security posture than the one this spec
+argues for. The *list* is a seed applied once, exactly like the owners.
+
+**Enabling asks whether a daemon is actually serving that name**
+<!--@ sc_server::routes::enable_repo -->, and this is a **typo-catcher, not a
+security gate** — built as one, because confusing the two makes it worse at
+both. Enabling `smrt-coder` writes a name nothing will ever claim: filings pile
+up against a repository that does not exist, and the surface looks broken rather
+than misconfigured. Asking a machine that is polling right now catches that when
+it is cheapest to fix.
+
+It needs a **narrower question than the one the review page asks**
+<!--@ crates/sc-server/src/daemons.rs -->. A daemon that declared nothing is
+treated as covering everything, which is right for *"is this request stuck?"* —
+it is serving something and the server cannot say it is not this — and wrong
+here, where the same generosity would rubber-stamp a misspelling into a
+permanent record.
+
+And it **cannot be a refusal**, because nobody having said the name is not proof
+of a typo: the register is empty for the first half-minute after a restart, and
+a daemon on an older build declares nothing at all. So an unconfirmed name is
+*questioned* — the page names the case, lists what is actually on offer, and
+offers to proceed. Taking that override records that nobody confirmed it, so
+"a machine vouched for this" and "I asserted it" stay distinguishable. A page
+that showed them alike could not explain why nothing is being drafted.
+
+**Disabling closes the door and keeps what came through it.** Deleting the
+filings would make the button destructive in a way its name does not say, and
+the developer's own review surface still shows them.
+
+**A surface with nothing enabled serves, and says why it cannot take anything.**
+That state is reachable the moment somebody disables the last repository, so it
+had to mean something. Refusing to boot would put the page that fixes it out of
+reach exactly when it is needed — the failure the enrolment bootstrap exists to
+prevent, at another layer — and a 404 teaches a filer at a working address
+nothing.
+
+Which cost the repository set its **non-empty invariant**, and that was the right
+trade. The invariant was load-bearing while parsing the developer's
+configuration was the only
+constructor: the empty set could not arise, so no reader had to handle it. Once
+a developer can disable the last repository it is real, and a type that declares
+it unrepresentable does not prevent it — it moves the failure from a value a
+reader must handle into a panic. So the accessor returns an `Option` and the two
+call sites that wanted "the only one" say so.
 
 **The daemon also publishes its names on poll**, which this spec previously
 called the right way to get the picker back, and it is — but it was built first
@@ -657,9 +794,14 @@ so a bump breaks every deployed peer — for a change that breaks none of them.
   polling this minute, so it would flap — and in memory, because persisting it
   would survive a restart as a confident claim about daemons that are gone.
 
-*Not built:* the picker. The server now has the material for one — it knows which
-names are on offer — but the device form still takes free text. Inventing a
-server-side repository list would still be the wrong way to get there.
+*Not built:* the picker **on the device form**, which still takes free text.
+The public form has one, and `/repos` gave the server a set to render it from —
+which is the thing this paragraph used to say would be the wrong way to get
+there. It was, while the set would have been *invented*: a list the server made
+up and the daemon had never confirmed. The set it holds now is one a daemon
+declared or the developer knowingly asserted, and it is per-surface rather than
+global. The device form is the developer's own, so a free-text name there costs
+nobody else anything.
 
 Canonicalisation happens at *configuration* time, by the developer at their own
 keyboard. By the time a network request is handled there is only a name to look up.
@@ -1099,11 +1241,24 @@ Both deployment files are checked against the config's environment module in
 both directions <!--@ crates/sc-server/src/config.rs -->, so a setting cannot be added to one
 and forgotten in the other — which would leave an operator on the Swarm stack
 with no box for a cap that exists.
-- **Configured entirely from environment variables**
+- **Configured from environment variables**
   <!--@ crates/sc-server/src/config.rs -->, because a Portainer stack editor is
   where a user configures a container. A config file baked into an image cannot
   be edited without rebuilding, and mounting one to override it makes two sources
   of truth.
+
+  **The roster is the deliberate exception, and the line is people versus
+  posture.** Owners and enabled repositories change when somebody joins, leaves
+  or starts a project — routinely, and by the developer rather than an operator
+  — and every edit through the stack meant a redeploy, which restarts the server
+  and drops what was in flight. Those live on the volume and are administered
+  from the review surface. What a *stack* still decides is whether the public
+  surface exists at all, what it may spend, and how it reaches the outside
+  world: the settings whose failure mode is a posture nobody meant, not a name
+  nobody updated. Both settings survive as seeds so nothing has to be
+  re-entered, and the server says out loud that it is ignoring them afterwards —
+  a setting that is present and inert is one somebody will edit expecting an
+  effect.
 - **It refuses to start without a daemon key**, and refuses one shorter than 32
   characters. Running open is not a degraded mode; it is the failure this whole
   design exists to prevent, and a short key looks configured while being
@@ -1213,7 +1368,7 @@ and not evidence.
   keeps it; this surface is ordinary HTTPS to a hosted server, and the daemon
   reaches it outbound. The two share no transport and should share no
   configuration.
-- The execution half is [19](19-queue-and-runner.md); the approval half is
+- The execution half is [19](19-queue-and-runner.md); the review half is
   [20](20-remote-review.md). This spec deliberately owns only intake and trust.
 - Reuses the token, hub, and single-file-HTML patterns already in `sc-web`, which
   spec 17 would currently classify as `UNGOVERNED` — this spec is where that code
