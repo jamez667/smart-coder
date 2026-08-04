@@ -78,11 +78,8 @@ pub fn landing_page(locale: Locale) -> String {
 }
 
 /// Ask for a sign-in link.
-///
-/// No GitHub link: this exists for callers with no `Ctx` to ask, and
-/// offering a route that may be a 404 is worse than offering none.
 pub fn signin_page() -> String {
-    signin_page_in(Locale::default(), false)
+    signin_page_in(Locale::default())
 }
 
 /// Ask for a sign-in link, in a chosen language.
@@ -90,8 +87,8 @@ pub fn signin_page() -> String {
 /// Split from [`signin_page`] because the language route renders this one *after*
 /// the choice and before the cookie has been read back — the only caller that
 /// knows the locale from something other than the request.
-pub fn signin_page_in(locale: Locale, github: bool) -> String {
-    signin_page_full(locale, github, true)
+pub fn signin_page_in(locale: Locale) -> String {
+    signin_page_full(locale, true, true, None)
 }
 
 /// The sign-in page, knowing whether this server can actually send an email.
@@ -102,9 +99,14 @@ pub fn signin_page_in(locale: Locale, github: bool) -> String {
 /// somebody can act on, and a form that silently swallows a request teaches
 /// people the site is broken in a way they cannot report.
 ///
-/// The administrator is unaffected — they sign in with GitHub — so the page
+/// The administrator is unaffected — they sign in with a password — so the page
 /// that configures mail stays reachable while mail is what is broken.
-pub fn signin_page_full(locale: Locale, github: bool, mail: bool) -> String {
+pub fn signin_page_full(
+    locale: Locale,
+    password: bool,
+    mail: bool,
+    problem: Option<&str>,
+) -> String {
     let s = locale.strings();
     let form = if mail {
         format!(
@@ -128,41 +130,51 @@ pub fn signin_page_full(locale: Locale, github: bool, mail: bool) -> String {
         locale,
         s.signin_title,
         &format!(
-            "<h1>{title}</h1><p>{intro}</p>{form}{owner}",
+            "<h1>{title}</h1>{problem}<p>{intro}</p>{form}{owner}",
             title = esc(s.signin_title),
+            problem = match problem {
+                Some(p) => format!("<p class=\"note\">{}</p>", esc(p)),
+                None => String::new(),
+            },
             intro = esc(if mail {
                 s.signin_intro
             } else {
                 s.signin_no_mail
             }),
             form = form,
-            owner = github_link_in(locale, github),
+            owner = password_form_in(locale, password),
         ),
     )
 }
 
-/// The way in for an owner, when there is an application for them to use.
+/// The way in for the administrator and for owners.
 ///
-/// **Rendered on exactly the condition `start_github` exists on.** The flow was
-/// built, reachable and tested, and nothing linked to it — so an owner's only
-/// way in was to know the URL and type it. A route with no link is a route
-/// nobody uses, and it looked from the outside like the feature was missing.
+/// **Below the email form, not beside it.** Filing is what almost everybody
+/// arriving here wants; signing in with a password is what the two named roles
+/// do, and they know they are doing something different.
 ///
-/// Below the email form rather than beside it: filing is what almost everybody
-/// arriving here wants, and an owner signing in is doing something rarer and
-/// knows they are.
-fn github_link_in(locale: Locale, github: bool) -> String {
-    if !github {
-        // No application configured, so `/public/auth/github` is a 404. A button
-        // to it would be a promise the server cannot keep.
+/// A form rather than a link to a third party, which is the whole point of this
+/// change: same-origin, inside `form-action 'self'`, no callback URL to
+/// configure and no hostname to get wrong.
+fn password_form_in(locale: Locale, password: bool) -> String {
+    if !password {
         return String::new();
     }
     let s = locale.strings();
     format!(
-        "<p class=\"meta\">{note}<br>\
-         <a href=\"/public/auth/github\">{link}</a></p>",
-        note = esc(s.signin_owner_note),
-        link = esc(s.signin_owner_link),
+        "<h2>{note}</h2>\
+         <form method=\"post\" action=\"{action}\">\
+         <label for=\"login\">{user}</label>\
+         <input id=\"login\" name=\"login\" required autocapitalize=\"off\" \
+         autocorrect=\"off\" spellcheck=\"false\">\
+         <label for=\"password\">{pass}</label>\
+         <input id=\"password\" name=\"password\" type=\"password\" required>\
+         <button type=\"submit\">{submit}</button></form>",
+        note = esc(s.signin_password_heading),
+        action = esc(crate::routes::public_route::SIGNIN_PASSWORD),
+        user = esc(s.signin_user_label),
+        pass = esc(s.signin_password_label),
+        submit = esc(s.signin_password_submit),
     )
 }
 
@@ -287,32 +299,6 @@ pub fn owner_detail(r: &Request, locale: Locale) -> String {
         esc(s.back)
     ));
     public_shell_as(locale, s.owner_title, &body, Signed::In)
-}
-
-/// The step before GitHub: what is about to happen, and a link.
-///
-/// **A link, not a redirect.** The reader sees where they are going before they
-/// go, which is the honest version of an OAuth hop — and it needs no `Location`
-/// header, which this server's response type deliberately does not carry.
-///
-/// The URL is built by this crate from configuration, never from anything a
-/// caller sent, so there is no open redirect here to find.
-pub fn github_start_page(authorize_url: &str, locale: Locale) -> String {
-    let s = locale.strings();
-    public_shell(
-        locale,
-        s.github_title,
-        &format!(
-            "<h1>{title}</h1><p>{intro}</p>\
-             <p><a class=\"cta\" href=\"{url}\">{go}</a></p>\
-             <p class=\"meta\">{note}</p>",
-            title = esc(s.github_title),
-            intro = esc(s.github_intro),
-            url = esc(authorize_url),
-            go = esc(s.github_go),
-            note = esc(s.github_note),
-        ),
-    )
 }
 
 /// Shown after asking for a link — **identical whatever actually happened**.
@@ -694,7 +680,7 @@ mod tests {
         // English phonemes — which is the accessibility failure this whole
         // feature is supposed to fix, not cause.
         for locale in Locale::ALL {
-            let html = signin_page_in(locale, true);
+            let html = signin_page_in(locale);
             assert!(
                 html.contains(&format!("<html lang=\"{}\"", locale.code())),
                 "{locale}: {html}"
@@ -713,7 +699,7 @@ mod tests {
         r.spec = Some("# Spec".to_string());
 
         let pages = [
-            signin_page_in(Locale::Fr, true),
+            signin_page_in(Locale::Fr),
             signin_sent_page(Locale::Fr),
             signin_confirm_page("t", Locale::Fr),
             signin_failed_page(true, Locale::Fr),

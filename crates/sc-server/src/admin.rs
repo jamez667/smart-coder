@@ -10,11 +10,30 @@
 //! machine.
 //!
 //! So the server is **claimed**. A fresh volume arms a one-time code, the code
-//! is spent at `/setup`, and the GitHub login that completes the flow is written
+//! is spent at `/setup`, and the username chosen on the step after is written
 //! here. Getting it wrong is a file to delete rather than a stack to edit, and
 //! the thing that proves ownership is *reading the container's logs* — which is
 //! the same proof a stack editor was standing in for, and better evidence than
 //! holding a cookie.
+//!
+//! ## What the claim rests on, stated plainly
+//!
+//! This used to be two proofs: the code proved you could read the logs, and a
+//! GitHub sign-in proved who you were. The password chosen at `/setup` is chosen
+//! by the same person who typed the code, so the second proof has collapsed into
+//! the first. **Whoever can read the container's log owns the server.**
+//!
+//! That is a real reduction and worth naming rather than glossing. It is
+//! defensible because reading the log already meant being able to deploy the
+//! thing — the two capabilities were never far apart — and because the
+//! alternative cost two days of a sign-in that never completed: a callback
+//! pointing at a hostname with no DNS, an OAuth application per deployment, and
+//! a third party who could take the only way in away.
+//!
+//! What follows from it is that [`Admin::spend`] and the setup token matter
+//! *more* than before, not less. The wizard is still multi-step, and the step in
+//! between now decides a password rather than an application — the same threat
+//! with a worse consequence.
 //!
 //! ## Why not first-login-wins
 //!
@@ -44,12 +63,16 @@ pub const CLAIM_TTL_MS: u64 = 30 * 60 * 1000;
 /// Who administers this server.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Admin {
-    /// The GitHub login, lowercased. `None` means unclaimed.
+    /// The administrator's username, lowercased. `None` means unclaimed.
     ///
-    /// A login rather than a numeric id, matching [`crate::roster::OwnerRecord`]:
-    /// somebody types a name they recognise. A rename makes this stop matching —
-    /// a person who cannot sign in and says so, which is the safe direction, and
-    /// the recovery is a file on the volume rather than a support ticket.
+    /// A login rather than an account id, matching [`crate::roster::OwnerRecord`]:
+    /// somebody types a name they recognise. It has to keep matching the
+    /// [`crate::account::Account`] that carries the password — which is why
+    /// [`crate::account::Accounts::create_login`] refuses a duplicate, since two
+    /// accounts answering to one name would make [`Admin::is`] match whichever
+    /// the iteration reached first. If it ever stops matching, the result is a
+    /// person who cannot sign in and says so — the safe direction — and the
+    /// recovery is a file on the volume rather than a support ticket.
     #[serde(default)]
     pub login: Option<String>,
     #[serde(default)]
@@ -71,8 +94,10 @@ pub struct Admin {
     /// **Setup is more than one step, and the code is spent at the first.**
     /// Without this, everything after step one is guarded only by the server
     /// being unclaimed — so a half-finished setup on a public hostname is open
-    /// to whoever arrives next, and they can supply their own GitHub
-    /// application and take the server.
+    /// to whoever arrives next, and they can set their own password and take the
+    /// server. **Worse than before**: the step this guards used to name a GitHub
+    /// application, which at least required the interloper to own one. It now
+    /// chooses a credential outright.
     ///
     /// That is not hypothetical on a *migrated* volume: seeding fills in the
     /// address, which made step one look already done to everybody.
@@ -97,8 +122,8 @@ impl Admin {
 
     /// Is this login the administrator?
     ///
-    /// Lowercased on the way in, so a caller holding GitHub's own casing matches
-    /// a record written from a different source.
+    /// Lowercased on the way in, so a caller who typed their name with different
+    /// capitalisation than they registered it still matches.
     pub fn is(&self, login: &str) -> bool {
         match &self.login {
             Some(mine) => mine == &login.to_ascii_lowercase(),
@@ -132,11 +157,18 @@ impl Admin {
     /// Spend the claim code, returning the token that carries the rest of the
     /// wizard.
     ///
-    /// `None` when the code was wrong, expired, or already spent. **Spending is
-    /// separate from claiming**: the code proves you can read the logs, and the
-    /// GitHub sign-in that follows proves who you are. Doing both in one step
-    /// would mean the code alone decided who owns the server, and a code read
-    /// from a log aggregator is a weaker thing to rest that on.
+    /// `None` when the code was wrong, expired, or already spent.
+    ///
+    /// **Spending is still separate from claiming, but no longer for the reason
+    /// it was.** It used to be two proofs — the code for the logs, a GitHub
+    /// sign-in for who you are. The username and password are now chosen by the
+    /// same person who typed the code, so the code alone does decide who owns the
+    /// server. What the split still buys is the [`setup_token_hash`] binding:
+    /// spending returns a token, and every step after this one demands it, so the
+    /// wizard cannot be finished by a second browser that merely arrived while it
+    /// was half-done.
+    ///
+    /// [`setup_token_hash`]: Admin::setup_token_hash
     ///
     /// An expired code is refused *before* it is compared and cleared on the way
     /// out, so a code that outlived its window stops being a credential rather
@@ -158,8 +190,8 @@ impl Admin {
         self.claim_expires_ms = None;
 
         // **The rest of the wizard belongs to this browser.** Minted here
-        // rather than at the claim, because the steps in between — naming a
-        // GitHub application — are exactly what somebody else arriving mid-way
+        // rather than at the claim, because the step in between — choosing the
+        // username and password — is exactly what somebody else arriving mid-way
         // would supply in order to take the server.
         let token = crate::auth::mint_secret();
         self.setup_token_hash = Some(hash(&token));
@@ -224,7 +256,9 @@ mod tests {
     }
 
     #[test]
-    fn the_administrator_is_matched_whatever_case_github_reports() {
+    fn the_administrator_is_matched_whatever_case_they_type() {
+        // Registered one way, typed another. A sign-in form is where this
+        // happens, and a mismatch would lock out the one account that matters.
         let mut admin = Admin::default();
         admin.claim("JameZ667", 1);
         assert!(admin.is("jamez667"));

@@ -461,13 +461,13 @@ pub fn owners_page(roster: &crate::roster::Roster, served: &crate::config::Repos
         "Owners",
         &format!(
             "<h1>Owners</h1>\
-             <p class=\"meta\">An owner signs in with GitHub and reviews requests \
+             <p class=\"meta\">An owner signs in with a username and password, and              reviews requests \
              for the repositories you name here. They can send work back, release \
              it and discard it — they cannot accept it, and they cannot add an \
              owner. Revoking one takes effect on their very next request.</p>{rows}\
              <h2>Add an owner</h2>\
              <form method=\"post\" action=\"/owners\">\
-             <label for=\"login\">GitHub username</label>\
+             <label for=\"login\">Username</label>\
              <input id=\"login\" name=\"login\" required autocapitalize=\"off\" \
              autocorrect=\"off\" spellcheck=\"false\">\
              {opts}\
@@ -582,8 +582,8 @@ pub fn repos_page(
 /// path for a stored secret anywhere in this server, which removes the class of
 /// leak rather than gating it: no page, cache or screenshot can hold a live key.
 ///
-/// `fresh` says whether this browser proved itself against GitHub recently
-/// enough to change one. The fields render either way and are disabled when it
+/// `fresh` says whether this browser typed a password recently enough to change
+/// one. The fields render either way and are disabled when it
 /// has not — being told to prove it again *after* typing a key is worse than
 /// being told before.
 pub fn settings_page(
@@ -628,9 +628,9 @@ pub fn settings_page(
     } else {
         format!(
             "<p class=\"note\">Changing a secret needs a fresh sign-in, and it has \
-             been more than five minutes. <a href=\"{}\">Prove it again</a>, then \
+             been more than five minutes. <a href=\"{}\">Sign in again</a>, then \
              come back.</p>",
-            esc(crate::routes::public_route::AUTH_GITHUB)
+            esc(crate::routes::public_route::SIGNIN)
         )
     };
 
@@ -660,7 +660,7 @@ pub fn settings_page(
              <form method=\"post\" action=\"/settings/secret\">\
              <label for=\"base_url\">This address</label>\
              <input id=\"base_url\" name=\"base_url\" value=\"{base}\"{disabled}>\
-             {mail_key}{gh_secret}{screen_key}\
+             {mail_key}{screen_key}\
              <button type=\"submit\"{disabled}>Save</button></form>\
              <h2>Sending email</h2>\
              <form method=\"post\" action=\"/settings/mail\">\
@@ -717,11 +717,6 @@ pub fn settings_page(
             disabled = disabled,
             gate = gate,
             mail_key = secret("Mail API key", "mail_key", &s.mail_key),
-            gh_secret = secret(
-                "GitHub client secret",
-                "github_client_secret",
-                &s.github_client_secret
-            ),
             screen_key = secret("Screening API key", "screen_key", &s.screen_key),
             provider = esc(&s.mail_provider),
             from = esc(&s.mail_from),
@@ -842,17 +837,21 @@ pub fn daemons_page(roster: &crate::roster::Roster, minted: Option<(&str, &str)>
 pub fn not_found_for_admin() -> String {
     shell(
         "Not found",
-        "<h1>Not found</h1><p>There is nothing here.</p>         <p class=\"meta\">If you administer this server,          <a href=\"/public/auth/github\">sign in with GitHub</a>.</p>",
+        "<h1>Not found</h1><p>There is nothing here.</p>         <p class=\"meta\">If you administer this server,          <a href=\"/public/signin\">sign in</a>.</p>",
     )
 }
 
 /// Claim an unclaimed server.
 ///
-/// **Three steps in dependency order**, and the order is forced rather than
-/// chosen: the GitHub callback URL is absolute, so it cannot be shown until the
-/// base address is known, and the sign-in cannot run until an application
-/// exists. Asking for everything on one screen would show a callback URL that
-/// changes as somebody types.
+/// **Two steps in dependency order**, and the order is still forced. The
+/// address decides whether session cookies carry `Secure` — see
+/// [`crate::config::secure_for`] — so it has to be settled before a password is
+/// typed, or the first credential this server ever sees might travel without it.
+/// Asking for both on one screen would mean deciding that after the fact.
+///
+/// It used to be three, the third being a GitHub application. That step is gone
+/// along with the callback URL that forced this ordering originally; the
+/// ordering survives on its own reason.
 ///
 /// `error` is a message from a rejected submission, re-rendered above the form
 /// with what was typed still in it.
@@ -902,38 +901,33 @@ pub fn setup_page(base_url: &str, error: Option<&str>) -> String {
     )
 }
 
-/// Step two: the GitHub application, now that the callback URL is known.
-pub fn setup_github_page(base_url: &str, error: Option<&str>) -> String {
+/// Step two: choose the username and password that will own this server.
+///
+/// **This is where the claim is decided**, which is why the wizard binds itself
+/// to the browser that spent the code — see [`crate::admin::Admin::setting_up`].
+pub fn setup_admin_page(base_url: &str, error: Option<&str>) -> String {
     let note = match error {
         Some(e) => format!("<p class=\"note\">{}</p>", esc(e)),
         None => String::new(),
     };
-    let callback = format!(
-        "{}/public/auth/github/callback",
-        base_url.trim_end_matches('/')
-    );
-
     shell(
         "Set up this server",
         &format!(
-            "<h1>Sign-in</h1>\
-             <p class=\"meta\">You sign in to this server with GitHub, which means \
-             it needs an OAuth application of its own. Create one at GitHub → \
-             Settings → Developer settings → OAuth Apps.</p>{note}\
-             <p>Paste this as the <strong>Authorization callback URL</strong>:</p>\
-             <pre>{callback}</pre>\
-             <form method=\"post\" action=\"/setup/github\">\
-             <label for=\"client_id\">Client ID</label>\
-             <input id=\"client_id\" name=\"client_id\" required autocapitalize=\"off\" \
-             autocorrect=\"off\" spellcheck=\"false\">\
-             <label for=\"client_secret\">Client secret</label>\
-             <input id=\"client_secret\" name=\"client_secret\" type=\"password\" required \
-             autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\">\
-             <button type=\"submit\">Save and sign in</button></form>\
-             <p class=\"meta\">The secret is stored encrypted and is never shown \
-             again. The next step signs you in, and the account you sign in with \
-             becomes this server's administrator.</p>",
-            callback = esc(&callback),
+            "<h1>Who administers this?</h1>             <p class=\"meta\">Choose a username and password. This account              administers <strong>{host}</strong>: it reviews requests, decides              what the public site collects, and holds the keys. There is no              second one.</p>{note}             <form method=\"post\" action=\"/setup/admin\">             <label for=\"login\">Username</label>             <input id=\"login\" name=\"login\" required autocapitalize=\"off\"              autocorrect=\"off\" spellcheck=\"false\" placeholder=\"you\">             <label for=\"password\">Password</label>             <input id=\"password\" name=\"password\" type=\"password\" required              minlength=\"{min}\">             <button type=\"submit\">Claim it</button></form>             <p class=\"meta\">At least {min} characters. It is stored hashed              and cannot be recovered — if you lose it, delete <code>admin.json</code>              from the volume and claim the server again.</p>",
+            host = esc(&crate::config::host_label(base_url)),
+            note = note,
+            min = crate::auth::MIN_PASSWORD,
+        ),
+    )
+}
+
+/// Setup is done, and this browser is already signed in as the administrator.
+pub fn claimed_page(login: &str) -> String {
+    shell(
+        "Claimed",
+        &format!(
+            "<h1>Claimed</h1>             <p><strong>{login}</strong> now administers this server, and you are              signed in.</p>             <p class=\"meta\">The public site is off until you turn it on, and              no machine can claim work until you mint a key. Both are below.</p>",
+            login = esc(login),
         ),
     )
 }

@@ -27,14 +27,14 @@ use crate::i18n::Locale;
 // as they did before the split. Every call site in `routes.rs` is unchanged,
 // which is what makes this a mechanical move rather than a rewrite.
 pub use private::{
-    accounts_page, confirm_accept, daemons_page, detail, filed, index, message, not_found,
-    not_found_for_admin, owners_page, repos_page, settings_page, setup_github_page, setup_page,
-    Who,
+    accounts_page, claimed_page, confirm_accept, daemons_page, detail, filed, index, message,
+    not_found, not_found_for_admin, owners_page, repos_page, settings_page, setup_admin_page,
+    setup_page, Who,
 };
 pub use public::{
-    github_start_page, landing_page, owner_detail, owner_page, public_detail, public_file_page,
-    public_filed, public_message, public_not_found, signin_confirm_page, signin_failed_page,
-    signin_page, signin_page_full, signin_page_in, signin_sent_page,
+    landing_page, owner_detail, owner_page, public_detail, public_file_page, public_filed,
+    public_message, public_not_found, signin_confirm_page, signin_failed_page, signin_page,
+    signin_page_full, signin_page_in, signin_sent_page,
 };
 
 /// Escape for HTML text content and attributes.
@@ -98,7 +98,7 @@ pre { white-space: pre-wrap; word-wrap: break-word; padding: .8rem;
 
 /// The **public** surface's stylesheet.
 ///
-/// Shares its token names and values with the GitHub Pages site
+/// Shares its token names and values with the published report site
 /// <!--@ crates/sc-comply/src/report/site.rs -->, so the two read as one product.
 /// Copied rather than imported, and that is a deliberate trade: the alternative
 /// is a shared crate between the compliance reporter and the intake server,
@@ -570,14 +570,13 @@ placeholder=\"{placeholder}\">\
             note = esc(s.signin_no_password),
             // **The dialog is the path almost everybody takes**, so the other
             // way in has to be reachable from it or it may as well not exist —
-            // which is exactly what happened to the GitHub flow.
+            // which is exactly what happened to the GitHub flow it replaced:
+            // built, tested, reachable, and linked from nowhere.
             //
-            // A link onward rather than the option itself: whether there *is* a
-            // GitHub application is a question only the routes can answer, and
-            // the shell that renders this masthead is called from fourteen
-            // places that have no `Ctx`. Threading a flag through all of them to
-            // reach one dialog would put the same condition in fourteen more
-            // hands. The sign-in page asks it once, in the one place that knows.
+            // A link onward rather than the form itself. The form is short
+            // enough to inline, but this masthead is rendered from fourteen
+            // places and a password field in every one of them is fourteen
+            // chances to post it to the wrong action. One page owns it.
             other = esc(s.signin_other_ways),
         );
     }
@@ -760,7 +759,7 @@ pub(crate) fn shell(title: &str, body: &str) -> String {
 ///
 /// **In the shell rather than on each page**, so a page added later is reachable
 /// by construction. Four of these were built, tested and reachable only by
-/// somebody who already knew the URL — the same failure the GitHub sign-in had,
+/// somebody who already knew the URL — the same failure the sign-in flow had,
 /// and it goes unnoticed for the same reason: a test asks for the route
 /// directly, which is exactly what a person cannot do.
 ///
@@ -928,18 +927,14 @@ pub(crate) mod corpus {
             all.extend([
                 ("landing_page", landing_page(l)),
                 ("signin_page", signin_page()),
-                ("signin_page_in", signin_page_in(l, true)),
+                ("signin_page_in", signin_page_in(l)),
                 // The no-mail variant, which is a real state now that a
                 // surface can exist before a provider is configured.
-                ("signin_page_full", signin_page_full(l, true, false)),
+                ("signin_page_full", signin_page_full(l, true, false, None)),
                 ("signin_sent_page", signin_sent_page(l)),
                 ("signin_confirm_page", signin_confirm_page("abc123", l)),
                 ("signin_failed_page", signin_failed_page(true, l)),
                 ("signin_failed_page", signin_failed_page(false, l)),
-                (
-                    "github_start_page",
-                    github_start_page("https://github.test/login/oauth/authorize?x=1", l),
-                ),
                 (
                     "owner_page",
                     owner_page(&[req()], "jamez667", &["alpha".to_string()], l),
@@ -1000,44 +995,18 @@ mod tests {
         // hallucinated remote image in a rendered spec still leaks the page URL
         // through `Referer`, and that argument is unchanged by allowing script.
         //
-        // **`github_start_page` is the one exception, and only for the URL.** Its
-        // whole purpose is to send a reader to GitHub, and a link they click is
-        // not a subresource: nothing is fetched while rendering, so there is no
-        // silent request and nothing leaks unless they choose to go. The
-        // subresource hazards below still apply to it, which is why the
-        // exemption is one hazard rather than the whole page — a remote `<img>`
-        // appearing on it would still fail here.
+        // **The rule is absolute now.** One page used to be exempt for its URL
+        // alone — its whole purpose was to send a reader to a third party for
+        // sign-in. With that page gone no public page links off-site at all, so
+        // the exemption went with it. A rule with no exceptions is one nobody
+        // has to remember the shape of.
         for (name, html) in corpus::public() {
-            let leaving_on_purpose = name == "github_start_page";
             for hazard in [
                 "http://", "https://", "<img", "<link", "@import", "url(http",
             ] {
-                let is_the_url =
-                    leaving_on_purpose && (hazard == "https://" || hazard == "http://");
-                if is_the_url {
-                    continue;
-                }
                 assert!(!html.contains(hazard), "{name} contains {hazard}");
             }
         }
-    }
-
-    #[test]
-    fn the_only_page_that_links_off_site_links_to_one_place() {
-        // The exemption above is narrow, and this is what keeps it honest: the
-        // page may carry a remote URL, and it must be the authorize link and
-        // nothing else. A second remote reference appearing here — an icon, a
-        // stylesheet — would show up as a count greater than one.
-        let html = github_start_page("https://github.test/login/oauth/authorize?x=1", Locale::En);
-        assert_eq!(
-            html.matches("https://").count(),
-            1,
-            "exactly one off-site reference: {html}"
-        );
-        assert!(
-            html.contains("<a class=\"cta\" href=\"https://github.test/"),
-            "{html}"
-        );
     }
 
     #[test]
@@ -1050,7 +1019,7 @@ mod tests {
         // state it cannot leave — so this asserts the structure rather than the
         // symptom. Counting inputs is crude, but it is exactly the thing that
         // went wrong, and a second one cannot reappear unnoticed.
-        let html = signin_page_in(Locale::En, true);
+        let html = signin_page_in(Locale::En);
         assert_eq!(
             html.matches("type=\"checkbox\"").count(),
             1,
@@ -1082,7 +1051,7 @@ mod tests {
         // document at all — no flash before a handler attaches, and nothing for
         // a stylesheet rule to hide. Without script it is the only way to change
         // language, and it is present and working.
-        let html = signin_page_in(Locale::En, true);
+        let html = signin_page_in(Locale::En);
         let form = html
             .split("id=\"langform\"")
             .nth(1)

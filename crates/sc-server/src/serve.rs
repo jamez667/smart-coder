@@ -129,12 +129,6 @@ fn seed_settings(store: &Store, cfg: &Config) -> Result<()> {
 
     let seed = crate::settings::Seed {
         base_url: p.map(|p| p.base_url.as_str()),
-        github_id: p
-            .and_then(|p| p.github.as_ref())
-            .map(|g| g.client_id.as_str()),
-        github_secret: p
-            .and_then(|p| p.github.as_ref())
-            .map(|g| g.client_secret.as_str()),
         site_name: p.map(|p| p.site_name.as_str()),
         public: p.is_some(),
         show_spec: p.map(|p| p.show_spec),
@@ -192,11 +186,12 @@ pub fn run(cfg: &Config) -> Result<()> {
     // sealed value unreadable, and without this the server would boot happily
     // and report nothing configured — indistinguishable from a fresh install,
     // and the operator would re-enter secrets that were never lost.
-    crate::seal::usable(
-        cfg.seal_key.as_ref(),
-        Some(&store.settings()?.github_client_secret),
-    )
-    .map_err(DcError::Eval)?;
+    // Checked against the mail key, which is now the first sealed value a
+    // server acquires. **Whichever value this points at has to be one that
+    // actually gets set** — pointing it at a field nothing writes turns the
+    // check into a no-op that still looks present.
+    crate::seal::usable(cfg.seal_key.as_ref(), Some(&store.settings()?.mail_key))
+        .map_err(DcError::Eval)?;
 
     seed_roster(&store, cfg)?;
     seed_settings(&store, cfg)?;
@@ -561,7 +556,7 @@ fn route_label(path: &str) -> &'static str {
         public_route::FONT_BODY | public_route::FONT_DISPLAY => "/public/font",
         private_route::REVIEW => "/review",
         private_route::SETUP => "/setup",
-        private_route::SETUP_GITHUB => "/setup/github",
+        private_route::SETUP_ADMIN => "/setup/admin",
         p if p.starts_with(public_route::SIGNIN_PREFIX) => "/public/signin/:token",
         p if p.starts_with(public_route::REQUEST_PREFIX) => "/public/request/:id",
         p if p.starts_with(wire::route::WORK) => "/api/v1/work",
@@ -635,16 +630,6 @@ fn public_now(shared: &Shared) -> Option<crate::config::PublicConfig> {
         // Read from the roster on the request path; this field is the seed and
         // is no longer consulted to decide anything.
         owners: Vec::new(),
-        github: if settings.has_github() {
-            settings
-                .github_secret(key)
-                .map(|client_secret| crate::config::GithubConfig {
-                    client_id: settings.github_client_id.clone(),
-                    client_secret,
-                })
-        } else {
-            None
-        },
     })
 }
 

@@ -156,10 +156,10 @@ pub struct Session {
     pub issued_ms: u64,
     #[serde(default)]
     pub revoked: bool,
-    /// Unix ms when this browser last proved itself against GitHub.
+    /// Unix ms when this browser last proved itself with a credential.
     ///
-    /// Equal to `issued_ms` on a session the callback just opened, and moved
-    /// forward when a re-authentication lands on it.
+    /// Equal to `issued_ms` on a session sign-in just opened, and moved forward
+    /// when a re-authentication lands on it.
     ///
     /// **Per session, not per account.** Proving it again on a laptop must not
     /// privilege a phone that has been sitting signed in for a month — that is
@@ -176,15 +176,15 @@ pub struct Session {
 
 /// How recently a browser must have proved itself to change a secret.
 ///
-/// Five minutes, not ten and not an hour. GitHub's own prompt is a few seconds
-/// when you already hold a session there, so the window only has to cover
-/// clicking through, coming back, and typing. Long enough that changing two
-/// settings does not mean two hops; short enough that a laptop walked away from
-/// is not a standing key to the secrets.
+/// Five minutes, not ten and not an hour. Typing a password takes seconds, so
+/// the window only has to cover reaching for it and typing it. Long enough that
+/// changing two settings does not mean proving it twice; short enough that a
+/// laptop walked away from is not a standing key to the secrets.
 ///
-/// Deliberately not [`crate::oauth::STATE_TTL_MS`], which is ten minutes and
-/// covers a *human deciding* whether to authorise an application — a different
-/// event that happens to be adjacent.
+/// **The number did not change when the mechanism did**, and that is not
+/// inertia: what it measures is how long a browser may coast on a proof, which
+/// has nothing to do with how the proof was made. A hop to a third party and a
+/// password field both take about as long, so both fit the same window.
 pub const FRESH_AUTH_MS: u64 = 5 * 60 * 1000;
 
 impl Session {
@@ -205,7 +205,7 @@ impl Session {
 /// could not make an unauthenticated request cost a parse of an attacker-sized
 /// file.
 ///
-/// Signing the administrator in with GitHub removed it. This is the only
+/// Giving the administrator an account removed it. This is the only
 /// credential store left, so every cookie-bearing request reaches it — including
 /// one carrying a cookie that matches nothing, which is what a guesser sends,
 /// and which is resolved *before* the rate limiter runs.
@@ -527,8 +527,8 @@ impl Accounts {
             token_hash: hash(&token),
             issued_ms: now_ms,
             revoked: false,
-            // A session the callback just opened *is* freshly proved: the
-            // browser came back from GitHub a moment ago.
+            // A session sign-in just opened *is* freshly proved: whoever holds
+            // it typed the credential a moment ago.
             authed_ms: now_ms,
         });
         token
@@ -550,7 +550,7 @@ impl Accounts {
             .find(|a| a.id == session.account_id && !a.revoked)
     }
 
-    /// Was this token's session proved against GitHub recently?
+    /// Was this token's session proved with a credential recently?
     ///
     /// Separate from [`session_for`](Accounts::session_for), which answers *who*
     /// — this answers *how recently*, and the two are wanted at different
@@ -899,9 +899,9 @@ mod tests {
     }
 
     #[test]
-    fn a_session_the_callback_just_opened_is_freshly_proved() {
-        // The browser came back from GitHub a moment ago, which is the whole
-        // definition of proved.
+    fn a_session_sign_in_just_opened_is_freshly_proved() {
+        // A credential was typed a moment ago, which is the whole definition of
+        // proved.
         let mut accounts = Accounts::default();
         let account = accounts.create(&hash("a@b.test"), "a***@b.test", 1_000);
         let token = accounts.open_session(&account.id, 1_000);

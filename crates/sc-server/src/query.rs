@@ -84,51 +84,6 @@ impl PollQuery {
     }
 }
 
-/// What GitHub sends back on the OAuth callback.
-///
-/// Both fields are caller-supplied and neither is trusted: the state is checked
-/// against what this server issued, and the code is only ever handed straight
-/// back to GitHub.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CallbackQuery {
-    pub code: Option<String>,
-    pub state: Option<String>,
-}
-
-impl CallbackQuery {
-    /// Parse from a raw request path.
-    ///
-    /// Values longer than a credible token are dropped rather than truncated: a
-    /// truncated token is a *different* token, and this one is compared against
-    /// a stored hash where "different" would simply fail — but silently, and for
-    /// a reason nobody could work out from the page.
-    pub fn parse(raw_path: &str) -> CallbackQuery {
-        const MAX: usize = 512;
-        let mut out = CallbackQuery::default();
-        let Some((_, query)) = raw_path.split_once('?') else {
-            return out;
-        };
-        for pair in query.split('&') {
-            let Some((key, value)) = pair.split_once('=') else {
-                continue;
-            };
-            let decoded = decode(value);
-            if decoded.is_empty() || decoded.len() > MAX {
-                continue;
-            }
-            match key {
-                "code" => out.code = Some(decoded),
-                "state" => out.state = Some(decoded),
-                // `error` and `error_description` are deliberately ignored:
-                // every callback failure renders one page, so nothing here needs
-                // to distinguish "declined" from "expired".
-                _ => {}
-            }
-        }
-        out
-    }
-}
-
 /// Percent-decode one query value.
 ///
 /// `+` is a space, per form encoding. A malformed `%` escape is kept **as

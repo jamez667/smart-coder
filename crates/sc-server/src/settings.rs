@@ -18,8 +18,8 @@
 //!
 //! ## Secrets are sealed, and never given back
 //!
-//! Three values here have to be *replayed* rather than compared — a mail key
-//! goes to Brevo, a client secret goes to GitHub — so they cannot be hashed the
+//! Two values here have to be *replayed* rather than compared — a mail key goes
+//! to Brevo, a screening key goes to its provider — so they cannot be hashed the
 //! way [`crate::auth`] hashes everything else. They are sealed instead; see
 //! [`crate::seal`] for why that keeps the volume safe to copy.
 //!
@@ -41,13 +41,6 @@ pub struct Settings {
     /// see [`crate::config::check_base_url`].
     #[serde(default)]
     pub base_url: String,
-    /// The GitHub OAuth application. Both halves or neither: an id without a
-    /// secret is a sign-in button that always fails.
-    #[serde(default)]
-    pub github_client_id: String,
-    #[serde(default)]
-    pub github_client_secret: Sealed,
-
     /// Whether the public surface exists at all.
     ///
     /// **This used to be an environment variable on purpose**: a server that
@@ -104,30 +97,6 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Is there a usable GitHub application?
-    ///
-    /// Both halves, because half an application is a button that sends somebody
-    /// to GitHub and then cannot finish — worse than no button.
-    pub fn has_github(&self) -> bool {
-        !self.github_client_id.is_empty() && self.github_client_secret.is_set()
-    }
-
-    /// The client secret, if it can be read.
-    ///
-    /// `None` when unset *or* when the sealing key is missing or wrong. The
-    /// caller cannot act differently on those, and the startup check in
-    /// [`crate::seal::usable`] is what turns the second into a refusal to boot
-    /// rather than a mystery here.
-    pub fn github_secret(&self, key: Option<&SealKey>) -> Option<String> {
-        crate::seal::open(key?, &self.github_client_secret)
-    }
-
-    /// Record a GitHub application.
-    pub fn set_github(&mut self, key: &SealKey, id: &str, secret: &str, now_ms: u64) {
-        self.github_client_id = id.trim().to_string();
-        self.github_client_secret = crate::seal::seal(key, secret.trim(), now_ms);
-    }
-
     /// Is mail configured well enough to send a sign-in link?
     pub fn has_mail(&self) -> bool {
         !self.mail_provider.is_empty() && self.mail_key.is_set() && !self.mail_from.is_empty()
@@ -194,14 +163,6 @@ impl Settings {
         if let Some(base) = from.base_url {
             self.base_url = base.trim().to_string();
         }
-        // Sealed only if there is a key to seal with. Without one the id is
-        // still recorded, which leaves `has_github` false — visibly incomplete
-        // on the settings page rather than silently half-applied.
-        if let (Some(id), Some(secret), Some(key)) = (from.github_id, from.github_secret, key) {
-            self.set_github(key, id, secret, now_ms);
-        } else if let Some(id) = from.github_id {
-            self.github_client_id = id.trim().to_string();
-        }
 
         self.public = from.public;
         if let Some(name) = from.site_name {
@@ -238,8 +199,6 @@ impl Settings {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Seed<'a> {
     pub base_url: Option<&'a str>,
-    pub github_id: Option<&'a str>,
-    pub github_secret: Option<&'a str>,
     pub site_name: Option<&'a str>,
     /// Whether the environment described a public surface at all.
     pub public: bool,
@@ -299,60 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn a_github_application_round_trips_without_the_secret_being_stored() {
-        let key = a_key();
-        let mut s = Settings::default();
-        s.set_github(&key, "client-id", "client-secret", 1);
-
-        assert!(s.has_github());
-        assert_eq!(
-            s.github_secret(Some(&key)).as_deref(),
-            Some("client-secret")
-        );
-
-        // And the file holds no secret.
-        let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("client-secret"), "{json}");
-        // The id is not a secret and is stored plainly, which the page shows.
-        assert!(json.contains("client-id"));
-    }
-
-    #[test]
-    fn half_an_application_is_not_an_application() {
-        // An id without a secret is a sign-in button that sends somebody to
-        // GitHub and cannot finish — worse than no button at all.
-        let mut s = Settings {
-            github_client_id: "client-id".into(),
-            ..Settings::default()
-        };
-        assert!(!s.has_github());
-
-        let key = a_key();
-        s.set_github(&key, "client-id", "secret", 1);
-        assert!(s.has_github());
-    }
-
-    #[test]
-    fn a_secret_sealed_with_a_lost_key_reads_as_absent_but_stays_set() {
-        // The distinction matters: the page must not invite re-entering a secret
-        // that was never lost, and `seal::usable` turns this into a refusal to
-        // boot rather than a blank page.
-        let mut s = Settings::default();
-        s.set_github(&a_key(), "id", "secret", 1);
-        assert!(s.github_client_secret.is_set());
-        assert_eq!(s.github_secret(Some(&a_key())), None);
-        assert_eq!(s.github_secret(None), None, "and with no key at all");
-    }
-
-    #[test]
     fn the_seed_is_applied_once_and_never_again() {
         // Without the flag a redeploy silently reverts every change made through
         // the UI — the restart back door.
         let key = a_key();
         let seed = Seed {
             base_url: Some("https://one.example"),
-            github_id: Some("id-one"),
-            github_secret: Some("secret-one"),
             ..Seed::default()
         };
 
@@ -381,24 +292,6 @@ mod tests {
             2
         ));
         assert!(s.base_url.is_empty());
-    }
-
-    #[test]
-    fn seeding_an_application_with_no_sealing_key_leaves_it_visibly_incomplete() {
-        // Rather than silently half-applied: `has_github` is false, so the
-        // sign-in button does not render and the settings page shows the gap.
-        let mut s = Settings::default();
-        s.seed(
-            Seed {
-                github_id: Some("id"),
-                github_secret: Some("secret"),
-                ..Seed::default()
-            },
-            None,
-            1,
-        );
-        assert_eq!(s.github_client_id, "id");
-        assert!(!s.has_github());
     }
 
     #[test]
@@ -441,7 +334,6 @@ mod tests {
         let old = r#"{"base_url":"https://one.example","seeded":true}"#;
         let s: Settings = serde_json::from_str(old).unwrap();
         assert_eq!(s.base_url, "https://one.example");
-        assert!(!s.has_github());
         assert!(s.seeded);
     }
 }

@@ -162,7 +162,7 @@ pub enum Caller {
     /// review.**
     ///
     /// A variant of its own rather than a flag on [`Caller::Owner`], even though
-    /// both now arrive as a GitHub session. The safety argument below is that no
+    /// both now arrive as an ordinary session. The safety argument below is that no
     /// value of `Owner` satisfies the gate's pattern — a boolean would turn that
     /// back into a check somebody has to remember, and would silently widen
     /// every existing `Some(Caller::Owner { .. })` match to include the

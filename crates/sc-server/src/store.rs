@@ -392,10 +392,6 @@ impl Store {
         self.root.join("links.json")
     }
 
-    fn oauth_states_path(&self) -> PathBuf {
-        self.root.join("oauth-states.json")
-    }
-
     fn admin_path(&self) -> PathBuf {
         self.root.join("admin.json")
     }
@@ -892,22 +888,6 @@ impl Store {
     pub fn put_links(&self, links: &Links) -> Result<()> {
         let json = serde_json::to_string_pretty(links).map_err(|e| DcError::Eval(e.to_string()))?;
         write_atomic(&self.links_path(), json.as_bytes())
-    }
-
-    /// Half-finished GitHub sign-ins.
-    ///
-    /// A file of its own rather than a field on `accounts.json`: these live for
-    /// ten minutes and are written by anyone who reaches the start of the flow,
-    /// while accounts are durable and written rarely. Sharing one file would put
-    /// the two under the same lock and the same rewrite.
-    pub fn oauth_states(&self) -> Result<crate::oauth::States> {
-        read_json(&self.oauth_states_path())
-    }
-
-    pub fn put_oauth_states(&self, states: &crate::oauth::States) -> Result<()> {
-        let json =
-            serde_json::to_string_pretty(states).map_err(|e| DcError::Eval(e.to_string()))?;
-        write_atomic(&self.oauth_states_path(), json.as_bytes())
     }
 
     /// What this server does — the settings that used to be environment

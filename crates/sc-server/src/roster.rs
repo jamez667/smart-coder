@@ -71,7 +71,7 @@ pub struct Roster {
 /// Somebody the **developer** promoted. Never somebody who promoted themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerRecord {
-    /// The GitHub login, lowercased.
+    /// The username, lowercased.
     ///
     /// Not the numeric id, for the same reason the configuration used a login:
     /// an administrator types a name they recognise, and nobody knows their
@@ -150,8 +150,8 @@ impl OwnerRecord {
 impl Roster {
     /// The live record for a login, if the developer has promoted one.
     ///
-    /// Lowercased on the way in so a caller holding GitHub's own casing matches
-    /// a record written by hand.
+    /// Lowercased on the way in so a caller who typed their name with different
+    /// capitalisation still matches a record written by hand.
     pub fn owner_for(&self, login: &str) -> Option<&OwnerRecord> {
         let login = login.to_ascii_lowercase();
         self.owners.iter().find(|o| o.login == login && o.live())
@@ -380,10 +380,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_owner_is_matched_whatever_case_github_reports() {
-        // The record is written by hand and the login arrives from GitHub, so
-        // the two have to meet somewhere. A mismatch here grants nothing while
-        // looking applied.
+    fn an_owner_is_matched_whatever_case_is_typed() {
+        // The record is written by hand and the login arrives from a sign-in
+        // form, so the two have to meet somewhere. A mismatch here grants
+        // nothing while looking applied.
         let mut roster = Roster::default();
         roster.set_owner("JameZ667", &["alpha".into()], 1);
         assert!(roster.owner_for("jamez667").is_some());

@@ -9,7 +9,7 @@
 //!
 //! It does not fit a mail API key. The server has to *send* that key to Brevo,
 //! so it has to be able to read it back, so a hash is no use. The same is true
-//! of a GitHub client secret and a screening key. These are the first secrets in
+//! of a screening key. These are the first secrets in
 //! this server that are reversible by necessity rather than by carelessness.
 //!
 //! Until now they were environment variables, which kept them off the volume by

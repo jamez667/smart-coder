@@ -45,7 +45,7 @@ pub struct Config {
     ///
     /// **The one secret that must stay in the environment**, because it is what
     /// makes the volume safe to copy. Settings that have to be *replayed* — a
-    /// mail key, a GitHub client secret — cannot be hashed the way every
+    /// mail key, a screening key — cannot be hashed the way every
     /// credential in [`crate::auth`] is, so they are encrypted instead, and an
     /// encryption key stored beside its ciphertext protects nothing.
     ///
@@ -184,9 +184,9 @@ impl From<Vec<String>> for Repos {
 /// grants anything at runtime is the roster, never this.
 ///
 /// **The allowlist is the whole authorization model**, and deliberately so. The
-/// server makes no call to GitHub to ask whether a person has anything to do
-/// with a repository, so it is the only thing standing between a GitHub account
-/// and every drafted spec for a project — and a drafted spec is model output
+/// server asks nobody whether a person has anything to do with a repository,
+/// so it is the only thing standing between a signed-in account and every
+/// drafted spec for a project — and a drafted spec is model output
 /// produced by reading the developer's tree.
 ///
 /// That is why every entry is validated at startup and why the failures are
@@ -195,12 +195,12 @@ impl From<Vec<String>> for Repos {
 /// nothing. A record read at runtime cannot refuse to boot, so the roster
 /// intersects instead and the admin page marks what no longer matches.
 ///
-/// **Repository access is not checked against GitHub.** Signing in proves who
+/// **Repository access is not checked anywhere else.** Signing in proves who
 /// somebody is and nothing more; what they may see comes from the roster.
 /// Adding the check later reads the same field and calls the API *in addition*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owner {
-    /// The GitHub **login**, lowercased. Not the numeric id.
+    /// The **username**, lowercased. Not the account id.
     ///
     /// The id is the stabler identifier, and that argument does not apply here:
     /// an operator writes this setting by hand from a name they recognise, and
@@ -223,17 +223,6 @@ impl Owner {
     pub fn owns(&self, repo: &str) -> bool {
         self.repos.iter().any(|r| r == repo)
     }
-}
-
-/// A GitHub OAuth application, for owner sign-in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GithubConfig {
-    /// Public: it appears in the URL a reader follows.
-    pub client_id: String,
-    /// **Kept in the clear because it must be replayed** in the server-to-server
-    /// token exchange, like the mail and screening keys and unlike a daemon key
-    /// — which is only ever compared, and so is stored hashed.
-    pub client_secret: String,
 }
 
 /// What the public surface needs before it may exist.
@@ -355,12 +344,6 @@ pub struct PublicConfig {
     /// Empty means the owner role does not exist on this surface — the resting
     /// state, and what every deployment has until an operator names somebody.
     pub owners: Vec<Owner>,
-    /// The GitHub OAuth application, when one is configured.
-    ///
-    /// `None` means no GitHub sign-in: the route does not exist rather than
-    /// existing and failing, so a half-configured application cannot present a
-    /// sign-in button that leads nowhere.
-    pub github: Option<GithubConfig>,
 }
 
 /// How the sign-in link is sent.
@@ -456,16 +439,12 @@ pub mod env {
 
     /// Set to turn the public surface on. Everything below is then required.
     /// The GitHub OAuth application's client id. Public — it appears in the URL
-    /// a reader follows.
-    pub const GITHUB_CLIENT_ID: &str = "SC_SERVER_GITHUB_CLIENT_ID";
     /// The GitHub OAuth application's client secret. **Never leaves this
-    /// server**: it appears only in the server-to-server token exchange.
-    pub const GITHUB_CLIENT_SECRET: &str = "SC_SERVER_GITHUB_CLIENT_SECRET";
     /// Who may review work, and for which repositories:
     /// `jamez667:smart-coder|memosy,someone:memosy`.
     ///
-    /// **This list is the authorization model.** Nothing is checked against
-    /// GitHub, so an entry here is the only thing granting sight of a project's
+    /// **This list is the authorization model.** Nothing is checked anywhere
+    /// else, so an entry here is the only thing granting sight of a project's
     /// drafted specs.
     pub const OWNERS: &str = "SC_SERVER_OWNERS";
     /// The repositories the public surface collects for, comma-separated:
@@ -764,49 +743,6 @@ fn public_repos(
     Ok(Some(Repos(out)))
 }
 
-/// The GitHub OAuth application, if one is configured.
-///
-/// **Both halves or neither.** An id without a secret is an application that
-/// sends readers to GitHub and then cannot finish the exchange — a sign-in
-/// button that always fails, which is worse than no button at all.
-///
-/// Refused when owners are named but no application is configured, for the same
-/// reason: an owner with no way to sign in is a setting that looks applied and
-/// does nothing.
-fn github_from(
-    get: &impl Fn(&str) -> Option<String>,
-    owners: &[Owner],
-) -> std::result::Result<Option<GithubConfig>, String> {
-    let id = opt(get, env::GITHUB_CLIENT_ID);
-    let secret = opt(get, env::GITHUB_CLIENT_SECRET);
-
-    match (id, secret) {
-        (Some(client_id), Some(client_secret)) => Ok(Some(GithubConfig {
-            client_id,
-            client_secret,
-        })),
-        (Some(_), None) => Err(format!(
-            "{} is set without {}. The exchange that finishes a sign-in needs \
-             both, so this would send people to GitHub and fail on the way back.",
-            env::GITHUB_CLIENT_ID,
-            env::GITHUB_CLIENT_SECRET
-        )),
-        (None, Some(_)) => Err(format!(
-            "{} is set without {}.",
-            env::GITHUB_CLIENT_SECRET,
-            env::GITHUB_CLIENT_ID
-        )),
-        (None, None) if !owners.is_empty() => Err(format!(
-            "{} names owners, but there is no GitHub application for them to \
-             sign in with. Set {} and {}, or remove the owners.",
-            env::OWNERS,
-            env::GITHUB_CLIENT_ID,
-            env::GITHUB_CLIENT_SECRET
-        )),
-        (None, None) => Ok(None),
-    }
-}
-
 /// Who may review work, and for what.
 ///
 /// `login:repo|repo`, comma-separated between owners:
@@ -840,8 +776,8 @@ fn owners(
                 env::OWNERS
             ));
         };
-        // Lowercased on the way in so a setting written `Jamez667` matches the
-        // login GitHub reports, rather than silently granting nothing.
+        // Lowercased on the way in so a setting written `Jamez667` matches a
+        // name registered as `jamez667`, rather than silently granting nothing.
         let login = login.trim().to_ascii_lowercase();
         if login.is_empty() {
             return Err(format!(
@@ -963,7 +899,6 @@ fn public_from(
         // surface does not serve is caught here rather than at their first
         // sign-in. Read before `repos` is moved into the struct.
         owners: owned.clone(),
-        github: github_from(get, &owned)?,
         repos,
         // Computed before `base_url` is moved, and from the same value the
         // `https://` check above ran on.
@@ -997,8 +932,8 @@ fn mail_from(
     // sign-in links yet and says so on the page, the same way one with no
     // repositories enabled says it cannot take a filing. Refusing to start
     // would put the settings page that fixes it out of reach — and it is
-    // reachable, because the administrator signs in with GitHub rather than by
-    // email.
+    // reachable, because the administrator signs in with a password rather
+    // than by email.
     let Some(raw) = opt(get, env::MAIL_PROVIDER) else {
         return Ok(None);
     };
@@ -1223,8 +1158,6 @@ mod tests {
             (env::MAIL_PROVIDER, "brevo"),
             (env::MAIL_KEY, GOOD_KEY),
             (env::MAIL_FROM, "noreply@example.com"),
-            (env::GITHUB_CLIENT_ID, "client-id"),
-            (env::GITHUB_CLIENT_SECRET, "client-secret"),
         ]
     }
 
@@ -1370,10 +1303,10 @@ mod tests {
     }
 
     #[test]
-    fn an_owners_login_is_lowercased_so_the_setting_matches_github() {
-        // GitHub reports a login in its own casing. A setting written the way a
-        // person types a name must still match, or it grants nothing while
-        // looking applied.
+    fn an_owners_login_is_lowercased_so_the_setting_matches_the_account() {
+        // A setting is written the way a person types a name; the account was
+        // registered however its holder typed it. The two must still match, or
+        // the setting grants nothing while looking applied.
         let mut vars = public_vars_multi();
         vars.push((env::OWNERS, "JameZ667:intake"));
         let p = load(&vars).unwrap().public.unwrap();
@@ -1420,39 +1353,6 @@ mod tests {
         vars.push((env::OWNERS, "jamez667"));
         let err = load(&vars).unwrap_err();
         assert!(err.contains("login:repo"), "{err}");
-    }
-
-    #[test]
-    fn naming_owners_without_a_github_application_is_refused() {
-        // An owner with no way to sign in is a setting that looks applied and
-        // does nothing — the same failure the repository check refuses.
-        let mut vars = public_vars_multi();
-        vars.retain(|(k, _)| *k != env::GITHUB_CLIENT_ID && *k != env::GITHUB_CLIENT_SECRET);
-        vars.push((env::OWNERS, "jamez667:intake"));
-        let err = load(&vars).unwrap_err();
-        assert!(err.contains(env::GITHUB_CLIENT_ID), "{err}");
-    }
-
-    #[test]
-    fn half_a_github_application_is_refused() {
-        // An id without a secret sends people to GitHub and cannot finish the
-        // exchange: a sign-in button that always fails.
-        let mut vars = public_vars_multi();
-        vars.retain(|(k, _)| *k != env::GITHUB_CLIENT_SECRET);
-        let err = load(&vars).unwrap_err();
-        assert!(err.contains(env::GITHUB_CLIENT_SECRET), "{err}");
-
-        let mut vars = public_vars_multi();
-        vars.retain(|(k, _)| *k != env::GITHUB_CLIENT_ID);
-        let err = load(&vars).unwrap_err();
-        assert!(err.contains(env::GITHUB_CLIENT_ID), "{err}");
-    }
-
-    #[test]
-    fn no_github_application_is_the_resting_state() {
-        // No GitHub sign-in unless asked for, and the surface works as it did.
-        let p = load(&public_vars()).unwrap().public.unwrap();
-        assert!(p.github.is_none());
     }
 
     #[test]
@@ -1816,8 +1716,8 @@ mod tests {
         // arrived. Naming none at all is a legal, visible state: the page says
         // sign-in is unavailable, and `/settings` fixes it without a restart.
         //
-        // `PUBLIC_BASE_URL` stays required because sign-in links, and the
-        // GitHub callback the administrator needs, are built from it.
+        // `PUBLIC_BASE_URL` stays required because the sign-in links sent to
+        // filers are built from it.
         for missing in [env::PUBLIC_BASE_URL, env::MAIL_KEY, env::MAIL_FROM] {
             let vars: Vec<_> = public_vars()
                 .into_iter()

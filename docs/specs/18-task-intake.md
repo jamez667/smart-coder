@@ -516,7 +516,7 @@ minted for anything longer. **No credential on this path is written to that file
 ### The administrator → server
 
 ✅ **Built.** One identity, signing in with GitHub from any browser
-<!--@ crates/sc-server/src/oauth.rs -->.
+<!--@ crates/sc-server/src/routes.rs -->.
 
 **This replaced per-device enrolment**, and the argument for that model
 dissolved rather than being answered. It held a credential per enrolled browser
@@ -582,7 +582,7 @@ carries only `repos`.
 
 ### The owner → server
 
-✅ **Built** <!--@ crates/sc-server/src/oauth.rs -->. An owner signs in with
+✅ **Built** <!--@ crates/sc-server/src/routes.rs -->. An owner signs in with
 GitHub and reads the drafted specs for the repositories the developer named as
 theirs, and may send them back, discard them, or release ones the screener held.
 Magic links stay for filers: the two are different roles, not two spellings of

@@ -212,13 +212,26 @@ pub struct Strings {
     pub signin_no_mail: &'static str,
     /// Names the other role, so somebody who is an owner knows this page has
     /// a second way in and everybody else can ignore it.
-    /// The way out of the dialog, to the page that knows whether there is a
-    /// GitHub application. Worded as a question about the reader rather than
-    /// about the mechanism, because somebody who is not an owner should be
-    /// able to skip it without wondering what they are missing.
+    /// The way out of the dialog, to the sign-in page that carries the
+    /// password form. Worded as a question about the reader rather than about
+    /// the mechanism, because somebody who is neither an owner nor the
+    /// administrator should be able to skip it without wondering what they are
+    /// missing.
     pub signin_other_ways: &'static str,
-    pub signin_owner_note: &'static str,
-    pub signin_owner_link: &'static str,
+    /// Heads the password form, naming who it is for.
+    ///
+    /// **Both named roles, not just owners.** The administrator signs in here
+    /// too, and a heading that named only owners would send the one person who
+    /// can fix a broken server looking for a door that does not exist.
+    pub signin_password_heading: &'static str,
+    /// One message for every sign-in failure.
+    ///
+    /// Wrong password, no such account, still backing off — all one answer,
+    /// because distinguishing them tells a guesser which half they got right.
+    pub signin_wrong: &'static str,
+    pub signin_user_label: &'static str,
+    pub signin_password_label: &'static str,
+    pub signin_password_submit: &'static str,
 
     pub sent_title: &'static str,
     pub sent_body: &'static str,
@@ -249,12 +262,6 @@ pub struct Strings {
     /// The repository picker's label. Shown only when the surface serves more
     /// than one — the names themselves are never translated.
     pub file_repo_label: &'static str,
-    pub github_title: &'static str,
-    pub github_intro: &'static str,
-    pub github_go: &'static str,
-    pub github_note: &'static str,
-    pub github_failed: &'static str,
-    pub github_busy: &'static str,
     pub owner_title: &'static str,
     pub owner_nothing: &'static str,
     pub owner_note: &'static str,
@@ -443,8 +450,11 @@ mod tests {
             s.signin_no_password,
             s.signin_no_mail,
             s.signin_other_ways,
-            s.signin_owner_note,
-            s.signin_owner_link,
+            s.signin_password_heading,
+            s.signin_wrong,
+            s.signin_user_label,
+            s.signin_password_label,
+            s.signin_password_submit,
             s.sent_title,
             s.sent_body,
             s.sent_nothing_yet,
@@ -466,12 +476,6 @@ mod tests {
             s.file_spec_note,
             s.file_kind_label,
             s.file_repo_label,
-            s.github_title,
-            s.github_intro,
-            s.github_go,
-            s.github_note,
-            s.github_failed,
-            s.github_busy,
             s.owner_title,
             s.owner_nothing,
             s.owner_note,

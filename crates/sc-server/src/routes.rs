@@ -85,12 +85,13 @@ pub mod public_route {
     /// `/public/signin/<token>` — `GET` renders and **changes nothing**;
     /// `POST` spends the link.
     pub const SIGNIN_PREFIX: &str = "/public/signin/";
-    /// Start a GitHub sign-in — renders a page with a link, and **changes
-    /// nothing a GET should not**: it mints a state token, which is the one
-    /// write, and is what makes the link single-use.
-    pub const AUTH_GITHUB: &str = "/public/auth/github";
-    /// Where GitHub sends a reader back, with `?code=…&state=…`.
-    pub const AUTH_GITHUB_CALLBACK: &str = "/public/auth/github/callback";
+    /// Where the administrator and owners sign in with a password.
+    ///
+    /// **Public because it has to be reachable by somebody holding nothing** —
+    /// it is how they stop holding nothing. A sibling of the magic-link form
+    /// rather than a private route, so both ways in live on the page a person
+    /// arrives at.
+    pub const SIGNIN_PASSWORD: &str = "/public/signin/password";
     /// End a session.
     pub const SIGNOUT: &str = "/public/signout";
     /// `/public/request/<id>` — one of the filer's own requests.
@@ -135,8 +136,8 @@ pub mod private_route {
     pub const REPOS: &str = "/repos";
     /// Claim an unclaimed server. **Exists only while unclaimed.**
     pub const SETUP: &str = "/setup";
-    /// Step two of setup: the GitHub application.
-    pub const SETUP_GITHUB: &str = "/setup/github";
+    /// Step two: choose the username and password that will own this server.
+    pub const SETUP_ADMIN: &str = "/setup/admin";
     /// What this server does. Device-only, like every other admin page.
     pub const SETTINGS: &str = "/settings";
     /// Which machines may claim work.
@@ -472,7 +473,7 @@ pub struct Ctx<'a> {
     /// server given a wrong key refuses to boot rather than arriving here, so
     /// `None` here really is "no key", not "the wrong one".
     pub seal_key: Option<&'a crate::seal::SealKey>,
-    /// Set when this request's session proved itself against GitHub within
+    /// Set when this request's session proved itself with a password within
     /// [`FRESH_AUTH_MS`](crate::account::FRESH_AUTH_MS).
     ///
     /// **Not a field on `Caller::Owner`**, and not a second caller variant. Two
@@ -552,7 +553,7 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // **It stops existing the moment the server is claimed.** Not "exists and
     // refuses" — a 404 means a stranger cannot tell a claimed server from one
     // that never had setup, and there is no page for them to keep trying.
-    if path == private_route::SETUP || path == private_route::SETUP_GITHUB {
+    if path == private_route::SETUP || path == private_route::SETUP_ADMIN {
         return setup_route(ctx, req, method, &path);
     }
 
@@ -575,6 +576,20 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // path and show every filer's spec for a repository, which is the second kind
     // and was being served as the first.
     if is_public_path(&path) {
+        // **The password form is not part of the public surface**, even though
+        // it lives at a public address. The administrator is a private-surface
+        // role, and a freshly claimed server starts with the public surface
+        // *off* — so gating this on `ctx.public` locks the one person who can
+        // turn it on out of the server the moment their setup session lapses.
+        //
+        // That is the same shape of bug as a page nothing links to, and it was
+        // live: a claim would succeed, the cookie would expire, and the way back
+        // in would 404 with nothing to say why. Pinned by
+        // `the_administrator_can_sign_in_with_no_public_surface`.
+        let admin_way_in = matches!(
+            (method, path.as_str()),
+            ("GET", public_route::SIGNIN) | ("POST", public_route::SIGNIN_PASSWORD)
+        );
         return match ctx.public {
             Some(_) => {
                 let policy = match &caller {
@@ -582,6 +597,9 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
                     _ => Policy::PublicScript,
                 };
                 public_route(ctx, req, method, &path, &caller).with_policy(policy)
+            }
+            None if admin_way_in => {
+                public_route(ctx, req, method, &path, &caller).with_policy(Policy::PublicScript)
             }
             // No public surface configured: this 404 is not *on* that surface, so
             // it is served strict like every other non-public response.
@@ -598,211 +616,61 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // no value of that variant which reaches one. An owner's own surface is
     // public-side, above.
     //
-    // Both variants now arrive as a GitHub session, so the whole burden of
-    // telling them apart sits in `identify` — one function, one branch, checked
-    // before the roster is consulted. That is the right place for it and the
-    // only place it happens.
+    // Both variants arrive as an ordinary password session, so the whole burden
+    // of telling them apart sits in `identify` — one function, one branch,
+    // checked before the roster is consulted. That is the right place for it and
+    // the only place it happens.
     let Some(Caller::Admin { .. }) = caller else {
         // **Not found** rather than unauthorized: a 401 on `/review` tells a
         // stranger the address is real. That now covers a signed-in owner and a
         // signed-in filer too, which is the same answer for the same reason.
         //
-        // The one accommodation is for the developer holding a cookie that used
-        // to work: a bare 404 is a confusing answer to somebody who was enrolled
-        // yesterday, so the page names the way back in when there is one.
+        // The one accommodation is for somebody holding a cookie that used to
+        // work: a bare 404 is a confusing answer at an address that worked
+        // yesterday, so the page names the way back in.
+        //
+        // **Unconditional now.** It used to depend on a GitHub application
+        // existing; a claimed server always has a password, so there is always
+        // somewhere to point.
         if method == "GET" {
-            return Res::html(
-                404,
-                if has_github(ctx) {
-                    crate::page::not_found_for_admin()
-                } else {
-                    crate::page::not_found()
-                },
-            );
+            return Res::html(404, crate::page::not_found_for_admin());
         }
         return error(401, "unauthorized");
     };
     browser_route(ctx, req, method, &path)
 }
 
-/// Begin a GitHub sign-in: mint a state token and offer the link.
+/// Sign in with a username and password.
 ///
-/// **A page with a link, not a redirect.** [`Res`] carries no `Location` header
-/// and giving it one means changing the response writer for a single route —
-/// and `set_language` records the standing objection to redirects on a surface
-/// anyone can reach. A link also stays inside the CSP as written, where a form
-/// posting to github.com would be refused by `form-action 'self'`.
-/// The GitHub application, wherever it is configured.
+/// **The two named roles only.** Filers keep magic links: they are strangers,
+/// and a stranger should not be made to keep a credential for a site they may
+/// use once. The administrator and owners are people who come back, and asking
+/// them to hold a password is what removes a third party from the path.
 ///
-/// **Settings first, then the environment.** An application entered through
-/// setup lives on the volume; one from the stack is the older path and stays
-/// readable so an existing deployment keeps working. Asked in one place so the
-/// two cannot disagree about which is in force.
-fn github_app(ctx: &Ctx<'_>) -> Option<(String, String)> {
-    let settings = match ctx.settings.lock() {
-        Ok(mut cache) => cache.current(&ctx.store.settings_path()),
-        Err(p) => p.into_inner().current(&ctx.store.settings_path()),
-    };
-    if settings.has_github() {
-        if let Some(secret) = settings.github_secret(ctx.seal_key) {
-            return Some((settings.github_client_id.clone(), secret));
-        }
-    }
-    ctx.public
-        .and_then(|p| p.github.as_ref())
-        .map(|g| (g.client_id.clone(), g.client_secret.clone()))
-}
+/// One page for every failure — no such account, wrong password, still backing
+/// off. Distinguishing them tells a guesser which half they got right, and the
+/// backoff is counted by [`Accounts::check_password`] whichever it was.
+fn sign_in_with_password(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    let locale = req.locale();
+    let form = form_fields(&req.body);
+    let login = form.get("login").map(|l| l.trim()).unwrap_or_default();
+    let password = form.get("password").map(String::as_str).unwrap_or_default();
 
-/// Begin the sign-in that will claim this server.
-///
-/// The same hop as an ordinary sign-in, marked on the state so the callback
-/// knows the login it resolves should own the server. Marked there rather than
-/// on a cookie because the state is already single-use, already expires, and is
-/// already what the callback validates.
-fn start_github_claim(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
-    start_github_inner(ctx, locale, true)
-}
-
-fn start_github(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
-    start_github_inner(ctx, locale, false)
-}
-
-fn start_github_inner(ctx: &mut Ctx<'_>, locale: Locale, claiming: bool) -> Res {
-    let Some((client_id, client_secret)) = github_app(ctx) else {
-        // No application configured: the route does not exist, rather than
-        // existing and failing after a trip to GitHub.
-        return Res::html(404, crate::page::public_not_found(locale));
-    };
-    let client = crate::oauth::HttpGithub::new(&client_id, &client_secret);
-
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut states = match ctx.store.oauth_states() {
-        Ok(s) => s,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    states.sweep(ctx.now_ms);
-    // Bounded before minting, so the file cannot be grown without limit by
-    // anyone who can reach the start of the flow.
-    if states.outstanding(ctx.now_ms) >= crate::oauth::MAX_OUTSTANDING_STATES {
-        return Res::html(
-            429,
-            crate::page::public_message(locale.strings().github_busy, locale),
-        );
-    }
-    let state = if claiming {
-        states.issue_claim(ctx.now_ms)
-    } else {
-        states.issue(ctx.now_ms)
-    };
-    if let Err(e) = ctx.store.put_oauth_states(&states) {
-        return error(500, &e.to_string());
-    }
-    drop(_guard);
-
-    Res::html(
-        200,
-        crate::page::github_start_page(&client.authorize_url(&state), locale),
-    )
-}
-
-/// Come back from GitHub: spend the state, exchange the code, open a session.
-///
-/// Every failure renders the same page. The reader can only act on "it did not
-/// work, try again", and distinguishing a forged state from an expired one for
-/// them would tell an attacker which half they got right.
-fn finish_github(ctx: &mut Ctx<'_>, req: &Req, locale: Locale) -> Res {
-    let Some((client_id, client_secret)) = github_app(ctx) else {
-        return Res::html(404, crate::page::public_not_found(locale));
-    };
-    let client = crate::oauth::HttpGithub::new(&client_id, &client_secret);
-    finish_github_with(ctx, req, locale, &client)
-}
-
-/// The callback, against any [`Github`](crate::oauth::Github) client.
-///
-/// Split out so a test can drive the whole path with a stub — the alternative is
-/// a test that talks to GitHub, which is not a test.
-fn finish_github_with(
-    ctx: &mut Ctx<'_>,
-    req: &Req,
-    locale: Locale,
-    client: &dyn crate::oauth::Github,
-) -> Res {
-    let failed = || {
+    let refused = |ctx: &Ctx<'_>| {
         Res::html(
-            400,
-            crate::page::public_message(locale.strings().github_failed, locale),
+            401,
+            crate::page::signin_page_full(
+                locale,
+                true,
+                has_mail(ctx),
+                Some(locale.strings().signin_wrong),
+            ),
         )
+        .with_policy(Policy::PublicScript)
     };
 
-    // Set from the state below, which is the only place that knows. A claim
-    // rides the hop rather than a cookie because the state is already single-use
-    // and already validated here.
-    let claiming;
-
-    let query = crate::query::CallbackQuery::parse(&req.path);
-    let (Some(code), Some(state)) = (query.code, query.state) else {
-        // GitHub sends `?error=access_denied` when somebody declines, and that
-        // is not a failure worth a different page: they chose it.
-        return failed();
-    };
-
-    // The state is spent **before** the code is exchanged. A code that survives
-    // a failed exchange is worth nothing; a state that survives one could be
-    // replayed.
-    {
-        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut states = match ctx.store.oauth_states() {
-            Ok(s) => s,
-            Err(e) => return error(500, &e.to_string()),
-        };
-        match states.consume(&state, ctx.now_ms) {
-            Ok(was_claiming) => claiming = was_claiming,
-            Err(_) => return failed(),
-        }
-        if let Err(e) = ctx.store.put_oauth_states(&states) {
-            return error(500, &e.to_string());
-        }
-    }
-
-    let login = match client.login_for(&code) {
-        Ok(login) => login,
-        Err(e) => {
-            // Logged for the operator, never shown: the page says only that it
-            // did not work. The error names GitHub's complaint, which is the
-            // operator's business and not the reader's.
-            crate::log::warn("github sign-in failed")
-                .text("err", e)
-                .emit();
-            return failed();
-        }
-    };
-
-    // **The second half of the claim.** The code proved whoever started this can
-    // read the container's logs; GitHub has now proved who they are. Written
-    // before the account, so a server that fails to record the account is still
-    // owned rather than left claimable by the next person to read the log.
-    //
-    // Re-checked here rather than trusted from `/setup`: `Admin::claim` is
-    // reached only when the server is *still* unclaimed, so two people who both
-    // spent a code cannot both end up owning it — the first to finish wins and
-    // the second is an ordinary sign-in.
-    if claiming {
-        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let mut admin = match ctx.store.admin() {
-            Ok(a) => a,
-            Err(e) => return error(500, &e.to_string()),
-        };
-        if !admin.claimed() {
-            admin.claim(&login, ctx.now_ms);
-            if let Err(e) = ctx.store.put_admin(&admin) {
-                return error(500, &e.to_string());
-            }
-            crate::log::warn("server claimed")
-                .with("login", login.to_ascii_lowercase())
-                .with("note", "this account now administers this server")
-                .emit();
-        }
+    if login.is_empty() || password.is_empty() {
+        return refused(ctx);
     }
 
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -810,47 +678,34 @@ fn finish_github_with(
         Ok(a) => a,
         Err(e) => return error(500, &e.to_string()),
     };
-    // **The administrator is exempt from the signup cap.** Otherwise a flood
-    // that reaches the ceiling locks out the one person who can stop it — and
-    // the surface that stops it is behind their sign-in.
-    let is_admin = ctx.store.admin().map(|a| a.is(&login)).unwrap_or(false);
 
-    // Keyed on the login rather than on an email: a GitHub profile's address is
-    // often absent and can be several, so it is not an identity this can rely
-    // on. The hash keeps the shape every other account has.
-    let email_hash = auth::hash(&format!("github:{login}"));
-    let existing = accounts.any_by_email(&email_hash).cloned();
-    let id = match existing {
-        Some(account) if account.revoked => {
-            // Revoked stays revoked, and says nothing about why — the same
-            // silence a revoked magic-link account gets.
-            return failed();
-        }
-        Some(account) => account.id,
-        None => {
-            let cap = ctx.public.map(|p| p.max_accounts).unwrap_or(0);
-            if !is_admin && accounts.accounts.len() >= cap {
-                crate::log::warn("signup refused")
-                    .with("accounts", accounts.accounts.len() as u64)
-                    .with("cap", cap as u64)
-                    .with("via", "github")
-                    .emit();
-                return failed();
-            }
-            let account = accounts.create(&email_hash, &login, ctx.now_ms);
-            // What makes them recognisable as an owner later — and only that:
-            // whether this login *is* one comes from the configuration, checked
-            // on every request.
-            let idx = accounts.accounts.len() - 1;
-            accounts.accounts[idx].login = Some(login.clone());
-            account.id
+    // The check records the attempt either way, so the write below has to
+    // happen on failure too — otherwise the backoff would never accumulate.
+    let outcome = accounts.check_password(login, password, ctx.now_ms);
+    if let Err(e) = ctx.store.put_accounts(&accounts) {
+        return error(500, &e.to_string());
+    }
+    invalidate_accounts(ctx);
+
+    let id = match outcome {
+        Ok(id) => id,
+        Err(retry_at) => {
+            // Logged for the operator, never shown: the page says the same
+            // thing whichever failure it was.
+            crate::log::warn("password refused")
+                .with("login", login.to_ascii_lowercase())
+                .with("retry_in_s", retry_at.saturating_sub(ctx.now_ms) / 1000)
+                .emit();
+            drop(_guard);
+            return refused(ctx);
         }
     };
 
     // **A re-authentication lands on the browser's existing session** rather
-    // than opening a second one. Otherwise proving yourself again would mean
-    // signing out and back in, and the old session would stay live and stale
-    // beside the new one — two credentials where the point was to refresh one.
+    // than opening a second one beside it. Otherwise proving yourself again
+    // would mean signing out and back in, and the stale session would stay live
+    // next to the fresh one — two credentials where the point was to refresh
+    // one.
     let session = match req
         .cookie_token
         .as_deref()
@@ -863,18 +718,23 @@ fn finish_github_with(
         return error(500, &e.to_string());
     }
     invalidate_accounts(ctx);
-    let secure = secure_attr(ctx);
     drop(_guard);
 
-    let Some(repos) = ctx.public.map(|p| p.repos.clone()) else {
-        return Res::html(404, crate::page::public_not_found(locale));
-    };
+    crate::log::info("signed in")
+        .with("login", login.to_ascii_lowercase())
+        .emit();
+
+    let secure = secure_attr(ctx);
+    let repos = ctx.public.map(|p| p.repos.clone()).unwrap_or_default();
     let mut res = Res::html(
         200,
         crate::page::public_file_page(&[], &repos, false, locale),
     );
+    // **`Strict`, where the GitHub return needed `Lax`.** That relaxation
+    // existed only because the browser arrived from github.com; a password POST
+    // is same-origin, so the tighter setting is available and taken.
     res.set_cookie = Some(format!(
-        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=31536000"
+        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
     ));
     res
 }
@@ -907,6 +767,12 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         // budget. Safe to key on for the same reason an account id is: it was
         // resolved by this server from configuration, not sent by the caller.
         Some(Caller::Owner { login, .. }) => Bucket::Credential(auth::hash(login)),
+        // **Credential guessing, which is what `AnonPrivate` is for** — its own
+        // doc names this exact family. Not `PublicWrite`: that bucket is both
+        // looser (30/min against 20) and *shared*, so somebody grinding
+        // passwords would lock every filer out of asking for a magic link. The
+        // path is public; the traffic is not.
+        None if path == public_route::SIGNIN_PASSWORD => Bucket::AnonPrivate,
         None if is_public_path(path) => {
             // Asking for a link costs an email; spending one costs a disk write.
             // Everything else on the public surface is a page render, and
@@ -932,11 +798,6 @@ fn is_public_path(path: &str) -> bool {
     path == public_route::LANDING
         || path == public_route::FILE
         || path == public_route::SIGNIN
-        // Both halves of the GitHub flow. Absent from this list they would fall
-        // through to the private device gate and 404, which is a sign-in button
-        // that leads nowhere.
-        || path == public_route::AUTH_GITHUB
-        || path == public_route::AUTH_GITHUB_CALLBACK
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
         || path == public_route::SCRIPT
@@ -978,8 +839,8 @@ fn invalidate_accounts(ctx: &Ctx<'_>) {
     }
 }
 
-/// Was this request's session proved against GitHub recently enough to change a
-/// secret?
+/// Was this request's session proved with a password recently enough to change
+/// a secret?
 ///
 /// Read from the session rather than the caller, because it is a property of
 /// *this browser's* proof and not of the person holding it.
@@ -1020,9 +881,9 @@ fn identify(ctx: &Ctx<'_>, req: &Req) -> Option<Caller> {
     let accounts = accounts_now(ctx);
     let account = accounts.session_for(token)?;
 
-    // A GitHub login is required for anything above a filer. A magic-link
-    // account has none and is an `Account` whatever any record says — so a
-    // claim naming an email address grants nothing rather than escalating.
+    // A login is required for anything above a filer. A magic-link account has
+    // none and is an `Account` whatever any record says — so a claim naming an
+    // email address grants nothing rather than escalating.
     //
     // **Not `?`.** Returning `None` here would make a signed-in filer
     // *anonymous* rather than an account, which silently drops them out of
@@ -1050,7 +911,7 @@ fn identify(ctx: &Ctx<'_>, req: &Req) -> Option<Caller> {
         });
     }
 
-    // An account whose identity is a GitHub login **the roster names** is an
+    // An account whose login **the roster names** is an
     // owner. Reached only after the administrator branch, and only where a
     // public surface exists — an owner reviews public filings, so without one
     // there is nothing for the role to mean.
@@ -1436,13 +1297,12 @@ fn public_route(
         // Ask for a link. Reachable signed-out — it is how one signs in.
         ("GET", public_route::SIGNIN) => Res::html(
             200,
-            crate::page::signin_page_full(locale, has_github(ctx), has_mail(ctx)),
+            crate::page::signin_page_full(locale, true, has_mail(ctx), None),
         ),
 
-        // Start a GitHub sign-in, and come back from one. Both reachable
-        // signed-out for the same reason.
-        ("GET", public_route::AUTH_GITHUB) => start_github(ctx, locale),
-        ("GET", public_route::AUTH_GITHUB_CALLBACK) => finish_github(ctx, req, locale),
+        // **The two named roles sign in here.** Filers use the magic-link
+        // form above; this is the administrator and the owners.
+        ("POST", public_route::SIGNIN_PASSWORD) => sign_in_with_password(ctx, req),
         ("POST", public_route::SIGNIN) => request_sign_in(ctx, req),
 
         ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
@@ -1475,6 +1335,13 @@ fn public_route(
             // would be a free validity oracle, cheaper than the POST it guards.
             Res::html(200, crate::page::signin_confirm_page(token, locale))
         }
+        // **This must stay below the password arm.** `SIGNIN_PASSWORD` lives
+        // under `SIGNIN_PREFIX`, so this guard matches it too — and reaching
+        // here first would feed a typed password to `complete_sign_in` as if it
+        // were a magic-link token. It would fail, which is the dangerous part:
+        // the sign-in page would simply stop working for the two roles that have
+        // no other way in, with nothing in the logs naming a cause. Pinned by
+        // `a_password_post_is_not_read_as_a_magic_link_token`.
         ("POST", p) if p.starts_with(public_route::SIGNIN_PREFIX) => {
             let token = p.trim_start_matches(public_route::SIGNIN_PREFIX);
             complete_sign_in(ctx, token, locale)
@@ -1485,7 +1352,7 @@ fn public_route(
             Some(id) => signed_in_route(ctx, req, method, path, &id, locale),
             None => Res::html(
                 200,
-                crate::page::signin_page_full(locale, has_github(ctx), has_mail(ctx)),
+                crate::page::signin_page_full(locale, true, has_mail(ctx), None),
             ),
         },
     }
@@ -1595,13 +1462,8 @@ fn set_owner(ctx: &mut Ctx<'_>, login: &str, repos: &[String]) -> Res {
     let Some(public) = ctx.public else {
         return Res::html(404, crate::page::not_found());
     };
-    if login.is_empty() || login.len() > 64 {
-        return error(400, "a GitHub username is required");
-    }
-    // GitHub's own rule, so a typo is refused here rather than becoming a
-    // record that can never match anybody.
-    if !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return error(400, "that is not a GitHub username");
+    if let Err(e) = check_login(login) {
+        return error(400, &e);
     }
     let known: Vec<String> = repos
         .iter()
@@ -2153,7 +2015,7 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     let secure = secure_attr(ctx);
     let mut res = Res::html(
         200,
-        crate::page::signin_page_full(req.locale(), has_github(ctx), has_mail(ctx)),
+        crate::page::signin_page_full(req.locale(), true, has_mail(ctx), None),
     );
     // Max-Age=0 so the browser drops it rather than carrying a dead token.
     res.set_cookie = Some(format!(
@@ -2208,7 +2070,7 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
     let secure = secure_attr(ctx);
     let mut res = Res::html(
         200,
-        crate::page::signin_page_full(locale, has_github(ctx), has_mail(ctx)),
+        crate::page::signin_page_full(locale, true, has_mail(ctx), None),
     );
     // Not `HttpOnly`: this is a preference, not a credential, and the public
     // surface's script may read it. `SameSite=Lax` rather than `Strict` so that
@@ -2221,23 +2083,12 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
     res
 }
 
-/// Is there a GitHub application for an owner to sign in with?
-///
-/// **The same condition [`start_github`] exists on**, asked in one place so the
-/// button and the route cannot drift apart. They already had: the flow was
-/// built and reachable and no page linked to it, so the only way in was to know
-/// the URL. Offering a link where the route 404s is the same bug pointing the
-/// other way.
 /// Can this server send a sign-in link?
 ///
 /// Rendered on, so a surface with no provider says so rather than offering a
 /// form that accepts an address and sends nothing.
 fn has_mail(ctx: &Ctx<'_>) -> bool {
     ctx.public.is_some_and(|p| p.mail.is_some())
-}
-
-fn has_github(ctx: &Ctx<'_>) -> bool {
-    github_app(ctx).is_some()
 }
 
 /// Claim an unclaimed server.
@@ -2264,8 +2115,8 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
     //
     // Without this the later steps are guarded only by the server being
     // unclaimed, so a half-finished setup on a public hostname is open to
-    // whoever arrives next — and they would supply their own GitHub
-    // application, sign in, and own the server.
+    // whoever arrives next — and they would set their own password and own the
+    // server.
     //
     // It bit on a *migrated* volume rather than a fresh one: seeding fills in
     // the address, so "step one is already done" was true for everybody from
@@ -2278,10 +2129,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             // sent back to the code box — which they cannot pass without
             // reading the container's log.
             if mine && !settings.base_url.is_empty() {
-                return Res::html(
-                    200,
-                    crate::page::setup_github_page(&settings.base_url, None),
-                );
+                return Res::html(200, crate::page::setup_admin_page(&settings.base_url, None));
             }
             Res::html(200, crate::page::setup_page("", None))
         }
@@ -2336,9 +2184,9 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             // **The rest of the wizard belongs to this browser now.** Without
             // it, every step after this one is guarded only by the server being
             // unclaimed, and somebody arriving mid-way could supply their own
-            // GitHub application and take the server.
+            // password and take the server.
             let secure = secure_attr(ctx);
-            let mut res = Res::html(200, crate::page::setup_github_page(base_url, None));
+            let mut res = Res::html(200, crate::page::setup_admin_page(base_url, None));
             res.set_cookie = Some(format!(
                 "{SETUP_COOKIE}={setup_token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
                 crate::admin::CLAIM_TTL_MS / 1000
@@ -2346,17 +2194,19 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             res
         }
 
-        ("POST", private_route::SETUP_GITHUB) => {
-            // **The step that would hand the server over.** Naming a GitHub
-            // application decides which account can finish the claim, so this
-            // is the one an interloper wants.
+        ("POST", private_route::SETUP_ADMIN) => {
+            // **The step that hands the server over.** Choosing the username and
+            // password decides who owns this, so it is the one an interloper
+            // wants — which is why the wizard is bound to the browser that spent
+            // the code.
             if !mine {
                 return Res::html(
                     400,
                     crate::page::setup_page(
                         "",
                         Some(
-                            "Start again from the claim code. Setting this                              server up has to be finished in the browser that                              started it.",
+                            "Start again from the claim code. Setting this server \
+                             up has to be finished in the browser that started it.",
                         ),
                     ),
                 );
@@ -2364,37 +2214,68 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             if settings.base_url.is_empty() {
                 return Res::html(400, crate::page::setup_page("", None));
             }
+
             let form = form_fields(&req.body);
-            let id = form.get("client_id").map(|v| v.trim()).unwrap_or_default();
-            let secret = form
-                .get("client_secret")
-                .map(|v| v.trim())
-                .unwrap_or_default();
-            if id.is_empty() || secret.is_empty() {
+            let login = form.get("login").map(|v| v.trim()).unwrap_or_default();
+            let password = form.get("password").map(String::as_str).unwrap_or_default();
+
+            if let Err(e) = check_login(login) {
                 return Res::html(
                     400,
-                    crate::page::setup_github_page(
-                        &settings.base_url,
-                        Some("Both halves are needed: an id without a secret is a                               sign-in button that always fails."),
-                    ),
+                    crate::page::setup_admin_page(&settings.base_url, Some(&e)),
                 );
             }
-            let Some(key) = ctx.seal_key else {
-                return Res::html(
-                    400,
-                    crate::page::setup_github_page(
-                        &settings.base_url,
-                        Some("This server has no sealing key, so it cannot store a                               secret. Set SC_SERVER_SECRET_KEY and restart."),
-                    ),
-                );
-            };
 
             let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+
+            // Re-read under the lock: the claim is the thing two people could
+            // race for, and the first to finish has to win rather than the last.
+            let mut admin = match ctx.store.admin() {
+                Ok(a) => a,
+                Err(e) => return error(500, &e.to_string()),
+            };
+            if admin.claimed() {
+                return gone();
+            }
+
+            let mut accounts = match ctx.store.accounts() {
+                Ok(a) => a,
+                Err(e) => return error(500, &e.to_string()),
+            };
+            // `create_login` refuses a short password and a taken name, and its
+            // message says which — this is the one form where naming the reason
+            // helps rather than leaking, because nobody is guessing at anything
+            // yet.
+            let account = match accounts.create_login(login, password, ctx.now_ms) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Res::html(
+                        400,
+                        crate::page::setup_admin_page(&settings.base_url, Some(&e)),
+                    )
+                }
+            };
+            let session = accounts.open_session(&account.id, ctx.now_ms);
+            if let Err(e) = ctx.store.put_accounts(&accounts) {
+                return error(500, &e.to_string());
+            }
+            invalidate_accounts(ctx);
+
+            // **The account is written before the claim.** A server that
+            // recorded the claim and then failed to store the account would be
+            // owned by a login nobody can sign in as — unrecoverable without
+            // deleting the volume. This ordering fails the other way: an
+            // unclaimed server with a spare account, which the next attempt
+            // simply names differently.
+            admin.claim(login, ctx.now_ms);
+            if let Err(e) = ctx.store.put_admin(&admin) {
+                return error(500, &e.to_string());
+            }
+
             let mut settings = match ctx.store.settings() {
                 Ok(s) => s,
                 Err(e) => return error(500, &e.to_string()),
             };
-            settings.set_github(key, id, secret, ctx.now_ms);
             settings.seeded = true;
             if let Err(e) = ctx.store.put_settings(&settings) {
                 return error(500, &e.to_string());
@@ -2402,10 +2283,20 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             invalidate_settings(ctx);
             drop(_guard);
 
-            // Straight into the sign-in that decides who owns this. An
-            // interstitial with a link rather than a redirect, for the reason
-            // `oauth` gives.
-            start_github_claim(ctx, req.locale())
+            crate::log::warn("server claimed")
+                .with("login", login.to_ascii_lowercase())
+                .with("note", "this account now administers this server")
+                .emit();
+
+            // Signed in already: they just proved themselves by choosing the
+            // credential, and asking them to type it again immediately would be
+            // ceremony rather than security.
+            let secure = secure_attr(ctx);
+            let mut res = Res::html(200, crate::page::claimed_page(login));
+            res.set_cookie = Some(format!(
+                "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
+            ));
+            res
         }
 
         _ => gone(),
@@ -2498,8 +2389,8 @@ pub const SENSITIVE_VERBS: [&str; 1] = [private_route::SETTINGS_SECRET];
 /// session already reaches accept, discard and owner promotion; that is the same
 /// blast radius the device cookie had. Secrets are where it stops being
 /// acceptable — somebody holding a stolen cookie must not be able to rotate the
-/// mail key and redirect every sign-in link — so this asks for GitHub *at that
-/// moment* rather than at some point in the past.
+/// mail key and redirect every sign-in link — so this asks for the password *at
+/// that moment* rather than at some point in the past.
 fn require_fresh(ctx: &Ctx<'_>) -> std::result::Result<(), Res> {
     if ctx.fresh_auth {
         return Ok(());
@@ -2631,7 +2522,6 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
             // submitted for another reason would be a trap.
             for (name, slot) in [
                 ("mail_key", &mut s.mail_key),
-                ("github_client_secret", &mut s.github_client_secret),
                 ("screen_key", &mut s.screen_key),
             ] {
                 if let Some(v) = form.get(name).map(|v| v.trim()).filter(|v| !v.is_empty()) {
@@ -2658,6 +2548,25 @@ fn invalidate_settings(ctx: &Ctx<'_>) {
     if let Ok(mut cache) = ctx.settings.lock() {
         cache.invalidate();
     }
+}
+
+/// Is this a username this server will store?
+///
+/// **One function, two callers** — setup and `/owners` — so the rule cannot
+/// hold in one place and not the other. It lands in a URL for revocation and in
+/// every log line about this person, so it is kept to what reads back
+/// unambiguously.
+fn check_login(login: &str) -> std::result::Result<(), String> {
+    if login.is_empty() || login.len() > 64 {
+        return Err("a username is required, up to 64 characters".to_string());
+    }
+    if !login
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("letters, numbers, dashes and underscores".to_string());
+    }
+    Ok(())
 }
 
 /// A filing that named no repository this surface collects for.
@@ -3066,19 +2975,7 @@ mod tests {
                 // No owner role unless a test asks for one, which is the
                 // resting state of every deployment.
                 owners: Vec::new(),
-                github: None,
             });
-            self
-        }
-
-        /// Configure a GitHub application, as an operator would.
-        fn with_github(mut self) -> Fixture {
-            if let Some(p) = self.public.as_mut() {
-                p.github = Some(crate::config::GithubConfig {
-                    client_id: "test-client-id".into(),
-                    client_secret: "test-client-secret".into(),
-                });
-            }
             self
         }
 
@@ -3197,20 +3094,24 @@ mod tests {
         }
 
         /// Sign in as a filer, returning the session cookie.
-        /// Sign in as somebody who authenticated with GitHub, returning the
-        /// session cookie.
+        /// Sign in as somebody who holds a username, returning the session
+        /// cookie.
         ///
         /// Builds the account directly because the OAuth routes do not exist
         /// yet — this is precisely what their callback will do, so the *rest*
         /// of the owner behaviour can be proven before the flow that produces
         /// it. Whether the login is an owner still comes from the configuration,
         /// which is the property under test.
-        fn signed_in_as_github(&mut self, login: &str) -> String {
+        fn signed_in_with_login(&mut self, login: &str) -> String {
+            // **Through `create_login`**, the same path `/setup` and `/owners`
+            // use, rather than assembling an `Account` by hand. A fixture that
+            // built its own would keep passing after the real constructor grew a
+            // rule — the uniqueness check is exactly such a rule, and it went in
+            // during this change.
             let mut accounts = self.store.accounts().unwrap();
-            let account =
-                accounts.create(&auth::hash(&format!("github:{login}")), login, self.now_ms);
-            let idx = accounts.accounts.len() - 1;
-            accounts.accounts[idx].login = Some(login.to_ascii_lowercase());
+            let account = accounts
+                .create_login(login, "fixture-password", self.now_ms)
+                .expect("the fixture picks unused logins");
             let session = accounts.open_session(&account.id, self.now_ms);
             self.store.put_accounts(&accounts).unwrap();
             session
@@ -3263,7 +3164,7 @@ mod tests {
             let mut admin = self.store.admin().unwrap();
             admin.claim("jamez667", self.now_ms);
             self.store.put_admin(&admin).unwrap();
-            self.signed_in_as_github("jamez667")
+            self.signed_in_with_login("jamez667")
         }
 
         fn file(&mut self, token: &str, text: &str, repo: &str) -> String {
@@ -4082,7 +3983,7 @@ mod tests {
 
     #[test]
     fn a_magic_link_account_named_as_the_administrator_grants_nothing() {
-        // A claim naming an email address must not escalate: a GitHub login is
+        // A claim naming an email address must not escalate: a login is
         // required for anything above a filer, so the claim never matches.
         let mut f = Fixture::new("admin-magic-link").with_public(false);
         let mut admin = f.store.admin().unwrap();
@@ -4122,14 +4023,14 @@ mod tests {
     }
 
     #[test]
-    fn a_stranger_signing_in_with_github_is_not_the_administrator() {
+    fn a_stranger_with_a_login_is_not_the_administrator() {
         // The claim is one login. Anybody else who signs in is an account.
         let mut f = Fixture::new("gh-stranger").with_public(false);
         let mut admin = f.store.admin().unwrap();
         admin.claim("jamez667", 1);
         f.store.put_admin(&admin).unwrap();
 
-        let session = f.signed_in_as_github("somebody-else");
+        let session = f.signed_in_with_login("somebody-else");
         assert_eq!(
             f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
@@ -4142,7 +4043,7 @@ mod tests {
         // Not "everybody" and not "the first person": until the claim is made,
         // the private surface belongs to nobody.
         let mut f = Fixture::new("unclaimed").with_public(false);
-        let session = f.signed_in_as_github("jamez667");
+        let session = f.signed_in_with_login("jamez667");
         assert_eq!(
             f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
@@ -4174,25 +4075,19 @@ mod tests {
 
     #[test]
     fn a_dead_cookie_is_told_where_to_sign_in() {
-        // The developer whose enrolled browser stopped working is the one person
-        // most likely to hit this, and a bare "there is nothing here" is a
-        // confusing answer at an address that worked yesterday. It leaks
-        // nothing — the sign-in link is on the public landing page already.
-        let mut f = Fixture::new("dead-cookie").with_public(false).with_github();
+        // Somebody whose session stopped working is the one person most likely
+        // to hit this, and a bare "there is nothing here" is a confusing answer
+        // at an address that worked yesterday. It leaks nothing — the sign-in
+        // page is linked from the landing page already.
+        //
+        // **Unconditional now.** It used to depend on a GitHub application
+        // existing; a claimed server always has a password, so there is always
+        // somewhere to point.
+        let mut f = Fixture::new("dead-cookie").with_public(false);
         let res =
             f.go(&Req::get(private_route::REVIEW).with_cookie("a-token-that-matches-nothing"));
         assert_eq!(res.status, 404);
-        assert!(res.body.contains(public_route::AUTH_GITHUB), "{}", res.body);
-
-        // With no application there is nothing to point at, so it says nothing.
-        let mut f = Fixture::new("dead-cookie-no-gh");
-        let res = f.go(&Req::get(private_route::REVIEW).with_cookie("nothing"));
-        assert_eq!(res.status, 404);
-        assert!(
-            !res.body.contains(public_route::AUTH_GITHUB),
-            "{}",
-            res.body
-        );
+        assert!(res.body.contains(public_route::SIGNIN), "{}", res.body);
     }
 
     #[test]
@@ -4572,15 +4467,21 @@ mod tests {
     fn the_public_routes_do_not_exist_when_the_surface_is_off() {
         // Absent rather than present-and-refusing: a server nobody configured for
         // public intake should look like one that has none.
+        //
+        // **Except the way the administrator gets back in.** `SIGNIN` used to be
+        // in this list, and that was the lockout: a claimed server starts with
+        // the surface off, so the one person who could turn it on had no door.
+        // See `the_administrator_can_sign_in_with_no_public_surface`.
         let mut f = Fixture::new("public-off");
         for path in [
             public_route::FILE,
-            public_route::SIGNIN,
             "/public/signin/abc",
             "/public/request/abc",
         ] {
             assert_eq!(f.go(&Req::get(path)).status, 404, "{path}");
         }
+        // Asking for a *link* is still gone — that is filer traffic, and it
+        // costs an email a server with no public surface should not be sending.
         assert_eq!(
             f.go(&Req::post(public_route::SIGNIN, "email=a%40x.com"))
                 .status,
@@ -4838,58 +4739,6 @@ mod tests {
         assert!(!res.body.contains("alice thing"), "{}", res.body);
     }
 
-    /// A GitHub that answers without a network.
-    struct StubGithub {
-        login: std::result::Result<String, String>,
-    }
-
-    impl crate::oauth::Github for StubGithub {
-        fn login_for(&self, _code: &str) -> sc_proto::Result<String> {
-            self.login.clone().map_err(sc_proto::DcError::Backend)
-        }
-    }
-
-    /// Drive the callback with a stub, as the route would.
-    fn callback(f: &mut Fixture, code: &str, state: &str, gh: &StubGithub) -> Res {
-        let path = format!(
-            "{}?code={code}&state={state}",
-            public_route::AUTH_GITHUB_CALLBACK
-        );
-        let req = Req::get(&path);
-        let mut limiter = RateLimiter::new();
-        let mut ctx = Ctx {
-            store: &f.store,
-            daemon_keys: &f.daemon_keys,
-            limiter: &mut limiter,
-            now_ms: f.now_ms,
-            public: f.public.as_ref(),
-            mailer: &f.mailer,
-            write_lock: &f.write_lock,
-            seen: &f.seen,
-            roster: &f.roster,
-            settings: &f.settings,
-            accounts: &f.accounts,
-            seal_key: f.seal_key.as_ref(),
-            // Filled in by `handle` before dispatch, beside the caller.
-            fresh_auth: false,
-            rechecking: false,
-        };
-        finish_github_with(&mut ctx, &req, Locale::En, gh)
-    }
-
-    /// Start a sign-in and return the state token that was minted.
-    fn start(f: &mut Fixture) -> String {
-        let res = f.go(&Req::get(public_route::AUTH_GITHUB));
-        assert_eq!(res.status, 200, "{}", res.body);
-        // The plaintext exists only in the page — the store keeps a hash.
-        res.body
-            .split("state=")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("the page carries the state")
-            .to_string()
-    }
-
     /// Arm a claim code, as a fresh server's startup does.
     fn armed(f: &mut Fixture, code: &str) {
         let mut admin = f.store.admin().unwrap();
@@ -4900,8 +4749,9 @@ mod tests {
     #[test]
     fn setting_up_claims_the_server_for_whoever_signs_in() {
         // **The whole first-run path**, end to end: the code proves you can read
-        // the container's log, and GitHub proves who you are. Neither alone is
-        // enough, which is why they are separate steps.
+        // the container's log, and the step after it sets the credential that
+        // will own the server. They are separate steps so the second is bound to
+        // the browser that spent the code.
         let mut f = Fixture::new("setup-claim").with_public(false);
         armed(&mut f, "ABC-123");
 
@@ -4923,48 +4773,33 @@ mod tests {
             .and_then(|c| c.split(';').next())
             .expect("a setup token was issued")
             .to_string();
-        // The callback URL is shown for copying, now that it can be.
-        assert!(
-            res.body
-                .contains("https://specs.example.test/public/auth/github/callback"),
-            "{}",
-            res.body
-        );
+        // Nobody owns it yet: spending the code is one proof, not the claim.
+        assert!(!f.store.admin().unwrap().claimed());
 
-        // Step two: the application.
+        // Step two: the credential that decides who owns this.
         let res = f.go(&Req::post(
-            private_route::SETUP_GITHUB,
-            "client_id=cid&client_secret=csecret",
+            private_route::SETUP_ADMIN,
+            "login=JameZ667&password=correct-horse-battery",
         )
         .with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
-        let settings = f.store.settings().unwrap();
-        assert!(settings.has_github());
-        // Stored sealed: the secret is not in the file.
-        let raw = std::fs::read_to_string(f.store.settings_path()).unwrap();
-        assert!(!raw.contains("csecret"), "{raw}");
-
-        // Step three: the sign-in that decides who owns this. Nobody yet.
-        assert!(!f.store.admin().unwrap().claimed());
-        let state = res
-            .body
-            .split("state=")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("the page carries the state")
-            .to_string();
-
-        let res = callback(
-            &mut f,
-            "code",
-            &state,
-            &StubGithub {
-                login: Ok("JameZ667".into()),
-            },
-        );
-        assert_eq!(res.status, 200, "{}", res.body);
         let admin = f.store.admin().unwrap();
         assert!(admin.is("jamez667"), "lowercased on the way in");
+
+        // The password is stored hashed and never rendered back.
+        assert!(!res.body.contains("correct-horse-battery"), "{}", res.body);
+        let raw = std::fs::read_to_string(f.store.accounts_path()).unwrap();
+        assert!(!raw.contains("correct-horse-battery"), "{raw}");
+        assert!(raw.contains("$argon2id$"), "and it is the slow hash");
+
+        // And they are signed in already — they just chose the credential, so
+        // asking for it again immediately would be ceremony.
+        let session = cookie_token(&res).expect("signed in");
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            200
+        );
 
         // And setup is gone.
         assert_eq!(f.go(&Req::get(private_route::SETUP)).status, 404);
@@ -4975,6 +4810,254 @@ mod tests {
             ))
             .status,
             404
+        );
+    }
+
+    #[test]
+    fn a_password_signs_the_administrator_in() {
+        // The ordinary path, and the one that was unreachable for two days: a
+        // form on this server's own origin, no third party in it.
+        let mut f = Fixture::new("password-signin").with_public(false);
+        let mut admin = crate::admin::Admin::default();
+        admin.claim("jamez667", f.now_ms);
+        f.store.put_admin(&admin).unwrap();
+        let mut accounts = f.store.accounts().unwrap();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .unwrap();
+        f.store.put_accounts(&accounts).unwrap();
+
+        let res = f.go(&Req::post(
+            public_route::SIGNIN_PASSWORD,
+            "login=JameZ667&password=correct-horse-battery",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        // **`Strict`**, which the GitHub return could not have. Nothing arrives
+        // here cross-site any more, so nothing needs the relaxation.
+        let set = res.set_cookie.as_deref().expect("a session cookie");
+        assert!(set.contains("SameSite=Strict"), "{set}");
+        assert!(set.contains("HttpOnly"), "{set}");
+
+        // And it is the administrator's session, not a filer's.
+        let session = cookie_token(&res).expect("signed in");
+        assert_eq!(
+            f.go(&Req::get(private_route::SETTINGS).with_cookie(&session))
+                .status,
+            200
+        );
+    }
+
+    #[test]
+    fn a_wrong_password_backs_off_and_a_right_one_clears_it() {
+        // **What GitHub used to do for us.** The rate limiter alone allows
+        // ~29,000 guesses a day against a known username, which is not a bound
+        // worth calling one.
+        let mut f = Fixture::new("password-backoff").with_public(false);
+        let mut accounts = f.store.accounts().unwrap();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .unwrap();
+        f.store.put_accounts(&accounts).unwrap();
+
+        let wrong = "login=jamez667&password=not-the-password";
+        for _ in 0..5 {
+            assert_eq!(
+                f.go(&Req::post(public_route::SIGNIN_PASSWORD, wrong))
+                    .status,
+                401
+            );
+        }
+        let waiting = f.store.accounts().unwrap();
+        let account = waiting.by_login("jamez667").expect("still there");
+        assert!(
+            account.next_attempt_ms > f.now_ms,
+            "the wrong guesses bought a wait"
+        );
+        // **Three, not five, and that is the property.** The first two are free;
+        // the third bought the delay, and the two attempts after it were refused
+        // *before* the password was checked at all. A locked-out account must
+        // not also be a way to spend this server's CPU on argon2, so the counter
+        // standing still under a delay is the evidence that it does not.
+        assert_eq!(account.failed_attempts, 3);
+
+        // **The right password during the wait is still refused**, and that is
+        // the point: an attacker who guesses correctly on the fourth attempt
+        // gains nothing until the delay has run.
+        assert_eq!(
+            f.go(&Req::post(
+                public_route::SIGNIN_PASSWORD,
+                "login=jamez667&password=correct-horse-battery",
+            ))
+            .status,
+            401
+        );
+
+        // Past the wait, the right password works and the count goes back to
+        // nothing — a person who mistyped it a few times is not penalised for
+        // the rest of the day.
+        f.now_ms = account.next_attempt_ms + 1;
+        let res = f.go(&Req::post(
+            public_route::SIGNIN_PASSWORD,
+            "login=jamez667&password=correct-horse-battery",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let after = f.store.accounts().unwrap();
+        let account = after.by_login("jamez667").expect("still there");
+        assert_eq!(account.failed_attempts, 0);
+        assert_eq!(account.next_attempt_ms, 0);
+    }
+
+    #[test]
+    fn every_sign_in_failure_says_the_same_thing() {
+        // No such account, wrong password, and still backing off are three
+        // different facts, and telling them apart tells a guesser which half
+        // they got right. One answer for all three.
+        let mut f = Fixture::new("password-one-answer").with_public(false);
+        let mut accounts = f.store.accounts().unwrap();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .unwrap();
+        f.store.put_accounts(&accounts).unwrap();
+
+        let no_such = f.go(&Req::post(
+            public_route::SIGNIN_PASSWORD,
+            "login=nobody-at-all&password=correct-horse-battery",
+        ));
+        let wrong = f.go(&Req::post(
+            public_route::SIGNIN_PASSWORD,
+            "login=jamez667&password=not-the-password",
+        ));
+        assert_eq!(no_such.status, 401);
+        assert_eq!(wrong.status, 401);
+        assert_eq!(no_such.body, wrong.body, "one answer, not two");
+    }
+
+    #[test]
+    fn a_password_post_is_not_read_as_a_magic_link_token() {
+        // **An ordering the match arms carry silently.** `SIGNIN_PASSWORD` sits
+        // under `SIGNIN_PREFIX`, so the magic-link arm's guard matches it too —
+        // and reaching that arm first would feed the typed password to
+        // `complete_sign_in` as a token. It would fail, which is the dangerous
+        // part: the two roles with no other way in would simply stop being able
+        // to sign in, with nothing naming a cause.
+        let mut f = Fixture::new("password-arm-order").with_public(false);
+        let mut accounts = f.store.accounts().unwrap();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .unwrap();
+        f.store.put_accounts(&accounts).unwrap();
+
+        let res = f.go(&Req::post(
+            public_route::SIGNIN_PASSWORD,
+            "login=jamez667&password=correct-horse-battery",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(
+            cookie_token(&res).is_some(),
+            "the password arm ran, not the token consumer"
+        );
+    }
+
+    #[test]
+    fn a_password_is_never_rendered_back_or_stored_in_the_clear() {
+        // The property `a_credential_is_never_stored_in_the_clear` names, for
+        // the one credential a human chooses — where a fast hash would have left
+        // that test passing while the property it names had quietly weakened.
+        let mut f = Fixture::new("password-never-echoed").with_public(false);
+        let mut accounts = f.store.accounts().unwrap();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .unwrap();
+        f.store.put_accounts(&accounts).unwrap();
+
+        let raw = std::fs::read_to_string(f.store.accounts_path()).unwrap();
+        assert!(!raw.contains("correct-horse-battery"), "{raw}");
+        assert!(raw.contains("$argon2id$"), "and it is the slow hash");
+
+        for body in [
+            "login=jamez667&password=correct-horse-battery",
+            "login=jamez667&password=not-the-password",
+        ] {
+            let res = f.go(&Req::post(public_route::SIGNIN_PASSWORD, body));
+            assert!(
+                !res.body.contains("correct-horse-battery")
+                    && !res.body.contains("not-the-password"),
+                "{}",
+                res.body
+            );
+        }
+    }
+
+    #[test]
+    fn the_administrator_can_sign_in_with_no_public_surface() {
+        // **The lockout this closes, and it was live.** A freshly claimed server
+        // starts with the public surface off, the password form lives at a
+        // public address, and every public address 404s when there is no public
+        // surface. So: claim the server, let the setup session lapse, and the
+        // only way back in is gone — leaving the one person who could turn the
+        // surface on unable to reach the switch.
+        //
+        // Found against the built binary, not here. A route test asks for the
+        // path directly and gets a fixture that happens to have a surface.
+        // **No `with_public` at all** — that builder turns the surface *on*
+        // (its bool is the screener). A fixture that called it would test the
+        // opposite of what this test is named for.
+        let mut f = Fixture::new("signin-no-public");
+        let mut admin = crate::admin::Admin::default();
+        admin.claim("jamez667", f.now_ms);
+        f.store.put_admin(&admin).unwrap();
+        let mut accounts = f.store.accounts().unwrap();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .unwrap();
+        f.store.put_accounts(&accounts).unwrap();
+
+        // The form renders...
+        assert_eq!(f.go(&Req::get(public_route::SIGNIN)).status, 200);
+
+        // ...and posting to it works.
+        let res = f.go(&Req::post(
+            public_route::SIGNIN_PASSWORD,
+            "login=jamez667&password=correct-horse-battery",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let session = cookie_token(&res).expect("signed in");
+        assert_eq!(
+            f.go(&Req::get(private_route::SETTINGS).with_cookie(&session))
+                .status,
+            200,
+            "and it reaches the switch that turns the public surface on"
+        );
+
+        // **The rest of the public surface stays shut** to a stranger. This is
+        // one door for the two named roles, not a way to serve filing pages from
+        // a server that has none.
+        let mut cold = Fixture::new("signin-no-public-cold");
+        assert_eq!(cold.go(&Req::get(public_route::FILE)).status, 404);
+        assert_eq!(cold.go(&Req::get("/public/request/abc")).status, 404);
+        assert_eq!(
+            cold.go(&Req::post(public_route::SIGNIN, "email=a%40x.com"))
+                .status,
+            404,
+            "and asking for a magic link is still gone"
+        );
+    }
+
+    #[test]
+    fn guessing_passwords_cannot_lock_filers_out_of_asking_for_a_link() {
+        // **Not `PublicWrite`.** That bucket is shared with the magic-link form,
+        // so an attacker grinding passwords would deny every filer a sign-in
+        // link — turning a credential attack into an outage for everybody else.
+        // `AnonPrivate` is what its own doc names for this.
+        assert_eq!(
+            bucket_for(&None, public_route::SIGNIN_PASSWORD),
+            Bucket::AnonPrivate,
+        );
+        assert_eq!(
+            bucket_for(&None, public_route::SIGNIN),
+            Bucket::PublicWrite,
+            "and asking for a link is still the public bucket",
         );
     }
 
@@ -4996,7 +5079,7 @@ mod tests {
     fn every_administrative_page_is_linked_from_the_surface() {
         // **The bug this pins, and it had already happened twice.** Four of
         // these were built, tested, and reachable only by somebody who already
-        // knew the URL — the same failure the GitHub sign-in had, and it goes
+        // knew the URL — the same failure the sign-in flow had, and it goes
         // unnoticed for the same reason: a test asks for a route directly,
         // which is exactly what a person cannot do.
         //
@@ -5058,9 +5141,9 @@ mod tests {
     fn a_half_finished_setup_cannot_be_taken_over_by_somebody_else() {
         // **The hole this closes, and it was live.** Setup is more than one
         // step and the code is spent at the first, so everything after it was
-        // guarded only by the server being unclaimed. Naming a GitHub
-        // application decides which account can finish the claim — so an
-        // interloper who reached step two would have supplied their own and
+        // guarded only by the server being unclaimed. Choosing the password
+        // decides which account can finish the claim — so an interloper who
+        // reached step two would have set their own and
         // owned the server.
         //
         // It bit hardest on a MIGRATED volume, where seeding fills in the
@@ -5098,32 +5181,32 @@ mod tests {
 
         // And cannot post to it.
         let res = f.go(&Req::post(
-            private_route::SETUP_GITHUB,
-            "client_id=theirs&client_secret=theirs",
+            private_route::SETUP_ADMIN,
+            "login=theirs&password=another-good-password",
         ));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(
-            !f.store.settings().unwrap().has_github(),
-            "a stranger named the application that decides who owns this"
+            !f.store.admin().unwrap().claimed(),
+            "a stranger claimed the server"
         );
 
         // A wrong token is no better than none.
         let res = f.go(&Req::post(
-            private_route::SETUP_GITHUB,
-            "client_id=theirs&client_secret=theirs",
+            private_route::SETUP_ADMIN,
+            "login=theirs&password=another-good-password",
         )
         .with_setup("not-the-token"));
         assert_eq!(res.status, 400, "{}", res.body);
-        assert!(!f.store.settings().unwrap().has_github());
+        assert!(!f.store.admin().unwrap().claimed());
 
         // The browser that spent the code still finishes normally.
         let res = f.go(&Req::post(
-            private_route::SETUP_GITHUB,
-            "client_id=mine&client_secret=mine",
+            private_route::SETUP_ADMIN,
+            "login=mine&password=correct-horse-battery",
         )
         .with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
-        assert!(f.store.settings().unwrap().has_github());
+        assert!(f.store.admin().unwrap().claimed());
     }
 
     #[test]
@@ -5167,12 +5250,12 @@ mod tests {
 
         f.now_ms += crate::admin::CLAIM_TTL_MS;
         let res = f.go(&Req::post(
-            private_route::SETUP_GITHUB,
-            "client_id=late&client_secret=late",
+            private_route::SETUP_ADMIN,
+            "login=late&password=correct-horse-battery",
         )
         .with_setup(&setup));
         assert_eq!(res.status, 400, "{}", res.body);
-        assert!(!f.store.settings().unwrap().has_github());
+        assert!(!f.store.admin().unwrap().claimed());
     }
 
     #[test]
@@ -5243,258 +5326,12 @@ mod tests {
         assert_eq!(f.go(&Req::get(private_route::SETUP)).status, 404);
         assert_eq!(
             f.go(&Req::post(
-                private_route::SETUP_GITHUB,
-                "client_id=a&client_secret=b"
+                private_route::SETUP_ADMIN,
+                "login=a&password=correct-horse-battery"
             ))
             .status,
             404
         );
-    }
-
-    #[test]
-    fn an_ordinary_sign_in_does_not_claim_anything() {
-        // The claim rides the state, so only a hop that started at /setup can
-        // finish as one. Somebody signing in normally on an unclaimed server is
-        // just an account.
-        let mut f = Fixture::new("setup-not-claim")
-            .with_public(false)
-            .with_github();
-        let state = start(&mut f);
-        let res = callback(
-            &mut f,
-            "code",
-            &state,
-            &StubGithub {
-                login: Ok("stranger".into()),
-            },
-        );
-        assert_eq!(res.status, 200, "{}", res.body);
-        assert!(
-            !f.store.admin().unwrap().claimed(),
-            "an ordinary sign-in claimed the server"
-        );
-    }
-
-    #[test]
-    fn a_github_hop_stamps_the_browser_it_came_back_to() {
-        // The freshness that guards secret changes, driven through the real
-        // callback rather than asserted on the store. A stale session that goes
-        // round again comes back fresh, on the SAME cookie.
-        let mut f = Fixture::new("fresh-auth").with_public(false).with_github();
-
-        let state = start(&mut f);
-        let res = callback(
-            &mut f,
-            "code",
-            &state,
-            &StubGithub {
-                login: Ok("jamez667".into()),
-            },
-        );
-        let cookie = cookie_token(&res).expect("a session was opened");
-        assert!(f.store.accounts().unwrap().session_fresh(&cookie, f.now_ms));
-
-        // Time passes; the session still signs in and is no longer fresh.
-        f.now_ms += crate::account::FRESH_AUTH_MS * 4;
-        let accounts = f.store.accounts().unwrap();
-        assert!(accounts.session_for(&cookie).is_some(), "still signed in");
-        assert!(
-            !accounts.session_fresh(&cookie, f.now_ms),
-            "no longer fresh"
-        );
-
-        // Round again, carrying the cookie this time.
-        let res = f.go(&Req::get(public_route::AUTH_GITHUB).with_cookie(&cookie));
-        let state = res
-            .body
-            .split("state=")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("the page carries the state")
-            .to_string();
-        let path = format!(
-            "{}?code=code&state={state}",
-            public_route::AUTH_GITHUB_CALLBACK
-        );
-        let req = Req::get(&path).with_cookie(&cookie);
-        let mut limiter = RateLimiter::new();
-        let mut ctx = Ctx {
-            store: &f.store,
-            daemon_keys: &f.daemon_keys,
-            limiter: &mut limiter,
-            now_ms: f.now_ms,
-            public: f.public.as_ref(),
-            mailer: &f.mailer,
-            write_lock: &f.write_lock,
-            seen: &f.seen,
-            roster: &f.roster,
-            settings: &f.settings,
-            accounts: &f.accounts,
-            seal_key: f.seal_key.as_ref(),
-            fresh_auth: false,
-            rechecking: false,
-        };
-        let res = finish_github_with(
-            &mut ctx,
-            &req,
-            Locale::En,
-            &StubGithub {
-                login: Ok("jamez667".into()),
-            },
-        );
-        assert_eq!(res.status, 200, "{}", res.body);
-
-        let accounts = f.store.accounts().unwrap();
-        assert!(
-            accounts.session_fresh(&cookie, f.now_ms),
-            "the same cookie came back fresh"
-        );
-        assert_eq!(accounts.sessions.len(), 1, "and no second session");
-    }
-
-    #[test]
-    fn signing_in_with_github_opens_a_session() {
-        let mut f = Fixture::new("gh-signin").with_public(false).with_github();
-        let state = start(&mut f);
-
-        let res = callback(
-            &mut f,
-            "the-code",
-            &state,
-            &StubGithub {
-                login: Ok("jamez667".into()),
-            },
-        );
-        assert_eq!(res.status, 200, "{}", res.body);
-        assert!(res.set_cookie.is_some(), "a session was opened");
-
-        // The account records how they signed in — and only that.
-        let accounts = f.store.accounts().unwrap();
-        assert_eq!(accounts.accounts.len(), 1);
-        assert_eq!(accounts.accounts[0].login.as_deref(), Some("jamez667"));
-    }
-
-    #[test]
-    fn a_state_token_cannot_be_replayed() {
-        // A callback URL sits in browser history and referrer logs. Spending the
-        // state once is what stops one being reused.
-        let mut f = Fixture::new("gh-replay").with_public(false).with_github();
-        let state = start(&mut f);
-        let gh = StubGithub {
-            login: Ok("jamez667".into()),
-        };
-
-        assert_eq!(callback(&mut f, "code", &state, &gh).status, 200);
-        assert_eq!(
-            callback(&mut f, "code", &state, &gh).status,
-            400,
-            "the second use is refused"
-        );
-    }
-
-    #[test]
-    fn a_forged_callback_signs_nobody_in() {
-        // No state this server issued, so nothing to spend.
-        let mut f = Fixture::new("gh-forged").with_public(false).with_github();
-        let res = callback(
-            &mut f,
-            "code",
-            "never-issued",
-            &StubGithub {
-                login: Ok("jamez667".into()),
-            },
-        );
-        assert_eq!(res.status, 400);
-        assert!(res.set_cookie.is_none(), "no session");
-        assert!(f.store.accounts().unwrap().accounts.is_empty());
-    }
-
-    #[test]
-    fn a_refused_code_signs_nobody_in() {
-        // GitHub declining the exchange — an expired code, or one already spent.
-        let mut f = Fixture::new("gh-refused").with_public(false).with_github();
-        let state = start(&mut f);
-        let res = callback(
-            &mut f,
-            "code",
-            &state,
-            &StubGithub {
-                login: Err("github refused the code".into()),
-            },
-        );
-        assert_eq!(res.status, 400);
-        assert!(res.set_cookie.is_none());
-        assert!(f.store.accounts().unwrap().accounts.is_empty());
-    }
-
-    #[test]
-    fn github_sign_in_is_linked_exactly_where_it_exists() {
-        // **The bug this pins.** The route was built, reachable and tested —
-        // and nothing on any page linked to it, so an owner's only way in was
-        // to know the URL and type it. From the outside the feature looked
-        // missing, because a route with no link is a route nobody uses.
-        //
-        // Asserted in both directions against the SAME condition the route
-        // itself uses, because the two failures are the same drift pointing
-        // opposite ways: a link with no route is a promise that 404s.
-        let mut f = Fixture::new("gh-linked").with_public(false).with_github();
-        let html = f.go(&Req::get(public_route::SIGNIN)).body;
-        assert!(
-            html.contains(public_route::AUTH_GITHUB),
-            "the route exists and no page links to it: {html}"
-        );
-        assert_eq!(f.go(&Req::get(public_route::AUTH_GITHUB)).status, 200);
-
-        // And with no application, neither the route nor the link. A button
-        // that always fails is worse than no button.
-        let mut f = Fixture::new("gh-none").with_public(false);
-        let html = f.go(&Req::get(public_route::SIGNIN)).body;
-        assert!(
-            !html.contains(public_route::AUTH_GITHUB),
-            "linked to a route that does not exist: {html}"
-        );
-        assert_eq!(f.go(&Req::get(public_route::AUTH_GITHUB)).status, 404);
-    }
-
-    #[test]
-    fn signing_in_with_github_makes_a_named_owner_an_owner() {
-        // The two halves meeting: GitHub says who, configuration says what they
-        // may see.
-        let mut f = Fixture::new("gh-owner")
-            .with_public(false)
-            .with_github()
-            .with_owner("jamez667", &["intake"]);
-        let state = start(&mut f);
-
-        let res = callback(
-            &mut f,
-            "code",
-            &state,
-            &StubGithub {
-                login: Ok("JameZ667".into()),
-            },
-        );
-        assert_eq!(res.status, 200);
-        let cookie = res
-            .set_cookie
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .trim_start_matches("sc_device=")
-            .to_string();
-
-        // Recognised as an owner — and still not a device, so the private
-        // surface stays closed.
-        assert_eq!(
-            f.go(&Req::get(private_route::REVIEW).with_cookie(&cookie))
-                .status,
-            404
-        );
-        for verb in REVIEW_VERBS {
-            let res = f.go(&Req::post(&format!("/request/r-1/{verb}"), "").with_cookie(&cookie));
-            assert_eq!(res.status, 401, "an owner reached {verb}");
-        }
     }
 
     /// An owner signed in and holding a session cookie, with a request filed
@@ -5504,7 +5341,7 @@ mod tests {
             .with_public(false)
             .with_repos(&["intake", "other"])
             .with_owner("jamez667", &["intake"]);
-        let owner = f.signed_in_as_github("jamez667");
+        let owner = f.signed_in_with_login("jamez667");
 
         let filer = f.signed_in("jo@x.com");
         f.go(
@@ -5795,7 +5632,7 @@ mod tests {
         let mut f = Fixture::new("owner-no-approve")
             .with_public(false)
             .with_owner("jamez667", &["intake"]);
-        let owner = f.signed_in_as_github("jamez667");
+        let owner = f.signed_in_with_login("jamez667");
 
         let filer = f.signed_in("jo@x.com");
         f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&filer));
@@ -5819,7 +5656,7 @@ mod tests {
         // promotes itself — so the same signed-in session is an owner or is
         // not, depending on a record only a device can write.
         let mut f = Fixture::new("owner-from-roster").with_public(false);
-        let session = f.signed_in_as_github("jamez667");
+        let session = f.signed_in_with_login("jamez667");
 
         // Not named: an ordinary filer, and the filing form is what they get.
         assert_eq!(
@@ -5831,7 +5668,7 @@ mod tests {
             f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
             404,
-            "a GitHub login alone grants nothing"
+            "a login alone grants nothing"
         );
     }
 
@@ -5891,7 +5728,7 @@ mod tests {
             .with_public(false)
             .with_repos(&["intake"])
             .with_owner("jamez667", &["something-else"]);
-        let owner = f.signed_in_as_github("jamez667");
+        let owner = f.signed_in_with_login("jamez667");
 
         let filer = f.signed_in("jo@x.com");
         f.go(
@@ -6193,8 +6030,9 @@ mod tests {
         let device = f.as_admin();
 
         // The filer specifically. The administrator now holds an account too —
-        // they sign in with GitHub like everybody else — so "the only account"
-        // is no longer a way to name the one being revoked.
+        // a username and password rather than a magic link, but an account all
+        // the same — so "the only account" is no longer a way to name the one
+        // being revoked.
         let id = f
             .store
             .accounts()
@@ -6296,7 +6134,7 @@ mod tests {
         let mut f = Fixture::new("policy-by-caller")
             .with_public(false)
             .with_owner("jamez667", &["intake"]);
-        let owner = f.signed_in_as_github("jamez667");
+        let owner = f.signed_in_with_login("jamez667");
         let filer = f.signed_in("jo@x.com");
 
         for path in [public_route::LANDING, public_route::FILE] {
@@ -6546,8 +6384,11 @@ mod tests {
         // The 404 for a surface that does not exist is not *on* that surface.
         // Worth pinning: it is rendered from inside the `is_public_path` branch,
         // one line from the stamp, and is the easiest thing to sweep into it.
+        //
+        // `FILE` rather than `SIGNIN`, which now renders without a surface so
+        // the administrator can get back in.
         let mut f = Fixture::new("policy-unconfigured");
-        let res = f.go(&Req::get(public_route::SIGNIN));
+        let res = f.go(&Req::get(public_route::FILE));
         assert_eq!(res.status, 404);
         assert_eq!(res.policy, Policy::Strict);
     }

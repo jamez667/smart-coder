@@ -278,23 +278,6 @@ services:
       # Empty is the resting state: no owner role at all.
       SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
 
-      # The GitHub OAuth application that owners sign in with.
-      #
-      # Create one at GitHub -> Settings -> Developer settings -> OAuth Apps.
-      # The callback URL must be your SC_SERVER_PUBLIC_BASE_URL followed by
-      # /public/auth/github/callback — GitHub uses the one registered there, so
-      # it is not sent by this server and cannot be varied by a caller.
-      #
-      # Both or neither: an id without a secret sends people to GitHub and
-      # cannot finish the exchange, so the server refuses to start rather than
-      # showing a sign-in button that always fails. Naming owners without an
-      # application is refused for the same reason.
-      #
-      # The client id is public — it appears in the URL. The SECRET never leaves
-      # this server: it is used only in the server-to-server token exchange.
-      SC_SERVER_GITHUB_CLIENT_ID: ${SC_SERVER_GITHUB_CLIENT_ID:-}
-      SC_SERVER_GITHUB_CLIENT_SECRET: ${SC_SERVER_GITHUB_CLIENT_SECRET:-}
-
       # What the masthead calls this site. Defaults to PUBLIC_REPO.
       #
       # Separate from it because that one is a ROUTING KEY the daemon matches

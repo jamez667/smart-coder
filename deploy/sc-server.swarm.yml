@@ -99,13 +99,6 @@ services:
       # release their own repositories' work — never accept, and never add
       # another owner. Nothing is checked against GitHub.
       SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
-
-      # SEEDS. The GitHub OAuth application the administrator AND owners sign
-      # in with — /setup asks for it on a fresh server and shows the callback
-      # URL to paste. The secret is stored ENCRYPTED on the volume, and is never
-      # shown again once saved.
-      SC_SERVER_GITHUB_CLIENT_ID: ${SC_SERVER_GITHUB_CLIENT_ID:-}
-      SC_SERVER_GITHUB_CLIENT_SECRET: ${SC_SERVER_GITHUB_CLIENT_SECRET:-}
       # What the masthead calls the site. A label, not the routing key above.
       SC_SERVER_PUBLIC_SITE_NAME: ${SC_SERVER_PUBLIC_SITE_NAME:-}
       # https, absolute. Sign-in links are built from it.
