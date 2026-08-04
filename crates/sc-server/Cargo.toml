@@ -45,3 +45,14 @@ ureq = { version = "3", features = ["json"] }
 # because somebody who can write the volume could otherwise point the screener at
 # a host of their choosing. See `src/seal.rs`.
 chacha20poly1305 = "0.11"
+# Password hashing for the administrator and owners.
+#
+# **Not `sha2` above, and the difference is the whole reason this is here.**
+# SHA-256 is fast by design, which is right for the credentials this server
+# mints — 256 bits of CSPRNG output has nothing to brute-force — and wrong for a
+# password a person chose. An unsalted fast hash of a human-chosen secret is a
+# password list waiting for somebody to copy the volume.
+#
+# argon2id is deliberately slow and memory-hard. Pure Rust and no C toolchain,
+# same RustCrypto family as the two above, so the container build is unchanged.
+argon2 = { version = "0.5", features = ["std"] }
