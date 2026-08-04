@@ -72,17 +72,41 @@ export async function server(): Promise<Server> {
   ).join("");
 
   const sibling = inContainer();
+  // **Join the server to the network this container is already on**, rather than
+  // guessing what it is called. Woodpecker names it after the workflow, so it
+  // differs per run and there is nothing stable to hardcode — and a container
+  // name only resolves between containers that share a network.
+  //
+  // Asking Docker which network we are on is the one reliable answer: if this is
+  // a container, the daemon knows where it is attached.
+  let network: string | undefined;
+  if (sibling) {
+    try {
+      network = docker(
+        "inspect",
+        "-f",
+        "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+        hostname(),
+      )
+        .trim()
+        .split(/\s+/)[0];
+    } catch {
+      // Not a container the daemon knows, which means the detection above was
+      // wrong. Fall through to a published port and let `waitFor` say so.
+    }
+  }
+
   // The base URL is not only how the tests reach it — the server validates its
   // own cookies and builds its links from it, so this has to be the address that
   // actually works from where the tests are.
-  const base = sibling ? `http://${NAME}:8420` : "http://127.0.0.1:8799";
+  const base = network ? `http://${NAME}:8420` : "http://127.0.0.1:8799";
 
   docker(
     "run",
     "-d",
     "--name",
     NAME,
-    ...(sibling ? [] : ["-p", "8799:8420"]),
+    ...(network ? ["--network", network] : ["-p", "8799:8420"]),
     "-e",
     `SC_SERVER_SECRET_KEY=${key}`,
     "-e",
