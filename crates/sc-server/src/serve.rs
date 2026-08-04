@@ -714,6 +714,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
 
     let mut bearer = None;
     let mut cookie_token = None;
+    let mut cookie_setup = None;
     let mut cookie_lang = None;
     let mut accept_language = None;
     for h in request.headers() {
@@ -728,6 +729,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             }
             "cookie" => {
                 cookie_token = cookie_value(value, routes::COOKIE);
+                cookie_setup = cookie_value(value, routes::SETUP_COOKIE);
                 cookie_lang = cookie_value(value, routes::LANG_COOKIE);
             }
             // Taken as sent and parsed in `i18n`, which knows what a valid one
@@ -746,6 +748,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             path,
             bearer,
             cookie_token,
+            cookie_setup,
             cookie_lang,
             accept_language,
             body: String::new(),
@@ -766,6 +769,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
         path,
         bearer,
         cookie_token,
+        cookie_setup,
         cookie_lang,
         accept_language,
         body,

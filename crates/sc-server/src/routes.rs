@@ -32,6 +32,14 @@ use crate::store::{new_id, Request, RequestState, Serves, Store};
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
 
+/// The cookie carrying a half-finished setup.
+///
+/// **Its own name, not [`COOKIE`].** A setup token is not a session and grants
+/// nothing once the server is claimed; sharing a name would mean `identify`
+/// having to tell two unrelated things apart on every request, and "both
+/// present" is what an attacker constructs.
+pub const SETUP_COOKIE: &str = "sc_setup";
+
 /// The `; Secure` a cookie carries, or nothing on a loopback server.
 ///
 /// A browser **discards** a `Secure` cookie arriving over plain HTTP, so on
@@ -165,6 +173,12 @@ pub struct Req {
     pub bearer: Option<String>,
     /// The device token from the cookie, if any — how a browser authenticates.
     pub cookie_token: Option<String>,
+    /// The setup token, from a browser part-way through claiming this server.
+    ///
+    /// A separate field rather than sharing [`cookie_token`](Req::cookie_token):
+    /// the two authenticate unrelated things, and one name for both would mean
+    /// deciding which was meant on every request.
+    pub cookie_setup: Option<String>,
     /// The reader's chosen language, from the `lang` cookie.
     ///
     /// Named fields rather than a header map, so `Req` keeps its property of
@@ -183,6 +197,7 @@ impl Req {
             path: path.into(),
             bearer: None,
             cookie_token: None,
+            cookie_setup: None,
             cookie_lang: None,
             accept_language: None,
             body: String::new(),
@@ -195,6 +210,7 @@ impl Req {
             path: path.into(),
             bearer: None,
             cookie_token: None,
+            cookie_setup: None,
             cookie_lang: None,
             accept_language: None,
             body: body.into(),
@@ -223,6 +239,12 @@ impl Req {
 
     pub fn with_cookie(mut self, token: &str) -> Req {
         self.cookie_token = Some(token.to_string());
+        self
+    }
+
+    /// Carry a half-finished setup, as the browser doing it would.
+    pub fn with_setup(mut self, token: &str) -> Req {
+        self.cookie_setup = Some(token.to_string());
         self
     }
 }
@@ -2241,11 +2263,24 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
         Err(e) => return error(500, &e.to_string()),
     };
 
+    // **Everything past step one belongs to the browser that spent the code.**
+    //
+    // Without this the later steps are guarded only by the server being
+    // unclaimed, so a half-finished setup on a public hostname is open to
+    // whoever arrives next — and they would supply their own GitHub
+    // application, sign in, and own the server.
+    //
+    // It bit on a *migrated* volume rather than a fresh one: seeding fills in
+    // the address, so "step one is already done" was true for everybody from
+    // the first boot.
+    let mine = admin.setting_up(req.cookie_setup.as_deref(), ctx.now_ms);
+
     match (method, path) {
         ("GET", private_route::SETUP) => {
-            // Step two when step one is already done, so a reload does not send
-            // somebody back to a code they have already spent.
-            if !settings.base_url.is_empty() {
+            // Step two only for the browser that reached it. Anybody else is
+            // sent back to the code box — which they cannot pass without
+            // reading the container's log.
+            if mine && !settings.base_url.is_empty() {
                 return Res::html(
                     200,
                     crate::page::setup_github_page(&settings.base_url, None),
@@ -2271,7 +2306,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
                 Ok(a) => a,
                 Err(e) => return error(500, &e.to_string()),
             };
-            if !admin.spend(code, ctx.now_ms) {
+            let Some(setup_token) = admin.spend(code, ctx.now_ms) else {
                 // One message for every failure — wrong, expired, already spent.
                 // Distinguishing them tells a guesser which half they got right.
                 return Res::html(
@@ -2283,7 +2318,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
                         ),
                     ),
                 );
-            }
+            };
             if let Err(e) = ctx.store.put_admin(&admin) {
                 return error(500, &e.to_string());
             }
@@ -2301,12 +2336,34 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             }
             invalidate_settings(ctx);
 
-            Res::html(200, crate::page::setup_github_page(base_url, None))
+            // **The rest of the wizard belongs to this browser now.** Without
+            // it, every step after this one is guarded only by the server being
+            // unclaimed, and somebody arriving mid-way could supply their own
+            // GitHub application and take the server.
+            let secure = secure_attr(ctx);
+            let mut res = Res::html(200, crate::page::setup_github_page(base_url, None));
+            res.set_cookie = Some(format!(
+                "{SETUP_COOKIE}={setup_token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
+                crate::admin::CLAIM_TTL_MS / 1000
+            ));
+            res
         }
 
         ("POST", private_route::SETUP_GITHUB) => {
-            // The code is already spent by now, so reaching this without a base
-            // URL means somebody skipped a step rather than failed one.
+            // **The step that would hand the server over.** Naming a GitHub
+            // application decides which account can finish the claim, so this
+            // is the one an interloper wants.
+            if !mine {
+                return Res::html(
+                    400,
+                    crate::page::setup_page(
+                        "",
+                        Some(
+                            "Start again from the claim code. Setting this                              server up has to be finished in the browser that                              started it.",
+                        ),
+                    ),
+                );
+            }
             if settings.base_url.is_empty() {
                 return Res::html(400, crate::page::setup_page("", None));
             }
@@ -4861,6 +4918,14 @@ mod tests {
             f.store.settings().unwrap().base_url,
             "https://specs.example.test"
         );
+        // The rest of the wizard is bound to this browser from here on.
+        let setup = res
+            .set_cookie
+            .as_deref()
+            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
+            .and_then(|c| c.split(';').next())
+            .expect("a setup token was issued")
+            .to_string();
         // The callback URL is shown for copying, now that it can be.
         assert!(
             res.body
@@ -4873,7 +4938,8 @@ mod tests {
         let res = f.go(&Req::post(
             private_route::SETUP_GITHUB,
             "client_id=cid&client_secret=csecret",
-        ));
+        )
+        .with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
         let settings = f.store.settings().unwrap();
         assert!(settings.has_github());
@@ -4913,6 +4979,127 @@ mod tests {
             .status,
             404
         );
+    }
+
+    #[test]
+    fn a_half_finished_setup_cannot_be_taken_over_by_somebody_else() {
+        // **The hole this closes, and it was live.** Setup is more than one
+        // step and the code is spent at the first, so everything after it was
+        // guarded only by the server being unclaimed. Naming a GitHub
+        // application decides which account can finish the claim — so an
+        // interloper who reached step two would have supplied their own and
+        // owned the server.
+        //
+        // It bit hardest on a MIGRATED volume, where seeding fills in the
+        // address: "step one is already done" was then true for everybody, from
+        // the first boot, with no code ever spent.
+        let mut f = Fixture::new("setup-hijack").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let setup = res
+            .set_cookie
+            .as_deref()
+            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
+            .and_then(|c| c.split(';').next())
+            .expect("a setup token was issued")
+            .to_string();
+
+        // Somebody else, arriving with no cookie, is sent back to the code box
+        // rather than shown the step that hands the server over.
+        let theirs = f.go(&Req::get(private_route::SETUP));
+        assert!(
+            theirs.body.contains("Claim code"),
+            "a stranger was shown a later step: {}",
+            theirs.body
+        );
+        assert!(
+            !theirs.body.contains("callback URL"),
+            "a stranger was shown the application step: {}",
+            theirs.body
+        );
+
+        // And cannot post to it.
+        let res = f.go(&Req::post(
+            private_route::SETUP_GITHUB,
+            "client_id=theirs&client_secret=theirs",
+        ));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(
+            !f.store.settings().unwrap().has_github(),
+            "a stranger named the application that decides who owns this"
+        );
+
+        // A wrong token is no better than none.
+        let res = f.go(&Req::post(
+            private_route::SETUP_GITHUB,
+            "client_id=theirs&client_secret=theirs",
+        )
+        .with_setup("not-the-token"));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(!f.store.settings().unwrap().has_github());
+
+        // The browser that spent the code still finishes normally.
+        let res = f.go(&Req::post(
+            private_route::SETUP_GITHUB,
+            "client_id=mine&client_secret=mine",
+        )
+        .with_setup(&setup));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(f.store.settings().unwrap().has_github());
+    }
+
+    #[test]
+    fn a_seeded_volume_does_not_look_half_set_up_to_a_stranger() {
+        // The migration case specifically: an upgraded server already has an
+        // address, and that must not be mistaken for "somebody is part-way
+        // through claiming this".
+        let mut f = Fixture::new("setup-seeded").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        let mut settings = f.store.settings().unwrap();
+        settings.base_url = "https://specs.example.test".into();
+        settings.seeded = true;
+        f.store.put_settings(&settings).unwrap();
+
+        let res = f.go(&Req::get(private_route::SETUP));
+        assert!(
+            res.body.contains("Claim code"),
+            "a seeded address skipped the code: {}",
+            res.body
+        );
+    }
+
+    #[test]
+    fn an_abandoned_setup_stops_standing_open() {
+        // The token shares the code's window. An abandoned wizard must not
+        // leave the step that hands the server over reachable indefinitely.
+        let mut f = Fixture::new("setup-abandoned").with_public(false);
+        armed(&mut f, "ABC-123");
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
+        ));
+        let setup = res
+            .set_cookie
+            .as_deref()
+            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
+            .and_then(|c| c.split(';').next())
+            .expect("a setup token")
+            .to_string();
+
+        f.now_ms += crate::admin::CLAIM_TTL_MS;
+        let res = f.go(&Req::post(
+            private_route::SETUP_GITHUB,
+            "client_id=late&client_secret=late",
+        )
+        .with_setup(&setup));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(!f.store.settings().unwrap().has_github());
     }
 
     #[test]

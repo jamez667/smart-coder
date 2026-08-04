@@ -436,6 +436,27 @@ the callback URL is absolute, so it cannot be shown until the address is known,
 and the sign-in cannot run until an application exists. One screen would show a
 URL that changed as somebody typed.
 
+**Everything past the first step belongs to the browser that spent the code**
+<!--@ crates/sc-server/src/admin.rs -->. Spending it mints a token, held
+in a cookie of its own and hashed on the volume like every other credential
+here.
+
+That is not decoration. The code is spent at step *one*, so without it the
+later steps are guarded only by the server being unclaimed — and step two is
+where a GitHub application is named, which decides which account can finish the
+claim. An interloper reaching it would supply their own and own the server.
+
+It bit hardest on a **migrated** volume rather than a fresh one. Seeding fills
+in the address, so "step one is already done" was true for everybody from the
+first boot, with no code ever spent — which is exactly the state a server
+upgrading into this design starts in. Found by looking at a real deployment
+mid-migration rather than by a test, which is recorded here because the test now
+exists and the reasoning that missed it is worth not repeating: the code was
+treated as guarding *the wizard*, when it guards one step of it.
+
+The token shares the code's thirty-minute window, so an abandoned setup stops
+standing open rather than leaving that step reachable indefinitely.
+
 `secure_cookies` stays **derived** from that address and the page says what it
 decided <!--@ sc_server::config::secure_for -->. "Is this a private network" is
 a question people answer wrong, and answering it wrong drops `Secure` from every

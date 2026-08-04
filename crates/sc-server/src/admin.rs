@@ -66,6 +66,27 @@ pub struct Admin {
     /// credential the expiry exists to end.
     #[serde(default)]
     pub claim_expires_ms: Option<u64>,
+    /// SHA-256 of the token held by the browser that spent the code.
+    ///
+    /// **Setup is more than one step, and the code is spent at the first.**
+    /// Without this, everything after step one is guarded only by the server
+    /// being unclaimed — so a half-finished setup on a public hostname is open
+    /// to whoever arrives next, and they can supply their own GitHub
+    /// application and take the server.
+    ///
+    /// That is not hypothetical on a *migrated* volume: seeding fills in the
+    /// address, which made step one look already done to everybody.
+    ///
+    /// Hashed like every other credential here, and cleared by the claim.
+    #[serde(default)]
+    pub setup_token_hash: Option<String>,
+    /// Unix ms after which a half-finished setup has to start again.
+    ///
+    /// Shares [`CLAIM_TTL_MS`] with the code, because it is the same window
+    /// seen from the other side: an abandoned setup must not leave the rest of
+    /// the wizard standing open indefinitely.
+    #[serde(default)]
+    pub setup_expires_ms: Option<u64>,
 }
 
 impl Admin {
@@ -108,9 +129,10 @@ impl Admin {
         }
     }
 
-    /// Spend the claim code.
+    /// Spend the claim code, returning the token that carries the rest of the
+    /// wizard.
     ///
-    /// Returns `true` when the code was right and is now spent. **Spending is
+    /// `None` when the code was wrong, expired, or already spent. **Spending is
     /// separate from claiming**: the code proves you can read the logs, and the
     /// GitHub sign-in that follows proves who you are. Doing both in one step
     /// would mean the code alone decided who owns the server, and a code read
@@ -119,24 +141,50 @@ impl Admin {
     /// An expired code is refused *before* it is compared and cleared on the way
     /// out, so a code that outlived its window stops being a credential rather
     /// than merely being unlucky.
-    pub fn spend(&mut self, code: &str, now_ms: u64) -> bool {
+    pub fn spend(&mut self, code: &str, now_ms: u64) -> Option<String> {
         if self.claimed() || self.claim_expired(now_ms) {
             self.claim_code_hash = None;
             self.claim_expires_ms = None;
-            return false;
+            return None;
         }
-        let Some(expected) = self.claim_code_hash.as_ref() else {
-            return false;
-        };
+        let expected = self.claim_code_hash.as_ref()?;
         if !matches(code, expected) {
             // Left armed: a wrong guess must not spend somebody else's code, or
             // a stranger who cannot read the log could still deny the claim to
             // the person who can.
-            return false;
+            return None;
         }
         self.claim_code_hash = None;
         self.claim_expires_ms = None;
-        true
+
+        // **The rest of the wizard belongs to this browser.** Minted here
+        // rather than at the claim, because the steps in between — naming a
+        // GitHub application — are exactly what somebody else arriving mid-way
+        // would supply in order to take the server.
+        let token = crate::auth::mint_secret();
+        self.setup_token_hash = Some(hash(&token));
+        self.setup_expires_ms = Some(now_ms.saturating_add(CLAIM_TTL_MS));
+        Some(token)
+    }
+
+    /// Is this the browser that spent the code?
+    ///
+    /// **Not merely "is the server unclaimed".** Setup has more than one step
+    /// and the code is spent at the first, so without this every later step is
+    /// open to whoever arrives — and on a migrated volume, where seeding fills
+    /// in the address, step one looks already done to everybody.
+    pub fn setting_up(&self, token: Option<&str>, now_ms: u64) -> bool {
+        let Some(expected) = self.setup_token_hash.as_ref() else {
+            return false;
+        };
+        match self.setup_expires_ms {
+            // No expiry recorded is a file written by an older build. Treated
+            // as expired, so an upgrade asks somebody to start again rather
+            // than honouring a session nobody can account for.
+            None => false,
+            Some(expires) if now_ms >= expires => false,
+            Some(_) => token.is_some_and(|t| matches(t, expected)),
+        }
     }
 
     /// Record who owns this server.
@@ -148,6 +196,9 @@ impl Admin {
         self.claimed_ms = now_ms;
         self.claim_code_hash = None;
         self.claim_expires_ms = None;
+        // The wizard is over, so its token stops meaning anything.
+        self.setup_token_hash = None;
+        self.setup_expires_ms = None;
     }
 }
 
@@ -188,8 +239,8 @@ mod tests {
         // already theirs rather than silently sharing it.
         let mut admin = Admin::default();
         assert!(admin.arm("ABC-123", 0));
-        assert!(admin.spend("ABC-123", 1));
-        assert!(!admin.spend("ABC-123", 2), "spent twice");
+        assert!(admin.spend("ABC-123", 1).is_some());
+        assert!(admin.spend("ABC-123", 2).is_none(), "spent twice");
     }
 
     #[test]
@@ -198,15 +249,18 @@ mod tests {
         // claim** to the person who can, by burning the code with any guess.
         let mut admin = Admin::default();
         admin.arm("ABC-123", 0);
-        assert!(!admin.spend("WRONG-1", 1));
-        assert!(admin.spend("ABC-123", 2), "the real code still works");
+        assert!(admin.spend("WRONG-1", 1).is_none());
+        assert!(
+            admin.spend("ABC-123", 2).is_some(),
+            "the real code still works"
+        );
     }
 
     #[test]
     fn a_claim_code_expires() {
         let mut admin = Admin::default();
         admin.arm("ABC-123", 0);
-        assert!(!admin.spend("ABC-123", CLAIM_TTL_MS));
+        assert!(admin.spend("ABC-123", CLAIM_TTL_MS).is_none());
         assert!(
             admin.claim_code_hash.is_none(),
             "an expired code is cleared, not merely refused"
@@ -236,7 +290,7 @@ mod tests {
 
         assert!(!admin.arm("NEW-COD", 2), "armed a claimed server");
         assert!(admin.claim_code_hash.is_none());
-        assert!(!admin.spend("NEW-COD", 3));
+        assert!(admin.spend("NEW-COD", 3).is_none());
         assert!(admin.is("jamez667"), "still theirs");
     }
 
@@ -266,18 +320,37 @@ mod tests {
 
     #[test]
     fn nothing_that_grants_access_is_serialized() {
-        // The same rule every store here keeps: the file holds a hash, so a copy
-        // of the volume lets nobody claim the server.
+        // The same rule every store here keeps: the file holds hashes, so a
+        // copy of the volume lets nobody claim the server or finish somebody
+        // else's setup.
+        //
+        // **Asserted on the values, not on field names.** Scanning the JSON for
+        // the word "token" was a proxy that broke the moment a field was called
+        // `setup_token_hash` — and a proxy that fails on a correct change is
+        // one that will eventually be silenced rather than read.
         let mut admin = Admin::default();
         admin.arm("ABC-123", 0);
-        let json = serde_json::to_string(&admin).unwrap();
-        assert!(!json.contains("ABC-123"), "{json}");
+        let setup = {
+            let mut a = admin.clone();
+            a.spend("ABC-123", 1).expect("spent")
+        };
 
-        admin.claim("jamez667", 1);
         let json = serde_json::to_string(&admin).unwrap();
-        for hazard in ["token", "secret", "ABC-123"] {
-            assert!(!json.contains(hazard), "{hazard} in {json}");
-        }
+        assert!(!json.contains("ABC-123"), "the claim code is in {json}");
+
+        let mut spent = Admin::default();
+        spent.arm("ABC-123", 0);
+        let token = spent.spend("ABC-123", 1).expect("spent");
+        let json = serde_json::to_string(&spent).unwrap();
+        assert!(!json.contains(&token), "the setup token is in {json}");
+        assert!(json.contains(&hash(&token)), "but its hash is not: {json}");
+        let _ = setup;
+
+        // And the claim clears both, so a claimed server carries neither.
+        spent.claim("jamez667", 2);
+        let json = serde_json::to_string(&spent).unwrap();
+        assert!(!json.contains("ABC-123"), "{json}");
+        assert!(!json.contains(&token), "{json}");
     }
 
     #[test]
