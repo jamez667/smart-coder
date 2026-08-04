@@ -208,6 +208,25 @@ pub fn owner_detail(r: &Request, locale: Locale) -> String {
         ));
     }
 
+    // Quarantine is the other state that admits a decision, and the only one
+    // where an owner's answer *admits* work rather than declining it. Offered
+    // for the same reason the developer's own page offers it: the screener is a
+    // model reading a stranger's text, so it holds things it should not, and
+    // somebody who cannot overrule it has to ask the developer every time.
+    if r.state == RequestState::Quarantined {
+        body.push_str(&format!(
+            "<div class=\"decide\"><p class=\"meta\">{note}</p>\
+             <form method=\"post\" action=\"/public/request/{id}/release\">\
+             <button type=\"submit\">{release}</button></form>\
+             <form method=\"post\" action=\"/public/request/{id}/discard\">\
+             <button type=\"submit\">{discard}</button></form></div>",
+            id = esc(&r.id),
+            note = esc(s.owner_release_note),
+            release = esc(s.owner_release),
+            discard = esc(s.owner_discard),
+        ));
+    }
+
     body.push_str(&format!(
         "<p class=\"meta\"><a href=\"/public\">{}</a></p>",
         esc(s.back)

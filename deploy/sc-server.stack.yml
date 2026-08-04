@@ -208,11 +208,16 @@ services:
       # has already started changes nothing.
       #
       # An owner signs in with GitHub and may READ the drafted specs for their
-      # own repositories and DECLINE them — send back, discard, release. They
-      # may not ACCEPT, and they may not add an owner. Declining loses work,
-      # which is visible and re-filable; accepting settles it, and that stays
-      # with the developer. Building it is the IDE's job either way: nothing on
-      # the public surface runs a pipeline.
+      # own repositories, DECLINE them (send back, discard) and UNBLOCK ones
+      # screening held (release). They may not ACCEPT, and they may not add an
+      # owner.
+      #
+      # Release is the one owner action that reaches your machine — a released
+      # request is drafted again — so it is bounded by
+      # SC_SERVER_PUBLIC_MAX_DRAFTS per repository per day, same as your own
+      # send-backs. Accepting settles a request instead, and that stays with
+      # you. Building it is the IDE's job either way: nothing on the public
+      # surface runs a pipeline.
       #
       # NOTHING IS CHECKED AGAINST GITHUB. Signing in proves who somebody is;
       # the roster is the only thing deciding what they may see. Treat it the

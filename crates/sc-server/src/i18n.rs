@@ -248,6 +248,14 @@ pub struct Strings {
     pub owner_note_hint: &'static str,
     pub owner_send_back: &'static str,
     pub owner_discard: &'static str,
+    /// Overruling the screener, which is why quarantine is not deletion.
+    ///
+    /// Deliberately not "looks fine to me": the screener held it for a reason,
+    /// and the point is that a person reads the text and decides rather than
+    /// clearing a nag.
+    pub owner_release: &'static str,
+    /// Why the request is sitting here at all, above the release button.
+    pub owner_release_note: &'static str,
     /// Shown when a filing names a repository this surface does not collect
     /// for. Deliberately says nothing about which ones it *does* — the picker
     /// already lists those to anyone who reached the form honestly.
@@ -447,6 +455,8 @@ mod tests {
             s.owner_note_hint,
             s.owner_send_back,
             s.owner_discard,
+            s.owner_release,
+            s.owner_release_note,
             s.file_repo_unknown,
             s.file_mine_heading,
             s.file_nothing_yet,

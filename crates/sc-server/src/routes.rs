@@ -1478,17 +1478,28 @@ fn drafting_budget(ctx: &Ctx<'_>, repo: &str) -> std::result::Result<(), Res> {
 
 /// The verbs an owner may reach.
 ///
-/// **Both decide *against* work**, and that is the whole rule. Their failure
-/// mode is lost work — visible on the page, and the filer can file again.
-/// Approving admits work to the developer's machine, and its failure mode is
-/// invisible until it costs something, so it is not here and not reachable:
-/// every admitting verb lives behind the `Caller::Device` match on the private
-/// surface, which no `Caller::Owner` satisfies.
+/// `send-back` and `discard` decide *against* work, and their failure mode is
+/// lost work — visible on the page, and the filer can file again.
+///
+/// **`release` is the exception, and knowingly so.** It moves a quarantined
+/// request to `Queued`, so a daemon will draft it: the one owner power that
+/// reaches the developer's machine. It is here because an owner who can see
+/// their repository's queue and not unblock it has to ask the developer for
+/// every screening false positive, which makes the role decorative. What makes
+/// it affordable is [`drafting_budget`] — the cost is bounded per repository,
+/// so the worst case is a day's drafting runs and not an unbounded loop.
+///
+/// **`accept` is the verb no owner has**, and the reason is different from
+/// cost. Accepting settles a request; building it means opening the IDE and
+/// running the pipeline, which is the developer's machine and the developer's
+/// call. That is not enforced here but structurally: every accepting route
+/// lives behind the `Caller::Device` match on the private surface, which no
+/// `Caller::Owner` satisfies.
 ///
 /// Named beside [`REVIEW_VERBS`] so the two lists can be compared at a glance,
 /// and so a verb added there is *absent* here until somebody decides otherwise —
 /// which is the safe direction for that omission to fall.
-pub const OWNER_VERBS: [&str; 2] = ["send-back", "discard"];
+pub const OWNER_VERBS: [&str; 3] = ["send-back", "discard", "release"];
 
 /// Everything filed against the repositories an owner owns.
 ///
@@ -1509,7 +1520,8 @@ fn owned(ctx: &Ctx<'_>, repos: &[String]) -> sc_proto::Result<Vec<Request>> {
         .collect())
 }
 
-/// What an owner may do: read their repositories' work, and decline it.
+/// What an owner may do: read their repositories' work, decline it, and unblock
+/// it. Never accept it — see [`OWNER_VERBS`].
 ///
 /// Every route here re-checks that the request's repository is one of theirs.
 /// The check is against the set carried on the caller, resolved once at
@@ -1587,6 +1599,12 @@ fn owner_route(
                     ctx.store.send_back(id, note.trim())
                 }
                 "discard" => ctx.store.discard(id),
+                // The one owner verb that admits work. Screening is a model
+                // judging a stranger's text, so it has false positives — and an
+                // owner who can see their repository's queue but not unblock it
+                // has to ask the developer about every one of them. Bounded by
+                // the budget taken above.
+                "release" => ctx.store.release(id),
                 // Unreachable past the allowlist above; refused rather than
                 // unwrapped so a later edit to `OWNER_VERBS` cannot open a path
                 // through here by accident.
@@ -3844,6 +3862,86 @@ mod tests {
     }
 
     #[test]
+    fn an_owner_may_release_their_own_repositorys_quarantined_work() {
+        // The one owner verb that admits work, and deliberate. Screening is a
+        // model reading a stranger's text, so it holds things it should not —
+        // and an owner who can see the queue but not unblock it has to ask the
+        // developer about every false positive.
+        let (mut f, owner, mine, theirs) = owner_fixture("owner-release");
+
+        for id in [&mine, &theirs] {
+            let mut r = f.store.get(id).unwrap().unwrap();
+            r.state = RequestState::Quarantined;
+            f.store.put(&r).unwrap();
+        }
+
+        // Offered on the page, not merely accepted on the wire — a verb with no
+        // button is one nobody uses.
+        let html = f
+            .go(&Req::get(&format!("{}{mine}", public_route::REQUEST_PREFIX)).with_cookie(&owner))
+            .body;
+        assert!(
+            html.contains(&format!("/public/request/{mine}/release")),
+            "{html}"
+        );
+
+        let res = f.go(&Req::post(
+            &format!("{}{mine}/release", public_route::REQUEST_PREFIX),
+            "",
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(
+            f.store.get(&mine).unwrap().unwrap().state,
+            RequestState::Queued,
+            "released into the claimable queue"
+        );
+
+        // Somebody else's repository stays quarantined, and says not found
+        // rather than forbidden.
+        let res = f.go(&Req::post(
+            &format!("{}{theirs}/release", public_route::REQUEST_PREFIX),
+            "",
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 404);
+        assert_eq!(
+            f.store.get(&theirs).unwrap().unwrap().state,
+            RequestState::Quarantined
+        );
+    }
+
+    #[test]
+    fn an_owners_releases_are_bounded_by_the_repositorys_drafting_budget() {
+        // **Why the budget shipped before this verb.** Release reaches the
+        // developer's machine: each one is a drafting run. Without a bound, an
+        // owner could loop release and send-back for ever, and the cost lands
+        // on somebody else's laptop.
+        let (mut f, owner, mine, _theirs) = owner_fixture("owner-release-budget");
+        if let Some(p) = f.public.as_mut() {
+            p.max_daily_drafts = 1;
+        }
+
+        // The request has already been drafted once today, so the budget is spent.
+        let mut r = f.store.get(&mine).unwrap().unwrap();
+        r.drafts = vec![f.now_ms];
+        r.state = RequestState::Quarantined;
+        f.store.put(&r).unwrap();
+
+        let res = f.go(&Req::post(
+            &format!("{}{mine}/release", public_route::REQUEST_PREFIX),
+            "",
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 429, "{}", res.body);
+        assert_eq!(
+            f.store.get(&mine).unwrap().unwrap().state,
+            RequestState::Quarantined,
+            "refused, and nothing moved"
+        );
+    }
+
+    #[test]
     fn an_owner_cannot_decline_somebody_elses_repository() {
         let (mut f, owner, _, theirs) = owner_fixture("owner-not-theirs");
         for verb in OWNER_VERBS {
@@ -3857,33 +3955,43 @@ mod tests {
     }
 
     #[test]
-    fn the_owner_verbs_are_a_strict_subset_that_admits_nothing() {
+    fn accepting_is_the_one_verb_no_owner_has() {
         // The two lists side by side. Every owner verb is a review verb, and
-        // every verb that ADMITS work is absent — asserted by name, so adding
-        // one to `OWNER_VERBS` without thinking fails here.
+        // accepting is absent — asserted by name, so adding it to `OWNER_VERBS`
+        // without thinking fails here.
+        //
+        // **The line is not "admits work".** `release` admits work, knowingly,
+        // and is bounded by the drafting budget rather than kept away. The line
+        // is that accepting SETTLES a request, and building it means opening
+        // the IDE and running the pipeline — the developer's machine, and so
+        // the developer's call.
         for verb in OWNER_VERBS {
             assert!(REVIEW_VERBS.contains(&verb), "{verb} is not a review verb");
         }
-        for admitting in ["accept", "accept/confirm", "release"] {
+        for settling in ["accept", "accept/confirm"] {
             assert!(
-                !OWNER_VERBS.contains(&admitting),
-                "{admitting} admits work and must not be an owner's to reach"
+                !OWNER_VERBS.contains(&settling),
+                "{settling} settles a request and is not an owner's to reach"
             );
         }
     }
 
     #[test]
-    fn an_owner_cannot_reach_any_admitting_verb() {
-        // **The property this role turns on.** An owner may decide against work
-        // and may not decide for it — and that is not a check inside the approve
-        // handler, it is `Caller::Owner` failing to match the `Caller::Device`
-        // pattern the private surface is gated on. There is no value of the
-        // variant that gets past it.
+    fn an_owner_cannot_reach_the_private_surface_at_all() {
+        // **The property this role turns on**, and it is structural rather than
+        // a check somebody has to write: `Caller::Owner` does not match the
+        // `Caller::Device` pattern the private surface is gated on, so every
+        // route past that line is unreachable by type. There is no value of the
+        // variant that gets through.
         //
-        // Iterates the shared constant, so a verb added later is covered without
-        // anyone remembering to extend this list. Every one of them is closed to
-        // an owner today; commit 5 opens exactly `send-back` and `discard`, on
-        // the *public* side, and this test keeps guarding the private one.
+        // That is what makes it worth testing here rather than verb by verb.
+        // An owner *does* reach `send-back`, `discard` and `release` — on the
+        // PUBLIC side, through `owner_route`, each behind an ownership check
+        // and a drafting budget. None of that touches this: the private
+        // handlers stay closed to them whatever `OWNER_VERBS` grows to.
+        //
+        // Iterates the shared constant, so a verb added later is covered
+        // without anyone remembering to extend this list.
         let mut f = Fixture::new("owner-no-approve")
             .with_public(false)
             .with_owner("jamez667", &["intake"]);
@@ -3906,11 +4014,11 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_is_recognised_only_because_the_configuration_says_so() {
-        // An owner is an account the configuration *promotes*, never one that
-        // promotes itself — so the same signed-in session is an owner or is not,
-        // depending on a setting the operator controls.
-        let mut f = Fixture::new("owner-from-config").with_public(false);
+    fn an_owner_is_recognised_only_because_the_roster_says_so() {
+        // An owner is an account the developer *promotes*, never one that
+        // promotes itself — so the same signed-in session is an owner or is
+        // not, depending on a record only a device can write.
+        let mut f = Fixture::new("owner-from-roster").with_public(false);
         let session = f.signed_in_as_github("jamez667");
 
         // Not named: an ordinary filer, and the filing form is what they get.
