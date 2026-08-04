@@ -41,6 +41,7 @@ pub mod roster;
 pub mod routes;
 pub mod screen;
 pub mod screen_eval;
+pub mod seal;
 pub mod serve;
 pub mod store;
 

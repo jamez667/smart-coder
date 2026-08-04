@@ -144,6 +144,29 @@ services:
       # this to a value of your own — one set here is never logged.
       SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
 
+      # The key the settings stored on the VOLUME are encrypted with.
+      #
+      # Some settings have to be replayed rather than merely compared -- a
+      # mail API key is sent to Brevo, a GitHub client secret is sent to
+      # GitHub -- so they cannot be stored as hashes the way device tokens
+      # and daemon keys are. Once they are editable from the review surface
+      # they live on the volume, and they are encrypted there.
+      #
+      # THIS IS THE ONE SECRET THAT MUST STAY HERE. It is what makes the
+      # volume safe to back up and copy: a key stored beside its own
+      # ciphertext protects nothing. Someone who takes a copy of /data and
+      # not this line has taken nothing usable.
+      #
+      # Generate one with `openssl rand -hex 32`, or leave it unset and read
+      # the one this server logs on a first start. LOSING IT means the stored
+      # secrets cannot be read and have to be entered again -- it is not a
+      # lockout, since who administers this server is recorded separately.
+      #
+      # A server that has never been given a secret through the UI does not
+      # need one. A WRONG one is refused at startup rather than quietly
+      # behaving as though nothing were configured.
+      SC_SERVER_SECRET_KEY: ${SC_SERVER_SECRET_KEY:-}
+
       # These carry their defaults *inside the image*, so they are substituted
       # to their real values rather than to an empty string. Passing an empty
       # one is not the same as leaving it unset: `SC_SERVER_DATA=""` overrides

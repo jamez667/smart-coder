@@ -35,3 +35,13 @@ sha2 = "0.10"
 # rest of the workspace — there is no async runtime outside the GUI. Declared
 # explicitly rather than relied on transitively via sc-daemon.
 ureq = { version = "3", features = ["json"] }
+# Sealing the settings on the volume. A mail key has to be *replayed* to Brevo,
+# so unlike every other secret here it cannot be hashed — and once it is editable
+# from a page it has to live on the volume rather than in the environment.
+#
+# Pure Rust and no C toolchain, so it does not complicate the container build;
+# same RustCrypto ecosystem as the `sha2` above. **AEAD rather than a bare
+# cipher**: detecting a tampered settings file matters more than secrecy here,
+# because somebody who can write the volume could otherwise point the screener at
+# a host of their choosing. See `src/seal.rs`.
+chacha20poly1305 = "0.11"

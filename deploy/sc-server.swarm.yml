@@ -51,7 +51,15 @@ services:
       # Filed under the label `default`.
       SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:-}
 
-      SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
+      SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
+      # The key the settings on the volume are encrypted with. Some settings
+      # are replayed rather than compared (a mail key, a GitHub secret), so
+      # they cannot be hashed; they live on the volume encrypted with this.
+      # IT MUST STAY HERE -- a key beside its own ciphertext protects
+      # nothing, and this is what makes a copied volume inert. `openssl rand
+      # -hex 32`, or read the one logged on a first start. Losing it means
+      # re-entering the secrets, not losing the server.
+      SC_SERVER_SECRET_KEY: ${SC_SERVER_SECRET_KEY:-}
       SC_SERVER_BIND: ${SC_SERVER_BIND:-0.0.0.0}
       SC_SERVER_PORT: ${SC_SERVER_PORT:-8420}
       SC_SERVER_DATA: ${SC_SERVER_DATA:-/data}
