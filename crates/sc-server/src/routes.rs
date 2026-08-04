@@ -296,12 +296,20 @@ pub enum Policy {
     /// one: JSON for the daemon, errors, the enrolment page.
     #[default]
     Strict,
-    /// Script from this origin only. The public surface.
+    /// Script from this origin only. A filer's own pages.
     ///
-    /// Permitted here and nowhere else because of who reads what: a filer's
-    /// pages show **their own** requests, so a script that went wrong reaches
-    /// only its author's data. The private surface renders every filer's spec on
-    /// one page, and the same argument does not reach it.
+    /// **The dividing line is how many distinct authors' model output one page
+    /// renders**, not which surface it is on. A filer's pages show *their own*
+    /// requests, so a script that went wrong reaches only its author's data —
+    /// they already control the input and can already read the output. A page
+    /// showing several filers' specs at once has no such argument, whichever
+    /// surface it lives on.
+    ///
+    /// Stated this way because the first reading — "the public surface gets
+    /// script" — was true only while the public surface had one kind of reader.
+    /// The owner pages made it false: they sit on public paths and render every
+    /// filer's spec for a repository, and were served with script until the
+    /// policy started being chosen by *caller* rather than by path.
     PublicScript,
 }
 
@@ -475,10 +483,21 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // `public_route` returns is stamped here, so a public handler cannot be
     // written without it and a private one cannot accidentally acquire it — the
     // two properties a per-handler `.with_policy()` call would each fail at.
+    //
+    // **Chosen by who the caller turned out to be, not by which path matched.**
+    // The rule was never "the public surface gets script" — see [`Policy`]: it is
+    // that a page rendering *one* author's model output can afford script, and a
+    // page rendering *many* authors' cannot. An owner's pages are on a public
+    // path and show every filer's spec for a repository, which is the second kind
+    // and was being served as the first.
     if is_public_path(&path) {
         return match ctx.public {
             Some(_) => {
-                public_route(ctx, req, method, &path, &caller).with_policy(Policy::PublicScript)
+                let policy = match &caller {
+                    Some(Caller::Owner { .. }) => Policy::Strict,
+                    _ => Policy::PublicScript,
+                };
+                public_route(ctx, req, method, &path, &caller).with_policy(policy)
             }
             // No public surface configured: this 404 is not *on* that surface, so
             // it is served strict like every other non-public response.
@@ -3754,6 +3773,38 @@ mod tests {
             "Content-Security-Policy",
         ] {
             assert!(named.contains(&required));
+        }
+    }
+
+    #[test]
+    fn a_page_showing_more_than_one_authors_spec_is_never_served_with_script() {
+        // **The real dividing line**, and the one the first reading of `Policy`
+        // got wrong. It is not "the public surface gets script" — it is that a
+        // page rendering one author's model output can afford it and a page
+        // rendering many authors' cannot.
+        //
+        // An owner's pages sit on public paths and show every filer's spec for a
+        // repository, so they are the second kind. They were served as the first
+        // until the policy was chosen by caller rather than by path.
+        let mut f = Fixture::new("policy-by-caller")
+            .with_public(false)
+            .with_owner("jamez667", &["intake"]);
+        let owner = f.signed_in_as_github("jamez667");
+        let filer = f.signed_in("jo@x.com");
+
+        for path in [public_route::LANDING, public_route::FILE] {
+            assert_eq!(
+                f.go(&Req::get(path).with_cookie(&owner)).policy,
+                Policy::Strict,
+                "{path} shows several filers' specs to an owner"
+            );
+            // And a filer's own pages keep it, because the argument does reach
+            // them: they wrote the input and can already read the output.
+            assert_eq!(
+                f.go(&Req::get(path).with_cookie(&filer)).policy,
+                Policy::PublicScript,
+                "{path} shows a filer only their own"
+            );
         }
     }
 
