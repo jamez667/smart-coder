@@ -1571,11 +1571,15 @@ fn revoke_account(ctx: &mut Ctx<'_>, id: &str) -> Res {
 /// something when one exists: an owner reviews public filings, so a
 /// private-only server has nothing for this page to administer.
 fn owners_page(ctx: &Ctx<'_>) -> Res {
-    let Some(public) = ctx.public else {
-        return Res::html(404, crate::page::not_found());
-    };
+    // **Serves with the public surface off**, where it used to 404. That
+    // guard made sense while the switch was an environment variable and this
+    // page could not turn it on; now it can, so 404ing here would hide the
+    // page exactly when somebody came to fix the thing it is about. An owner
+    // reviews public filings, so with no surface the list is simply empty and
+    // the page says why.
+    let served = ctx.public.map(|p| p.repos.clone()).unwrap_or_default();
     match ctx.store.roster() {
-        Ok(r) => Res::html(200, crate::page::owners_page(&r, &public.repos)),
+        Ok(r) => Res::html(200, crate::page::owners_page(&r, &served)),
         Err(e) => error(500, &e.to_string()),
     }
 }
@@ -1652,9 +1656,8 @@ fn revoke_owner(ctx: &mut Ctx<'_>, login: &str) -> Res {
 /// `unconfirmed` carries the name a daemon could not be found for, so the page
 /// can offer the override instead of a bare error.
 fn repos_page(ctx: &Ctx<'_>, unconfirmed: Option<&str>) -> Res {
-    if ctx.public.is_none() {
-        return Res::html(404, crate::page::not_found());
-    }
+    // Serves with the public surface off, for the reason `owners_page` gives:
+    // enabling a repository is part of turning one on.
     let offered = match ctx.seen.lock() {
         Ok(seen) => seen.offered(ctx.now_ms),
         Err(p) => p.into_inner().offered(ctx.now_ms),
@@ -1681,9 +1684,6 @@ fn repos_page(ctx: &Ctx<'_>, unconfirmed: Option<&str>) -> Res {
 /// `served_by: None`, so a repository enabled without confirmation stays
 /// visibly distinguishable from one a machine vouched for.
 fn enable_repo(ctx: &mut Ctx<'_>, name: &str, anyway: bool) -> Res {
-    if ctx.public.is_none() {
-        return Res::html(404, crate::page::not_found());
-    }
     if name.is_empty() || name.len() > crate::config::MAX_REPO_NAME {
         return error(400, "a repository name is required");
     }
@@ -1718,9 +1718,6 @@ fn enable_repo(ctx: &mut Ctx<'_>, name: &str, anyway: bool) -> Res {
 /// shows every request. Deleting them would make this button destructive in a
 /// way its name does not say.
 fn disable_repo(ctx: &mut Ctx<'_>, name: &str) -> Res {
-    if ctx.public.is_none() {
-        return Res::html(404, crate::page::not_found());
-    }
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut roster = match ctx.store.roster() {
         Ok(r) => r,
@@ -4979,6 +4976,82 @@ mod tests {
             .status,
             404
         );
+    }
+
+    /// Every page an administrator is expected to find.
+    ///
+    /// Named once so the test below iterates it rather than a hand-written copy
+    /// that goes stale the moment a page is added — which is the failure it
+    /// exists to catch.
+    const ADMIN_PAGES: [&str; 6] = [
+        private_route::REVIEW,
+        private_route::SETTINGS,
+        private_route::REPOS,
+        private_route::OWNERS,
+        private_route::DAEMONS,
+        private_route::ACCOUNTS,
+    ];
+
+    #[test]
+    fn every_administrative_page_is_linked_from_the_surface() {
+        // **The bug this pins, and it had already happened twice.** Four of
+        // these were built, tested, and reachable only by somebody who already
+        // knew the URL — the same failure the GitHub sign-in had, and it goes
+        // unnoticed for the same reason: a test asks for a route directly,
+        // which is exactly what a person cannot do.
+        //
+        // Asserted from EVERY page rather than one, because the nav lives in
+        // the shell precisely so a page added later is linked by construction.
+        let mut f = Fixture::new("admin-nav").with_public(false);
+        let admin = f.as_admin();
+
+        for from in ADMIN_PAGES {
+            let res = f.go(&Req::get(from).with_cookie(&admin));
+            assert_eq!(res.status, 200, "{from}: {}", res.body);
+            for to in ADMIN_PAGES {
+                assert!(
+                    res.body.contains(&format!("href=\"{to}\"")),
+                    "{from} does not link {to}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_administrative_page_serves_with_no_public_surface() {
+        // **A link that 404s is worse than no link.** Two of these were guarded
+        // on a public surface existing, which was right while the switch was an
+        // environment variable and these pages could not turn it on. Now they
+        // can — so 404ing here hid the page exactly when somebody came to fix
+        // the thing it is about.
+        //
+        // This is the state a freshly claimed server is in: claimed, no public
+        // surface, and the administrator looking for where to turn one on.
+        let mut f = Fixture::new("admin-nav-private");
+        assert!(f.public.is_none(), "no public surface at all");
+        let admin = f.as_admin();
+
+        for path in ADMIN_PAGES {
+            let res = f.go(&Req::get(path).with_cookie(&admin));
+            assert_eq!(res.status, 200, "{path} is linked but 404s: {}", res.body);
+        }
+    }
+
+    #[test]
+    fn the_admin_navigation_is_not_on_the_public_surface() {
+        // It names pages a filer cannot reach, and a 404 they can see the door
+        // to is worse than one they cannot: it tells a stranger the addresses
+        // are real.
+        let mut f = Fixture::new("admin-nav-public").with_public(false);
+        let filer = f.signed_in("jo@x.com");
+        let res = f.go(&Req::get(public_route::FILE).with_cookie(&filer));
+        for path in [private_route::SETTINGS, private_route::DAEMONS] {
+            assert!(
+                !res.body.contains(&format!("href=\"{path}\"")),
+                "the public surface links {path}: {}",
+                res.body
+            );
+        }
     }
 
     #[test]

@@ -92,6 +92,8 @@ pre { white-space: pre-wrap; word-wrap: break-word; padding: .8rem;
 .skip { display: block; font-size: .85rem; opacity: .7; margin: .5rem 0; }
 .elided { text-align: center; opacity: .6; font-size: .85rem;
           padding: .4rem; font-style: italic; }
+.adminnav { margin-top: 2rem; padding-top: 1rem; font-size: .85rem;
+            border-top: 1px solid rgba(128,128,128,.35); opacity: .8; }
 ";
 
 /// The **public** surface's stylesheet.
@@ -748,8 +750,39 @@ pub(crate) fn shell(title: &str, body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>{}</title><style>{STYLE}</style></head><body>{body}</body></html>",
-        esc(title)
+<title>{title}</title><style>{STYLE}</style></head><body>{body}{nav}</body></html>",
+        title = esc(title),
+        nav = admin_nav(),
+    )
+}
+
+/// Every administrative page, linked from every administrative page.
+///
+/// **In the shell rather than on each page**, so a page added later is reachable
+/// by construction. Four of these were built, tested and reachable only by
+/// somebody who already knew the URL — the same failure the GitHub sign-in had,
+/// and it goes unnoticed for the same reason: a test asks for the route
+/// directly, which is exactly what a person cannot do.
+///
+/// At the foot rather than the head. This surface is read on a phone, the thing
+/// somebody came for is at the top, and a menu above the content pushes the
+/// request they are reviewing off the first screen.
+///
+/// No script and no `<details>`: the private CSP permits neither script nor the
+/// state a menu would need, and a row of links needs neither.
+fn admin_nav() -> String {
+    let link = |href: &str, label: &str| format!("<a href=\"{href}\">{label}</a>");
+    format!(
+        "<nav class=\"adminnav\">{}</nav>",
+        [
+            link("/review", "Requests"),
+            link("/settings", "Settings"),
+            link("/repos", "Repositories"),
+            link("/owners", "Owners"),
+            link("/daemons", "Machines"),
+            link("/accounts", "Who can file"),
+        ]
+        .join(" · ")
     )
 }
 

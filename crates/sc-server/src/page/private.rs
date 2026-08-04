@@ -60,8 +60,7 @@ pub fn index(all: &[Request]) -> String {
              placeholder=\"Describe it the way you would to a colleague.\"></textarea>\
              {kind}{repo}\
              <button type=\"submit\">File it</button></form>\
-             <h2>Filed</h2>{items}\
-             <p class=\"meta\"><a href=\"/accounts\">Who can file</a></p>",
+             <h2>Filed</h2>{items}",
             kind = kind_field(),
             repo = repo_field(),
         ),
