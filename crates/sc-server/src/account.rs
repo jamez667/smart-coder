@@ -380,6 +380,13 @@ pub struct Accounts {
 
 impl Accounts {
     /// Find a live account by hashed address.
+    /// The live account for an address, mutably.
+    pub fn by_email_mut(&mut self, email_hash: &str) -> Option<&mut Account> {
+        self.accounts
+            .iter_mut()
+            .find(|a| !a.revoked && a.email_hash == email_hash)
+    }
+
     pub fn by_email(&self, email_hash: &str) -> Option<&Account> {
         self.accounts
             .iter()
@@ -452,17 +459,36 @@ impl Accounts {
         password: &str,
         now_ms: u64,
     ) -> std::result::Result<Account, String> {
-        let login = login.trim().to_ascii_lowercase();
-        if self.by_login(&login).is_some() {
-            return Err(format!("{login:?} is taken"));
+        // **The login is an email address, and it keys the account.** It used
+        // to be a separate name over a synthesised `hash("login:{name}")`, which
+        // meant one person could hold two unrelated rows \u2014 a password account
+        // and a magic-link account \u2014 that no code could ever reconcile.
+        //
+        // The consequence is worth stating: a magic link now reaches an
+        // administrator's account exactly as it reaches a filer's, because there
+        // is one row and two ways to prove you own the address. Whoever can read
+        // that inbox can sign in as its owner. That is the price of one
+        // identity, and it was chosen deliberately over two.
+        if !valid_email(login) {
+            return Err("that is not an email address".to_string());
         }
+        let login = normalize_email(login);
+        let email_hash = crate::auth::hash(&login);
         let password_hash = crate::auth::hash_password(password)?;
 
-        let mut account = self.create(
-            &crate::auth::hash(&format!("login:{login}")),
-            &login,
-            now_ms,
-        );
+        // Adopt an existing row rather than making a second one: somebody who
+        // filed a request last week and is made an owner today is the same
+        // person, and two rows would split their history from their permissions.
+        if let Some(existing) = self.by_email_mut(&email_hash) {
+            if existing.password_hash.is_some() {
+                return Err(format!("{login:?} is taken"));
+            }
+            existing.login = Some(login);
+            existing.password_hash = Some(password_hash);
+            return Ok(existing.clone());
+        }
+
+        let mut account = self.create(&email_hash, &email_hint(&login), now_ms);
         account.login = Some(login);
         account.password_hash = Some(password_hash);
 
@@ -1059,19 +1085,86 @@ mod tests {
     fn a_login_account_signs_in_with_its_password() {
         let mut accounts = Accounts::default();
         let account = accounts
-            .create_login("JameZ667", "correct-horse-battery", 1_000)
+            .create_login("JameZ667@example.test", "correct-horse-battery", 1_000)
             .unwrap();
 
         // Lowercased on the way in, so whatever casing somebody types matches.
-        assert_eq!(account.login.as_deref(), Some("jamez667"));
-        assert!(accounts.by_login("JAMEZ667").is_some());
+        assert_eq!(account.login.as_deref(), Some("jamez667@example.test"));
+        assert!(accounts.by_login("JAMEZ667@EXAMPLE.TEST").is_some());
 
         assert_eq!(
             accounts
-                .check_password("jamez667", "correct-horse-battery", 1_000)
+                .check_password("jamez667@example.test", "correct-horse-battery", 1_000)
                 .as_deref(),
             Ok(account.id.as_str())
         );
+    }
+
+    #[test]
+    fn one_address_is_one_account_however_it_signs_in() {
+        // **The whole point of making the login an email.** A filer who signed
+        // in by link last week and is given a password today is the same person,
+        // and used to become two unrelated rows: one keyed on `hash(address)`,
+        // one on a synthesised `hash("login:name")`. Nothing could reconcile
+        // them, so their filings sat under an identity their permissions did not.
+        let mut accounts = Accounts::default();
+        let email = "jo@x.com";
+        let hash_of = crate::auth::hash(&normalize_email(email));
+
+        // They arrive as a filer.
+        let filed_as = accounts.create(&hash_of, &email_hint(email), 1_000).id;
+        assert_eq!(accounts.accounts.len(), 1);
+
+        // They are given a password.
+        let with_password = accounts
+            .create_login(email, "correct-horse-battery", 2_000)
+            .expect("the address is theirs");
+
+        assert_eq!(accounts.accounts.len(), 1, "adopted, not duplicated");
+        assert_eq!(with_password.id, filed_as, "and it is the same account");
+
+        // Both ways in now land on it.
+        assert_eq!(
+            accounts.check_password(email, "correct-horse-battery", 3_000),
+            Ok(filed_as.clone()),
+        );
+        assert_eq!(
+            accounts.by_email(&hash_of).map(|a| a.id.clone()),
+            Some(filed_as),
+            "and a magic link resolves the very same row"
+        );
+    }
+
+    #[test]
+    fn a_capitalised_address_is_the_same_account() {
+        // Somebody registers one way and types it another. A second row here
+        // would be an account they could not reach and could not see.
+        let mut accounts = Accounts::default();
+        accounts
+            .create_login("Jo@X.com", "correct-horse-battery", 1_000)
+            .unwrap();
+        assert!(accounts
+            .create_login("jo@x.com", "another-password-here", 2_000)
+            .is_err());
+        assert_eq!(accounts.accounts.len(), 1);
+        assert!(accounts
+            .check_password("JO@X.COM", "correct-horse-battery", 3_000)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_login_that_is_not_an_address_is_refused() {
+        // It keys the account, so it has to be the thing a magic link would
+        // hash to. A bare name would key on nothing anybody could sign in to.
+        let mut accounts = Accounts::default();
+        for bad in ["jamez667", "", "no-at-sign.com", "@x.com"] {
+            assert!(
+                accounts
+                    .create_login(bad, "correct-horse-battery", 1)
+                    .is_err(),
+                "{bad:?} was accepted"
+            );
+        }
     }
 
     #[test]
@@ -1081,10 +1174,10 @@ mod tests {
         // `Admin::is` match whichever the iteration reached first.
         let mut accounts = Accounts::default();
         accounts
-            .create_login("jamez667", "correct-horse-battery", 1)
+            .create_login("jamez667@example.test", "correct-horse-battery", 1)
             .unwrap();
         let err = accounts
-            .create_login("JameZ667", "another-good-password", 2)
+            .create_login("JameZ667@example.test", "another-good-password", 2)
             .unwrap_err();
         assert!(err.contains("taken"), "{err}");
         assert_eq!(accounts.accounts.len(), 1);
@@ -1094,7 +1187,7 @@ mod tests {
     fn a_password_is_never_stored_in_the_clear() {
         let mut accounts = Accounts::default();
         accounts
-            .create_login("jamez667", "correct-horse-battery", 1)
+            .create_login("jamez667@example.test", "correct-horse-battery", 1)
             .unwrap();
         let json = serde_json::to_string(&accounts).unwrap();
         assert!(!json.contains("correct-horse-battery"), "{json}");
@@ -1108,29 +1201,46 @@ mod tests {
     fn a_wrong_password_backs_off_and_a_right_one_clears_it() {
         let mut accounts = Accounts::default();
         accounts
-            .create_login("jamez667", "correct-horse-battery", 0)
+            .create_login("jamez667@example.test", "correct-horse-battery", 0)
             .unwrap();
 
         // The first two are free: a typo should not be punished, and the point
         // is to make *sustained* guessing expensive.
         for _ in 0..2 {
-            assert_eq!(accounts.check_password("jamez667", "wrong", 0), Err(0));
+            assert_eq!(
+                accounts.check_password("jamez667@example.test", "wrong", 0),
+                Err(0)
+            );
         }
         // Then it grows.
-        let third = accounts.check_password("jamez667", "wrong", 0).unwrap_err();
+        let third = accounts
+            .check_password("jamez667@example.test", "wrong", 0)
+            .unwrap_err();
         assert!(third > 0, "the third failure did not delay");
         let fourth = accounts
-            .check_password("jamez667", "wrong", third)
+            .check_password("jamez667@example.test", "wrong", third)
             .unwrap_err();
         assert!(fourth > third + 1_000, "the delay did not grow");
 
         // And a correct one wipes it, so a forgotten password is a short wait
         // rather than something to recover from.
         assert!(accounts
-            .check_password("jamez667", "correct-horse-battery", fourth)
+            .check_password("jamez667@example.test", "correct-horse-battery", fourth)
             .is_ok());
-        assert_eq!(accounts.by_login("jamez667").unwrap().failed_attempts, 0);
-        assert_eq!(accounts.by_login("jamez667").unwrap().retry_at(), 0);
+        assert_eq!(
+            accounts
+                .by_login("jamez667@example.test")
+                .unwrap()
+                .failed_attempts,
+            0
+        );
+        assert_eq!(
+            accounts
+                .by_login("jamez667@example.test")
+                .unwrap()
+                .retry_at(),
+            0
+        );
     }
 
     #[test]
@@ -1140,22 +1250,25 @@ mod tests {
         // cost rather than a theoretical one.
         let mut accounts = Accounts::default();
         accounts
-            .create_login("jamez667", "correct-horse-battery", 0)
+            .create_login("jamez667@example.test", "correct-horse-battery", 0)
             .unwrap();
         for _ in 0..4 {
-            let _ = accounts.check_password("jamez667", "wrong", 0);
+            let _ = accounts.check_password("jamez667@example.test", "wrong", 0);
         }
-        let until = accounts.by_login("jamez667").unwrap().retry_at();
+        let until = accounts
+            .by_login("jamez667@example.test")
+            .unwrap()
+            .retry_at();
         assert!(until > 0);
 
         // Even the RIGHT password is refused while the delay stands.
         assert_eq!(
-            accounts.check_password("jamez667", "correct-horse-battery", until - 1),
+            accounts.check_password("jamez667@example.test", "correct-horse-battery", until - 1),
             Err(until)
         );
         // And works once it passes.
         assert!(accounts
-            .check_password("jamez667", "correct-horse-battery", until)
+            .check_password("jamez667@example.test", "correct-horse-battery", until)
             .is_ok());
     }
 
@@ -1176,28 +1289,31 @@ mod tests {
         // Distinguishing them tells a guesser which half they got right.
         let mut accounts = Accounts::default();
         accounts
-            .create_login("jamez667", "correct-horse-battery", 0)
+            .create_login("jamez667@example.test", "correct-horse-battery", 0)
             .unwrap();
         assert_eq!(accounts.check_password("nobody", "whatever", 0), Err(0));
-        assert_eq!(accounts.check_password("jamez667", "wrong", 0), Err(0));
+        assert_eq!(
+            accounts.check_password("jamez667@example.test", "wrong", 0),
+            Err(0)
+        );
     }
 
     #[test]
     fn a_revoked_account_cannot_sign_in_and_frees_its_login() {
         let mut accounts = Accounts::default();
         let a = accounts
-            .create_login("jamez667", "correct-horse-battery", 0)
+            .create_login("jamez667@example.test", "correct-horse-battery", 0)
             .unwrap();
         assert!(accounts.revoke(&a.id));
 
-        assert!(accounts.by_login("jamez667").is_none());
+        assert!(accounts.by_login("jamez667@example.test").is_none());
         assert_eq!(
-            accounts.check_password("jamez667", "correct-horse-battery", 0),
+            accounts.check_password("jamez667@example.test", "correct-horse-battery", 0),
             Err(0)
         );
         // And the name can be used again, since the old record grants nothing.
         assert!(accounts
-            .create_login("jamez667", "a-different-password", 1)
+            .create_login("jamez667@example.test", "a-different-password", 1)
             .is_ok());
     }
 

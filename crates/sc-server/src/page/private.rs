@@ -12,7 +12,7 @@
 
 use sc_proto::IntakeKind;
 
-use super::{ago, esc, kind_field, shell};
+use super::{ago, esc, kind_field, shell, shell_plain};
 
 use crate::account::Accounts;
 use crate::store::{Request, RequestState};
@@ -835,7 +835,7 @@ pub fn daemons_page(roster: &crate::roster::Roster, minted: Option<(&str, &str)>
 /// It leaks nothing: the sign-in link is already on the public landing page for
 /// anyone to see.
 pub fn not_found_for_admin() -> String {
-    shell(
+    shell_plain(
         "Not found",
         "<h1>Not found</h1><p>There is nothing here.</p>         <p class=\"meta\">If you administer this server,          <a href=\"/public/signin\">sign in</a>.</p>",
     )
@@ -877,7 +877,7 @@ pub fn setup_page(base_url: &str, error: Option<&str>) -> String {
             .to_string()
     };
 
-    shell(
+    shell_plain(
         "Set up this server",
         &format!(
             "<h1>Set up this server</h1>\
@@ -910,7 +910,7 @@ pub fn setup_admin_page(base_url: &str, error: Option<&str>) -> String {
         Some(e) => format!("<p class=\"note\">{}</p>", esc(e)),
         None => String::new(),
     };
-    shell(
+    shell_plain(
         "Set up this server",
         &format!(
             "<h1>Who administers this?</h1>             <p class=\"meta\">Choose a username and password. This account              administers <strong>{host}</strong>: it reviews requests, decides              what the public site collects, and holds the keys. There is no              second one.</p>{note}             <form method=\"post\" action=\"/setup/admin\">             <label for=\"login\">Username</label>             <input id=\"login\" name=\"login\" required autocapitalize=\"off\"              autocorrect=\"off\" spellcheck=\"false\" placeholder=\"you\">             <label for=\"password\">Password</label>             <input id=\"password\" name=\"password\" type=\"password\" required              minlength=\"{min}\">             <button type=\"submit\">Claim it</button></form>             <p class=\"meta\">At least {min} characters. It is stored hashed              and cannot be recovered — if you lose it, delete <code>admin.json</code>              from the volume and claim the server again.</p>",
@@ -934,7 +934,7 @@ pub fn claimed_page(login: &str) -> String {
 
 /// A plain message page, for a refused action.
 pub fn message(msg: &str) -> String {
-    shell(
+    shell_plain(
         "Smart Coder",
         &format!(
             "<p class=\"note\">{}</p><p><a href=\"/\">Back to the list</a></p>",
@@ -944,7 +944,7 @@ pub fn message(msg: &str) -> String {
 }
 
 pub fn not_found() -> String {
-    shell(
+    shell_plain(
         "Not found",
         "<h1>Not found</h1><p><a href=\"/\">Back to the list</a></p>",
     )
@@ -1098,11 +1098,20 @@ mod tests {
         let r = req("a thing");
         let html = confirm_accept(&r, "# Spec", "deadbeef");
 
-        let buttons: Vec<&str> = html
+        // **Scoped to `<main>`**, because the shell around it has buttons of its
+        // own now — the theme toggle and the account menu. Counting those would
+        // make this test about the masthead, which is not the property: it is
+        // that the two ways out of *this decision* weigh the same.
+        let main = {
+            let start = html.find("<main>").expect("a main element") + "<main>".len();
+            let end = html.find("</main>").expect("a closing main");
+            &html[start..end]
+        };
+        let buttons: Vec<&str> = main
             .match_indices("<button")
-            .map(|(i, _)| &html[i..])
+            .map(|(i, _)| &main[i..])
             .collect();
-        assert_eq!(buttons.len(), 2, "confirm and go back: {html}");
+        assert_eq!(buttons.len(), 2, "confirm and go back: {main}");
         for b in buttons {
             let tag = &b[..b.find('>').unwrap()];
             assert_eq!(tag, "<button type=\"submit\"", "styled differently: {tag}");

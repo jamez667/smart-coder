@@ -242,6 +242,17 @@ services:
       # away. Setting either turns the public surface on.
       SC_SERVER_PUBLIC_REPO: ${SC_SERVER_PUBLIC_REPO:-}
 
+      # Serve the single-page interface instead of the rendered pages.
+      #
+      # TEMPORARY, and it goes away with the pages it replaces. Spec 18 stages
+      # this move: the JSON API and the interface are built and proven before
+      # anything is deleted, and until then a server can be run either way — so
+      # a bad build is a variable to unset rather than an image to roll back.
+      #
+      # Anything but empty is on. A switch with a vocabulary of truthy words is
+      # one somebody sets to "false" and finds enabled.
+      SC_SERVER_UI: ${SC_SERVER_UI:-}
+
       # A SEED for the owner list, applied ONCE on a fresh volume:
       #
       #     SC_SERVER_OWNERS=jamez667:smart-coder|memosy,someone:memosy

@@ -1028,7 +1028,7 @@ mod tests {
         let (s, dir) = store("one-volume");
         file(&s, "r-1", "alpha");
         let mut admin = s.admin().unwrap();
-        admin.claim("jamez667", 1);
+        admin.claim("jamez667@example.test", 1);
         s.put_admin(&admin).unwrap();
 
         assert!(dir.join("requests").join("r-1.json").is_file());

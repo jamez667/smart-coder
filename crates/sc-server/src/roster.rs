@@ -385,9 +385,9 @@ mod tests {
         // form, so the two have to meet somewhere. A mismatch here grants
         // nothing while looking applied.
         let mut roster = Roster::default();
-        roster.set_owner("JameZ667", &["alpha".into()], 1);
-        assert!(roster.owner_for("jamez667").is_some());
-        assert!(roster.owner_for("JAMEZ667").is_some());
+        roster.set_owner("JameZ667@example.test", &["alpha".into()], 1);
+        assert!(roster.owner_for("jamez667@example.test").is_some());
+        assert!(roster.owner_for("JAMEZ667@EXAMPLE.TEST").is_some());
     }
 
     #[test]
@@ -395,10 +395,13 @@ mod tests {
         // Two records for one person makes "revoke that owner" ambiguous, and
         // deleting one would leave them with access from the other.
         let mut roster = Roster::default();
-        roster.set_owner("jamez667", &["alpha".into()], 1);
-        roster.set_owner("jamez667", &["beta".into()], 2);
+        roster.set_owner("jamez667@example.test", &["alpha".into()], 1);
+        roster.set_owner("jamez667@example.test", &["beta".into()], 2);
         assert_eq!(roster.owners.len(), 1);
-        assert_eq!(roster.owner_for("jamez667").unwrap().repos, ["beta"]);
+        assert_eq!(
+            roster.owner_for("jamez667@example.test").unwrap().repos,
+            ["beta"]
+        );
     }
 
     #[test]
@@ -407,21 +410,21 @@ mod tests {
         // could, so the unusable case has to mean something — and "sees
         // nothing" is the reading that fails closed.
         let mut roster = Roster::default();
-        roster.set_owner("jamez667", &[], 1);
-        assert!(roster.owner_for("jamez667").is_none());
+        roster.set_owner("jamez667@example.test", &[], 1);
+        assert!(roster.owner_for("jamez667@example.test").is_none());
     }
 
     #[test]
     fn a_revoked_owner_is_kept_and_grants_nothing() {
         let mut roster = Roster::default();
-        roster.set_owner("jamez667", &["alpha".into()], 1);
-        assert!(roster.revoke("jamez667"));
-        assert!(roster.owner_for("jamez667").is_none());
+        roster.set_owner("jamez667@example.test", &["alpha".into()], 1);
+        assert!(roster.revoke("jamez667@example.test"));
+        assert!(roster.owner_for("jamez667@example.test").is_none());
         // Kept, so the page can say they *were* one.
         assert_eq!(roster.owners.len(), 1);
         assert!(roster.owners[0].revoked);
         // And revoking twice is not a second event.
-        assert!(!roster.revoke("jamez667"));
+        assert!(!roster.revoke("jamez667@example.test"));
     }
 
     #[test]
@@ -434,18 +437,24 @@ mod tests {
         let path = dir.join("owners.json");
 
         let mut roster = Roster::default();
-        roster.set_owner("jamez667", &["alpha".into()], 1);
+        roster.set_owner("jamez667@example.test", &["alpha".into()], 1);
         std::fs::write(&path, serde_json::to_string(&roster).unwrap()).unwrap();
 
         let mut cache = RosterCache::default();
-        assert!(cache.current(&path).owner_for("jamez667").is_some());
+        assert!(cache
+            .current(&path)
+            .owner_for("jamez667@example.test")
+            .is_some());
 
-        roster.revoke("jamez667");
+        roster.revoke("jamez667@example.test");
         std::fs::write(&path, serde_json::to_string(&roster).unwrap()).unwrap();
         cache.invalidate();
 
         assert!(
-            cache.current(&path).owner_for("jamez667").is_none(),
+            cache
+                .current(&path)
+                .owner_for("jamez667@example.test")
+                .is_none(),
             "revocation takes effect on the next look"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -466,7 +475,10 @@ mod tests {
         // revocation-on-the-next-request exists to prevent, arriving by a
         // different door and only on a restart, which is where it would go
         // unnoticed longest.
-        let configured = vec![("jamez667".to_string(), vec!["intake".to_string()])];
+        let configured = vec![(
+            "jamez667@example.test".to_string(),
+            vec!["intake".to_string()],
+        )];
         let repos = vec!["intake".to_string()];
 
         let mut roster = Roster::default();
@@ -474,20 +486,20 @@ mod tests {
             roster.seed(&configured, &repos, &[], 1),
             "the first boot seeds"
         );
-        assert!(roster.owner_for("jamez667").is_some());
+        assert!(roster.owner_for("jamez667@example.test").is_some());
         assert_eq!(roster.enabled(), ["intake"]);
 
         // The developer revokes the owner and stops collecting for the
         // repository, then the container restarts with both settings still in
         // place.
-        assert!(roster.revoke("jamez667"));
+        assert!(roster.revoke("jamez667@example.test"));
         assert!(roster.disable("intake"));
         assert!(
             !roster.seed(&configured, &repos, &[], 2),
             "a later boot does not"
         );
         assert!(
-            roster.owner_for("jamez667").is_none(),
+            roster.owner_for("jamez667@example.test").is_none(),
             "a revoked owner came back on a restart"
         );
         assert!(
@@ -561,12 +573,15 @@ mod tests {
         assert!(roster.seed(&[], &[], &[], 1));
         assert!(roster.seeded);
 
-        let configured = vec![("jamez667".to_string(), vec!["intake".to_string()])];
+        let configured = vec![(
+            "jamez667@example.test".to_string(),
+            vec!["intake".to_string()],
+        )];
         assert!(
             !roster.seed(&configured, &["intake".to_string()], &[], 2),
             "already administered"
         );
-        assert!(roster.owner_for("jamez667").is_none());
+        assert!(roster.owner_for("jamez667@example.test").is_none());
         assert!(roster.enabled().is_empty());
     }
 
@@ -610,10 +625,10 @@ mod tests {
         // Commit 4 wrote owners with no `repos` key at all. A volume that
         // upgrades must not fail to parse — that is the one file the developer
         // cannot lose.
-        let old = r#"{"owners":[{"login":"jamez667","repos":["intake"],
+        let old = r#"{"owners":[{"login":"jamez667@example.test","repos":["intake"],
                       "added_ms":1,"revoked":false}],"seeded":true}"#;
         let roster: Roster = serde_json::from_str(old).unwrap();
-        assert!(roster.owner_for("jamez667").is_some());
+        assert!(roster.owner_for("jamez667@example.test").is_some());
         assert!(roster.enabled().is_empty());
         assert!(roster.seeded, "and it is not seeded a second time");
     }
@@ -624,7 +639,7 @@ mod tests {
         // copy of the volume grants nobody anything — the same rule the account
         // and credential stores keep.
         let mut roster = Roster::default();
-        roster.set_owner("jamez667", &["alpha".into()], 1);
+        roster.set_owner("jamez667@example.test", &["alpha".into()], 1);
         let json = serde_json::to_string(&roster).unwrap();
         for hazard in ["token", "secret", "key", "hash"] {
             assert!(!json.contains(hazard), "{hazard} in {json}");

@@ -22,6 +22,13 @@ pub static STRINGS: Strings = Strings {
 
     nav_signin: "Se connecter",
     nav_account: "Compte",
+    nav_admin_heading: "Administration",
+    nav_admin_review: "Demandes",
+    nav_admin_settings: "Réglages",
+    nav_admin_repos: "Dépôts",
+    nav_admin_owners: "Responsables",
+    nav_admin_daemons: "Machines",
+    nav_admin_accounts: "Qui peut déposer",
     dialog_close: "Fermer",
 
     landing_headline: "Demandez un changement, recevez une spécification.",
@@ -40,11 +47,12 @@ pub static STRINGS: Strings = Strings {
     signin_email_label: "E-mail",
     signin_email_placeholder: "vous@exemple.com",
     signin_submit: "Envoyez-moi un lien",
-    signin_user_label: "Nom d'utilisateur",
+    signin_user_label: "E-mail",
     signin_password_label: "Mot de passe",
     signin_wrong: "Cela n'a pas fonctionné. Vérifiez le nom et le mot de passe, puis réessayez dans un instant.",
-    signin_password_heading: "Vous gérez un projet ici, ou ce serveur ?",
+    signin_password_heading: "Connexion administrateur",
     signin_password_submit: "Se connecter",
+    signin_register: "Créer un compte",
     signin_no_mail: "Ce site ne peut pas envoyer de liens de connexion pour le moment. Réessayez plus tard.",
     signin_no_password: "Pas de mot de passe. Nous envoyons un lien à usage unique, \
                          valable quinze minutes.",

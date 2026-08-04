@@ -8,6 +8,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The browser interface, first — `include_str!` reads its output at compile
+# time, so nothing below this compiles without it.
+#
+# **Skipped rather than fatal when the bundle is already there and npm is not.**
+# This gate was offline and deterministic before the interface existed, and a
+# gate that suddenly needs a toolchain is a gate people stop running. CI always
+# builds it; here, a developer touching only Rust is not made to install Node.
+if [ ! -f crates/sc-server/assets/ui/app.js ] || [ -n "${SC_BUILD_WEB:-}" ]; then
+  echo "==> the interface (vite)"
+  if command -v npm >/dev/null 2>&1; then
+    ( cd web && npm ci --silent && npm run lint && npm run build )
+  else
+    echo "npm is not installed, and crates/sc-server/assets/ui/app.js is missing."
+    echo "The server cannot compile without it. Install Node 22, or fetch a build."
+    exit 1
+  fi
+else
+  echo "==> the interface (already built; SC_BUILD_WEB=1 to rebuild)"
+fi
+
 echo "==> rustfmt (check)"
 cargo fmt --all -- --check
 

@@ -98,6 +98,17 @@ services:
       # An owner signs in with GitHub and may read, send back, discard and
       # release their own repositories' work — never accept, and never add
       # another owner. Nothing is checked against GitHub.
+      # Serve the single-page interface instead of the rendered pages.
+      #
+      # TEMPORARY, and it goes away with the pages it replaces. Spec 18 stages
+      # this move: the JSON API and the interface are built and proven before
+      # anything is deleted, and until then a server can be run either way — so
+      # a bad build is a variable to unset rather than an image to roll back.
+      #
+      # Anything but empty is on. A switch with a vocabulary of truthy words is
+      # one somebody sets to "false" and finds enabled.
+      SC_SERVER_UI: ${SC_SERVER_UI:-}
+
       SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
       # What the masthead calls the site. A label, not the routing key above.
       SC_SERVER_PUBLIC_SITE_NAME: ${SC_SERVER_PUBLIC_SITE_NAME:-}

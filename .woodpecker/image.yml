@@ -53,6 +53,12 @@ when:
     path:
       include:
         - "crates/sc-server/**"
+        # **The browser interface is a compile-time input**, not an asset
+        # shipped beside the binary: Vite builds it and `include_str!`
+        # embeds it. A change here that did not rebuild the image would
+        # ship a server serving the previous interface — silently, and
+        # with every test still green.
+        - "web/**"
         # The protocol crate: a wire change alters what the server accepts.
         - "crates/sc-proto/**"
         - "Dockerfile"

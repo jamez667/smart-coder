@@ -46,6 +46,11 @@ struct Shared {
     settings: Mutex<crate::settings::SettingsCache>,
     /// Who is signed in. On the hot path — see `AccountsCache`.
     accounts: Mutex<crate::account::AccountsCache>,
+    /// Serve the single-page interface rather than the rendered pages.
+    ///
+    /// Read once at startup because it decides which of two surfaces this
+    /// process is, which is not a thing to change under a running server.
+    ui: bool,
     seal_key: Option<crate::seal::SealKey>,
 }
 
@@ -206,6 +211,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         settings: Mutex::new(crate::settings::SettingsCache::default()),
         accounts: Mutex::new(crate::account::AccountsCache::default()),
         seal_key: cfg.seal_key.clone(),
+        ui: cfg.ui,
     });
 
     let server = tiny_http::Server::http(cfg.addr())
@@ -683,6 +689,7 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         // Filled in by `handle` before dispatch, beside the caller.
         fresh_auth: false,
         rechecking,
+        ui: shared.ui,
     };
     routes::handle(&mut ctx, req)
 }
@@ -702,6 +709,8 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
     let mut cookie_setup = None;
     let mut cookie_lang = None;
     let mut accept_language = None;
+    let mut origin = None;
+    let mut content_type = None;
     for h in request.headers() {
         let name = h.field.as_str().as_str().to_ascii_lowercase();
         let value = h.value.as_str();
@@ -721,6 +730,13 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             // looks like. Anything unrecognised there falls back to the default,
             // so no validation is owed here.
             "accept-language" => accept_language = Some(value.to_string()),
+            // **Both exist for the JSON API's CSRF check**, and neither is
+            // trusted for anything else. A browser sets `Origin` itself and a
+            // page cannot forge it; `Content-Type` is checked because a form
+            // POST cannot send `application/json` without a preflight the
+            // attacker's page will not survive.
+            "origin" => origin = Some(value.to_string()),
+            "content-type" => content_type = Some(value.to_string()),
             _ => {}
         }
     }
@@ -736,6 +752,8 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             cookie_setup,
             cookie_lang,
             accept_language,
+            origin,
+            content_type,
             body: String::new(),
         });
     }
@@ -757,6 +775,8 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
         cookie_setup,
         cookie_lang,
         accept_language,
+        origin,
+        content_type,
         body,
     })
 }

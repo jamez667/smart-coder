@@ -188,6 +188,21 @@ pub struct Req {
     pub cookie_lang: Option<String>,
     /// The `Accept-Language` header, as sent.
     pub accept_language: Option<String>,
+    /// The `Origin` header, when the browser sent one.
+    ///
+    /// **Only the JSON API reads this.** The HTML surface is defended by
+    /// `SameSite=Strict` on the session cookie, which is load-bearing rather
+    /// than defence-in-depth — a cross-site POST simply arrives without a
+    /// credential. That still holds for `fetch`, and this adds a second line
+    /// rather than replacing the first.
+    pub origin: Option<String>,
+    /// The `Content-Type` header, when one was sent.
+    ///
+    /// The API demands `application/json` on every mutating call. A `<form>`
+    /// cannot send that content type, so a cross-origin page cannot reach these
+    /// endpoints without a preflight — and the `Origin` check above is what the
+    /// preflight then fails.
+    pub content_type: Option<String>,
     pub body: String,
 }
 
@@ -201,6 +216,8 @@ impl Req {
             cookie_setup: None,
             cookie_lang: None,
             accept_language: None,
+            origin: None,
+            content_type: None,
             body: String::new(),
         }
     }
@@ -214,6 +231,8 @@ impl Req {
             cookie_setup: None,
             cookie_lang: None,
             accept_language: None,
+            origin: None,
+            content_type: None,
             body: body.into(),
         }
     }
@@ -393,8 +412,20 @@ impl Policy {
             // to anywhere else refused. That is the shape that matters: script
             // able to *reach a third party* is what turns a rendered spec into
             // an exfiltration channel, and this grants none of it.
+            // `style-src` carries **both** `'self'` and `'unsafe-inline'`. The
+            // interface ships one bundled stylesheet, which is a served file
+            // and needs `'self'`; the rendered pages inline their CSS in a
+            // `<style>` block and need the other. Dropping `'self'` leaves the
+            // interface unstyled — a failure a `curl` cannot see, because the
+            // header is present and correct-looking and only a browser refuses
+            // anything.
+            //
+            // An inline *style* is not an inline *script*: the argument against
+            // `'unsafe-inline'` on `script-src` is that it is what a successful
+            // injection needs, and a style block cannot execute.
             Policy::PublicScript => {
-                "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
+                "default-src 'none'; script-src 'self'; \
+                 style-src 'self' 'unsafe-inline'; \
                  font-src 'self'; connect-src 'self'; form-action 'self'; \
                  base-uri 'none'; frame-ancestors 'none'"
             }
@@ -488,6 +519,12 @@ pub struct Ctx<'a> {
     /// and charging them to the caller's budget is what made an idle daemon
     /// rate-limit itself.
     pub rechecking: bool,
+    /// Serve the single-page interface rather than the rendered pages.
+    ///
+    /// Set from `SC_SERVER_UI`. **Temporary by design** — it exists so both
+    /// surfaces can run while the move is staged, and it goes away with the
+    /// pages it is an alternative to.
+    pub ui: bool,
 }
 
 /// Route one request.
@@ -545,6 +582,47 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         };
         let label = label.clone();
         return daemon_route(ctx, req, method, &path, &label);
+    }
+
+    // **The browser surface's JSON API.** Matched here, above the setup and
+    // public paths, so it is dispatched in one place and can never fall through
+    // into the private device gate — which answers HTML, and an HTML 404 to a
+    // `fetch` is a parse error rather than a status the client can act on.
+    //
+    // Kept apart from `/api/v1/work` above: that one is the daemon's, holds a
+    // bearer key, and is versioned by the wire protocol. Two audiences, two
+    // prefixes, and no path a client of one can guess to reach the other.
+    if path.starts_with(crate::api::PREFIX) {
+        return api_route(ctx, req, method, &path, &caller);
+    }
+
+    // **The interface's document**, when this server is serving it. Answered for
+    // every path the interface owns rather than only `/`, because the client
+    // routes on the path itself — a reader who reloads on `/public` must get the
+    // application, not a 404 from a server that only knew about `/`.
+    //
+    // Behind `ctx.ui` so both surfaces can be run while the move is staged. The
+    // flag and this branch both disappear when the pages do.
+    if ctx.ui && method == "GET" && wants_document(&path) {
+        return Res::html(200, crate::api::ui::INDEX).with_policy(Policy::PublicScript);
+    }
+
+    // **The interface's own files.** Matched here so they are reachable signed
+    // out — a stranger has to be able to load the page that offers them a way
+    // in, which is the same reason the sign-in route is exempt from the public
+    // surface being off.
+    //
+    // `PublicScript` because these *are* the script: `Strict` would have the
+    // browser refuse the bundle it was just sent.
+    if method == "GET" && path == crate::api::ui::SCRIPT_PATH {
+        let mut res = Res::html(200, crate::api::ui::SCRIPT);
+        res.content_type = "text/javascript; charset=utf-8";
+        return res.with_policy(Policy::PublicScript);
+    }
+    if method == "GET" && path == crate::api::ui::STYLE_PATH {
+        let mut res = Res::html(200, crate::api::ui::STYLE);
+        res.content_type = "text/css; charset=utf-8";
+        return res.with_policy(Policy::PublicScript);
     }
 
     // Setup is the one route reachable without a credential — it is how the
@@ -773,6 +851,30 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         // passwords would lock every filer out of asking for a magic link. The
         // path is public; the traffic is not.
         None if path == public_route::SIGNIN_PASSWORD => Bucket::AnonPrivate,
+        // **`/me` is what a stranger's browser asks first.** The landing page is
+        // public and the client cannot render it without knowing whether anybody
+        // is signed in, so this is a page read in every sense that matters to a
+        // rate limiter — `AnonPrivate`'s 20/min would throttle ordinary browsing
+        // of a public page.
+        //
+        // Only `me`, and only for a caller with no credential. Everything else
+        // under the prefix stays in the tight bucket below: an anonymous request
+        // for somebody's *data* is either a mistake or a probe, and neither
+        // deserves a public allowance.
+        None if path == ME_PATH => Bucket::PublicRead,
+        // **`PublicRead`, like the fonts** — 600/min rather than the 20 an
+        // anonymous private request gets. These are two immutable, compiled-in
+        // responses with no store read behind them, and they are fetched on
+        // every single page load.
+        //
+        // They were falling through to `AnonPrivate` because they are not on the
+        // public path list, and that broke things quietly: a page load spends
+        // three of a 20/min budget before rendering, so a reader who reloads a
+        // few times gets a 429 on their *stylesheet* and sees an unstyled page.
+        // Nothing checking status codes notices, because the document was fine.
+        None if path == crate::api::ui::SCRIPT_PATH || path == crate::api::ui::STYLE_PATH => {
+            Bucket::PublicRead
+        }
         None if is_public_path(path) => {
             // Asking for a link costs an email; spending one costs a disk write.
             // Everything else on the public surface is a page render, and
@@ -804,6 +906,355 @@ fn is_public_path(path: &str) -> bool {
         || path == public_route::FONT_BODY
         || path == public_route::FONT_DISPLAY
         || path.starts_with(public_route::SIGNIN_PREFIX)
+        || path.starts_with(public_route::REQUEST_PREFIX)
+}
+
+/// The browser surface's JSON API.
+///
+/// **Every response here is JSON, including the failures.** The HTML surface
+/// answers a stranger on a private path with a rendered 404 page; a `fetch`
+/// cannot read that, so this answers the same *status* with a body the client
+/// can parse. The status codes are deliberately identical to the HTML surface's
+/// — see the module doc for why 404-rather-than-403 is load-bearing rather than
+/// sloppy.
+///
+/// `Policy::Strict` throughout, which is the default: a JSON body is not a
+/// document, nothing loads a subresource from it, and there is no reason to
+/// relax anything.
+/// `/api/v1/ui/me`, spelled out.
+///
+/// A constant because [`bucket_for`] and [`api_route`] both need it, and the
+/// rate-limit classifier disagreeing with the route matcher is the failure the
+/// route constants module exists to prevent.
+use crate::api::{AccountView, FiledRequest, ReviewRequest, SettingsView};
+
+const ME_PATH: &str = "/api/v1/ui/me";
+
+fn api_route(
+    ctx: &mut Ctx<'_>,
+    req: &Req,
+    method: &str,
+    path: &str,
+    caller: &Option<Caller>,
+) -> Res {
+    let rest = path.trim_start_matches(crate::api::PREFIX);
+    match (method, rest) {
+        // Who am I, and what may I do? The one endpoint reachable by anybody,
+        // because signing in is reachable by anybody and the client has to be
+        // able to ask before it has an answer.
+        ("GET", "me") => match serde_json::to_string(&crate::api::Me::of(caller.as_ref())) {
+            Ok(body) => Res::json(200, body),
+            Err(e) => error(500, &e.to_string()),
+        },
+        // The caller's own requests, or the ones they review. **One path, three
+        // answers**, exactly as `GET /` is three pages — which is the shape the
+        // HTML surface already had and the client already has to understand.
+        ("GET", "requests") => api_requests(ctx, req, caller),
+
+        // One request. The 404s here are the load-bearing kind: another filer's
+        // request and an owner's non-owned repository both answer *not found*,
+        // because a 403 would confirm the id is real.
+        ("GET", rest) if rest.starts_with("requests/") => {
+            api_request(ctx, req, caller, rest.trim_start_matches("requests/"))
+        }
+
+        // The administrative lists. Each is `Caller::Admin` only, and the gate is
+        // the same `let ... else` the HTML surface uses rather than a re-check
+        // written out again here.
+        ("GET", "settings") => api_admin(ctx, caller, AdminView::Settings),
+        ("GET", "owners") => api_admin(ctx, caller, AdminView::Owners),
+        ("GET", "repos") => api_admin(ctx, caller, AdminView::Repos),
+        ("GET", "daemons") => api_admin(ctx, caller, AdminView::Daemons),
+        ("GET", "accounts") => api_admin(ctx, caller, AdminView::Accounts),
+
+        // **Every mutating call passes the CSRF guard first.** Written as one
+        // arm rather than a check inside each handler, for the reason the CSP
+        // stamping site gives: a guard added per handler is a guard eventually
+        // missing from one.
+        ("POST", rest) => {
+            if let Err(refusal) = same_origin(ctx, req) {
+                return refusal;
+            }
+            api_write(ctx, req, caller, rest)
+        }
+
+        _ => error(404, "no such endpoint"),
+    }
+}
+
+/// Refuse a mutating call that did not come from this server's own page.
+///
+/// **A second line, not a replacement.** `SameSite=Strict` on the session cookie
+/// is still what actually stops a cross-site POST — the request simply arrives
+/// with no credential and resolves to a stranger. That has been the whole
+/// defence, load-bearing rather than defence-in-depth, and it is easy to lose by
+/// accident: one endpoint reachable with a `Lax` cookie, or the interface moved
+/// to another origin, and there is nothing behind it.
+///
+/// So this demands two things a cross-origin page cannot supply together:
+///
+/// - **`Content-Type: application/json`.** A `<form>` can only send three
+///   content types and this is not among them, so reaching these endpoints from
+///   a form is impossible; `fetch` can set it, but only after a preflight.
+/// - **An `Origin` that is this server.** The browser sets it and a page cannot
+///   forge it, so the preflight a `fetch` must pass is the one this fails.
+///
+/// A request with no `Origin` at all is allowed through: `curl` sends none, and
+/// so do the tests. That is not a hole — a caller with no browser is not a
+/// caller a browser can be tricked into being.
+fn same_origin(ctx: &Ctx<'_>, req: &Req) -> std::result::Result<(), Res> {
+    let json = req
+        .content_type
+        .as_deref()
+        .is_some_and(|c| c.trim_start().starts_with("application/json"));
+    if !json {
+        return Err(error(415, "this endpoint takes application/json"));
+    }
+    let Some(origin) = req.origin.as_deref() else {
+        return Ok(());
+    };
+    // The configured address is the only origin this surface is ever served
+    // from — it is what sign-in links are built from and what decides whether
+    // cookies carry `Secure`, so a mismatch here is a request from somewhere
+    // else by definition.
+    let ours = ctx.public.map(|p| p.base_url.as_str()).unwrap_or_default();
+    if !ours.is_empty() && origin.trim_end_matches('/') == ours.trim_end_matches('/') {
+        return Ok(());
+    }
+    Err(error(403, "cross-origin"))
+}
+
+/// The mutating half of the browser API.
+fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) -> Res {
+    // `POST requests/{id}/{verb}` — the review and owner verbs.
+    if let Some(tail) = rest.strip_prefix("requests/") {
+        let Some((id, verb)) = tail.split_once('/') else {
+            return error(404, "no such endpoint");
+        };
+        return api_verb(ctx, req, caller, id, verb);
+    }
+    error(404, "no such endpoint")
+}
+
+/// Act on a request: send back, discard, release, accept.
+///
+/// **The gate is the caller's variant, exactly as it is on the HTML surface.**
+/// An owner reaches `send-back`, `discard` and `release`; only the administrator
+/// reaches `accept`, and that is enforced here by matching the variant rather
+/// than by a boolean somebody has to remember to check.
+fn api_verb(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, id: &str, verb: &str) -> Res {
+    let body: serde_json::Value = if req.body.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_str(&req.body) {
+            Ok(v) => v,
+            Err(e) => return error(400, &format!("that body is not JSON: {e}")),
+        }
+    };
+    let note = body
+        .get("note")
+        .and_then(|n| n.as_str())
+        .unwrap_or_default();
+    let digest = body
+        .get("digest")
+        .and_then(|d| d.as_str())
+        .unwrap_or_default();
+
+    match caller {
+        Some(Caller::Admin { .. }) => {
+            let outcome = match verb {
+                "send-back" => ctx.store.send_back(id, note),
+                "discard" => ctx.store.discard(id),
+                "release" => ctx.store.release(id),
+                // **The digest is the handshake, not decoration.** Accepting
+                // means accepting *these bytes*; a redraft landing between
+                // reading and accepting changes the digest, and the store
+                // refuses rather than approving text nobody read.
+                "accept" => {
+                    if digest.is_empty() {
+                        return error(400, "accepting needs the digest of the spec you read");
+                    }
+                    ctx.store.accept(id, digest)
+                }
+                _ => return error(404, "no such verb"),
+            };
+            match outcome {
+                Ok(_) => api_request(ctx, req, caller, id),
+                Err(e) => error(400, &e.to_string()),
+            }
+        }
+        Some(Caller::Owner { repos, .. }) => {
+            // Their repository, or nothing — and *nothing* is 404, because a 403
+            // would confirm the id is real.
+            let owns = match ctx.store.get(id) {
+                Ok(Some(r)) => repos.iter().any(|owned| owned == &r.repo),
+                Ok(None) => return error(404, "no such request"),
+                Err(e) => return error(500, &e.to_string()),
+            };
+            if !owns {
+                return error(404, "no such request");
+            }
+            let outcome = match verb {
+                "send-back" => ctx.store.send_back(id, note),
+                "discard" => ctx.store.discard(id),
+                "release" => ctx.store.release(id),
+                // **An owner may not accept**, and this is where that is true.
+                // Not a 403: the verb does not exist for them.
+                _ => return error(404, "no such verb"),
+            };
+            match outcome {
+                Ok(_) => api_request(ctx, req, caller, id),
+                Err(e) => error(400, &e.to_string()),
+            }
+        }
+        // A filer, a stranger, a daemon: the review surface is not theirs.
+        _ => error(404, "no such request"),
+    }
+}
+
+/// Which administrative list is being asked for.
+///
+/// An enum rather than five near-identical handlers, so the admin gate and the
+/// error handling are written once. Adding a list is a variant, not a copy of
+/// the gate that might be copied wrong.
+enum AdminView {
+    Settings,
+    Owners,
+    Repos,
+    Daemons,
+    Accounts,
+}
+
+/// The request list, answered according to who is asking.
+fn api_requests(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>) -> Res {
+    let all = match ctx.store.all() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let body = match caller {
+        // Everything, with the artifact paths — this is their own machine.
+        Some(Caller::Admin { .. }) => {
+            let list: Vec<_> = all.iter().map(|r| ReviewRequest::of(r, true)).collect();
+            serde_json::to_string(&list)
+        }
+        // **Only the repositories they own**, and the set is the one carried on
+        // the variant rather than re-derived here. `Caller::Owner` pre-intersects
+        // it with what this surface serves precisely so no call site has to.
+        Some(Caller::Owner { repos, .. }) => {
+            let list: Vec<_> = all
+                .iter()
+                .filter(|r| repos.iter().any(|owned| owned == &r.repo))
+                .map(|r| ReviewRequest::of(r, false))
+                .collect();
+            serde_json::to_string(&list)
+        }
+        // Their own, narrowed. `show_spec` is the operator's decision about
+        // whether a filer may read the spec drafted from their request.
+        Some(Caller::Account { id }) => {
+            let show_spec = ctx.public.is_some_and(|p| p.show_spec);
+            let locale = req.locale();
+            let list: Vec<_> = all
+                .iter()
+                .filter(|r| r.filed_by(id))
+                .map(|r| FiledRequest::of(r, show_spec, locale))
+                .collect();
+            serde_json::to_string(&list)
+        }
+        // A stranger has no requests, and a daemon has no browser identity.
+        // Empty rather than 401: the client asks this on a page a stranger may
+        // legitimately be looking at.
+        Some(Caller::Daemon { .. }) | None => Ok("[]".to_string()),
+    };
+    match body {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// One request, gated the way its page is.
+fn api_request(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, id: &str) -> Res {
+    let found = match ctx.store.get(id) {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    // **Absent and forbidden are the same answer.** Whichever it is, the caller
+    // learns only that they have nothing here.
+    let Some(r) = found else {
+        return error(404, "no such request");
+    };
+    let body = match caller {
+        Some(Caller::Admin { .. }) => serde_json::to_string(&ReviewRequest::of(&r, true)),
+        Some(Caller::Owner { repos, .. }) if repos.iter().any(|owned| owned == &r.repo) => {
+            serde_json::to_string(&ReviewRequest::of(&r, false))
+        }
+        Some(Caller::Account { id: account }) if r.filed_by(account) => {
+            let show_spec = ctx.public.is_some_and(|p| p.show_spec);
+            serde_json::to_string(&FiledRequest::of(&r, show_spec, req.locale()))
+        }
+        // An owner outside their repositories, a filer who did not file this, a
+        // stranger, a daemon: not found.
+        _ => return error(404, "no such request"),
+    };
+    match body {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// An administrative list. `Caller::Admin` or nothing.
+fn api_admin(ctx: &mut Ctx<'_>, caller: &Option<Caller>, view: AdminView) -> Res {
+    // The same gate the private surface uses, and the same answer: **404, not
+    // 401**. The administrative surface does not exist for anybody else, and
+    // saying "unauthorized" would tell a stranger the address is real.
+    let Some(Caller::Admin { .. }) = caller else {
+        return error(404, "no such endpoint");
+    };
+    let body = match view {
+        AdminView::Settings => match ctx.store.settings() {
+            // `SettingsView` renders presence and a date, never a secret — the
+            // same rule the settings page follows. There is no read path for a
+            // stored secret anywhere in this server and this does not add one.
+            Ok(s) => serde_json::to_string(&SettingsView::of(&s)),
+            Err(e) => return error(500, &e.to_string()),
+        },
+        AdminView::Owners => match ctx.store.roster() {
+            Ok(r) => serde_json::to_string(&r.owners),
+            Err(e) => return error(500, &e.to_string()),
+        },
+        AdminView::Repos => match ctx.store.roster() {
+            Ok(r) => serde_json::to_string(&r.repos),
+            Err(e) => return error(500, &e.to_string()),
+        },
+        AdminView::Daemons => match ctx.store.roster() {
+            Ok(r) => serde_json::to_string(&r.daemons),
+            Err(e) => return error(500, &e.to_string()),
+        },
+        AdminView::Accounts => match ctx.store.accounts() {
+            // `AccountView` carries the hint, never `email_hash` and never the
+            // password hash.
+            Ok(a) => {
+                let list: Vec<_> = a.accounts.iter().map(AccountView::of).collect();
+                serde_json::to_string(&list)
+            }
+            Err(e) => return error(500, &e.to_string()),
+        },
+    };
+    match body {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Is this a path the single-page interface should answer with its document?
+///
+/// **An allowlist, not "anything that did not match".** A catch-all would turn
+/// every mistyped API path into a 200 holding an HTML document, which is the
+/// failure mode that makes a client's error handling useless — it can no longer
+/// tell "no such request" from "here is the application again".
+fn wants_document(path: &str) -> bool {
+    path == public_route::LANDING
+        || path == public_route::FILE
+        || path == public_route::SIGNIN
         || path.starts_with(public_route::REQUEST_PREFIX)
 }
 
@@ -2557,14 +3008,13 @@ fn invalidate_settings(ctx: &Ctx<'_>) {
 /// every log line about this person, so it is kept to what reads back
 /// unambiguously.
 fn check_login(login: &str) -> std::result::Result<(), String> {
-    if login.is_empty() || login.len() > 64 {
-        return Err("a username is required, up to 64 characters".to_string());
-    }
-    if !login
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("letters, numbers, dashes and underscores".to_string());
+    // **An email address, not a username.** The two used to be separate, which
+    // meant one person could hold a password account and a magic-link account
+    // that nothing could reconcile. One address, one row, two ways to prove it
+    // is yours \u2014 see [`crate::account::Accounts::create_login`] for what that
+    // costs.
+    if !account::valid_email(login) {
+        return Err("that is not an email address".to_string());
     }
     Ok(())
 }
@@ -3068,6 +3518,7 @@ mod tests {
                 // Filled in by `handle` before dispatch, beside the caller.
                 fresh_auth: false,
                 rechecking: false,
+                ui: false,
             };
             handle(&mut ctx, req)
         }
@@ -3089,6 +3540,7 @@ mod tests {
                 seal_key: self.seal_key.as_ref(),
                 fresh_auth: false,
                 rechecking: true,
+                ui: false,
             };
             handle(&mut ctx, req)
         }
@@ -3162,9 +3614,9 @@ mod tests {
         /// administrator rather than a re-run of how one is made.
         fn as_admin(&mut self) -> String {
             let mut admin = self.store.admin().unwrap();
-            admin.claim("jamez667", self.now_ms);
+            admin.claim("jamez667@example.test", self.now_ms);
             self.store.put_admin(&admin).unwrap();
-            self.signed_in_with_login("jamez667")
+            self.signed_in_with_login("jamez667@example.test")
         }
 
         fn file(&mut self, token: &str, text: &str, repo: &str) -> String {
@@ -3755,11 +4207,11 @@ mod tests {
         let res = f.go(&Req::get(public_route::SIGNIN));
         assert_eq!(res.status, 200, "the page still serves");
         assert!(res.body.contains("cannot send"), "{}", res.body);
-        // The page's OWN form is gone. The masthead dialog is rendered by the
-        // shell and still carries one — it is on every page and knows nothing
-        // about what is configured — which is why the POST refuses below.
+        // The email form is gone from the dialog, replaced by the line saying
+        // so. The password form stays: the administrator does not sign in by
+        // mail, which is what keeps the page that *fixes* mail reachable.
         assert!(
-            !res.body.contains("id=\"email\""),
+            !res.body.contains("id=\"dlg-email\""),
             "a form that sends nothing was offered: {}",
             res.body
         );
@@ -3774,10 +4226,10 @@ mod tests {
             "a link was minted"
         );
 
-        // And with a provider it is an ordinary sign-in page again.
+        // And with a provider the dialog offers the email form again.
         let mut f = Fixture::new("with-mail").with_public(false);
         let res = f.go(&Req::get(public_route::SIGNIN));
-        assert!(res.body.contains("id=\"email\""), "{}", res.body);
+        assert!(res.body.contains("id=\"dlg-email\""), "{}", res.body);
     }
 
     #[test]
@@ -3970,7 +4422,7 @@ mod tests {
         let mut f = Fixture::new("admin-also-owner")
             .with_public(false)
             .with_repos(&["intake"])
-            .with_owner("jamez667", &["intake"]);
+            .with_owner("jamez667@example.test", &["intake"]);
         let session = f.as_admin();
 
         assert_eq!(
@@ -4027,10 +4479,10 @@ mod tests {
         // The claim is one login. Anybody else who signs in is an account.
         let mut f = Fixture::new("gh-stranger").with_public(false);
         let mut admin = f.store.admin().unwrap();
-        admin.claim("jamez667", 1);
+        admin.claim("jamez667@example.test", 1);
         f.store.put_admin(&admin).unwrap();
 
-        let session = f.signed_in_with_login("somebody-else");
+        let session = f.signed_in_with_login("somebody-else@example.test");
         assert_eq!(
             f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
@@ -4043,7 +4495,7 @@ mod tests {
         // Not "everybody" and not "the first person": until the claim is made,
         // the private surface belongs to nobody.
         let mut f = Fixture::new("unclaimed").with_public(false);
-        let session = f.signed_in_with_login("jamez667");
+        let session = f.signed_in_with_login("jamez667@example.test");
         assert_eq!(
             f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
@@ -4779,12 +5231,15 @@ mod tests {
         // Step two: the credential that decides who owns this.
         let res = f.go(&Req::post(
             private_route::SETUP_ADMIN,
-            "login=JameZ667&password=correct-horse-battery",
+            "login=JameZ667@example.test&password=correct-horse-battery",
         )
         .with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
         let admin = f.store.admin().unwrap();
-        assert!(admin.is("jamez667"), "lowercased on the way in");
+        assert!(
+            admin.is("jamez667@example.test"),
+            "lowercased on the way in"
+        );
 
         // The password is stored hashed and never rendered back.
         assert!(!res.body.contains("correct-horse-battery"), "{}", res.body);
@@ -4819,17 +5274,17 @@ mod tests {
         // form on this server's own origin, no third party in it.
         let mut f = Fixture::new("password-signin").with_public(false);
         let mut admin = crate::admin::Admin::default();
-        admin.claim("jamez667", f.now_ms);
+        admin.claim("jamez667@example.test", f.now_ms);
         f.store.put_admin(&admin).unwrap();
         let mut accounts = f.store.accounts().unwrap();
         accounts
-            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .create_login("jamez667@example.test", "correct-horse-battery", f.now_ms)
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
         let res = f.go(&Req::post(
             public_route::SIGNIN_PASSWORD,
-            "login=JameZ667&password=correct-horse-battery",
+            "login=JameZ667@example.test&password=correct-horse-battery",
         ));
         assert_eq!(res.status, 200, "{}", res.body);
 
@@ -4856,11 +5311,11 @@ mod tests {
         let mut f = Fixture::new("password-backoff").with_public(false);
         let mut accounts = f.store.accounts().unwrap();
         accounts
-            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .create_login("jamez667@example.test", "correct-horse-battery", f.now_ms)
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
-        let wrong = "login=jamez667&password=not-the-password";
+        let wrong = "login=jamez667@example.test&password=not-the-password";
         for _ in 0..5 {
             assert_eq!(
                 f.go(&Req::post(public_route::SIGNIN_PASSWORD, wrong))
@@ -4869,7 +5324,9 @@ mod tests {
             );
         }
         let waiting = f.store.accounts().unwrap();
-        let account = waiting.by_login("jamez667").expect("still there");
+        let account = waiting
+            .by_login("jamez667@example.test")
+            .expect("still there");
         assert!(
             account.next_attempt_ms > f.now_ms,
             "the wrong guesses bought a wait"
@@ -4887,7 +5344,7 @@ mod tests {
         assert_eq!(
             f.go(&Req::post(
                 public_route::SIGNIN_PASSWORD,
-                "login=jamez667&password=correct-horse-battery",
+                "login=jamez667@example.test&password=correct-horse-battery",
             ))
             .status,
             401
@@ -4899,11 +5356,13 @@ mod tests {
         f.now_ms = account.next_attempt_ms + 1;
         let res = f.go(&Req::post(
             public_route::SIGNIN_PASSWORD,
-            "login=jamez667&password=correct-horse-battery",
+            "login=jamez667@example.test&password=correct-horse-battery",
         ));
         assert_eq!(res.status, 200, "{}", res.body);
         let after = f.store.accounts().unwrap();
-        let account = after.by_login("jamez667").expect("still there");
+        let account = after
+            .by_login("jamez667@example.test")
+            .expect("still there");
         assert_eq!(account.failed_attempts, 0);
         assert_eq!(account.next_attempt_ms, 0);
     }
@@ -4916,7 +5375,7 @@ mod tests {
         let mut f = Fixture::new("password-one-answer").with_public(false);
         let mut accounts = f.store.accounts().unwrap();
         accounts
-            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .create_login("jamez667@example.test", "correct-horse-battery", f.now_ms)
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
@@ -4926,7 +5385,7 @@ mod tests {
         ));
         let wrong = f.go(&Req::post(
             public_route::SIGNIN_PASSWORD,
-            "login=jamez667&password=not-the-password",
+            "login=jamez667@example.test&password=not-the-password",
         ));
         assert_eq!(no_such.status, 401);
         assert_eq!(wrong.status, 401);
@@ -4944,13 +5403,13 @@ mod tests {
         let mut f = Fixture::new("password-arm-order").with_public(false);
         let mut accounts = f.store.accounts().unwrap();
         accounts
-            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .create_login("jamez667@example.test", "correct-horse-battery", f.now_ms)
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
         let res = f.go(&Req::post(
             public_route::SIGNIN_PASSWORD,
-            "login=jamez667&password=correct-horse-battery",
+            "login=jamez667@example.test&password=correct-horse-battery",
         ));
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(
@@ -4967,7 +5426,7 @@ mod tests {
         let mut f = Fixture::new("password-never-echoed").with_public(false);
         let mut accounts = f.store.accounts().unwrap();
         accounts
-            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .create_login("jamez667@example.test", "correct-horse-battery", f.now_ms)
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
@@ -4976,8 +5435,8 @@ mod tests {
         assert!(raw.contains("$argon2id$"), "and it is the slow hash");
 
         for body in [
-            "login=jamez667&password=correct-horse-battery",
-            "login=jamez667&password=not-the-password",
+            "login=jamez667@example.test&password=correct-horse-battery",
+            "login=jamez667@example.test&password=not-the-password",
         ] {
             let res = f.go(&Req::post(public_route::SIGNIN_PASSWORD, body));
             assert!(
@@ -5005,11 +5464,11 @@ mod tests {
         // opposite of what this test is named for.
         let mut f = Fixture::new("signin-no-public");
         let mut admin = crate::admin::Admin::default();
-        admin.claim("jamez667", f.now_ms);
+        admin.claim("jamez667@example.test", f.now_ms);
         f.store.put_admin(&admin).unwrap();
         let mut accounts = f.store.accounts().unwrap();
         accounts
-            .create_login("jamez667", "correct-horse-battery", f.now_ms)
+            .create_login("jamez667@example.test", "correct-horse-battery", f.now_ms)
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
@@ -5019,7 +5478,7 @@ mod tests {
         // ...and posting to it works.
         let res = f.go(&Req::post(
             public_route::SIGNIN_PASSWORD,
-            "login=jamez667&password=correct-horse-battery",
+            "login=jamez667@example.test&password=correct-horse-battery",
         ));
         assert_eq!(res.status, 200, "{}", res.body);
         let session = cookie_token(&res).expect("signed in");
@@ -5059,6 +5518,514 @@ mod tests {
             Bucket::PublicWrite,
             "and asking for a link is still the public bucket",
         );
+    }
+
+    // -- the browser surface's JSON API --------------------------------------
+
+    #[test]
+    fn who_am_i_answers_a_stranger_rather_than_refusing() {
+        // The landing page is public and the client cannot render it without
+        // knowing whether anybody is signed in. A 401 here would mean the SPA
+        // could not draw its own front door.
+        let mut f = Fixture::new("api-me-anon").with_public(false);
+        let res = f.go(&Req::get("/api/v1/ui/me"));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(res.content_type, "application/json");
+
+        let me: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert_eq!(me["role"], "anonymous");
+        assert_eq!(me["can"]["file"], false);
+        assert_eq!(me["can"]["administer"], false);
+    }
+
+    #[test]
+    fn who_am_i_tells_the_administrator_what_they_may_do() {
+        let mut f = Fixture::new("api-me-admin").with_public(false);
+        let session = f.as_admin();
+        let res = f.go(&Req::get("/api/v1/ui/me").with_cookie(&session));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        let me: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert_eq!(me["role"], "administrator");
+        assert_eq!(me["can"]["accept"], true);
+        assert_eq!(me["can"]["administer"], true);
+    }
+
+    #[test]
+    fn who_am_i_never_tells_an_owner_they_may_accept() {
+        // The owner role in one line: review yes, accept no. The server enforces
+        // it by variant identity; this stops the interface offering a button
+        // that would 404.
+        let mut f = Fixture::new("api-me-owner")
+            .with_public(false)
+            .with_repos(&["intake"])
+            .with_owner("jo@x.com", &["intake"]);
+        let session = f.signed_in_with_login("jo@x.com");
+        let res = f.go(&Req::get("/api/v1/ui/me").with_cookie(&session));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        let me: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert_eq!(me["role"], "owner");
+        assert_eq!(me["can"]["review"], true);
+        assert_eq!(me["can"]["accept"], false, "an owner cannot accept");
+        assert_eq!(me["can"]["administer"], false);
+        assert_eq!(me["repos"][0], "intake");
+    }
+
+    #[test]
+    fn the_json_api_answers_json_even_when_it_refuses() {
+        // **The reason this dispatch sits above the private device gate.** That
+        // gate answers a rendered HTML 404, and an HTML body handed to a `fetch`
+        // is a parse error rather than a status the client can act on.
+        let mut f = Fixture::new("api-404").with_public(false);
+        let res = f.go(&Req::get("/api/v1/ui/nothing-here"));
+        assert_eq!(res.status, 404);
+        assert_eq!(res.content_type, "application/json");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&res.body).is_ok(),
+            "the body parses as JSON: {}",
+            res.body
+        );
+    }
+
+    #[test]
+    fn the_json_api_is_never_served_with_script() {
+        // A JSON body is not a document: nothing loads a subresource from it and
+        // nothing runs in it. `Policy::Strict` is the default and this asserts
+        // the API did not quietly acquire the public one by sitting near it.
+        let mut f = Fixture::new("api-policy").with_public(false);
+        assert_eq!(f.go(&Req::get("/api/v1/ui/me")).policy, Policy::Strict);
+        assert_eq!(
+            f.go(&Req::get("/api/v1/ui/nothing-here")).policy,
+            Policy::Strict
+        );
+    }
+
+    #[test]
+    fn a_daemon_key_buys_nothing_on_the_browser_api() {
+        // Two prefixes, two audiences. A daemon holds a bearer key for
+        // `/api/v1/work` and has no browser identity to report.
+        let mut f = Fixture::new("api-daemon").with_public(false);
+        let res = f.go(&Req::get("/api/v1/ui/me").with_bearer(KEY));
+        assert_eq!(res.status, 200);
+        let me: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert_eq!(me["role"], "anonymous");
+        assert_eq!(me["can"]["review"], false);
+    }
+
+    #[test]
+    fn asking_who_i_am_is_not_rate_limited_like_a_password_guess() {
+        // `/me` is what every browser asks first, including a stranger loading
+        // the public landing page. `AnonPrivate`'s 20/min would throttle
+        // ordinary reading; everything else under the prefix keeps it.
+        assert_eq!(bucket_for(&None, "/api/v1/ui/me"), Bucket::PublicRead);
+        assert_eq!(
+            bucket_for(&None, "/api/v1/ui/requests"),
+            Bucket::AnonPrivate,
+            "an anonymous request for somebody's data is a probe, not browsing"
+        );
+    }
+
+    #[test]
+    fn a_filer_is_never_told_their_request_was_quarantined() {
+        // **The rule the HTML surface enforced with a coarse label**, carried
+        // into JSON. `Screening`, `Quarantined` and `Queued` all read as
+        // "received": a filer learning theirs was quarantined learns this server
+        // screens, which is what a spammer tunes against.
+        let (mut f, filer, id) = quarantined_fixture("api-coarse");
+
+        let res = f.go(&Req::get("/api/v1/ui/requests").with_cookie(&filer));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let body = res.body.to_ascii_lowercase();
+        assert!(!body.contains("quarantin"), "{}", res.body);
+        assert!(!body.contains("spam"), "{}", res.body);
+        assert!(!body.contains("screening"), "{}", res.body);
+
+        // And by id, the same.
+        let one = f.go(&Req::get(&format!("/api/v1/ui/requests/{id}")).with_cookie(&filer));
+        assert_eq!(one.status, 200, "{}", one.body);
+        assert!(
+            !one.body.to_ascii_lowercase().contains("quarantin"),
+            "{}",
+            one.body
+        );
+    }
+
+    #[test]
+    fn a_filer_is_never_sent_a_path_on_the_developers_machine() {
+        // `artifact_dir` is a directory on somebody else's computer, `note` is
+        // daemon failure text naming repositories, and `repo` is the repository
+        // name. The filer's type has no field for any of them, so this cannot
+        // regress by a handler forgetting to strip one.
+        let (mut f, filer, id) = filed_fixture("api-narrow");
+
+        let res = f.go(&Req::get(&format!("/api/v1/ui/requests/{id}")).with_cookie(&filer));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert!(v.get("artifact_dir").is_none(), "{}", res.body);
+        assert!(v.get("note").is_none(), "{}", res.body);
+        assert!(v.get("repo").is_none(), "{}", res.body);
+        assert!(
+            v.get("summary").is_some(),
+            "but they do see their own: {}",
+            res.body
+        );
+    }
+
+    #[test]
+    fn another_filers_request_is_not_found_rather_than_forbidden() {
+        // **404, never 403.** A 403 confirms the id is real, which is the fact
+        // being withheld. Ids are time-ordered and enumerable in seconds, so
+        // this is the difference between a list nobody can build and one anybody
+        // can.
+        let (mut f, _filer, id) = filed_fixture("api-not-mine");
+        let stranger = f.signed_in("someone-else@x.com");
+
+        let res = f.go(&Req::get(&format!("/api/v1/ui/requests/{id}")).with_cookie(&stranger));
+        assert_eq!(res.status, 404, "{}", res.body);
+        assert_eq!(res.content_type, "application/json");
+    }
+
+    #[test]
+    fn an_owner_reads_only_the_repositories_they_own() {
+        let (mut f, owner, _mine, _theirs) = owner_fixture("api-owner-list");
+
+        let res = f.go(&Req::get("/api/v1/ui/requests").with_cookie(&owner));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let list: Vec<serde_json::Value> = serde_json::from_str(&res.body).unwrap();
+        assert!(!list.is_empty(), "they own something");
+        for r in &list {
+            assert_eq!(r["repo"], "intake", "never somebody else's: {r}");
+        }
+    }
+
+    #[test]
+    fn an_owner_is_not_given_the_developers_artifact_path() {
+        // It is a path on a machine the owner does not have, and naming it tells
+        // them how the developer's disk is laid out. The administrator gets it;
+        // an owner does not.
+        let (mut f, owner, _mine, _theirs) = owner_fixture("api-owner-narrow");
+        let res = f.go(&Req::get("/api/v1/ui/requests").with_cookie(&owner));
+        let list: Vec<serde_json::Value> = serde_json::from_str(&res.body).unwrap();
+        for r in &list {
+            assert!(r.get("artifact_dir").is_none(), "{r}");
+        }
+    }
+
+    #[test]
+    fn the_administrative_lists_do_not_exist_for_anybody_else() {
+        // The same answer the private surface gives: **404, not 401**. Saying
+        // "unauthorized" would tell a stranger the address is real.
+        let mut f = Fixture::new("api-admin-gate").with_public(false);
+        let filer = f.signed_in("jo@x.com");
+
+        for path in [
+            "/api/v1/ui/settings",
+            "/api/v1/ui/owners",
+            "/api/v1/ui/repos",
+            "/api/v1/ui/daemons",
+            "/api/v1/ui/accounts",
+        ] {
+            assert_eq!(f.go(&Req::get(path)).status, 404, "signed out: {path}");
+            assert_eq!(
+                f.go(&Req::get(path).with_cookie(&filer)).status,
+                404,
+                "a filer: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_settings_endpoint_returns_presence_and_never_a_secret() {
+        // **There is no read path for a stored secret anywhere in this server**,
+        // and adding a JSON API must not create one. The page renders whether a
+        // key is set and when; so does this.
+        let mut f = Fixture::new("api-settings").with_public(false);
+        let admin = f.as_admin();
+
+        let res = f.go(&Req::get("/api/v1/ui/settings").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(
+            !res.body.contains(KEY),
+            "the mail key must never be readable: {}",
+            res.body
+        );
+        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert!(v.get("mail_key").is_none(), "not even the ciphertext");
+        assert!(v.get("screen_key").is_none());
+        assert!(v["mail_key_set"].is_boolean(), "only whether one is there");
+    }
+
+    #[test]
+    fn the_accounts_endpoint_carries_a_hint_and_no_address() {
+        // The hint is `j***@example.com` — enough to recognise an account you
+        // meant to revoke, not enough to be a contact list. The hash and the
+        // password hash stay on the volume.
+        let mut f = Fixture::new("api-accounts").with_public(false);
+        let admin = f.as_admin();
+        f.signed_in("jo@x.com");
+
+        let res = f.go(&Req::get("/api/v1/ui/accounts").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(
+            !res.body.contains("jo@x.com"),
+            "not the address: {}",
+            res.body
+        );
+        assert!(!res.body.contains("email_hash"), "{}", res.body);
+        assert!(!res.body.contains("password_hash"), "{}", res.body);
+        assert!(res.body.contains("email_hint"), "{}", res.body);
+    }
+
+    #[test]
+    fn a_stranger_asking_for_requests_gets_an_empty_list_not_an_error() {
+        // The client asks this on a page a stranger may legitimately be reading.
+        // An empty list is the true answer; a 401 would make the landing page
+        // impossible to render.
+        let mut f = Fixture::new("api-anon-requests").with_public(false);
+        let res = f.go(&Req::get("/api/v1/ui/requests"));
+        assert_eq!(res.status, 200);
+        assert_eq!(res.body, "[]");
+    }
+
+    #[test]
+    fn the_administrator_is_sent_the_digest_of_the_spec_they_are_reading() {
+        // **The accept handshake.** Accepting means accepting *these bytes*; if a
+        // redraft lands between reading and accepting, the digest no longer
+        // matches and the accept is refused rather than approving text nobody
+        // read. The client cannot thread a digest it was never given.
+        let (mut f, id) = drafted_fixture("api-digest");
+        let admin = f.as_admin();
+
+        let res = f.go(&Req::get(&format!("/api/v1/ui/requests/{id}")).with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        let digest = v["spec_digest"]
+            .as_str()
+            .expect("a digest travels with the spec");
+        let spec = v["spec"].as_str().expect("and so does the spec");
+        assert_eq!(
+            digest,
+            auth::hash(spec),
+            "and it is the digest of that spec"
+        );
+    }
+
+    /// A JSON POST, as the SPA sends one.
+    fn api_post(path: &str, body: &str) -> Req {
+        let mut r = Req::post(path, body);
+        r.content_type = Some("application/json".into());
+        r
+    }
+
+    #[test]
+    fn accepting_needs_the_digest_of_the_spec_that_was_read() {
+        // **The handshake, carried into JSON.** Accepting means accepting *these
+        // bytes*. If a redraft lands between reading and accepting, the digest
+        // stops matching and the accept is refused rather than silently
+        // approving text nobody read.
+        let (mut f, id) = drafted_fixture("api-accept-digest");
+        let admin = f.as_admin();
+
+        // Without one: refused, and told why.
+        let bare =
+            f.go(&api_post(&format!("/api/v1/ui/requests/{id}/accept"), "{}").with_cookie(&admin));
+        assert_eq!(bare.status, 400, "{}", bare.body);
+
+        // With the wrong one: refused.
+        let wrong = f.go(&api_post(
+            &format!("/api/v1/ui/requests/{id}/accept"),
+            "{\"digest\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+        )
+        .with_cookie(&admin));
+        assert_eq!(wrong.status, 400, "{}", wrong.body);
+
+        // With the right one: accepted.
+        let spec = f.store.get(&id).unwrap().unwrap().spec.unwrap();
+        let good = f.go(&api_post(
+            &format!("/api/v1/ui/requests/{id}/accept"),
+            &format!("{{\"digest\":\"{}\"}}", auth::hash(&spec)),
+        )
+        .with_cookie(&admin));
+        assert_eq!(good.status, 200, "{}", good.body);
+        assert_eq!(
+            f.store.get(&id).unwrap().unwrap().state,
+            RequestState::Accepted
+        );
+    }
+
+    #[test]
+    fn an_owner_cannot_accept_through_the_json_api_either() {
+        // The role's whole shape. On the HTML surface this is enforced by
+        // `Caller::Owner` not matching the admin gate — no value of the variant
+        // reaches an accepting handler. The API matches the variant the same
+        // way, and answers **404**: the verb does not exist for them.
+        let (mut f, owner, mine, _theirs) = owner_fixture("api-owner-accept");
+        let mut r = f.store.get(&mine).unwrap().unwrap();
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# spec".to_string());
+        f.store.put(&r).unwrap();
+
+        let res = f.go(&api_post(
+            &format!("/api/v1/ui/requests/{mine}/accept"),
+            &format!("{{\"digest\":\"{}\"}}", auth::hash("# spec")),
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 404, "{}", res.body);
+        assert_ne!(
+            f.store.get(&mine).unwrap().unwrap().state,
+            RequestState::Accepted,
+            "and nothing was accepted"
+        );
+    }
+
+    #[test]
+    fn an_owner_may_send_back_and_discard_their_own_repositories() {
+        let (mut f, owner, mine, _theirs) = owner_fixture("api-owner-verbs");
+        let mut r = f.store.get(&mine).unwrap().unwrap();
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# spec".to_string());
+        f.store.put(&r).unwrap();
+
+        let res = f.go(&api_post(
+            &format!("/api/v1/ui/requests/{mine}/send-back"),
+            "{\"note\":\"needs more detail\"}",
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 200, "{}", res.body);
+    }
+
+    #[test]
+    fn an_owner_acting_outside_their_repositories_is_not_found() {
+        // 404, never 403 — a 403 confirms the id is real.
+        let (mut f, owner, _mine, theirs) = owner_fixture("api-owner-outside");
+        let res = f.go(
+            &api_post(&format!("/api/v1/ui/requests/{theirs}/discard"), "{}").with_cookie(&owner),
+        );
+        assert_eq!(res.status, 404, "{}", res.body);
+    }
+
+    #[test]
+    fn a_filer_cannot_reach_a_review_verb() {
+        let (mut f, filer, id) = filed_fixture("api-filer-verb");
+        let res =
+            f.go(&api_post(&format!("/api/v1/ui/requests/{id}/discard"), "{}").with_cookie(&filer));
+        assert_eq!(res.status, 404, "{}", res.body);
+    }
+
+    #[test]
+    fn a_mutating_call_must_say_it_is_json() {
+        // **A `<form>` cannot send `application/json`.** Demanding it means a
+        // cross-origin page cannot reach these endpoints without a preflight —
+        // and the origin check is what that preflight then fails. Today the only
+        // defence is `SameSite=Strict`, which is load-bearing rather than
+        // defence-in-depth; this is the second line.
+        let (mut f, id) = drafted_fixture("api-content-type");
+        let admin = f.as_admin();
+
+        // A form-shaped POST, exactly what a cross-origin page could send.
+        let form = f.go(
+            &Req::post(&format!("/api/v1/ui/requests/{id}/discard"), "note=x").with_cookie(&admin),
+        );
+        assert_eq!(form.status, 415, "{}", form.body);
+        assert_ne!(
+            f.store.get(&id).unwrap().unwrap().state,
+            RequestState::Discarded,
+            "and nothing happened"
+        );
+    }
+
+    #[test]
+    fn a_mutating_call_from_another_origin_is_refused() {
+        let (mut f, id) = drafted_fixture("api-origin");
+        let admin = f.as_admin();
+
+        let mut req = api_post(&format!("/api/v1/ui/requests/{id}/discard"), "{}");
+        req.origin = Some("https://evil.example".into());
+        let res = f.go(&req.with_cookie(&admin));
+        assert_eq!(res.status, 403, "{}", res.body);
+
+        // And this server's own origin is fine.
+        let mut ours = api_post(&format!("/api/v1/ui/requests/{id}/discard"), "{}");
+        ours.origin = Some("https://specs.example.test".into());
+        assert_eq!(f.go(&ours.with_cookie(&admin)).status, 200);
+    }
+
+    #[test]
+    fn a_verb_answers_with_the_request_as_it_now_stands() {
+        // The HTML surface re-rendered the page after a POST; there are no
+        // redirects anywhere in this crate. The API returns the mutated record
+        // for the same reason — one round trip, and the client never has to
+        // guess what changed.
+        let (mut f, id) = drafted_fixture("api-verb-echo");
+        let admin = f.as_admin();
+
+        let res = f.go(&api_post(
+            &format!("/api/v1/ui/requests/{id}/send-back"),
+            "{\"note\":\"more detail please\"}",
+        )
+        .with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert_eq!(v["id"], id.as_str());
+        assert_eq!(v["state"], "queued", "the state it is now in: {}", res.body);
+    }
+
+    #[test]
+    fn the_interface_can_load_its_own_stylesheet() {
+        // **A failure no `curl` can see.** The header is present and looks right
+        // either way; only a browser refuses the stylesheet, and the result is
+        // an unstyled page rather than an error anybody would notice in a test
+        // that only checks status codes.
+        //
+        // The rendered pages inline their CSS and need `'unsafe-inline'`; the
+        // interface ships a bundled file and needs `'self'`. Both are in there,
+        // and this is what says so.
+        let csp = Policy::PublicScript.csp();
+        assert!(csp.contains("style-src 'self' 'unsafe-inline'"), "{csp}");
+        assert!(csp.contains("script-src 'self'"), "{csp}");
+    }
+
+    #[test]
+    fn the_interfaces_files_are_reachable_signed_out() {
+        // A stranger has to load the page that offers them a way in. If the
+        // bundle were behind the sign-in it guards, nobody could ever reach it.
+        let mut f = Fixture::new("ui-assets").with_public(false);
+        for path in [crate::api::ui::SCRIPT_PATH, crate::api::ui::STYLE_PATH] {
+            let res = f.go(&Req::get(path));
+            assert_eq!(res.status, 200, "{path}");
+            assert_eq!(res.policy, Policy::PublicScript, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_interface_answers_only_the_paths_it_owns() {
+        // **An allowlist, not a catch-all.** Answering every unmatched path with
+        // the document would turn a mistyped API call into a 200 holding HTML,
+        // and a client could no longer tell "no such request" from "here is the
+        // application again".
+        assert!(wants_document(public_route::LANDING));
+        assert!(wants_document(public_route::FILE));
+        assert!(wants_document("/public/request/r-1"));
+        assert!(!wants_document("/api/v1/ui/nope"));
+        assert!(!wants_document("/settings"));
+        assert!(!wants_document("/ui/app.js"));
+    }
+
+    #[test]
+    fn the_interfaces_files_are_read_budget_not_guess_budget() {
+        // **Found by the browser harness, not by a unit test.** These were
+        // falling through to `AnonPrivate` — 20/min, the bucket for credential
+        // guessing — because they are not on the public path list. A page load
+        // fetches three things, so a reader who reloaded a few times got a 429
+        // on their *stylesheet* and saw an unstyled page.
+        //
+        // Nothing that checks status codes catches that: the document itself
+        // was 200 every time. It took a browser noticing the page had no
+        // background.
+        for path in [crate::api::ui::SCRIPT_PATH, crate::api::ui::STYLE_PATH] {
+            assert_eq!(bucket_for(&None, path), Bucket::PublicRead, "{path}");
+        }
     }
 
     /// Every page an administrator is expected to find.
@@ -5202,7 +6169,7 @@ mod tests {
         // The browser that spent the code still finishes normally.
         let res = f.go(&Req::post(
             private_route::SETUP_ADMIN,
-            "login=mine&password=correct-horse-battery",
+            "login=mine%40example.test&password=correct-horse-battery",
         )
         .with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
@@ -5320,7 +6287,7 @@ mod tests {
         // administrator's own front door.
         let mut f = Fixture::new("setup-claimed").with_public(false);
         let mut admin = f.store.admin().unwrap();
-        admin.claim("jamez667", 1);
+        admin.claim("jamez667@example.test", 1);
         f.store.put_admin(&admin).unwrap();
 
         assert_eq!(f.go(&Req::get(private_route::SETUP)).status, 404);
@@ -5336,12 +6303,50 @@ mod tests {
 
     /// An owner signed in and holding a session cookie, with a request filed
     /// against each of two repositories.
+    /// A public surface with one request filed by one filer.
+    ///
+    /// Returns the fixture, the filer's session, and the request id. Filed
+    /// through the real route rather than written to the store, so the record
+    /// carries whatever filing actually sets — including `account_id`, which is
+    /// what every "is this mine" check keys on.
+    fn filed_fixture(tag: &str) -> (Fixture, String, String) {
+        let mut f = Fixture::new(tag).with_public(false).with_repos(&["intake"]);
+        let filer = f.signed_in("jo@x.com");
+        f.go(&Req::post(
+            public_route::FILE,
+            "text=please+fix+the+thing&kind=bug&repo=intake",
+        )
+        .with_cookie(&filer));
+        let id = f.store.all().unwrap()[0].id.clone();
+        (f, filer, id)
+    }
+
+    /// The same, with the request held by the screener.
+    fn quarantined_fixture(tag: &str) -> (Fixture, String, String) {
+        let (f, filer, id) = filed_fixture(tag);
+        let mut r = f.store.get(&id).unwrap().unwrap();
+        r.state = RequestState::Quarantined;
+        f.store.put(&r).unwrap();
+        (f, filer, id)
+    }
+
+    /// The same, with a drafted spec awaiting review.
+    fn drafted_fixture(tag: &str) -> (Fixture, String) {
+        let (f, _filer, id) = filed_fixture(tag);
+        let mut r = f.store.get(&id).unwrap().unwrap();
+        r.state = RequestState::AwaitingReview;
+        r.spec = Some("# A spec\n\nSomething a model wrote.".to_string());
+        r.artifact_dir = Some("/home/dev/specs/r-1".to_string());
+        f.store.put(&r).unwrap();
+        (f, id)
+    }
+
     fn owner_fixture(tag: &str) -> (Fixture, String, String, String) {
         let mut f = Fixture::new(tag)
             .with_public(false)
             .with_repos(&["intake", "other"])
-            .with_owner("jamez667", &["intake"]);
-        let owner = f.signed_in_with_login("jamez667");
+            .with_owner("jamez667@example.test", &["intake"]);
+        let owner = f.signed_in_with_login("jamez667@example.test");
 
         let filer = f.signed_in("jo@x.com");
         f.go(
@@ -5631,8 +6636,8 @@ mod tests {
         // without anyone remembering to extend this list.
         let mut f = Fixture::new("owner-no-approve")
             .with_public(false)
-            .with_owner("jamez667", &["intake"]);
-        let owner = f.signed_in_with_login("jamez667");
+            .with_owner("jamez667@example.test", &["intake"]);
+        let owner = f.signed_in_with_login("jamez667@example.test");
 
         let filer = f.signed_in("jo@x.com");
         f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&filer));
@@ -5656,7 +6661,7 @@ mod tests {
         // promotes itself — so the same signed-in session is an owner or is
         // not, depending on a record only a device can write.
         let mut f = Fixture::new("owner-from-roster").with_public(false);
-        let session = f.signed_in_with_login("jamez667");
+        let session = f.signed_in_with_login("jamez667@example.test");
 
         // Not named: an ordinary filer, and the filing form is what they get.
         assert_eq!(
@@ -5694,7 +6699,7 @@ mod tests {
 
         // The developer revokes them.
         let mut roster = f.store.roster().unwrap();
-        assert!(roster.revoke("jamez667"));
+        assert!(roster.revoke("jamez667@example.test"));
         f.store.put_roster(&roster).unwrap();
 
         // **The next request**, with no restart and no redeploy. A cache that
@@ -5727,8 +6732,8 @@ mod tests {
         let mut f = Fixture::new("owner-stale-repo")
             .with_public(false)
             .with_repos(&["intake"])
-            .with_owner("jamez667", &["something-else"]);
-        let owner = f.signed_in_with_login("jamez667");
+            .with_owner("jamez667@example.test", &["something-else"]);
+        let owner = f.signed_in_with_login("jamez667@example.test");
 
         let filer = f.signed_in("jo@x.com");
         f.go(
@@ -5752,7 +6757,7 @@ mod tests {
         let (mut f, session, _mine, _theirs) = owner_fixture("owner-no-promote");
 
         for body in [
-            "login=jamez667&repos=intake&repos=other",
+            "login=jamez667@example.test&repos=intake&repos=other",
             "login=accomplice&repos=intake",
         ] {
             let res = f.go(&Req::post(private_route::OWNERS, body).with_cookie(&session));
@@ -5768,7 +6773,10 @@ mod tests {
         // The roster is untouched: no accomplice, and no second repository.
         let roster = f.store.roster().unwrap();
         assert!(roster.owner_for("accomplice").is_none());
-        assert_eq!(roster.owner_for("jamez667").unwrap().repos, ["intake"]);
+        assert_eq!(
+            roster.owner_for("jamez667@example.test").unwrap().repos,
+            ["intake"]
+        );
     }
 
     #[test]
@@ -5782,18 +6790,23 @@ mod tests {
         // the last, which would grant one of the two — hence `form_values`.
         let res = f.go(&Req::post(
             private_route::OWNERS,
-            "login=JameZ667&repos=intake&repos=other",
+            "login=JameZ667@example.test&repos=intake&repos=other",
         )
         .with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
         let roster = f.store.roster().unwrap();
-        let owner = roster.owner_for("jamez667").expect("promoted");
+        let owner = roster.owner_for("jamez667@example.test").expect("promoted");
         assert_eq!(owner.repos, ["intake", "other"], "both ticked repositories");
 
         // And revoking from the same page.
-        let res = f.go(&Req::post("/owners/jamez667/revoke", "").with_cookie(&device));
+        let res = f.go(&Req::post("/owners/jamez667@example.test/revoke", "").with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
-        assert!(f.store.roster().unwrap().owner_for("jamez667").is_none());
+        assert!(f
+            .store
+            .roster()
+            .unwrap()
+            .owner_for("jamez667@example.test")
+            .is_none());
     }
 
     #[test]
@@ -5924,16 +6937,19 @@ mod tests {
             .with_repos(&["intake"]);
         let device = f.as_admin();
 
-        let res = f.go(
-            &Req::post(private_route::OWNERS, "login=jamez667&repos=not-served")
-                .with_cookie(&device),
-        );
+        let res = f.go(&Req::post(
+            private_route::OWNERS,
+            "login=jamez667@example.test&repos=not-served",
+        )
+        .with_cookie(&device));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.roster().unwrap().owners.is_empty());
 
         // Nor an owner of nothing at all, which reads as promoted on the page
         // and grants nothing.
-        let res = f.go(&Req::post(private_route::OWNERS, "login=jamez667").with_cookie(&device));
+        let res = f.go(
+            &Req::post(private_route::OWNERS, "login=jamez667@example.test").with_cookie(&device),
+        );
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.roster().unwrap().owners.is_empty());
     }
@@ -6133,8 +7149,8 @@ mod tests {
         // until the policy was chosen by caller rather than by path.
         let mut f = Fixture::new("policy-by-caller")
             .with_public(false)
-            .with_owner("jamez667", &["intake"]);
-        let owner = f.signed_in_with_login("jamez667");
+            .with_owner("jamez667@example.test", &["intake"]);
+        let owner = f.signed_in_with_login("jamez667@example.test");
         let filer = f.signed_in("jo@x.com");
 
         for path in [public_route::LANDING, public_route::FILE] {

@@ -30,3 +30,12 @@ sc-win-launch-*.log
 
 # Personal Claude Code tooling — local to a contributor's machine, not project source.
 .claude/
+
+# The browser interface is built by Vite and embedded with `include_str!`.
+# **Generated, so not committed** — CI installs Node and builds it, which is the
+# trade recorded in spec 18: a checked-in bundle is one somebody forgets to
+# rebuild, and a stale one ships silently with every test still green.
+crates/sc-server/assets/ui/
+node_modules/
+web/test-results/
+web/playwright-report/

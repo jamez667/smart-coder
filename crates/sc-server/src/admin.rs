@@ -251,7 +251,7 @@ mod tests {
     fn a_fresh_server_is_unclaimed_and_nobody_is_the_administrator() {
         let admin = Admin::default();
         assert!(!admin.claimed());
-        assert!(!admin.is("jamez667"));
+        assert!(!admin.is("jamez667@example.test"));
         assert!(!admin.is(""));
     }
 
@@ -260,9 +260,9 @@ mod tests {
         // Registered one way, typed another. A sign-in form is where this
         // happens, and a mismatch would lock out the one account that matters.
         let mut admin = Admin::default();
-        admin.claim("JameZ667", 1);
-        assert!(admin.is("jamez667"));
-        assert!(admin.is("JAMEZ667"));
+        admin.claim("JameZ667@example.test", 1);
+        assert!(admin.is("jamez667@example.test"));
+        assert!(admin.is("JAMEZ667@EXAMPLE.TEST"));
         assert!(!admin.is("someone-else"));
     }
 
@@ -320,12 +320,12 @@ mod tests {
         // restart would print a fresh key to the administrator's own front door,
         // and anyone reading the logs could take the server from them.
         let mut admin = Admin::default();
-        admin.claim("jamez667", 1);
+        admin.claim("jamez667@example.test", 1);
 
         assert!(!admin.arm("NEW-COD", 2), "armed a claimed server");
         assert!(admin.claim_code_hash.is_none());
         assert!(admin.spend("NEW-COD", 3).is_none());
-        assert!(admin.is("jamez667"), "still theirs");
+        assert!(admin.is("jamez667@example.test"), "still theirs");
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
         // that nobody is watching.
         let mut admin = Admin::default();
         admin.arm("ABC-123", 0);
-        admin.claim("jamez667", 1);
+        admin.claim("jamez667@example.test", 1);
         assert!(admin.claim_code_hash.is_none());
         assert!(admin.claim_expires_ms.is_none());
         assert_eq!(admin.claimed_ms, 1);
@@ -345,10 +345,10 @@ mod tests {
         // One login, always. Two administrators could hand the server to each
         // other, and revoking one would not revoke what the other granted.
         let mut admin = Admin::default();
-        admin.claim("jamez667", 1);
+        admin.claim("jamez667@example.test", 1);
         admin.claim("somebody-else", 2);
         assert!(admin.is("somebody-else"));
-        assert!(!admin.is("jamez667"));
+        assert!(!admin.is("jamez667@example.test"));
         assert_eq!(admin.claimed_ms, 2);
     }
 
@@ -381,7 +381,7 @@ mod tests {
         let _ = setup;
 
         // And the claim clears both, so a claimed server carries neither.
-        spent.claim("jamez667", 2);
+        spent.claim("jamez667@example.test", 2);
         let json = serde_json::to_string(&spent).unwrap();
         assert!(!json.contains("ABC-123"), "{json}");
         assert!(!json.contains(&token), "{json}");
@@ -390,9 +390,9 @@ mod tests {
     #[test]
     fn a_file_written_before_these_fields_existed_still_loads() {
         // The data volume outlives any one image tag.
-        let old = r#"{"login":"jamez667","claimed_ms":7}"#;
+        let old = r#"{"login":"jamez667@example.test","claimed_ms":7}"#;
         let admin: Admin = serde_json::from_str(old).unwrap();
-        assert!(admin.is("jamez667"));
+        assert!(admin.is("jamez667@example.test"));
         assert!(admin.claim_expired(0), "and no code is outstanding");
     }
 

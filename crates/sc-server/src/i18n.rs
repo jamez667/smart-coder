@@ -181,6 +181,18 @@ pub struct Strings {
     /// The masthead's sign-in action, and the account menu.
     pub nav_signin: &'static str,
     pub nav_account: &'static str,
+    /// The administrative pages, as they appear in the account menu.
+    ///
+    /// **Translated, unlike the route slugs they point at.** These are read by
+    /// exactly one person per server, but that person may not read English, and
+    /// the rest of the masthead around them is already translated.
+    pub nav_admin_heading: &'static str,
+    pub nav_admin_review: &'static str,
+    pub nav_admin_settings: &'static str,
+    pub nav_admin_repos: &'static str,
+    pub nav_admin_owners: &'static str,
+    pub nav_admin_daemons: &'static str,
+    pub nav_admin_accounts: &'static str,
     /// The dialog's close button, for a screen reader — the glyph itself is
     /// decorative and hidden from one.
     pub dialog_close: &'static str,
@@ -225,6 +237,13 @@ pub struct Strings {
     pub signin_user_label: &'static str,
     pub signin_password_label: &'static str,
     pub signin_password_submit: &'static str,
+    /// The register button, under the email form.
+    ///
+    /// **The same route as signing in**, because on this surface a first
+    /// sign-in *is* the signup — there is no separate registration to perform.
+    /// It exists because "Email me a link" does not read as a way to *start*,
+    /// and somebody with no account needs to see a door rather than infer one.
+    pub signin_register: &'static str,
 
     pub sent_title: &'static str,
     pub sent_body: &'static str,
@@ -426,6 +445,13 @@ mod tests {
             s.footer_tagline,
             s.nav_signin,
             s.nav_account,
+            s.nav_admin_heading,
+            s.nav_admin_review,
+            s.nav_admin_settings,
+            s.nav_admin_repos,
+            s.nav_admin_owners,
+            s.nav_admin_daemons,
+            s.nav_admin_accounts,
             s.dialog_close,
             s.landing_headline,
             s.landing_sub,
@@ -447,6 +473,7 @@ mod tests {
             s.signin_user_label,
             s.signin_password_label,
             s.signin_password_submit,
+            s.signin_register,
             s.sent_title,
             s.sent_body,
             s.sent_nothing_yet,
@@ -540,9 +567,11 @@ mod tests {
         //
         // The exceptions are strings that are *correctly* identical, and each is
         // named with its reason rather than skipped in bulk.
-        const SAME_ON_PURPOSE: [&str; 3] = [
+        const SAME_ON_PURPOSE: [&str; 4] = [
             // A product name, not a word.
             "brand",
+            // "Machines" is the same word in French.
+            "nav_admin_daemons",
             // "you@example.com" -> "vous@exemple.com" differs; but a language
             // that shares the address form legitimately matches.
             "signin_email_placeholder",

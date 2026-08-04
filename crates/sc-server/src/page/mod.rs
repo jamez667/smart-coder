@@ -57,45 +57,6 @@ pub fn esc(s: &str) -> String {
     out
 }
 
-/// The stylesheet. Inline, because a separate file would be one more request on
-/// a bad connection — and on the private half the CSP allows no remote
-/// subresource at all.
-pub(crate) const STYLE: &str = "\
-:root { color-scheme: light dark; }
-* { box-sizing: border-box; }
-body { font: 16px/1.55 system-ui, -apple-system, 'Segoe UI', sans-serif;
-       margin: 0; padding: 1rem; max-width: 46rem; margin-inline: auto; }
-h1 { font-size: 1.3rem; margin: 0 0 1rem; }
-h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
-a { color: inherit; }
-form { margin: 0; }
-label { display: block; margin: .75rem 0 .25rem; font-weight: 600; font-size: .9rem; }
-textarea, input, select, button {
-  font: inherit; width: 100%; padding: .6rem; border-radius: .4rem;
-  border: 1px solid rgba(128,128,128,.5); background: transparent; color: inherit; }
-textarea { min-height: 7rem; resize: vertical; }
-button { cursor: pointer; margin-top: .75rem; font-weight: 600; }
-.row { display: flex; gap: .5rem; }
-.row > form { flex: 1; }
-.item { display: block; padding: .7rem; margin: .4rem 0; text-decoration: none;
-        border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; }
-.meta { font-size: .8rem; opacity: .7; }
-.tag { display: inline-block; font-size: .72rem; padding: .1rem .45rem;
-       border-radius: .8rem; border: 1px solid currentColor; opacity: .85; }
-pre { white-space: pre-wrap; word-wrap: break-word; padding: .8rem;
-      border: 1px solid rgba(128,128,128,.35); border-radius: .5rem;
-      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.note { padding: .7rem; border-left: 3px solid currentColor; opacity: .85;
-        font-size: .9rem; }
-.decide { margin-top: 1.5rem; padding-top: 1rem;
-          border-top: 1px solid rgba(128,128,128,.35); }
-.skip { display: block; font-size: .85rem; opacity: .7; margin: .5rem 0; }
-.elided { text-align: center; opacity: .6; font-size: .85rem;
-          padding: .4rem; font-style: italic; }
-.adminnav { margin-top: 2rem; padding-top: 1rem; font-size: .85rem;
-            border-top: 1px solid rgba(128,128,128,.35); opacity: .8; }
-";
-
 /// The **public** surface's stylesheet.
 ///
 /// Shares its token names and values with the published report site
@@ -300,7 +261,15 @@ font-family:"Fraunces",Georgia,serif;font-size:.95rem;font-weight:600;letter-spa
    `16px 0 4px` and `16px 0 0`. */
 .controls{display:flex;align-items:center;gap:8px}
 .controls label,.controls button,.controls select,.controls a{margin:0}
-.controls>dialog{position:fixed}
+/* **Not `position:fixed` alone**, which was the bug. The dialog is a child of
+this flex row, and `fixed` with no offsets pins it wherever the row happens to
+be — the top right corner — instead of letting a `<dialog>` centre itself the
+way it does by default. Memosy's own dialog centres explicitly rather than
+relying on the default, so this does the same: `fixed top-1/2 left-1/2` with a
+half-size translate back, which is `web/src/components/ui/dialog.tsx` in that
+repository. */
+.controls>dialog{position:fixed;top:50%;left:50%;
+transform:translate(-50%,-50%);margin:0}
 /* The footer, matching the reference: a copyright line and a dot-separated
    set of links, stacking centred on a narrow screen. */
 .footer{margin-top:auto;border-block-start:1px solid var(--line);
@@ -360,6 +329,13 @@ padding:var(--s2) var(--s3);border:0;border-radius:.4rem;margin:0;
 background:transparent;color:var(--fg);font:inherit;font-size:.85rem;
 font-weight:500;text-decoration:none;cursor:pointer}
 .acct .menu a:hover,.acct .menu button:hover{background:var(--surface-2)}
+/* The administrative group. A heading and a rule rather than a flat list: the
+   menu now holds two kinds of destination — what this account filed, and what
+   it administers — and running them together reads as one list of seven. */
+.acct .menu hr{border:0;border-block-start:1px solid var(--line);
+margin:var(--s1) var(--s2)}
+.acct .menu .grp{margin:var(--s2) var(--s3) var(--s1);font-size:.7rem;
+font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
 /* The landing page's three points. */
 .point{margin-block:3rem}
 .point h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
@@ -370,16 +346,59 @@ font-weight:500;text-decoration:none;cursor:pointer}
    focus trapping, Escape-to-close, inertness of the content behind it and a
    `::backdrop` — every one of which a hand-rolled overlay has to reimplement,
    and the accessibility half of that list is what such overlays usually skip. */
-dialog{max-width:380px;width:calc(100% - 2rem);padding:1.75rem;
-border:1px solid var(--line);border-radius:var(--radius);
-background:var(--surface);color:var(--fg);box-shadow:var(--shadow);
+/* `max-w-sm` (24rem) capped by `max-w-[calc(100%-2rem)]`, `rounded-xl`, and a
+`ring-1 ring-foreground/10` rather than a solid border — all from Memosy's
+`DialogContent`. Its `--popover` is #faf7f2 / #1f1c24, which is what `--surface`
+already holds here, so the fill needs no new token. */
+dialog{width:100%;max-width:24rem;padding:var(--s5);
+border:0;border-radius:.75rem;
+box-shadow:0 0 0 1px color-mix(in srgb,var(--fg) 10%,transparent),var(--shadow);
+background:var(--surface);color:var(--fg);
 /* Two forms live in here now — email above, password below. On a short
    viewport (a phone in landscape) that is taller than the screen, and a
    `<dialog>` does not scroll its own content by default: the overflow is
    simply unreachable, which would put the submit button out of reach. */
 max-height:calc(100dvh - 2rem);overflow-y:auto}
-dialog::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
+/* **10% black and a 2px blur**, which is Memosy's `bg-black/10` and
+`backdrop-blur-xs` — considerably lighter than the 55%/4px that was here. The
+point is to separate the dialog from the page, not to hide it. A browser without
+`backdrop-filter` ignores the second line and keeps the tint. */
+dialog::backdrop{background:rgba(0,0,0,.1);backdrop-filter:blur(2px)}
+/* **A dialog opened by the `open` attribute is non-modal, and a non-modal
+dialog has no `::backdrop` at all.** That is why `/public/signin` had no blur:
+the rule above was correct and simply never applied. The script promotes it with
+`showModal()`, which brings the backdrop along with focus trapping and Escape.
+Without script there is no way to reach `::backdrop`, so this paints the tint
+itself with a very large shadow spread. It cannot blur — `backdrop-filter` on
+the dialog would filter what is behind the *dialog*, not the page — and a tint
+alone is the honest degradation. */
+dialog[open]:not(:modal){box-shadow:0 0 0 1px
+color-mix(in srgb,var(--fg) 10%,transparent),var(--shadow),
+0 0 0 100vmax rgba(0,0,0,.1)}
 dialog h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
+/* Register, under the primary button. A quieter treatment because it posts to
+   the *same* route: on this surface a first sign-in is the signup, so these are
+   one action with two names, and giving both equal weight would ask the reader
+   to choose between things that do not differ. */
+dialog .ghost{margin-top:var(--s2);background:transparent;color:var(--dim);
+border:1px solid var(--line)}
+dialog .ghost:hover{background:var(--surface-2);color:var(--fg)}
+/* The admin password, folded away. **A `<details>`, not a script toggle**: the
+   private surface permits no script at all, and a disclosure that needs one is a
+   disclosure that never opens there. */
+dialog .pw{margin-top:var(--s4);border-block-start:1px solid var(--line);
+padding-block-start:var(--s3)}
+dialog .pw>summary{cursor:pointer;font-size:.8rem;color:var(--dim);
+list-style:none}
+dialog .pw>summary::-webkit-details-marker{display:none}
+dialog .pw>summary:hover{color:var(--fg)}
+/* A caret that turns, so the summary reads as something that opens rather than
+   as a link that goes somewhere. */
+dialog .pw>summary::before{content:"";display:inline-block;width:.3rem;
+height:.3rem;margin-inline-end:.4rem;vertical-align:middle;
+border-inline-end:1.5px solid currentColor;border-block-end:1.5px solid currentColor;
+transform:rotate(-45deg)}
+dialog .pw[open]>summary::before{transform:rotate(45deg)}
 dialog p{color:var(--dim);font-size:.9rem}
 dialog .close{position:absolute;inset-block-start:var(--s3);
 inset-inline-end:var(--s3);width:1.75rem;height:1.75rem;padding:0;margin:0;
@@ -456,7 +475,7 @@ padding:var(--s3) var(--s4);margin:var(--s5) 0;box-shadow:var(--shadow)}
 /// the honest limit of doing this without script, and it is the right trade
 /// here: the alternative is a third cookie and a route to set it, on a surface
 /// whose pages a reader passes through two or three at a time.
-fn masthead(locale: Locale, signed: Signed) -> String {
+fn masthead(locale: Locale, signed: Signed, signin: SignIn<'_>) -> String {
     let s = locale.strings();
     let mut options = String::new();
     for l in Locale::ALL {
@@ -497,7 +516,7 @@ fn masthead(locale: Locale, signed: Signed) -> String {
 {account}\
 </div></div></header>",
         brand = esc(&site::name(s.brand)),
-        account = account_nav(locale, signed == Signed::In),
+        account = account_nav(locale, signed, signin),
         light = esc(s.theme_light),
         dark = esc(s.theme_dark),
         lang_label = esc(s.language_label),
@@ -540,47 +559,89 @@ fn footer(locale: Locale) -> String {
 /// Signed in it is a details/summary menu holding sign-out. No script: a menu
 /// that needs JavaScript to open is a menu that does not open for a reader whose
 /// script failed, and `<details>` is the same interaction with none.
-fn account_nav(locale: Locale, signed_in: bool) -> String {
+///
+/// `open` starts the dialog already showing, and that is the whole of what
+/// signing in looks like now: **there is no sign-in page.** `/public/signin`
+/// renders the surface behind it with this dialog open, and so does any page
+/// that needs an account and did not get one. A second full-page copy of the
+/// same two forms was one surface too many — the same duplication the password
+/// form had while it lived on a page the dialog merely linked to.
+fn account_nav(locale: Locale, signed_in: Signed, signin: SignIn<'_>) -> String {
     let s = locale.strings();
-    if !signed_in {
+    if !signed_in.is_in() {
         // **Two triggers, one of which is always the wrong one — and the CSS
-        // picks.** Without script the dialog cannot open, so the page must not
-        // offer a button that does nothing: `.modal-fallback` is an ordinary
-        // link to the sign-in page, and `.modal` is the dialog opener, with only
-        // the second shown once the script has marked the document.
+        // picks.** Without script nothing can *open* the dialog, so the page
+        // must not offer a button that does nothing: `.modal-fallback` is an
+        // ordinary link to `/public/signin`, which serves this same dialog
+        // already open. `.modal` is the in-place opener, shown only once the
+        // script has marked the document.
         //
-        // The dialog holds the *same form* posting to the *same route*, so the
-        // two paths differ in presentation and nothing else.
-        return format!(
-            "<a class=\"btn modal-fallback\" href=\"/public/signin\">{signin}</a>\
-<button class=\"btn modal\" id=\"signin-open\" type=\"button\">{signin}</button>\
-<dialog id=\"signin-dialog\">\
-<button class=\"close\" id=\"signin-close\" type=\"button\" \
-aria-label=\"{close}\">\u{00d7}</button>\
-<h2>{title}</h2><p>{intro}</p>\
+        // Both routes end at the same markup, so they differ in whether the page
+        // behind it reloaded and in nothing else.
+        let attr = if signin.open { " open" } else { "" };
+        // The email half, or an honest line in its place.
+        let ask = if signin.mail {
+            format!(
+                "<p>{intro}</p>\
 <form method=\"post\" action=\"/public/signin\">\
 <label for=\"dlg-email\">{email}</label>\
 <input id=\"dlg-email\" name=\"email\" type=\"email\" required \
 autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
 placeholder=\"{placeholder}\">\
-<button type=\"submit\">{submit}</button></form>\
-<p class=\"meta\">{note}</p>\
-<h2>{pw_heading}</h2>\
+<button type=\"submit\">{submit}</button>\
+<button type=\"submit\" class=\"ghost\">{register}</button></form>\
+<p class=\"meta\">{note}</p>",
+                intro = esc(s.signin_intro),
+                email = esc(s.signin_email_label),
+                placeholder = esc(s.signin_email_placeholder),
+                submit = esc(s.signin_submit),
+                // **The same form and the same route.** A first sign-in is the
+                // signup, so a separate registration would be the same POST
+                // behind a different word \u2014 and the two must stay
+                // indistinguishable anyway, since that is what stops the page
+                // revealing whether an address already has an account.
+                register = esc(s.signin_register),
+                note = esc(s.signin_no_password),
+            )
+        } else {
+            format!("<p>{}</p>", esc(s.signin_no_mail))
+        };
+        // **The password is behind a disclosure, and that is presentation.** A
+        // magic link reaches the administrator's account like any other, because
+        // both ways in resolve the same row keyed on the same address \u2014 so
+        // folding the password away makes the ordinary path shorter, and does
+        // not make the account harder to reach. Whoever can read that inbox can
+        // sign in as its owner either way.
+        //
+        // `<details>` rather than a script toggle: this must work under the
+        // private CSP, which permits no script at all.
+        return format!(
+            "<a class=\"btn modal-fallback\" href=\"/public/signin\">{signin}</a>\
+<button class=\"btn modal\" id=\"signin-open\" type=\"button\">{signin}</button>\
+<dialog id=\"signin-dialog\"{attr}>\
+<button class=\"close\" id=\"signin-close\" type=\"button\" \
+aria-label=\"{close}\">\u{00d7}</button>\
+<h2>{title}</h2>{problem}{ask}\
+<details class=\"pw\"{pw_open}><summary>{pw_heading}</summary>\
 <form method=\"post\" action=\"{pw_action}\">\
 <label for=\"dlg-login\">{user}</label>\
-<input id=\"dlg-login\" name=\"login\" required \
-autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\">\
+<input id=\"dlg-login\" name=\"login\" type=\"email\" required \
+autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
+placeholder=\"{placeholder}\">\
 <label for=\"dlg-password\">{pass}</label>\
 <input id=\"dlg-password\" name=\"password\" type=\"password\" required>\
-<button type=\"submit\">{pw_submit}</button></form></dialog>",
+<button type=\"submit\">{pw_submit}</button></form></details></dialog>",
             signin = esc(s.nav_signin),
             close = esc(s.dialog_close),
             title = esc(s.signin_title),
-            intro = esc(s.signin_intro),
-            email = esc(s.signin_email_label),
-            placeholder = esc(s.signin_email_placeholder),
-            submit = esc(s.signin_submit),
-            note = esc(s.signin_no_password),
+            // **Inside the dialog, above the email field**, because that is
+            // where the reader is looking when a sign-in fails. It used to be
+            // rendered on a separate page, which is where nobody was.
+            problem = match signin.problem {
+                Some(p) => format!("<p class=\"note\">{}</p>", esc(p)),
+                None => String::new(),
+            },
+            ask = ask,
             // **Both ways in, in the dialog itself.** This used to be a link
             // onward to `/public/signin`, on the reasoning that a masthead
             // rendered from fourteen places meant fourteen chances to post a
@@ -593,21 +654,59 @@ autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\">\
             // need to — the administrator of a server whose public surface is off
             // has no filing page to reach the full one from.
             pw_heading = esc(s.signin_password_heading),
+            // Open when the last attempt failed, so the reader lands back on
+            // the form they got wrong rather than on a collapsed summary with
+            // an error above it and nothing to do about it.
+            pw_open = if signin.problem.is_some() {
+                " open"
+            } else {
+                ""
+            },
             pw_action = esc(crate::routes::public_route::SIGNIN_PASSWORD),
             user = esc(s.signin_user_label),
+            placeholder = esc(s.signin_email_placeholder),
             pass = esc(s.signin_password_label),
             pw_submit = esc(s.signin_password_submit),
         );
     }
+    // **The administrative pages live here**, in the one menu every page
+    // carries, rather than in a row of links at the foot of a second shell. Four
+    // of them were once reachable only by somebody who already knew the URL, and
+    // the footer row that fixed it existed only on the pages it linked to — so
+    // the way to the settings was the settings.
+    //
+    // Rendered only for `Admin`, and that is the whole gate here: a filer's menu
+    // must not name pages they cannot open, or every signed-in stranger learns
+    // the shape of the private surface from a menu.
+    let admin = if signed_in == Signed::Admin {
+        let link = |href: &str, label: &str| format!("<a href=\"{href}\">{}</a>", esc(label));
+        format!(
+            "<hr><p class=\"grp\">{heading}</p>{}",
+            [
+                link(crate::routes::private_route::REVIEW, s.nav_admin_review),
+                link(crate::routes::private_route::SETTINGS, s.nav_admin_settings),
+                link(crate::routes::private_route::REPOS, s.nav_admin_repos),
+                link(crate::routes::private_route::OWNERS, s.nav_admin_owners),
+                link(crate::routes::private_route::DAEMONS, s.nav_admin_daemons),
+                link(crate::routes::private_route::ACCOUNTS, s.nav_admin_accounts),
+            ]
+            .join(""),
+            heading = esc(s.nav_admin_heading),
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "<details class=\"acct\"><summary class=\"btn\">{account}</summary>\
 <div class=\"menu\">\
-<a href=\"/public\">{mine}</a>\
+<a href=\"/public\">{mine}</a>{admin}<hr>\
 <form method=\"post\" action=\"/public/signout\">\
 <button type=\"submit\">{signout}</button></form>\
 </div></details>",
         account = esc(s.nav_account),
         mine = esc(s.file_mine_heading),
+        admin = admin,
         signout = esc(s.file_signout),
     )
 }
@@ -666,6 +765,21 @@ pub(crate) mod site {
 pub(crate) enum Signed {
     In,
     Out,
+    /// Signed in **and** administering this server: the account menu carries the
+    /// administrative pages as well as the filer's own.
+    ///
+    /// A third variant rather than a second parameter, for the reason the enum
+    /// exists at all — `public_shell(l, t, b, true, true)` says nothing about
+    /// what is true, and the wrong value here puts the administrative pages in a
+    /// stranger's menu.
+    Admin,
+}
+
+impl Signed {
+    /// Is there an account behind this request?
+    fn is_in(self) -> bool {
+        matches!(self, Signed::In | Signed::Admin)
+    }
 }
 
 /// The document, with the masthead told who is reading.
@@ -673,17 +787,114 @@ pub(crate) fn public_shell_as(locale: Locale, title: &str, body: &str, signed: S
     shell_inner(locale, title, body, signed)
 }
 
+/// How the sign-in dialog should render on this page.
+///
+/// A struct rather than three more positional parameters: `shell_over(l, t, b,
+/// signed, surface, true, None, false)` says nothing about what is true, which
+/// is the argument [`Signed`] is an enum for.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SignIn<'a> {
+    /// Render it already open, rather than waiting for the masthead button.
+    pub open: bool,
+    /// A failed attempt, shown above the email field inside the dialog.
+    pub problem: Option<&'a str>,
+    /// Can this server actually send a sign-in link? When it cannot, the email
+    /// form is replaced by a line saying so — a form that takes an address and
+    /// sends nothing teaches people the site is broken in a way they cannot
+    /// report. The password form is unaffected: the administrator does not need
+    /// mail, which is what keeps the page that *fixes* mail reachable.
+    pub mail: bool,
+}
+
+/// Which surface this page is served on, and therefore whether it may carry a
+/// script tag.
+///
+/// **Not derivable from [`Signed`]**, which was the mistake: the administrator
+/// is `Signed::Admin`, so keying the script on that looked right and left every
+/// *other* private page — a 404, the setup wizard, a refusal — still emitting a
+/// tag its `Policy::Strict` CSP forbids. Caught by
+/// `a_private_page_references_nothing_remote_and_carries_no_script`, which has
+/// been asserting exactly this since before there was one shell.
+///
+/// The surface decides, the role does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Surface {
+    /// `Policy::PublicScript`. May load `/public/app.js`.
+    Public,
+    /// `Policy::Strict`. No script at all.
+    ///
+    /// Nothing is lost: the script opens the sign-in dialog, which only renders
+    /// signed *out*, and auto-submits the language picker, which keeps a real
+    /// submit button inside `<noscript>`. Both degrade to the path they had.
+    Private,
+}
+
 fn shell_inner(locale: Locale, title: &str, body: &str, signed: Signed) -> String {
+    shell_on(locale, title, body, signed, Surface::Public, false)
+}
+
+/// The same document with the sign-in dialog already open over it.
+///
+/// **What `/public/signin` is**, and what a page that needs an account serves
+/// instead of refusing: the reader sees where they were going, with the way in
+/// on top of it.
+pub(crate) fn shell_signing_in(
+    locale: Locale,
+    title: &str,
+    body: &str,
+    problem: Option<&str>,
+    mail: bool,
+) -> String {
+    let signin = SignIn {
+        open: true,
+        problem,
+        mail,
+    };
+    shell_over(locale, title, body, Signed::Out, Surface::Public, signin)
+}
+
+fn shell_on(
+    locale: Locale,
+    title: &str,
+    body: &str,
+    signed: Signed,
+    surface: Surface,
+    open_signin: bool,
+) -> String {
+    // A page that is not itself a sign-in still carries the dialog, closed,
+    // because the masthead button has to open something. `mail: true` so that
+    // dialog offers the email form: a page rendered by a caller who did not say
+    // otherwise is a page on a working surface.
+    let signin = SignIn {
+        open: open_signin,
+        problem: None,
+        mail: true,
+    };
+    shell_over(locale, title, body, signed, surface, signin)
+}
+
+fn shell_over(
+    locale: Locale,
+    title: &str,
+    body: &str,
+    signed: Signed,
+    surface: Surface,
+    signin: SignIn<'_>,
+) -> String {
+    let script = match surface {
+        Surface::Public => "<script src=\"/public/app.js\" defer></script>",
+        Surface::Private => "",
+    };
     format!(
         "<!doctype html>\n<html lang=\"{lang}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>{title}</title><style>{PUBLIC_STYLE}</style></head><body>\
-{masthead}<main>{body}</main>{footer}\
-<script src=\"/public/app.js\" defer></script></body></html>",
+{masthead}<main>{body}</main>{footer}{script}</body></html>",
         lang = esc(locale.code()),
         title = esc(title),
-        masthead = masthead(locale, signed),
+        masthead = masthead(locale, signed, signin),
         footer = footer(locale),
+        script = script,
     )
 }
 
@@ -737,6 +948,21 @@ pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
     dialog.addEventListener('click', function (e) {
       if (e.target === dialog) dialog.close();
     });
+
+    // **Promote a server-opened dialog to a real modal.** `/public/signin` and
+    // every page that needs an account render `<dialog open>`, which shows it
+    // *non-modally*: no `::backdrop` element exists, so the tint and blur never
+    // paint, and the page behind stays focusable. Reopening with `showModal()`
+    // is the only way to get those \u2014 there is no attribute for it.
+    //
+    // The close-then-open matters: `showModal()` on an already-open dialog
+    // throws, so this cannot simply call it.
+    if (dialog.hasAttribute('open')) {
+      dialog.close();
+      dialog.showModal();
+      var first = dialog.querySelector('input:not([type=hidden])');
+      if (first) first.focus();
+    }
   }
 
   // The language switcher submits on change. The submit button lives inside
@@ -761,46 +987,52 @@ pub(crate) const PUBLIC_SCRIPT: &str = r#"(function () {
 
 /// The document a **private** page is wrapped in.
 ///
-/// Kept plain on purpose. It has one reader, who is the developer, and it is
-/// served with a CSP that permits no script — so it gets none of the controls
-/// the public shell carries, and needs none of them.
+/// **The same document the public surface gets**, and that is the point: there
+/// was a second shell here with its own bare stylesheet, no masthead, and a row
+/// of links at the foot. Clicking from a filing page into the settings changed
+/// site — different type, different colours, no way back except the browser's
+/// own button.
+///
+/// It is one shell now. The administrative pages are in the account menu the
+/// masthead already carries, so the way to the settings is no longer the
+/// settings, and a page added later is reachable by construction rather than by
+/// somebody remembering to add it to a list.
+///
+/// Rendered as [`Signed::Admin`], which is what puts those entries in the menu
+/// and what drops the `<script>` tag this surface's CSP forbids.
 pub(crate) fn shell(title: &str, body: &str) -> String {
-    format!(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>{title}</title><style>{STYLE}</style></head><body>{body}{nav}</body></html>",
-        title = esc(title),
-        nav = admin_nav(),
+    shell_on(
+        Locale::En,
+        title,
+        body,
+        Signed::Admin,
+        Surface::Private,
+        false,
     )
 }
 
-/// Every administrative page, linked from every administrative page.
+/// The same document, for a private page whose reader is **not** the
+/// administrator.
 ///
-/// **In the shell rather than on each page**, so a page added later is reachable
-/// by construction. Four of these were built, tested and reachable only by
-/// somebody who already knew the URL — the same failure the sign-in flow had,
-/// and it goes unnoticed for the same reason: a test asks for the route
-/// directly, which is exactly what a person cannot do.
+/// A `404`, the setup wizard, a refusal — pages that render before anybody has
+/// signed in, or for somebody whose cookie matches nothing. They get the
+/// masthead and the footer like everything else, and an account menu that names
+/// no administrative page.
 ///
-/// At the foot rather than the head. This surface is read on a phone, the thing
-/// somebody came for is at the top, and a menu above the content pushes the
-/// request they are reviewing off the first screen.
-///
-/// No script and no `<details>`: the private CSP permits neither script nor the
-/// state a menu would need, and a row of links needs neither.
-fn admin_nav() -> String {
-    let link = |href: &str, label: &str| format!("<a href=\"{href}\">{label}</a>");
-    format!(
-        "<nav class=\"adminnav\">{}</nav>",
-        [
-            link("/review", "Requests"),
-            link("/settings", "Settings"),
-            link("/repos", "Repositories"),
-            link("/owners", "Owners"),
-            link("/daemons", "Machines"),
-            link("/accounts", "Who can file"),
-        ]
-        .join(" · ")
+/// **This distinction is the whole security of putting those links in a menu.**
+/// `shell` is the common case and says "administrator" by being the default,
+/// which is the wrong way round for a leak: so the rule is that a page reachable
+/// while signed out calls *this*, and the test
+/// `a_page_a_stranger_can_reach_names_no_administrative_route` walks the ones
+/// that can.
+pub(crate) fn shell_plain(title: &str, body: &str) -> String {
+    shell_on(
+        Locale::En,
+        title,
+        body,
+        Signed::Out,
+        Surface::Private,
+        false,
     )
 }
 
@@ -956,7 +1188,7 @@ pub(crate) mod corpus {
                 ("signin_failed_page", signin_failed_page(false, l)),
                 (
                     "owner_page",
-                    owner_page(&[req()], "jamez667", &["alpha".to_string()], l),
+                    owner_page(&[req()], "jamez667@example.test", &["alpha".to_string()], l),
                 ),
                 ("owner_detail", owner_detail(&reviewable(), l)),
                 (
@@ -978,6 +1210,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_page_a_stranger_can_reach_names_no_administrative_route() {
+        // **The cost of putting the administrative pages in a menu.** The menu
+        // is in the shell, the shell wraps every page, and several private pages
+        // render for somebody who has not signed in — a 404, the setup wizard, a
+        // refusal. Rendering those through `shell` rather than `shell_plain`
+        // would hand a stranger the name of every private route.
+        //
+        // `shell` is the default and says "administrator" by being the default,
+        // which is the wrong way round for a leak. So this walks the pages a
+        // stranger can actually reach.
+        let strangers = [
+            ("not_found", private::not_found()),
+            ("not_found_for_admin", private::not_found_for_admin()),
+            ("setup_page", private::setup_page("https://x.test", None)),
+            (
+                "setup_admin_page",
+                private::setup_admin_page("https://x.test", None),
+            ),
+            ("message", private::message("no")),
+        ];
+        for (name, html) in strangers {
+            for route in [
+                crate::routes::private_route::SETTINGS,
+                crate::routes::private_route::REPOS,
+                crate::routes::private_route::OWNERS,
+                crate::routes::private_route::DAEMONS,
+                crate::routes::private_route::ACCOUNTS,
+            ] {
+                assert!(
+                    !html.contains(&format!("href=\"{route}\"")),
+                    "{name} names {route} to a stranger"
+                );
+            }
+        }
+
+        // And the administrator's own pages *do* carry them, or the menu would
+        // be a security property with no feature attached.
+        let mine = shell("x", "<p>x</p>");
+        for route in [
+            crate::routes::private_route::SETTINGS,
+            crate::routes::private_route::ACCOUNTS,
+        ] {
+            assert!(mine.contains(&format!("href=\"{route}\"")), "{route}");
+        }
+    }
+
+    #[test]
+    fn the_administrators_pages_carry_no_script_tag() {
+        // Their CSP is `Policy::Strict`, which permits none. A tag here would be
+        // blocked on every page load and reported as a violation — and the two
+        // things the script does (open the sign-in dialog, auto-submit the
+        // language picker) either never render signed in or keep a working
+        // no-script path.
+        let mine = shell("x", "<p>x</p>");
+        assert!(!mine.contains("<script"), "{mine}");
+
+        // The public surface still gets it.
+        let theirs = public_shell(Locale::En, "x", "<p>x</p>");
+        assert!(theirs.contains("/public/app.js"), "{theirs}");
+    }
+
+    #[test]
     fn the_sign_in_dialog_carries_both_ways_in() {
         // **The dialog is the path almost everybody takes**, and for a while it
         // was the only one that could not sign in the two people who most need
@@ -989,7 +1283,14 @@ mod tests {
         //
         // The link made it worse than cosmetic: an administrator whose public
         // surface is off has no filing page to reach the full sign-in page from.
-        let nav = account_nav(Locale::En, false);
+        let nav = account_nav(
+            Locale::En,
+            Signed::Out,
+            SignIn {
+                mail: true,
+                ..SignIn::default()
+            },
+        );
         assert!(nav.contains("action=\"/public/signin\""), "{nav}");
         assert!(
             nav.contains(&format!(
@@ -1001,7 +1302,7 @@ mod tests {
         assert!(nav.contains("type=\"password\""), "{nav}");
 
         // Signed in, neither form is offered — this is the account menu then.
-        let signed = account_nav(Locale::En, true);
+        let signed = account_nav(Locale::En, Signed::In, SignIn::default());
         assert!(!signed.contains("type=\"password\""), "{signed}");
     }
 

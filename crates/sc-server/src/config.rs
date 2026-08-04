@@ -57,6 +57,11 @@ pub struct Config {
     /// and the key is missing or wrong — see the startup check in
     /// [`crate::serve`].
     pub seal_key: Option<crate::seal::SealKey>,
+    /// Serve the single-page interface rather than the rendered pages.
+    ///
+    /// Temporary: it exists while both surfaces are built, and goes away with
+    /// the pages. See [`env::UI`].
+    pub ui: bool,
     /// The public, self-serve filing surface — **absent unless asked for**.
     ///
     /// `Option` rather than a bool plus loose fields, so a route cannot read a
@@ -243,7 +248,7 @@ pub struct PublicConfig {
     ///
     /// Separate from the routing keys because the two answer different
     /// questions. A repository name has to equal what the daemon was told,
-    /// exactly; a heading wants `jamez667/smart-coder` — the name a person
+    /// exactly; a heading wants `jamez667@example.test/smart-coder` — the name a person
     /// recognises. Folding them into one field would mean renaming the heading
     /// forces a matching `queue add-repo`, and a mismatch there is a queue that
     /// silently never drains.
@@ -441,12 +446,24 @@ pub mod env {
     /// The GitHub OAuth application's client id. Public — it appears in the URL
     /// The GitHub OAuth application's client secret. **Never leaves this
     /// Who may review work, and for which repositories:
-    /// `jamez667:smart-coder|memosy,someone:memosy`.
+    /// `jamez667@example.test:smart-coder|memosy,someone:memosy`.
     ///
     /// **This list is the authorization model.** Nothing is checked anywhere
     /// else, so an entry here is the only thing granting sight of a project's
     /// drafted specs.
     pub const OWNERS: &str = "SC_SERVER_OWNERS";
+    /// Serve the single-page interface instead of the rendered pages.
+    ///
+    /// **A switch rather than a replacement, and only while both exist.** Spec
+    /// 18 stages this move: the API and the interface are built and proven
+    /// before the pages are deleted, and until that last step a server can be
+    /// run either way — which is what makes the staging reversible rather than
+    /// merely sequential.
+    ///
+    /// It goes away with the pages. A permanent flag would be two surfaces to
+    /// keep working forever, which is the cost this whole change exists to stop
+    /// paying.
+    pub const UI: &str = "SC_SERVER_UI";
     /// The repositories the public surface collects for, comma-separated:
     /// `smart-coder,memosy`. Setting this or [`PUBLIC_REPO`] turns the surface
     /// on.
@@ -536,6 +553,11 @@ impl Config {
             // Read again here rather than threaded out of `public_from`, which
             // returns `None` when the public surface is off — and the switch is
             // meaningless in that case anyway, since nothing sends mail.
+            // **Anything but empty is on.** A switch with a vocabulary of
+            // truthy words is a switch somebody sets to "false" and finds
+            // enabled; presence is unambiguous, and this one is temporary
+            // besides.
+            ui: opt(&get, env::UI).is_some_and(|v| !v.trim().is_empty()),
             public: public_from(&get)?,
         })
     }
@@ -748,7 +770,7 @@ fn public_repos(
 /// `login:repo|repo`, comma-separated between owners:
 ///
 /// ```text
-/// SC_SERVER_OWNERS=jamez667:smart-coder|memosy,someone:memosy
+/// SC_SERVER_OWNERS=jamez667@example.test:smart-coder|memosy,someone:memosy
 /// ```
 ///
 /// **`|` inside an entry and `,` between them**, rather than commas throughout.
@@ -772,12 +794,12 @@ fn owners(
         let Some((login, names)) = entry.split_once(':') else {
             return Err(format!(
                 "{} entries are `login:repo|repo`, but {entry:?} has no colon. \
-                 For example: jamez667:smart-coder|memosy",
+                 For example: jamez667@example.test:smart-coder|memosy",
                 env::OWNERS
             ));
         };
         // Lowercased on the way in so a setting written `Jamez667` matches a
-        // name registered as `jamez667`, rather than silently granting nothing.
+        // name registered as `jamez667@example.test`, rather than silently granting nothing.
         let login = login.trim().to_ascii_lowercase();
         if login.is_empty() {
             return Err(format!(
@@ -1292,11 +1314,14 @@ mod tests {
     #[test]
     fn owners_are_read_with_the_repositories_they_own() {
         let mut vars = public_vars_multi();
-        vars.push((env::OWNERS, "jamez667:intake|memosy,someone:memosy"));
+        vars.push((
+            env::OWNERS,
+            "jamez667@example.test:intake|memosy,someone:memosy",
+        ));
         let p = load(&vars).unwrap().public.unwrap();
 
         assert_eq!(p.owners.len(), 2);
-        assert_eq!(p.owners[0].login, "jamez667");
+        assert_eq!(p.owners[0].login, "jamez667@example.test");
         assert_eq!(p.owners[0].repos, ["intake", "memosy"]);
         assert!(p.owners[1].owns("memosy"));
         assert!(!p.owners[1].owns("intake"), "not theirs");
@@ -1308,9 +1333,9 @@ mod tests {
         // registered however its holder typed it. The two must still match, or
         // the setting grants nothing while looking applied.
         let mut vars = public_vars_multi();
-        vars.push((env::OWNERS, "JameZ667:intake"));
+        vars.push((env::OWNERS, "JameZ667@example.test:intake"));
         let p = load(&vars).unwrap().public.unwrap();
-        assert_eq!(p.owners[0].login, "jamez667");
+        assert_eq!(p.owners[0].login, "jamez667@example.test");
     }
 
     #[test]
@@ -1318,7 +1343,7 @@ mod tests {
         // The allowlist IS the authorization model, so a typo in it must not be
         // a silently-empty view somebody investigates weeks later.
         let mut vars = public_vars_multi();
-        vars.push((env::OWNERS, "jamez667:intake|typo-repo"));
+        vars.push((env::OWNERS, "jamez667@example.test:intake|typo-repo"));
         let err = load(&vars).unwrap_err();
         assert!(err.contains("does not serve"), "{err}");
         assert!(
@@ -1332,7 +1357,7 @@ mod tests {
         // Fails closed: somebody who signs in successfully and sees a blank page
         // has no way to tell that from a bug.
         let mut vars = public_vars_multi();
-        vars.push((env::OWNERS, "jamez667:"));
+        vars.push((env::OWNERS, "jamez667@example.test:"));
         let err = load(&vars).unwrap_err();
         assert!(err.contains("no repositories"), "{err}");
     }
@@ -1342,7 +1367,10 @@ mod tests {
         // Merging them would mean deleting one entry to revoke somebody leaves
         // them with access from the other.
         let mut vars = public_vars_multi();
-        vars.push((env::OWNERS, "jamez667:intake,jamez667:memosy"));
+        vars.push((
+            env::OWNERS,
+            "jamez667@example.test:intake,jamez667@example.test:memosy",
+        ));
         let err = load(&vars).unwrap_err();
         assert!(err.contains("twice"), "{err}");
     }
@@ -1350,7 +1378,7 @@ mod tests {
     #[test]
     fn an_owner_entry_without_a_colon_says_what_the_shape_is() {
         let mut vars = public_vars_multi();
-        vars.push((env::OWNERS, "jamez667"));
+        vars.push((env::OWNERS, "jamez667@example.test"));
         let err = load(&vars).unwrap_err();
         assert!(err.contains("login:repo"), "{err}");
     }

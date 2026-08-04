@@ -28,6 +28,7 @@
 
 pub mod account;
 pub mod admin;
+pub mod api;
 pub mod auth;
 pub mod config;
 pub mod daemons;

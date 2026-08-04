@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Smart Coder</title>
+    <!--
+      **No inline script and no inline style.** The CSP is `script-src 'self'`
+      and deliberately not `'unsafe-inline'`: an inline allowance is what a
+      successful injection needs, and this surface renders text a model wrote.
+      Vite emits a `<script type="module" src=...>`, which is a served file.
+    -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

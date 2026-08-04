@@ -17,6 +17,13 @@ pub static STRINGS: Strings = Strings {
 
     nav_signin: "Sign in",
     nav_account: "Account",
+    nav_admin_heading: "Admin",
+    nav_admin_review: "Requests",
+    nav_admin_settings: "Settings",
+    nav_admin_repos: "Repositories",
+    nav_admin_owners: "Owners",
+    nav_admin_daemons: "Machines",
+    nav_admin_accounts: "Who can file",
     dialog_close: "Close",
 
     landing_headline: "Ask for a change — get a spec back.",
@@ -34,11 +41,12 @@ pub static STRINGS: Strings = Strings {
     signin_email_label: "Email",
     signin_email_placeholder: "you@example.com",
     signin_submit: "Email me a link",
-    signin_user_label: "Username",
+    signin_user_label: "Email",
     signin_password_label: "Password",
     signin_wrong: "That did not work. Check the username and password, and try again in a moment.",
-    signin_password_heading: "Own a project here, or run this server?",
+    signin_password_heading: "Admin login",
     signin_password_submit: "Sign in",
+    signin_register: "Create an account",
     signin_no_mail: "This site cannot send sign-in links just now, so there is no way to sign in. Try again later.",
     signin_no_password: "No password. We send a link that works once, for fifteen minutes.",
 

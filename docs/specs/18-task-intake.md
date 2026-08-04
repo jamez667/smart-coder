@@ -956,6 +956,48 @@ The cost of that argument being won is not aesthetic. It is a JS toolchain, a
 dependency tree, and a supply chain, added to the one component that faces the
 network, in a project whose entire premise is a self-contained local binary.
 
+### Reversed: that argument was won
+
+**This surface is now a JSON API and a single-page application.** The paragraph
+above is kept rather than deleted, because it states the cost correctly and the
+cost is being paid rather than avoided. What follows is what was bought and what
+it is being bought with.
+
+**What did not justify it.** The reversal was first argued for on rebuild speed.
+That turned out to be false: a debug rebuild after editing a page is **2.2
+seconds**, and the ~26s figure that prompted the complaint was a *release* build
+being run to produce container images. Recording this because a reason that does
+not survive measurement should not survive into a spec either.
+
+**What did.** Component reuse, a real design system, and interactions that a form
+round-trip cannot express. This surface shares its palette and type with a
+sibling product (see the `PUBLIC_STYLE` doc) by *copying* values, and the copy
+was accepted only because importing them meant a toolchain. Once the toolchain
+exists that trade changes.
+
+**What it costs, itemised:**
+
+- **A dependency tree on the network-facing component.** Unchanged from the
+  argument above. Mitigated only by keeping the tree small and lockfiled, which
+  is a mitigation, not an answer.
+- **The no-script floor.** The section below on progressive enhancement is
+  **withdrawn**: the pages no longer work with script disabled.
+- **`script-src 'self'` on the private surface**, which the CSP section below
+  amends and argues.
+- **In-process tests that assert on markup.** Roughly thirty of them encode
+  policy in HTML — button parity on the review gate, decision-after-artifact
+  order, the leak check that a signed-out stranger is never shown an
+  administrative route. These move to a browser harness, which is a weaker gate
+  because it needs a browser: `scripts/layout-check.js` already states the
+  objection, that *"a gate that cannot run everywhere is a gate somebody
+  disables."*
+
+**The staging is the risk control.** The public half moves first, where script is
+already permitted and each reader sees only their own content — so no CSP
+argument breaks and no cross-tenant test is lost. The private half moves only
+after the browser harness is green, because that is where the posture actually
+changes.
+
 **Browser transport is polling with a cursor**, as the existing pages do
 <!--@ crates/sc-web/src/dashboard.html --> — note this is despite `sc-web`
 describing itself as SSE; the SSE frame helper is dead relative to the pages that
@@ -1023,9 +1065,44 @@ narrow:
 - `'self'` and not `'unsafe-inline'`. An inline-script allowance is also what a
   successful injection needs, and this is the surface rendering model-authored
   text. Script here must be a served file.
-- The transport is still forms and links. The pages work with script disabled;
-  what script is permitted *for* is presentation. The polling deviation this
-  section records therefore still stands.
+- ~~The transport is still forms and links. The pages work with script disabled;
+  what script is permitted *for* is presentation.~~ **Withdrawn.** See below.
+
+### Amended again: `script-src 'self'` on both surfaces
+
+The table above gave the private surface `never`. That is no longer true, and the
+argument it rested on has not stopped being true — so this records a **cost
+accepted**, not a mistake corrected.
+
+The argument was that a script on the private surface reaches every filer's specs
+at once, *"a cross-tenant leak with no equivalent on the other side"*, and spec
+[20](20-remote-review.md) adds that escaping and no-script are **multiplicative**:
+with no script, an escaper bug renders some angle brackets wrong; with script, it
+becomes model-authored text influencing a live script context.
+
+Both remain accurate. After this change **a bug in the client-side renderer is a
+cross-tenant XSS on the administrator's surface, where today it would be a
+rendering glitch.** That is the price, stated in the strongest form available
+rather than the most comfortable one.
+
+What bounds it, none of which is as strong as "no script runs":
+
+- **Text nodes only, never `innerHTML`.** Enforced by lint in CI rather than by
+  review. The fields that rely on escaping today are a known, closed list —
+  request text, drafted spec, summary, daemon note, artifact path, email hint,
+  login, repository name.
+- **`default-src 'none'` and `connect-src 'self'` still hold.** A renderer bug
+  can corrupt the page; it cannot reach a third party, so the exfiltration
+  channel this spec's CSP section exists to close stays closed. The damage is
+  bounded to the browser it happens in.
+- **The browser harness** asserts the review-integrity properties that in-process
+  tests used to assert against markup.
+
+**The no-script floor is withdrawn.** The `<noscript>` language button, the
+`<details>` account and password menus, the CSS-only theme control and the
+`<dialog open>` fallback were built so this surface works with script disabled.
+It no longer does. Deleting the sentence rather than leaving it to be quietly
+falsified is the point of writing it here.
 
 What is lost is live updates: a spec that finishes drafting while the developer
 is looking at the list does not appear until they reload. On a phone on a train

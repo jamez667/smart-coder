@@ -12,6 +12,31 @@
 # Or in a Portainer stack, see deploy/sc-server.stack.yml.
 
 # ---------------------------------------------------------------------------
+# The interface — built first, because the Rust stage embeds its output.
+# ---------------------------------------------------------------------------
+#
+# **This stage exists because spec 18's "no build step, no bundler" decision was
+# reversed.** That reversal is recorded there with its cost; this is the part of
+# the cost that lands in the image build.
+#
+# `npm ci`, not `npm install`: the lockfile decides, so a build today and a build
+# next month compile the same tree. On the one component that faces the network,
+# a dependency resolved at build time is a dependency nobody chose.
+FROM node:22-alpine AS web
+
+WORKDIR /web
+
+# The manifest and lockfile alone, so `npm ci` is cached against them rather than
+# re-run every time a component changes. This is the layer caching the Rust stage
+# below deliberately does not have — and it is worth having here, because the
+# install is slower than the build it precedes.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
 # Build — static against musl, so the runtime stage needs no libc at all.
 # ---------------------------------------------------------------------------
 FROM rust:1.97.1-alpine AS build
@@ -26,6 +51,12 @@ WORKDIR /src
 # small because of `sc-server`'s dependencies — it takes only `sc-proto` — not
 # because of where the code lives.
 COPY . .
+
+# **The built interface, over whatever the working tree had.** `include_str!`
+# reads these at compile time, so they have to be in place before `cargo build`
+# — and taking them from the `web` stage rather than the context is what stops a
+# stale local build being shipped by accident.
+COPY --from=web /crates/sc-server/assets/ui/ crates/sc-server/assets/ui/
 
 RUN cargo build --release -p sc-server --bin sc-server \
     && strip target/release/sc-server

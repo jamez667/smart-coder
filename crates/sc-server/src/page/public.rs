@@ -51,6 +51,20 @@ use crate::store::{Request, RequestState};
 /// Signed-in filers never see it: the route sends them to their own page
 /// instead, because they have read the pitch and came back for their requests.
 pub fn landing_page(locale: Locale) -> String {
+    public_shell(
+        locale,
+        locale.strings().landing_headline,
+        &landing_body(locale),
+    )
+}
+
+/// What the landing page says, without a document around it.
+///
+/// Split out so the sign-in dialog has something to sit over. Signing in is a
+/// dialog now rather than a page of its own, and a dialog over nothing is a
+/// modal floating on a blank screen — which is what it looked like before this
+/// was pulled out.
+fn landing_body(locale: Locale) -> String {
     let s = locale.strings();
     let point = |title: &str, body: &str| {
         format!(
@@ -59,21 +73,17 @@ pub fn landing_page(locale: Locale) -> String {
             esc(body)
         )
     };
-    public_shell(
-        locale,
-        s.landing_headline,
-        &format!(
-            // **No call-to-action button.** The masthead's Sign in is the way
-            // in, and a second button competing with it — going to a page that
-            // immediately asks for the same sign-in — was a step that added
-            // nothing. The reference has no CTA here either.
-            "<h1>{headline}</h1><p>{sub}</p>{p1}{p2}{p3}",
-            headline = esc(s.landing_headline),
-            sub = esc(s.landing_sub),
-            p1 = point(s.landing_point_1_title, s.landing_point_1_body),
-            p2 = point(s.landing_point_2_title, s.landing_point_2_body),
-            p3 = point(s.landing_point_3_title, s.landing_point_3_body),
-        ),
+    format!(
+        // **No call-to-action button.** The masthead's Sign in is the way in,
+        // and a second button competing with it — going to a page that
+        // immediately asks for the same sign-in — was a step that added
+        // nothing. The reference has no CTA here either.
+        "<h1>{headline}</h1><p>{sub}</p>{p1}{p2}{p3}",
+        headline = esc(s.landing_headline),
+        sub = esc(s.landing_sub),
+        p1 = point(s.landing_point_1_title, s.landing_point_1_body),
+        p2 = point(s.landing_point_2_title, s.landing_point_2_body),
+        p3 = point(s.landing_point_3_title, s.landing_point_3_body),
     )
 }
 
@@ -107,74 +117,23 @@ pub fn signin_page_full(
     mail: bool,
     problem: Option<&str>,
 ) -> String {
-    let s = locale.strings();
-    let form = if mail {
-        format!(
-            "<form method=\"post\" action=\"/public/signin\">\
-             <label for=\"email\">{email}</label>\
-             <input id=\"email\" name=\"email\" type=\"email\" required \
-             autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
-             placeholder=\"{placeholder}\">\
-             <button type=\"submit\">{submit}</button></form>\
-             <p class=\"meta\">{note}</p>",
-            email = esc(s.signin_email_label),
-            placeholder = esc(s.signin_email_placeholder),
-            submit = esc(s.signin_submit),
-            note = esc(s.signin_no_password),
-        )
-    } else {
-        String::new()
-    };
-
-    public_shell(
+    let _ = password;
+    // **There is no sign-in page.** This renders the landing content with the
+    // sign-in dialog open over it, which is what every way in now looks like:
+    // the masthead button opens it in place, `/public/signin` serves it already
+    // open, and a page that needs an account serves it rather than refusing.
+    //
+    // A full-page copy of the same two forms used to live here. It was a second
+    // surface saying the same thing in a different shape, and the shape people
+    // actually met was the dialog. `password` and `mail` went with it: the
+    // dialog carries both forms unconditionally, and a surface with no mail
+    // provider says so inside it.
+    crate::page::shell_signing_in(
         locale,
-        s.signin_title,
-        &format!(
-            "<h1>{title}</h1>{problem}<p>{intro}</p>{form}{owner}",
-            title = esc(s.signin_title),
-            problem = match problem {
-                Some(p) => format!("<p class=\"note\">{}</p>", esc(p)),
-                None => String::new(),
-            },
-            intro = esc(if mail {
-                s.signin_intro
-            } else {
-                s.signin_no_mail
-            }),
-            form = form,
-            owner = password_form_in(locale, password),
-        ),
-    )
-}
-
-/// The way in for the administrator and for owners.
-///
-/// **Below the email form, not beside it.** Filing is what almost everybody
-/// arriving here wants; signing in with a password is what the two named roles
-/// do, and they know they are doing something different.
-///
-/// A form rather than a link to a third party, which is the whole point of this
-/// change: same-origin, inside `form-action 'self'`, no callback URL to
-/// configure and no hostname to get wrong.
-fn password_form_in(locale: Locale, password: bool) -> String {
-    if !password {
-        return String::new();
-    }
-    let s = locale.strings();
-    format!(
-        "<h2>{note}</h2>\
-         <form method=\"post\" action=\"{action}\">\
-         <label for=\"login\">{user}</label>\
-         <input id=\"login\" name=\"login\" required autocapitalize=\"off\" \
-         autocorrect=\"off\" spellcheck=\"false\">\
-         <label for=\"password\">{pass}</label>\
-         <input id=\"password\" name=\"password\" type=\"password\" required>\
-         <button type=\"submit\">{submit}</button></form>",
-        note = esc(s.signin_password_heading),
-        action = esc(crate::routes::public_route::SIGNIN_PASSWORD),
-        user = esc(s.signin_user_label),
-        pass = esc(s.signin_password_label),
-        submit = esc(s.signin_password_submit),
+        locale.strings().signin_title,
+        &landing_body(locale),
+        problem,
+        mail,
     )
 }
 
@@ -473,7 +432,7 @@ pub fn public_file_page(
 /// gaming, and "queued" is true in the sense they care about. `Quarantined`
 /// likewise reads as waiting rather than as an accusation, since a human may yet
 /// release it.
-fn public_state_label(state: RequestState, locale: Locale) -> &'static str {
+pub(crate) fn public_state_label(state: RequestState, locale: Locale) -> &'static str {
     let s = locale.strings();
     match state {
         RequestState::Screening | RequestState::Quarantined | RequestState::Queued => {

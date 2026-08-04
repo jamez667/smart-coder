@@ -3,8 +3,13 @@
 #
 # One step: Woodpecker gives each step a fresh container sharing only the cloned
 # workspace volume, so system packages installed in one step don't persist to
-# the next. Installing deps and running all four gates in a single step keeps it
-# correct and lets the gates share one `target/` build.
+# the next. Installing deps and running the gates in a single step keeps it
+# correct and lets them share one `target/` build.
+#
+# **Node is installed here because the server does not compile without it.** The
+# browser interface is built by Vite and embedded with `include_str!`, so its
+# output is a compile-time input rather than a packaging step — see spec 18 for
+# why that trade was made and what it cost.
 #
 # The workspace includes `sc-win`, an iced (winit/wgpu) GUI crate, so even a
 # `cargo check` of the whole workspace on Linux needs the X11/Wayland/font dev
@@ -37,6 +42,20 @@ steps:
       # rust-toolchain.toml pins the channel; ensure its components are present
       # (no-op if rustup already auto-installed them).
       - rustup component add rustfmt clippy
+      # **The interface, built before any cargo command touches sc-server.**
+      # `include_str!` reads the bundle at compile time, so `cargo check` fails
+      # outright without it — this is not an optional extra step, it is a
+      # prerequisite of compiling at all.
+      #
+      # Nothing generated is committed, which is why this is here. The
+      # alternative was checking a 150 kB build artifact into the tree, where a
+      # stale one ships silently.
+      - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs
+      # `npm ci`, not `npm install`: the lockfile decides. A dependency resolved
+      # at build time is a dependency nobody chose, on the one component that
+      # faces the network.
+      - cd web && npm ci && npm run lint && npm run build && cd ..
       # The gates, in the same order as scripts/check.sh.
       - cargo fmt --all -- --check
       - cargo clippy --workspace --all-targets -- -D warnings

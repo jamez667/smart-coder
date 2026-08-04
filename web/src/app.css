@@ -1,0 +1,390 @@
+/* The public surface's stylesheet, lifted verbatim from what the Rust
+   renderer served.
+
+   **Copied, not rewritten.** The design is settled and its provenance is
+   recorded in the crate: the palette and type are Memosy's, reused so two
+   properties by the same owner look like it. Re-typing it during a port is
+   how a design drifts for no reason anybody can name later. */
+
+/* The real faces, served from this origin. Memosy loads these from Google;
+   here they are compiled into the binary and served from `/public/`, so the page
+   looks the same while `default-src 'none'` still forbids every remote fetch —
+   `font-src 'self'` permits exactly these two and nothing else.
+   `display:swap` so text is readable in the fallback face while they load,
+   rather than invisible: on the bad connection this surface is designed for,
+   the alternative is a blank page holding real content. */
+@font-face{font-family:"DM Sans";src:url(/public/dm-sans.woff2)format("woff2");
+font-weight:100 1000;font-style:normal;font-display:swap}
+@font-face{font-family:"Fraunces";src:url(/public/fraunces.woff2)format("woff2");
+font-weight:100 1000;font-style:normal;font-display:swap}
+/* Warm cream in light, plum-black with coral in dark. Taken from Memosy's own
+   palette (web/src/app.css in that repository) so two properties by the same
+   owner look like it — reuse rather than imitation. Values are copied rather
+   than referenced: that project is a separate repository with a JS toolchain,
+   and this one deliberately has neither. */
+:root{
+--bg:#f5f0e8;--surface:#faf7f2;--surface-2:#ede8df;
+--fg:#2c2a25;--dim:#7a7468;--faint:#9a9384;
+--line:#d9d2c4;--line-2:#c4bba8;
+--link:#8b6914;--accent-ink:#fff;
+--shadow:0 1px 2px rgba(44,42,37,.05),0 4px 12px rgba(44,42,37,.04);
+--s1:.25rem;--s2:.5rem;--s3:.75rem;--s4:1rem;--s5:1.5rem;--s6:2.5rem;
+--radius:.625rem;--pill:999px;
+color-scheme:light}
+/* Following the OS is the default: with the box unticked, these two blocks are
+   the only thing deciding, and they read `prefers-color-scheme` directly.
+   Ticking `#theme-invert` means "the other one", so a dark OS goes light and a
+   light OS goes dark. One box, two rules, and no state it cannot leave. */
+@media(prefers-color-scheme:dark){
+:root:not(:has(#theme-invert:checked)){
+--bg:#141218;--surface:#1f1c24;--surface-2:#2a2633;
+--fg:#f2eef8;--dim:#9d94ab;--faint:#7a7288;
+--line:#3a3445;--line-2:#4a4356;
+--link:#e85d6c;--accent-ink:#fff;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+/* A light OS with the box ticked: dark. */
+@media(prefers-color-scheme:light){
+:root:has(#theme-invert:checked){
+--bg:#141218;--surface:#1f1c24;--surface-2:#2a2633;
+--fg:#f2eef8;--dim:#9d94ab;--faint:#7a7288;
+--line:#3a3445;--line-2:#4a4356;
+--link:#e85d6c;--accent-ink:#fff;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+color-scheme:dark}}
+*{box-sizing:border-box}
+/* **A local stack, not a web font.** Memosy loads DM Sans and Fraunces from
+   Google. This surface is served with `default-src 'none'`, which forbids the
+   fetch outright — and that ban is what stops a model-authored spec leaking the
+   page URL through a remote reference, so it is not up for trade against
+   typography. Georgia is Memosy's own declared fallback for Fraunces, making
+   this the degradation that design already anticipated rather than a
+   substitution invented here. */
+/* The coral glow behind the top of the page, from the reference. A gradient
+   rather than an image, so it costs no subresource — which the CSP forbids. */
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;
+background:radial-gradient(ellipse 120% 80% at 50% -20%,
+color-mix(in srgb,var(--link) 18%,transparent),transparent 55%),var(--bg);
+color:var(--fg);
+font:16px/1.6 "DM Sans",system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}
+/* The header and footer rules span the viewport; their contents share the
+   column width with `main`, so the lines run edge to edge while the text stays
+   readable — the arrangement in the reference design. */
+.bar{border-block-end:1px solid var(--line);background:var(--surface)}
+/* **The bars are 960px and the text column is 720px** — the reference's own
+   two widths, and the thing I had wrong. Making them equal put the header's
+   controls directly above body text that then stopped short of them, which is
+   what read as "nothing lines up". A narrower measure is also simply easier to
+   read; 60rem of prose is too wide a line.
+   Padding is 2rem here against the reference's px-8, so the two columns still
+   share a left edge on a wide screen. */
+.bar-inner{max-width:60rem;margin-inline:auto;width:100%;padding-inline:2rem}
+main{flex:1;max-width:45rem;margin-inline:auto;width:100%;
+padding:3rem 2rem;display:block}
+@media(max-width:520px){.bar-inner{padding-inline:var(--s4)}
+main{padding-inline:var(--s4)}}
+/* The radios are off-screen rather than `display:none`, which would take them
+   out of the tab order and hide them from a screen reader. */
+.theme-in{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+/* A sliding pill: a 44x24 track with a knob that moves and carries one glyph.
+   Copied from Memosy's ThemeToggle, down to the measurements — 1.15rem knob,
+   2px inset, 200ms — because "roughly like theirs" is what produced the last
+   version, and it did not look like theirs.
+   Two states rather than three. Theirs has two, and the third (follow the OS)
+   is what the page does before anything is clicked, so nothing is lost that a
+   reader can reach. */
+/* `inline-flex`, not `inline-block`. An inline-block sits on the **text
+   baseline**, so it hangs below the buttons beside it by the depth of a
+   descender — which reads as "not aligned" and is not fixed by centring the
+   knob inside it. A flex item aligns to the row's centre line instead. */
+/* The reference's 44x24. The neighbouring controls are 1.95rem tall, and two
+   boxes of different heights in a centred row read as misaligned even when both
+   are centred — so the pill gets the same box height and holds its 24px track
+   inside it. That is what "align it" actually meant; centring the knob within a
+   short box could never fix it. */
+/* The reference's 44x24 track, and **the box IS the track** — an earlier
+   attempt made the box 1.95rem to match its neighbours and drew the track as a
+   `::before`, which put the knob's `top:50%` and its `calc(100% - ...)` on the
+   box while the visible track was somewhere else. The knob ended up off-centre
+   and hanging past the right edge.
+   Matching the neighbours' height is done by `align-self:center` in the flex
+   row instead, which is what centres a shorter item without lying about its
+   size. */
+/* Transcribed from the reference's ThemeToggle, class for class:
+     w-11 h-6 rounded-full border border-border bg-secondary p-0 flex-shrink-0
+   which is 44x24 under `border-box` — Tailwind's reset, and this file's global
+   default, so the border sits inside the 24px exactly as it does there. */
+.theme{position:relative;display:block;flex:none;align-self:center;
+width:2.75rem;height:1.5rem;padding:0;cursor:pointer;
+border-radius:var(--pill);border:1px solid var(--line);
+background:var(--surface-2);transition:border-color .12s}
+.theme:hover{border-color:var(--dim)}
+/* The knob, also transcribed rather than derived:
+     absolute top-0.5 w-[1.15rem] h-[1.15rem] rounded-full bg-primary
+     transition-all duration-200 flex items-center justify-center
+     text-[0.7rem] leading-none
+   **`top:2px`, not `top:50%` with a transform.** Every attempt to centre this
+   arithmetically landed a pixel out, because the offset is measured from the
+   border box while a 50% translate centres on the padding box. The reference
+   just says 2px from the top, and 2px from the top is correct. */
+.theme .knob{position:absolute;top:2px;
+inset-inline-start:2px;
+width:1.15rem;height:1.15rem;border-radius:var(--pill);
+background:var(--link);color:var(--accent-ink);
+display:flex;align-items:center;justify-content:center;
+font-size:.7rem;line-height:1;transition:inset-inline-start .2s}
+/* **One checkbox, meaning "the opposite of what the OS says".**
+   Two checkboxes could both end up ticked, and then no press could get back:
+   ticking `light` and then `dark` left both set, an explicit-light rule kept
+   winning, and dark became unreachable without script to untick the other. A
+   single box cannot reach a state it cannot leave.
+   So there are two pills — one for each OS setting — and exactly one is in the
+   document flow at a time. Under a dark OS the sun pill shows and ticking the
+   box means light; under a light OS the moon pill shows and ticking means dark. */
+.to-light{display:none}
+@media(prefers-color-scheme:dark){
+.to-light{display:inline-flex}
+.to-dark{display:none}}
+/* Whichever pill is showing, ticking the box slides its knob across and swaps
+   the glyph — so the control always animates towards the state it just entered. */
+.to-light .moon,.to-dark .sun{display:none}
+:root:has(#theme-invert:checked) .to-light .knob,
+:root:not(:has(#theme-invert:checked)) .to-dark .knob{inset-inline-start:2px}
+:root:not(:has(#theme-invert:checked)) .to-light .knob,
+:root:has(#theme-invert:checked) .to-dark .knob{
+inset-inline-start:calc(100% - 1.15rem - 2px)}
+.theme-in:focus-visible~.masthead .theme{outline:2px solid var(--link);outline-offset:2px}
+.masthead{display:flex;justify-content:space-between;align-items:center;
+gap:var(--s4);flex-wrap:wrap;padding-block:var(--s4)}
+.masthead .wordmark{font-family:"Fraunces",Georgia,"Times New Roman",serif;
+font-weight:600;font-size:1.25rem;letter-spacing:-.02em;
+text-decoration:none;color:var(--fg);display:inline-flex;align-items:center;
+gap:.65rem}
+/* The mark, drawn in CSS. An image element would be a subresource, and the CSP
+   forbids every one of those — including a same-origin file, since
+   `default-src 'none'` leaves no img-src to fall back to.
+   (Written without the tag name in angle brackets on purpose: this stylesheet
+   ships inside the page, and the self-containment test greps the rendered HTML
+   for markup it must not contain. A comment naming the tag would trip it.) */
+.masthead .logo{width:2.25rem;height:2.25rem;flex:none;
+border-radius:var(--radius);box-shadow:var(--shadow);
+background:linear-gradient(140deg,var(--link),color-mix(in srgb,var(--link) 55%,#000));
+color:var(--accent-ink);display:inline-flex;align-items:center;justify-content:center;
+font-family:"Fraunces",Georgia,serif;font-size:.95rem;font-weight:600;letter-spacing:.02em}
+/* The nav row, as the reference has it: `flex items-center gap-2` and nothing
+   else. **No `flex-wrap`** — wrapping is what put the sign-in button on its own
+   line as soon as the row got tight, and a nav that reflows into two rows is
+   not the design. The items are small and `white-space:nowrap`, so the row
+   fits; the masthead above still wraps, which is where a narrow screen should
+   break.
+   The dialog is excluded because a closed `<dialog>` is still a child, and as a
+   flex item it would take a slot in this row and push the buttons along. */
+/* `flex items-center gap-2` from the reference's PublicHeader nav — 8px.
+   **The margin reset is the whole fix.** The form rules below give every
+   `label` a 16px top margin and every `button` a 16px one, which is right in a
+   form and wrong in a nav — and the pill IS a label and Sign in IS a button, so
+   each was being pushed down by 16px independently. That is what four rounds of
+   adjusting heights, box-sizing and baselines never touched: the boxes were the
+   right size all along and the margins were moving them.
+   Measured, not guessed: `scripts/layout-check.js` reported the pill at y=34,
+   the select at y=24 and the button at y=32, with computed margins of
+   `16px 0 4px` and `16px 0 0`. */
+.controls{display:flex;align-items:center;gap:8px}
+.controls label,.controls button,.controls select,.controls a{margin:0}
+/* **Not `position:fixed` alone**, which was the bug. The dialog is a child of
+this flex row, and `fixed` with no offsets pins it wherever the row happens to
+be — the top right corner — instead of letting a `<dialog>` centre itself the
+way it does by default. Memosy's own dialog centres explicitly rather than
+relying on the default, so this does the same: `fixed top-1/2 left-1/2` with a
+half-size translate back, which is `web/src/components/ui/dialog.tsx` in that
+repository. */
+.controls>dialog{position:fixed;top:50%;left:50%;
+transform:translate(-50%,-50%);margin:0}
+/* The footer, matching the reference: a copyright line and a dot-separated
+   set of links, stacking centred on a narrow screen. */
+.footer{margin-top:auto;border-block-start:1px solid var(--line);
+border-block-end:0;background:transparent}
+/* One line. `space-between` and the nav rules went with the link list — with a
+   single child, `space-between` is just `flex-start` with extra words. */
+.footer .bar-inner{padding-block:var(--s5);font-size:.85rem;color:var(--dim)}
+.footer p{margin:0;opacity:.75}
+@media(max-width:520px){.footer .bar-inner{text-align:center}}
+/* **Submits on change.** Requiring a second click on "Apply" to change language
+   is a step nobody expects, and this surface permits script for exactly this
+   kind of thing. The button stays in the markup for readers without script and
+   is hidden from those with it, so neither audience sees a dead control. */
+.lang{position:relative;display:inline-flex;align-items:center;margin:0}
+/* The same 32px box as the buttons it sits between. */
+.lang select{font:inherit;font-size:.8rem;width:auto;
+padding:0 1.6rem 0 10px;height:32px;
+border:1px solid var(--line);border-radius:var(--pill);
+background:var(--surface);color:var(--dim);
+appearance:none;cursor:pointer;transition:color .12s,border-color .12s}
+.lang select:hover{color:var(--fg);border-color:var(--line-2)}
+/* The chevron, drawn in CSS rather than fetched — `appearance:none` removes the
+   native one and a background image would be a subresource the CSP forbids. */
+.lang::after{content:"";position:absolute;inset-inline-end:.6rem;
+width:.4rem;height:.4rem;pointer-events:none;
+border-inline-end:1.6px solid currentColor;border-block-end:1.6px solid currentColor;
+transform:translateY(-15%) rotate(45deg);color:var(--dim)}
+/* The submit button exists only inside `<noscript>`, so with script it is not
+   in the document at all — no flash before a handler attaches, and nothing to
+   hide. Without script it is the only way to change language, and it works. */
+.lang button{font-size:.78rem;width:auto;margin:0;margin-inline-start:6px;
+padding:0 10px;height:32px;border-radius:var(--pill)}
+/* The masthead's buttons and the landing page's call to action. */
+/* The reference's `size="sm"`: h-8 (32px), px-2.5 (10px). Transcribed rather
+   than eyeballed — the heights I had picked were within a pixel of these and
+   still visibly wrong beside a 24px pill. */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+height:32px;padding:0 10px;border-radius:var(--pill);
+border:1px solid var(--line);background:var(--surface);color:var(--fg);
+font-size:.82rem;font-weight:600;text-decoration:none;cursor:pointer;
+white-space:nowrap;transition:border-color .12s,background .12s}
+.btn:hover{border-color:var(--line-2);background:var(--surface-2)}
+/* The account menu: `<details>`, so it opens with no script at all. */
+.acct{position:relative}
+.acct summary{list-style:none}
+.acct summary::-webkit-details-marker{display:none}
+.acct summary::after{content:"";width:.35rem;height:.35rem;
+border-inline-end:1.5px solid currentColor;border-block-end:1.5px solid currentColor;
+transform:translateY(-25%) rotate(45deg)}
+.acct[open] summary{border-color:var(--line-2);background:var(--surface-2)}
+.acct .menu{position:absolute;inset-inline-end:0;top:calc(100% + var(--s1));
+min-width:11rem;padding:var(--s1);z-index:20;
+background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);box-shadow:var(--shadow)}
+.acct .menu a,.acct .menu button{display:block;width:100%;text-align:start;
+padding:var(--s2) var(--s3);border:0;border-radius:.4rem;margin:0;
+background:transparent;color:var(--fg);font:inherit;font-size:.85rem;
+font-weight:500;text-decoration:none;cursor:pointer}
+.acct .menu a:hover,.acct .menu button:hover{background:var(--surface-2)}
+/* The administrative group. A heading and a rule rather than a flat list: the
+   menu now holds two kinds of destination — what this account filed, and what
+   it administers — and running them together reads as one list of seven. */
+.acct .menu hr{border:0;border-block-start:1px solid var(--line);
+margin:var(--s1) var(--s2)}
+.acct .menu .grp{margin:var(--s2) var(--s3) var(--s1);font-size:.7rem;
+font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+/* The landing page's three points. */
+.point{margin-block:3rem}
+.point h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
+.point p{margin:0;color:var(--dim);font-size:.95rem;line-height:1.65}
+/* The sign-in dialog. Measurements from the reference: 380px, 1.75rem padding,
+   a 55% black backdrop with a 4px blur.
+   **A real `<dialog>`**, not a div positioned over the page. The element brings
+   focus trapping, Escape-to-close, inertness of the content behind it and a
+   `::backdrop` — every one of which a hand-rolled overlay has to reimplement,
+   and the accessibility half of that list is what such overlays usually skip. */
+/* `max-w-sm` (24rem) capped by `max-w-[calc(100%-2rem)]`, `rounded-xl`, and a
+`ring-1 ring-foreground/10` rather than a solid border — all from Memosy's
+`DialogContent`. Its `--popover` is #faf7f2 / #1f1c24, which is what `--surface`
+already holds here, so the fill needs no new token. */
+dialog{width:100%;max-width:24rem;padding:var(--s5);
+border:0;border-radius:.75rem;
+box-shadow:0 0 0 1px color-mix(in srgb,var(--fg) 10%,transparent),var(--shadow);
+background:var(--surface);color:var(--fg);
+/* Two forms live in here now — email above, password below. On a short
+   viewport (a phone in landscape) that is taller than the screen, and a
+   `<dialog>` does not scroll its own content by default: the overflow is
+   simply unreachable, which would put the submit button out of reach. */
+max-height:calc(100dvh - 2rem);overflow-y:auto}
+/* **10% black and a 2px blur**, which is Memosy's `bg-black/10` and
+`backdrop-blur-xs` — considerably lighter than the 55%/4px that was here. The
+point is to separate the dialog from the page, not to hide it. A browser without
+`backdrop-filter` ignores the second line and keeps the tint. */
+dialog::backdrop{background:rgba(0,0,0,.1);backdrop-filter:blur(2px)}
+/* **A dialog opened by the `open` attribute is non-modal, and a non-modal
+dialog has no `::backdrop` at all.** That is why `/public/signin` had no blur:
+the rule above was correct and simply never applied. The script promotes it with
+`showModal()`, which brings the backdrop along with focus trapping and Escape.
+Without script there is no way to reach `::backdrop`, so this paints the tint
+itself with a very large shadow spread. It cannot blur — `backdrop-filter` on
+the dialog would filter what is behind the *dialog*, not the page — and a tint
+alone is the honest degradation. */
+dialog[open]:not(:modal){box-shadow:0 0 0 1px
+color-mix(in srgb,var(--fg) 10%,transparent),var(--shadow),
+0 0 0 100vmax rgba(0,0,0,.1)}
+dialog h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
+/* Register, under the primary button. A quieter treatment because it posts to
+   the *same* route: on this surface a first sign-in is the signup, so these are
+   one action with two names, and giving both equal weight would ask the reader
+   to choose between things that do not differ. */
+dialog .ghost{margin-top:var(--s2);background:transparent;color:var(--dim);
+border:1px solid var(--line)}
+dialog .ghost:hover{background:var(--surface-2);color:var(--fg)}
+/* The admin password, folded away. **A `<details>`, not a script toggle**: the
+   private surface permits no script at all, and a disclosure that needs one is a
+   disclosure that never opens there. */
+dialog .pw{margin-top:var(--s4);border-block-start:1px solid var(--line);
+padding-block-start:var(--s3)}
+dialog .pw>summary{cursor:pointer;font-size:.8rem;color:var(--dim);
+list-style:none}
+dialog .pw>summary::-webkit-details-marker{display:none}
+dialog .pw>summary:hover{color:var(--fg)}
+/* A caret that turns, so the summary reads as something that opens rather than
+   as a link that goes somewhere. */
+dialog .pw>summary::before{content:"";display:inline-block;width:.3rem;
+height:.3rem;margin-inline-end:.4rem;vertical-align:middle;
+border-inline-end:1.5px solid currentColor;border-block-end:1.5px solid currentColor;
+transform:rotate(-45deg)}
+dialog .pw[open]>summary::before{transform:rotate(45deg)}
+dialog p{color:var(--dim);font-size:.9rem}
+dialog .close{position:absolute;inset-block-start:var(--s3);
+inset-inline-end:var(--s3);width:1.75rem;height:1.75rem;padding:0;margin:0;
+display:inline-flex;align-items:center;justify-content:center;
+border:0;border-radius:var(--pill);background:transparent;color:var(--dim);
+font-size:1.1rem;line-height:1;cursor:pointer}
+dialog .close:hover{background:var(--surface-2);color:var(--fg)}
+/* Without script the dialog cannot be opened, so the page must not pretend it
+   can: the trigger is a plain link to the sign-in page, and this only turns it
+   into a dialog opener once the script is there to do it.
+   Its **own** class rather than the document-wide `.js`, because the fallback
+   is also needed on a browser that has script but no `showModal` — and undoing
+   `.js` to express that would drag the language form's button back with it. */
+.modal{display:none}
+.has-dialog .modal{display:inline-flex}
+.has-dialog .modal-fallback{display:none}
+/* Serif headings against a sans body, which is the pairing that makes the
+   reference design read as designed rather than as a default stylesheet. */
+h1,h2{font-family:"Fraunces",Georgia,"Times New Roman",serif;font-weight:600}
+h1{font-size:clamp(1.75rem,4vw,2.35rem);margin:0 0 var(--s4);
+letter-spacing:-.02em;line-height:1.2}
+h2{font-size:1.2rem;margin:var(--s6) 0 var(--s3);letter-spacing:-.01em}
+/* The paragraph directly after an h1 is the subtitle. */
+/* No `max-width` on the prose. A 38rem cap inside a 60rem column left every
+   paragraph stopping two-thirds of the way across while the header ran the full
+   width — the mismatch that reads as "nothing lines up". Measure is controlled
+   by the column, in one place. */
+h1+p{color:var(--dim);font-size:1rem;line-height:1.65;margin-block:0 3rem}
+a{color:var(--link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}
+form{margin:0}
+label{display:block;margin:var(--s4) 0 var(--s1);font-weight:600;font-size:.88rem}
+textarea,input,select,button{font:inherit;width:100%;padding:var(--s3);
+border-radius:.5rem;border:1px solid var(--line-2);
+background:var(--surface);color:var(--fg)}
+textarea{min-height:8rem;resize:vertical;line-height:1.55}
+button{cursor:pointer;margin-top:var(--s4);font-weight:600;
+background:var(--link);color:var(--accent-ink);border-color:transparent}
+button:hover{filter:brightness(1.08)}
+.item{display:block;padding:var(--s3) var(--s4);margin:var(--s2) 0;
+text-decoration:none;color:inherit;background:var(--surface);
+border:1px solid var(--line);border-radius:var(--radius);
+box-shadow:var(--shadow);transition:border-color .12s,box-shadow .12s}
+.item:hover{border-color:var(--line-2)}
+.meta{font-size:.82rem;color:var(--dim)}
+.tag{display:inline-block;font-size:.74rem;padding:.1em .6em;border-radius:10px;
+font-weight:600;background:var(--surface-2);color:var(--dim)}
+/* Model-authored text. It scrolls inside its own box rather than pushing the
+   page sideways — on a phone that is the difference between readable and not. */
+pre{white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:auto;
+padding:var(--s4);background:var(--surface);border:1px solid var(--line);
+border-radius:var(--radius);box-shadow:var(--shadow);
+font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.note{background:var(--surface);border:1px solid var(--line);
+border-inline-start:3px solid var(--link);border-radius:var(--radius);
+padding:var(--s3) var(--s4);margin:var(--s5) 0;box-shadow:var(--shadow)}

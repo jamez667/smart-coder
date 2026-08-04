@@ -166,8 +166,10 @@ decision on this surface.
 
 ### On JavaScript and the CSP
 
-The surface is server-rendered HTML with **no script at all**, and the
-Content-Security-Policy is `default-src 'none'` <!--@ crates/sc-server/src/routes.rs -->.
+The surface is served with `default-src 'none'`
+<!--@ crates/sc-server/src/routes.rs -->. It was server-rendered HTML with **no
+script at all** when this section was written; it is a single-page application
+now, and the paragraph below marks which half of the argument survived that.
 
 The reason to record is not "the trade was unfavourable" but **"the capability
 JavaScript would buy does not exist"**. Scroll detection proves nothing more than
@@ -177,10 +179,21 @@ reopened every time someone rediscovers `IntersectionObserver`.
 
 Two further reasons the line holds:
 
-- **Script and escaping are multiplicative defences today.** The artifact is
-  rendered as escaped text in a `<pre>`, and no script runs. If script ever ran, a
-  bug in the escaper would upgrade from "some angle brackets render wrong" to
-  "model-authored text influences a live script context" ([18](18-task-intake.md)).
+- ~~**Script and escaping are multiplicative defences today.**~~ **This one has
+  expired.** It was true while the surface ran no script; spec
+  [18](18-task-intake.md) now permits `script-src 'self'` on both halves, so the
+  artifact is rendered by a script rather than beside one. The upgrade that
+  paragraph warned about — from "some angle brackets render wrong" to
+  "model-authored text influences a live script context" — is now the standing
+  risk rather than a hypothetical, and 18 records what bounds it.
+
+  **The primary reason above is untouched, and it is the one that matters here.**
+  Scroll detection still proves nothing document order does not, so the review
+  gate gains no capability from script being available. What changes is that the
+  gate's properties — the decision controls sitting after the artifact, the two
+  actions weighing the same, the skip link being visible — are no longer
+  assertable by reading the rendered HTML in-process. They move to a browser
+  harness, and that harness is the thing keeping this section honest.
 - **A CSS scroll-reveal is worse than either.** `animation-timeline: scroll()` is
   Chromium-only and unsupported on every iOS Safari, where the un-animated state
   *is* the initial state — so a control hidden until the technique fires becomes

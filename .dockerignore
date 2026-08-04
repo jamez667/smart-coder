@@ -21,3 +21,14 @@ notes/
 # The desktop client's assets are the largest non-source tree in the repo, and
 # `sc-server` has no relationship to them.
 crates/sc-win/assets/
+
+# The interface is built in its own stage from `web/`, so the host's installed
+# tree must not be shipped in — `node_modules` is large, platform-specific, and
+# would be shadowed by `npm ci` anyway.
+node_modules/
+web/node_modules/
+web/test-results/
+web/playwright-report/
+# The built output is copied from the `web` stage, never from the context. A
+# stale local build reaching the image is exactly what that COPY prevents.
+crates/sc-server/assets/ui/
