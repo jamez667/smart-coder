@@ -65,22 +65,86 @@ pub struct Account {
     /// with that?".
     #[serde(default)]
     pub revoked: bool,
-    /// The GitHub login this account signed in with, lowercased, when it did.
+    /// The username this account signs in with, lowercased.
     ///
     /// **Not a permission.** It says who somebody proved they are, and nothing
-    /// about what they may see — whether this login is an *owner* comes from the
-    /// configuration, checked on every request. So removing a name from
-    /// `SC_SERVER_OWNERS` demotes them immediately, and this field is left
-    /// alone: it remains a true statement about how they signed in.
+    /// about what they may see — whether this login is the *administrator* comes
+    /// from `admin.json` and whether it is an *owner* comes from the roster,
+    /// both checked on every request. So revoking either demotes them
+    /// immediately, and this field is left alone: it remains a true statement
+    /// about how they signed in.
     ///
-    /// `None` for an account created by a magic link, which is every account
-    /// that existed before GitHub sign-in — hence `#[serde(default)]`.
+    /// `None` for an account created by a magic link, which is every filer.
+    /// Filers are strangers and should not be made to keep a credential; the two
+    /// named roles are people who come back.
     ///
-    /// Storing the login rather than the numeric id is the same trade the
-    /// configuration makes: the operator writes a name they recognise, and the
-    /// two have to be comparable.
+    /// **Unique across live accounts**, enforced by [`Accounts::create_login`].
+    /// With GitHub a login was proved by a third party and could not collide;
+    /// now two accounts sharing one would make `Admin::is` match whichever came
+    /// first, which is not a coin toss anybody should be running.
     #[serde(default)]
-    pub github_login: Option<String>,
+    pub login: Option<String>,
+    /// argon2id of the password, when this account has one.
+    ///
+    /// **[`crate::auth::hash_password`], never [`crate::auth::hash`]** — see that
+    /// module for why the two are not interchangeable.
+    #[serde(default)]
+    pub password_hash: Option<String>,
+    /// How many wrong passwords in a row.
+    ///
+    /// Reset by a correct one. Feeds [`Account::retry_at`], and exists because
+    /// the rate limiter alone allows ~29,000 guesses a day against a known
+    /// username — GitHub used to do this throttling for us.
+    #[serde(default)]
+    pub failed_attempts: u32,
+    /// Unix ms before which another attempt is refused **without checking the
+    /// password**.
+    ///
+    /// Checked before the hash is computed, so a locked-out account is not also
+    /// a way to spend this server's CPU.
+    #[serde(default)]
+    pub next_attempt_ms: u64,
+}
+
+/// The longest a wrong password makes somebody wait.
+///
+/// **A delay, not a lockout.** With no second way in, locking the administrator
+/// out means editing `admin.json` on the volume — and anybody who knows the
+/// username could trigger that deliberately. A ceiling of five minutes costs a
+/// guesser everything (it caps them at a few hundred attempts a day rather than
+/// tens of thousands) and costs the rightful holder a short wait.
+pub const MAX_BACKOFF_MS: u64 = 5 * 60 * 1000;
+
+/// How long to wait after `n` consecutive failures.
+///
+/// The first two are free: a typo should not be punished, and the point is to
+/// make *sustained* guessing expensive rather than to make one mistake annoying.
+/// After that it doubles — 2s, 4s, 8s — to the ceiling.
+pub fn backoff_ms(failures: u32) -> u64 {
+    match failures {
+        0..=2 => 0,
+        n => MAX_BACKOFF_MS.min(1_000u64.saturating_mul(1 << (n - 2).min(20))),
+    }
+}
+
+impl Account {
+    /// When may this account try a password again?
+    pub fn retry_at(&self) -> u64 {
+        self.next_attempt_ms
+    }
+
+    /// Record a wrong password, and return when they may try again.
+    pub fn note_failure(&mut self, now_ms: u64) -> u64 {
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        self.next_attempt_ms = now_ms.saturating_add(backoff_ms(self.failed_attempts));
+        self.next_attempt_ms
+    }
+
+    /// Record a correct password. Clears the backoff entirely.
+    pub fn note_success(&mut self) {
+        self.failed_attempts = 0;
+        self.next_attempt_ms = 0;
+    }
 }
 
 /// A signed-in browser.
@@ -342,12 +406,117 @@ impl Accounts {
             email_hint: email_hint.to_string(),
             created_ms: now_ms,
             revoked: false,
-            // A magic-link signup. GitHub sign-in sets this at creation, and it
-            // is the only way an account ever acquires one.
-            github_login: None,
+            // A magic-link signup. `create_login` is the only other way in, and
+            // it is the only way an account ever acquires a password.
+            login: None,
+            password_hash: None,
+            failed_attempts: 0,
+            next_attempt_ms: 0,
         };
         self.accounts.push(account.clone());
         account
+    }
+
+    /// The live account holding this username, if any.
+    ///
+    /// Lowercased on the way in, so a caller holding whatever casing somebody
+    /// typed matches a record written from a different source — the same rule
+    /// `Admin::is` and `Roster::owner_for` already keep.
+    pub fn by_login(&self, login: &str) -> Option<&Account> {
+        let login = login.trim().to_ascii_lowercase();
+        self.accounts
+            .iter()
+            .find(|a| !a.revoked && a.login.as_deref() == Some(login.as_str()))
+    }
+
+    fn by_login_mut(&mut self, login: &str) -> Option<&mut Account> {
+        let login = login.trim().to_ascii_lowercase();
+        self.accounts
+            .iter_mut()
+            .find(|a| !a.revoked && a.login.as_deref() == Some(login.as_str()))
+    }
+
+    /// Create an account that signs in with a username and password.
+    ///
+    /// **Refuses a login already taken by a live account.** Nothing enforced
+    /// this while logins came from GitHub, because a third party guaranteed
+    /// uniqueness; now two accounts sharing one would make `Admin::is` match
+    /// whichever the iteration reached first.
+    ///
+    /// The email hash is synthesised from the login rather than left empty: it
+    /// is the store's other unique key, and two accounts colliding there would
+    /// break `by_email` the same way.
+    pub fn create_login(
+        &mut self,
+        login: &str,
+        password: &str,
+        now_ms: u64,
+    ) -> std::result::Result<Account, String> {
+        let login = login.trim().to_ascii_lowercase();
+        if self.by_login(&login).is_some() {
+            return Err(format!("{login:?} is taken"));
+        }
+        let password_hash = crate::auth::hash_password(password)?;
+
+        let mut account = self.create(
+            &crate::auth::hash(&format!("login:{login}")),
+            &login,
+            now_ms,
+        );
+        account.login = Some(login);
+        account.password_hash = Some(password_hash);
+
+        // `create` pushed a copy already; make the stored one match.
+        let idx = self.accounts.len() - 1;
+        self.accounts[idx] = account.clone();
+        Ok(account)
+    }
+
+    /// Replace an account's password.
+    ///
+    /// Clears the backoff, because somebody who just proved themselves well
+    /// enough to change it is not the guesser it exists to slow down.
+    pub fn set_password(&mut self, login: &str, password: &str) -> std::result::Result<(), String> {
+        let hash = crate::auth::hash_password(password)?;
+        let Some(account) = self.by_login_mut(login) else {
+            return Err("no such account".to_string());
+        };
+        account.password_hash = Some(hash);
+        account.note_success();
+        Ok(())
+    }
+
+    /// Check a password, recording the attempt.
+    ///
+    /// `Ok(account_id)` on success. `Err(retry_at_ms)` on failure — including
+    /// when the account is still backing off, in which case **the password is
+    /// not checked at all**, so a locked-out account cannot be used to spend
+    /// this server's CPU.
+    ///
+    /// One answer for "no such account", "wrong password" and "still waiting":
+    /// the caller renders the same page for all three, because distinguishing
+    /// them tells a guesser which half they got right.
+    pub fn check_password(
+        &mut self,
+        login: &str,
+        password: &str,
+        now_ms: u64,
+    ) -> std::result::Result<String, u64> {
+        let Some(account) = self.by_login_mut(login) else {
+            return Err(0);
+        };
+        if now_ms < account.next_attempt_ms {
+            return Err(account.next_attempt_ms);
+        }
+        let Some(stored) = account.password_hash.clone() else {
+            return Err(0);
+        };
+        if crate::auth::password_matches(password, &stored) {
+            account.note_success();
+            Ok(account.id.clone())
+        } else {
+            Err(account.note_failure(now_ms))
+        }
     }
 
     /// Open a session for an account, returning the cookie token.
@@ -884,5 +1053,176 @@ mod tests {
             "a bad parse emptied the store"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_login_account_signs_in_with_its_password() {
+        let mut accounts = Accounts::default();
+        let account = accounts
+            .create_login("JameZ667", "correct-horse-battery", 1_000)
+            .unwrap();
+
+        // Lowercased on the way in, so whatever casing somebody types matches.
+        assert_eq!(account.login.as_deref(), Some("jamez667"));
+        assert!(accounts.by_login("JAMEZ667").is_some());
+
+        assert_eq!(
+            accounts
+                .check_password("jamez667", "correct-horse-battery", 1_000)
+                .as_deref(),
+            Ok(account.id.as_str())
+        );
+    }
+
+    #[test]
+    fn two_accounts_cannot_share_a_login() {
+        // **Nothing enforced this while logins came from GitHub**, because a
+        // third party guaranteed uniqueness. Two accounts sharing one would make
+        // `Admin::is` match whichever the iteration reached first.
+        let mut accounts = Accounts::default();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", 1)
+            .unwrap();
+        let err = accounts
+            .create_login("JameZ667", "another-good-password", 2)
+            .unwrap_err();
+        assert!(err.contains("taken"), "{err}");
+        assert_eq!(accounts.accounts.len(), 1);
+    }
+
+    #[test]
+    fn a_password_is_never_stored_in_the_clear() {
+        let mut accounts = Accounts::default();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", 1)
+            .unwrap();
+        let json = serde_json::to_string(&accounts).unwrap();
+        assert!(!json.contains("correct-horse-battery"), "{json}");
+        assert!(
+            json.contains("$argon2id$"),
+            "and it is the slow hash: {json}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_password_backs_off_and_a_right_one_clears_it() {
+        let mut accounts = Accounts::default();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", 0)
+            .unwrap();
+
+        // The first two are free: a typo should not be punished, and the point
+        // is to make *sustained* guessing expensive.
+        for _ in 0..2 {
+            assert_eq!(accounts.check_password("jamez667", "wrong", 0), Err(0));
+        }
+        // Then it grows.
+        let third = accounts.check_password("jamez667", "wrong", 0).unwrap_err();
+        assert!(third > 0, "the third failure did not delay");
+        let fourth = accounts
+            .check_password("jamez667", "wrong", third)
+            .unwrap_err();
+        assert!(fourth > third + 1_000, "the delay did not grow");
+
+        // And a correct one wipes it, so a forgotten password is a short wait
+        // rather than something to recover from.
+        assert!(accounts
+            .check_password("jamez667", "correct-horse-battery", fourth)
+            .is_ok());
+        assert_eq!(accounts.by_login("jamez667").unwrap().failed_attempts, 0);
+        assert_eq!(accounts.by_login("jamez667").unwrap().retry_at(), 0);
+    }
+
+    #[test]
+    fn a_backed_off_account_is_refused_without_checking_the_password() {
+        // **Checked before the hash is computed**, so a locked-out account is
+        // not also a way to spend this server's CPU — which argon2 makes a real
+        // cost rather than a theoretical one.
+        let mut accounts = Accounts::default();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", 0)
+            .unwrap();
+        for _ in 0..4 {
+            let _ = accounts.check_password("jamez667", "wrong", 0);
+        }
+        let until = accounts.by_login("jamez667").unwrap().retry_at();
+        assert!(until > 0);
+
+        // Even the RIGHT password is refused while the delay stands.
+        assert_eq!(
+            accounts.check_password("jamez667", "correct-horse-battery", until - 1),
+            Err(until)
+        );
+        // And works once it passes.
+        assert!(accounts
+            .check_password("jamez667", "correct-horse-battery", until)
+            .is_ok());
+    }
+
+    #[test]
+    fn the_backoff_is_bounded() {
+        // A ceiling, not a lockout: with no second way in, locking the
+        // administrator out means editing a file on the volume, and anybody who
+        // knows the username could trigger that deliberately.
+        assert_eq!(backoff_ms(0), 0);
+        assert_eq!(backoff_ms(2), 0);
+        assert!(backoff_ms(3) > 0);
+        assert_eq!(backoff_ms(100), MAX_BACKOFF_MS);
+        assert!(backoff_ms(u32::MAX) <= MAX_BACKOFF_MS, "no overflow");
+    }
+
+    #[test]
+    fn a_missing_account_and_a_wrong_password_are_one_answer() {
+        // Distinguishing them tells a guesser which half they got right.
+        let mut accounts = Accounts::default();
+        accounts
+            .create_login("jamez667", "correct-horse-battery", 0)
+            .unwrap();
+        assert_eq!(accounts.check_password("nobody", "whatever", 0), Err(0));
+        assert_eq!(accounts.check_password("jamez667", "wrong", 0), Err(0));
+    }
+
+    #[test]
+    fn a_revoked_account_cannot_sign_in_and_frees_its_login() {
+        let mut accounts = Accounts::default();
+        let a = accounts
+            .create_login("jamez667", "correct-horse-battery", 0)
+            .unwrap();
+        assert!(accounts.revoke(&a.id));
+
+        assert!(accounts.by_login("jamez667").is_none());
+        assert_eq!(
+            accounts.check_password("jamez667", "correct-horse-battery", 0),
+            Err(0)
+        );
+        // And the name can be used again, since the old record grants nothing.
+        assert!(accounts
+            .create_login("jamez667", "a-different-password", 1)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_filer_has_no_login_and_that_is_not_an_error() {
+        // Magic links stay for filers: strangers should not be made to keep a
+        // credential.
+        let mut accounts = Accounts::default();
+        let a = accounts.create(&hash("jo@x.com"), "j***@x.com", 1);
+        assert!(a.login.is_none());
+        assert!(a.password_hash.is_none());
+        assert!(accounts.by_login("jo@x.com").is_none());
+    }
+
+    #[test]
+    fn an_account_written_before_passwords_existed_still_loads() {
+        // The data volume outlives any one image tag.
+        let old = r#"{"accounts":[{"id":"acct-1","email_hash":"x",
+                      "email_hint":"j***@x.com","created_ms":1,"revoked":false}],
+                      "sessions":[],"links":[]}"#;
+        let accounts: Accounts = serde_json::from_str(old).unwrap();
+        let a = &accounts.accounts[0];
+        assert!(a.login.is_none());
+        assert!(a.password_hash.is_none());
+        assert_eq!(a.failed_attempts, 0);
+        assert_eq!(a.retry_at(), 0);
     }
 }

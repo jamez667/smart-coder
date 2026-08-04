@@ -842,7 +842,7 @@ fn finish_github_with(
             // whether this login *is* one comes from the configuration, checked
             // on every request.
             let idx = accounts.accounts.len() - 1;
-            accounts.accounts[idx].github_login = Some(login.clone());
+            accounts.accounts[idx].login = Some(login.clone());
             account.id
         }
     };
@@ -1027,7 +1027,7 @@ fn identify(ctx: &Ctx<'_>, req: &Req) -> Option<Caller> {
     // **Not `?`.** Returning `None` here would make a signed-in filer
     // *anonymous* rather than an account, which silently drops them out of
     // every per-account cap.
-    let Some(login) = account.github_login.as_deref() else {
+    let Some(login) = account.login.as_deref() else {
         return Some(Caller::Account {
             id: account.id.clone(),
         });
@@ -3210,7 +3210,7 @@ mod tests {
             let account =
                 accounts.create(&auth::hash(&format!("github:{login}")), login, self.now_ms);
             let idx = accounts.accounts.len() - 1;
-            accounts.accounts[idx].github_login = Some(login.to_ascii_lowercase());
+            accounts.accounts[idx].login = Some(login.to_ascii_lowercase());
             let session = accounts.open_session(&account.id, self.now_ms);
             self.store.put_accounts(&accounts).unwrap();
             session
@@ -5371,10 +5371,7 @@ mod tests {
         // The account records how they signed in — and only that.
         let accounts = f.store.accounts().unwrap();
         assert_eq!(accounts.accounts.len(), 1);
-        assert_eq!(
-            accounts.accounts[0].github_login.as_deref(),
-            Some("jamez667")
-        );
+        assert_eq!(accounts.accounts[0].login.as_deref(), Some("jamez667"));
     }
 
     #[test]
