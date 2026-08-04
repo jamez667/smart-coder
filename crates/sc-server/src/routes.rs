@@ -22,7 +22,7 @@ use sc_proto::IntakeKind;
 use std::sync::Mutex;
 
 use crate::account;
-use crate::auth::{self, Caller, Credentials};
+use crate::auth::{self, Caller};
 use crate::config::PublicConfig;
 use crate::i18n::Locale;
 use crate::mail::Mailer;
@@ -110,8 +110,6 @@ pub mod public_route {
 pub mod private_route {
     /// The review surface. **Moved off `/`**, which is now the landing page.
     pub const REVIEW: &str = "/review";
-    /// Where a device is enrolled. `GET` renders the form, `POST` spends a code.
-    pub const ENROL: &str = "/enrol";
     /// Who may file, and the switch that stops them.
     pub const ACCOUNTS: &str = "/accounts";
     /// Who may review, and for what.
@@ -465,11 +463,7 @@ pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 }
 
 fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
-    let creds = match ctx.store.credentials() {
-        Ok(c) => c,
-        Err(e) => return error(500, &format!("the credential store is unreadable: {e}")),
-    };
-    let caller = identify(ctx, req, &creds);
+    let caller = identify(ctx, req);
     // Resolved once, beside the caller, so a handler cannot forget to ask and
     // cannot ask a second time and get a different answer within one request.
     ctx.fresh_auth = fresh_auth(ctx, req);
@@ -510,14 +504,8 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         return daemon_route(ctx, req, method, &path, &label);
     }
 
-    // Enrolment is the one route reachable without a credential — it is how a
-    // credential is obtained. It is guarded by the single-use code instead.
-    if method == "POST" && path == private_route::ENROL {
-        return enrol(ctx, req, creds);
-    }
-
-    // Setup, likewise reachable without a credential, and for the same reason:
-    // it is how the first one is obtained. Guarded by the single-use claim code.
+    // Setup is the one route reachable without a credential — it is how the
+    // first one is obtained. Guarded by the single-use claim code instead.
     //
     // **It stops existing the moment the server is claimed.** Not "exists and
     // refuses" — a 404 means a stranger cannot tell a claimed server from one
@@ -562,24 +550,33 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // Everything else is the developer's own surface.
     //
     // **This pattern is what makes the owner role safe.** An owner may decline
-    // work and may not approve it, and that is not enforced by a check inside
-    // the approve handler — it is enforced here, by `Caller::Owner` not being
-    // `Caller::Device`. Every admitting verb lives past this line, so there is
+    // work and may not accept it, and that is not enforced by a check inside
+    // the accept handler — it is enforced here, by `Caller::Owner` not being
+    // `Caller::Admin`. Every accepting verb lives past this line, so there is
     // no value of that variant which reaches one. An owner's own surface is
     // public-side, above.
-    let Some(Caller::Device { .. }) = caller else {
-        // **The enrolment page lives at `/enrol` and nowhere else.** It used to
-        // be what any un-enrolled GET rendered, which made every wrong URL look
-        // like a login prompt — and left `/` unable to be a landing page,
-        // because a stranger arriving there met a box asking for a code they
-        // could not have.
-        if method == "GET" && path == private_route::ENROL {
-            return Res::html(401, crate::page::enrol_page());
-        }
-        // Anything else private, without a device, is **not found** rather than
-        // unauthorized: a 401 on `/review` tells a stranger the address is real.
+    //
+    // Both variants now arrive as a GitHub session, so the whole burden of
+    // telling them apart sits in `identify` — one function, one branch, checked
+    // before the roster is consulted. That is the right place for it and the
+    // only place it happens.
+    let Some(Caller::Admin { .. }) = caller else {
+        // **Not found** rather than unauthorized: a 401 on `/review` tells a
+        // stranger the address is real. That now covers a signed-in owner and a
+        // signed-in filer too, which is the same answer for the same reason.
+        //
+        // The one accommodation is for the developer holding a cookie that used
+        // to work: a bare 404 is a confusing answer to somebody who was enrolled
+        // yesterday, so the page names the way back in when there is one.
         if method == "GET" {
-            return Res::html(404, crate::page::not_found());
+            return Res::html(
+                404,
+                if has_github(ctx) {
+                    crate::page::not_found_for_admin()
+                } else {
+                    crate::page::not_found()
+                },
+            );
         }
         return error(401, "unauthorized");
     };
@@ -854,7 +851,10 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         // Keyed on the label, so each machine has its own budget: a daemon stuck
         // in a retry loop on one host cannot exhaust the allowance of another.
         Some(Caller::Daemon { label }) => Bucket::Credential(auth::hash(label)),
-        Some(Caller::Device { id }) => Bucket::Credential(auth::hash(id)),
+        // Keyed on the login, so the budget is per person: an administrator
+        // on a phone and a laptop is one human, and the per-device budget
+        // died with per-device credentials.
+        Some(Caller::Admin { login }) => Bucket::Credential(auth::hash(login)),
         // A signed-in filer gets their own budget. Safe to key on, unlike an
         // email or a forwarded header, because an account id is minted by this
         // server and costs a confirmed mailbox to obtain — the caller cannot vary
@@ -874,7 +874,7 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
                 Bucket::PublicRead
             }
         }
-        None => Bucket::Enrol,
+        None => Bucket::AnonPrivate,
     }
 }
 
@@ -925,7 +925,7 @@ fn fresh_auth(ctx: &Ctx<'_>, req: &Req) -> bool {
         .unwrap_or(false)
 }
 
-fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
+fn identify(ctx: &Ctx<'_>, req: &Req) -> Option<Caller> {
     if let Some(bearer) = &req.bearer {
         // Walked rather than looked up: `auth::matches` is constant-time over
         // fixed-width hashes, so the only thing this leaks is *how many* keys
@@ -942,36 +942,56 @@ fn identify(ctx: &Ctx<'_>, req: &Req, creds: &Credentials) -> Option<Caller> {
     }
     let token = req.cookie_token.as_deref()?;
 
-    if let Some(device) = creds.device_for(token) {
-        return Some(Caller::Device {
-            id: device.id.clone(),
-        });
-    }
-
-    // Only now is the account store read — lazily, and only when a public
-    // surface exists at all. It is unbounded and attacker-sized, so parsing it
-    // on every request would let a stranger choose how much work each one costs.
-    let public = ctx.public?;
+    // **The account store is now read on every cookie-bearing request**, not
+    // lazily behind a public surface. It has to be: it is the only credential
+    // store left, so an administrator with no public surface must still be
+    // recognised on their own private one.
+    //
+    // The ordering argument that used to protect it — check the small
+    // developer-sized credentials file first, read the attacker-sized account
+    // file only where signup exists — is therefore gone. `max_accounts` is what
+    // bounds this now, and it does double duty: it caps signup *and* caps what
+    // one request can be made to parse.
     let accounts = ctx.store.accounts().ok()?;
     let account = accounts.session_for(token)?;
 
+    // A GitHub login is required for anything above a filer. A magic-link
+    // account has none and is an `Account` whatever any record says — so a
+    // claim naming an email address grants nothing rather than escalating.
+    //
+    // **Not `?`.** Returning `None` here would make a signed-in filer
+    // *anonymous* rather than an account, which silently drops them out of
+    // every per-account cap.
+    let Some(login) = account.github_login.as_deref() else {
+        return Some(Caller::Account {
+            id: account.id.clone(),
+        });
+    };
+
+    // **The administrator, checked before the roster, returning immediately.**
+    //
+    // The early return is load-bearing. An administrator who *also* appears in
+    // `owners.json` is easy to arrange — the seed may have put them there — and
+    // without this they would match `owner_for` first and be identified as an
+    // owner, losing their own server to a file they can edit from the UI.
+    //
+    // The claim lives on the volume and its only writer is past the gate, so an
+    // owner cannot promote themselves into it. The old guarantee holds with the
+    // words swapped: an administrator is claimed once, never self-appointed.
+    let admin = ctx.store.admin().ok()?;
+    if admin.is(login) {
+        return Some(Caller::Admin {
+            login: login.to_ascii_lowercase(),
+        });
+    }
+
     // An account whose identity is a GitHub login **the roster names** is an
-    // owner. Checked here, after the account lookup and against a value already
-    // in hand, so the order above is untouched: the device store is still
-    // first, and the account file is still read once and only where a public
-    // surface exists.
+    // owner. Reached only after the administrator branch, and only where a
+    // public surface exists — an owner reviews public filings, so without one
+    // there is nothing for the role to mean.
     //
-    // The roster is on the volume rather than in configuration, and the reading
-    // costs a `stat` — not a parse — on the requests that get this far. That
-    // ordering argument is about who pays to parse an *attacker-sized* file;
-    // `accounts.json` is one because signup is self-serve, and this is
-    // administrator-sized and reached only after the account branch succeeded.
-    //
-    // The direction matters, and survives the move intact. An owner is an
-    // account the *developer* promotes — never one that promotes itself, since
-    // the only writer is behind the device gate — so revoking demotes them on
-    // their very next request, with no session to hunt down.
-    if let Some(login) = account.github_login.as_deref() {
+    // The roster costs a `stat` rather than a parse on requests that get here.
+    if let Some(public) = ctx.public {
         let roster = {
             let mut cache = ctx.roster.lock().ok()?;
             cache.current(&ctx.store.roster_path())
@@ -1109,31 +1129,6 @@ fn work_item(r: &Request) -> WorkItem {
 // The browser side
 // ---------------------------------------------------------------------------
 
-fn enrol(ctx: &mut Ctx<'_>, req: &Req, mut creds: Credentials) -> Res {
-    let form = form_fields(&req.body);
-    let code = form.get("code").cloned().unwrap_or_default();
-    let label = form.get("label").cloned().unwrap_or_default();
-
-    let Some((_device, token)) = creds.enrol(code.trim(), &label, ctx.now_ms) else {
-        // Deliberately the same message whether the code was wrong, absent or
-        // already spent: distinguishing them tells a guesser which half they got
-        // right.
-        return Res::html(401, crate::page::enrol_page_with_error());
-    };
-    if let Err(e) = ctx.store.put_credentials(&creds) {
-        return error(500, &format!("could not record the device: {e}"));
-    }
-
-    let secure = secure_attr(ctx);
-    let mut res = Res::html(200, crate::page::enrolled_page());
-    // HttpOnly so script cannot read it; SameSite=Strict so a cross-site form
-    // cannot ride it; Secure because this is served over TLS at the proxy.
-    res.set_cookie = Some(format!(
-        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
-    ));
-    res
-}
-
 fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
     match (method, path) {
         // The review list. `/` used to be here and is now the landing page, so
@@ -1143,9 +1138,6 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             Ok(all) => Res::html(200, crate::page::index(&all)),
             Err(e) => error(500, &e.to_string()),
         },
-
-        // A device that just enrolled, or one following an old bookmark.
-        ("GET", private_route::ENROL) => Res::html(200, crate::page::enrolled_page()),
 
         ("POST", "/file") => {
             let form = form_fields(&req.body);
@@ -1742,7 +1734,7 @@ fn drafting_budget(ctx: &Ctx<'_>, repo: &str) -> std::result::Result<(), Res> {
 /// cost. Accepting settles a request; building it means opening the IDE and
 /// running the pipeline, which is the developer's machine and the developer's
 /// call. That is not enforced here but structurally: every accepting route
-/// lives behind the `Caller::Device` match on the private surface, which no
+/// lives behind the `Caller::Admin` match on the private surface, which no
 /// `Caller::Owner` satisfies.
 ///
 /// Named beside [`REVIEW_VERBS`] so the two lists can be compared at a glance,
@@ -2854,19 +2846,16 @@ mod tests {
 
     impl Fixture {
         /// Enrol a browser and return its cookie token.
-        fn enrolled(&mut self) -> String {
-            let mut creds = Credentials::default();
-            creds.set_enrol_code("ABC-123", 0);
-            self.store.put_credentials(&creds).unwrap();
-            let res = self.go(&Req::post("/enrol", "code=ABC-123&label=phone"));
-            assert_eq!(res.status, 200, "{}", res.body);
-            let cookie = res.set_cookie.expect("a token was issued");
-            cookie
-                .trim_start_matches(&format!("{COOKIE}="))
-                .split(';')
-                .next()
-                .unwrap()
-                .to_string()
+        /// Claim this server and sign in as its administrator.
+        ///
+        /// Writes the claim straight to the volume rather than walking `/setup`:
+        /// the wizard has its own tests, and every other test wants an
+        /// administrator rather than a re-run of how one is made.
+        fn as_admin(&mut self) -> String {
+            let mut admin = self.store.admin().unwrap();
+            admin.claim("jamez667", self.now_ms);
+            self.store.put_admin(&admin).unwrap();
+            self.signed_in_as_github("jamez667")
         }
 
         fn file(&mut self, token: &str, text: &str, repo: &str) -> String {
@@ -2885,7 +2874,7 @@ mod tests {
     #[test]
     fn a_daemon_polls_and_gets_work() {
         let mut f = Fixture::new("poll");
-        let token = f.enrolled();
+        let token = f.as_admin();
         f.file(&token, "add+a+health+check", "alpha");
 
         let res = f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
@@ -2917,7 +2906,7 @@ mod tests {
         // An unauthenticated intake surface on the public internet is the exact
         // failure this design exists to prevent.
         let mut f = Fixture::new("daemon-closed");
-        let token = f.enrolled();
+        let token = f.as_admin();
 
         for req in [
             Req::get(wire::route::WORK),
@@ -3050,7 +3039,7 @@ mod tests {
         // The route a daemon uses to say "wrong machine" instead of burning the
         // request with a failure.
         let mut f = Fixture::new("released-route");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "something", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
 
@@ -3081,7 +3070,7 @@ mod tests {
                 key_hash: auth::hash(OTHER_KEY),
             },
         ];
-        let token = f.enrolled();
+        let token = f.as_admin();
         let alpha = f.file(&token, "something+for+alpha", "alpha");
         let beta = f.file(&token, "something+for+beta", "beta");
 
@@ -3107,7 +3096,7 @@ mod tests {
     #[test]
     fn a_daemon_is_never_handed_a_repository_it_did_not_declare() {
         let mut f = Fixture::new("undeclared");
-        let token = f.enrolled();
+        let token = f.as_admin();
         f.file(&token, "something+for+alpha", "alpha");
 
         let res = f.go(&Req::get(&format!("{}?repo=beta", wire::route::WORK)).with_bearer(KEY));
@@ -3128,7 +3117,7 @@ mod tests {
         // An older daemon does not know how to declare, and upgrading the server
         // must not silently stop it.
         let mut f = Fixture::new("declares-nothing");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "anything", "alpha");
 
         let res = f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
@@ -3145,7 +3134,7 @@ mod tests {
         // that will never move. The page has to distinguish the two cases,
         // because they send the operator to different places.
         let mut f = Fixture::new("unserved-page");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "something+for+alpha", "alpha");
 
         // Nothing has polled at all.
@@ -3179,7 +3168,7 @@ mod tests {
     #[test]
     fn a_drafted_spec_comes_back_and_the_request_awaits_review() {
         let mut f = Fixture::new("drafted");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "add+a+health+check", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
 
@@ -3196,7 +3185,7 @@ mod tests {
     #[test]
     fn a_failure_is_recorded_with_its_reason() {
         let mut f = Fixture::new("failed");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "something", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
 
@@ -3212,7 +3201,7 @@ mod tests {
         // The daemon and server are deployed separately and will skew; the
         // developer needs to be told which one to update.
         let mut f = Fixture::new("skew");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "something", "alpha");
 
         let payload = format!(
@@ -3227,101 +3216,138 @@ mod tests {
     // -- the browser side ---------------------------------------------------
 
     #[test]
-    fn the_enrolment_page_is_at_enrol_and_nowhere_else() {
-        // The person typing a code is the developer, and the next thing they
-        // need is the box — but **only at `/enrol`**. It used to be what any
-        // un-enrolled GET rendered, which made every wrong URL look like a
-        // login prompt and left `/` unable to be a landing page, because a
-        // stranger arriving there met a box asking for a code they cannot have.
-        let mut f = Fixture::new("unenrolled");
-        let res = f.go(&Req::get(private_route::ENROL));
-        assert_eq!(res.status, 401);
-        assert!(res.body.contains("enrol"), "{}", res.body);
-
-        // Everywhere else private is **not found** rather than a code box: a
-        // 401 on `/review` tells a stranger the address is real.
-        for path in [private_route::REVIEW, "/accounts", "/request/anything"] {
-            let res = f.go(&Req::get(path));
-            assert_eq!(res.status, 404, "{path}: {}", res.body);
-            assert!(!res.body.contains("Enrol this device"), "{path}");
-        }
-    }
-
-    #[test]
-    fn a_wrong_enrolment_code_says_nothing_about_which_half_was_wrong() {
-        // Distinguishing "no code armed" from "wrong code" from "already spent"
-        // tells a guesser which half they got right.
-        let mut f = Fixture::new("enrol-wrong");
-        let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123", 0);
-        f.store.put_credentials(&creds).unwrap();
-
-        let wrong = f.go(&Req::post("/enrol", "code=XYZ-999&label=phone"));
-        let none = {
-            f.store.put_credentials(&Credentials::default()).unwrap();
-            f.go(&Req::post("/enrol", "code=ABC-123&label=phone"))
-        };
-        assert_eq!(wrong.status, 401);
-        assert_eq!(wrong.status, none.status);
-        assert_eq!(
-            wrong.body, none.body,
-            "the two failures are indistinguishable"
-        );
-        assert!(wrong.set_cookie.is_none());
-    }
-
-    #[test]
-    fn an_enrolled_device_gets_an_httponly_strict_cookie() {
-        // Script must not read it, and a cross-site form must not ride it.
-        let mut f = Fixture::new("cookie");
-        let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123", 0);
-        f.store.put_credentials(&creds).unwrap();
-
-        let res = f.go(&Req::post("/enrol", "code=ABC-123&label=phone"));
-        let cookie = res.set_cookie.unwrap();
-        assert!(cookie.contains("HttpOnly"), "{cookie}");
-        assert!(cookie.contains("SameSite=Strict"), "{cookie}");
-        assert!(cookie.contains("Secure"), "{cookie}");
-    }
-
-    #[test]
-    fn a_revoked_device_is_refused_while_the_others_still_work() {
-        let mut f = Fixture::new("revoked");
-        let phone = f.enrolled();
-        // Arm the second code on the *existing* store — a fresh `Credentials`
-        // would wipe the phone this test is about.
-        let mut creds = f.store.credentials().unwrap();
-        creds.set_enrol_code("DEF-456", 0);
-        f.store.put_credentials(&creds).unwrap();
-        let laptop = f
-            .go(&Req::post("/enrol", "code=DEF-456&label=laptop"))
-            .set_cookie
-            .unwrap()
-            .trim_start_matches(&format!("{COOKIE}="))
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-
-        let mut creds = f.store.credentials().unwrap();
-        let phone_id = creds
-            .device_for(&phone)
-            .map(|d| d.id.clone())
-            .expect("the phone is live");
-        assert!(creds.revoke(&phone_id));
-        f.store.put_credentials(&creds).unwrap();
+    fn an_owner_who_is_also_the_administrator_is_the_administrator() {
+        // **The ordering property, and the reason `identify` returns early.**
+        // An administrator who also appears in `owners.json` is easy to arrange
+        // — the seed may have put them there — and without the early return
+        // they would match `owner_for` first and be identified as an owner,
+        // losing their own server to a file they can edit from the UI.
+        let mut f = Fixture::new("admin-also-owner")
+            .with_public(false)
+            .with_repos(&["intake"])
+            .with_owner("jamez667", &["intake"]);
+        let session = f.as_admin();
 
         assert_eq!(
-            f.go(&Req::get(private_route::REVIEW).with_cookie(&phone))
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
                 .status,
-            404,
-            "a revoked device is a stranger: not found, not unauthorized"
+            200,
+            "the administrator was demoted by the roster"
         );
+    }
+
+    #[test]
+    fn a_magic_link_account_named_as_the_administrator_grants_nothing() {
+        // A claim naming an email address must not escalate: a GitHub login is
+        // required for anything above a filer, so the claim never matches.
+        let mut f = Fixture::new("admin-magic-link").with_public(false);
+        let mut admin = f.store.admin().unwrap();
+        admin.claim("jo@x.com", 1);
+        f.store.put_admin(&admin).unwrap();
+
+        let session = f.signed_in("jo@x.com");
         assert_eq!(
-            f.go(&Req::get(private_route::REVIEW).with_cookie(&laptop))
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            404
+        );
+        // And they are still an ordinary filer, not anonymous — otherwise they
+        // would silently drop out of every per-account cap.
+        assert_eq!(
+            f.go(&Req::get(public_route::FILE).with_cookie(&session))
                 .status,
             200
+        );
+    }
+
+    #[test]
+    fn the_administrator_reaches_their_surface_with_no_public_one_configured() {
+        // `identify` used to bail out before the account lookup when
+        // `ctx.public` was `None`. With the account store as the only
+        // credential store that would lock the administrator out of a
+        // private-only server — their own machine, with nothing public on it.
+        let mut f = Fixture::new("admin-no-public");
+        assert!(f.public.is_none(), "no public surface at all");
+        let session = f.as_admin();
+
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            200
+        );
+    }
+
+    #[test]
+    fn a_stranger_signing_in_with_github_is_not_the_administrator() {
+        // The claim is one login. Anybody else who signs in is an account.
+        let mut f = Fixture::new("gh-stranger").with_public(false);
+        let mut admin = f.store.admin().unwrap();
+        admin.claim("jamez667", 1);
+        f.store.put_admin(&admin).unwrap();
+
+        let session = f.signed_in_as_github("somebody-else");
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            404
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_server_has_no_administrator_at_all() {
+        // Not "everybody" and not "the first person": until the claim is made,
+        // the private surface belongs to nobody.
+        let mut f = Fixture::new("unclaimed").with_public(false);
+        let session = f.signed_in_as_github("jamez667");
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&session))
+                .status,
+            404
+        );
+    }
+
+    #[test]
+    fn the_private_surface_is_not_found_to_anybody_who_is_not_the_administrator() {
+        // **Replaces the enrolment-page test**, whose premise went with the code
+        // box. The property that mattered survives: a 401 on `/review` would
+        // tell a stranger the address is real, so everything private is *not
+        // found* to everyone else.
+        let mut f = Fixture::new("private-404");
+        for path in [
+            private_route::REVIEW,
+            "/accounts",
+            "/owners",
+            "/repos",
+            "/request/anything",
+        ] {
+            let res = f.go(&Req::get(path));
+            assert_eq!(res.status, 404, "{path}: {}", res.body);
+        }
+        // And a POST is 401 rather than 404: it is not a page anybody browses
+        // to, so there is no address to confirm.
+        assert_eq!(f.go(&Req::post("/owners", "login=x&repos=y")).status, 401);
+    }
+
+    #[test]
+    fn a_dead_cookie_is_told_where_to_sign_in() {
+        // The developer whose enrolled browser stopped working is the one person
+        // most likely to hit this, and a bare "there is nothing here" is a
+        // confusing answer at an address that worked yesterday. It leaks
+        // nothing — the sign-in link is on the public landing page already.
+        let mut f = Fixture::new("dead-cookie").with_public(false).with_github();
+        let res =
+            f.go(&Req::get(private_route::REVIEW).with_cookie("a-token-that-matches-nothing"));
+        assert_eq!(res.status, 404);
+        assert!(res.body.contains(public_route::AUTH_GITHUB), "{}", res.body);
+
+        // With no application there is nothing to point at, so it says nothing.
+        let mut f = Fixture::new("dead-cookie-no-gh");
+        let res = f.go(&Req::get(private_route::REVIEW).with_cookie("nothing"));
+        assert_eq!(res.status, 404);
+        assert!(
+            !res.body.contains(public_route::AUTH_GITHUB),
+            "{}",
+            res.body
         );
     }
 
@@ -3330,7 +3356,7 @@ mod tests {
         // The form has no field for a path, so traversal is unreachable rather
         // than mitigated (spec 18).
         let mut f = Fixture::new("file");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "add+a+health+check", "alpha");
 
         let req = f.store.require(&id).unwrap();
@@ -3343,7 +3369,7 @@ mod tests {
     #[test]
     fn an_empty_or_oversized_request_is_refused_with_a_reason() {
         let mut f = Fixture::new("file-bad");
-        let token = f.enrolled();
+        let token = f.as_admin();
 
         let empty = f.go(&Req::post("/file", "text=+++&repo=alpha").with_cookie(&token));
         assert_eq!(empty.status, 400);
@@ -3385,7 +3411,7 @@ mod tests {
     #[test]
     fn every_intake_kind_is_accepted_and_an_unknown_one_defaults() {
         let mut f = Fixture::new("kinds");
-        let token = f.enrolled();
+        let token = f.as_admin();
         for (form, expected) in [
             ("bug", IntakeKind::Bug),
             ("feature", IntakeKind::Feature),
@@ -3414,7 +3440,7 @@ mod tests {
         // Spec 20: approve is a deliberate action taken below the full artifact.
         // The first POST asks; only the second settles.
         let mut f = Fixture::new("accept");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
@@ -3447,7 +3473,7 @@ mod tests {
         // they read. Confirming must not settle v2 on the strength of having read
         // v1 — consent attaches to bytes, not to an id.
         let mut f = Fixture::new("stale");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let v1 = serde_json::to_string(&DraftedSpec::new(&id, "# Version one", "specs/x")).unwrap();
@@ -3483,7 +3509,7 @@ mod tests {
         // The obvious bypass: skip the confirmation page and POST the committing
         // route directly. It must not succeed by omission.
         let mut f = Fixture::new("no-digest");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
@@ -3505,7 +3531,7 @@ mod tests {
         // Approving a queued request would be signing off a spec that does not
         // exist yet.
         let mut f = Fixture::new("ask-nodraft");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
 
         let res = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
@@ -3517,7 +3543,7 @@ mod tests {
     #[test]
     fn sending_back_requeues_it_with_the_note() {
         let mut f = Fixture::new("send-back");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Vague", "specs/x")).unwrap();
@@ -3551,7 +3577,7 @@ mod tests {
         // The surface's whole vocabulary is: file · watch · read · approve or send
         // back. Spec 19's "no writing code" anti-goal, satisfied structurally.
         let mut f = Fixture::new("no-build");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
 
         for path in [
@@ -4864,7 +4890,7 @@ mod tests {
         let mut f = Fixture::new("owners-admin")
             .with_public(false)
             .with_repos(&["intake", "other"]);
-        let device = f.enrolled();
+        let device = f.as_admin();
 
         // Two repositories ticked arrive as a repeated field. A map keeps only
         // the last, which would grant one of the two — hence `form_values`.
@@ -4890,7 +4916,7 @@ mod tests {
         // nothing will ever claim, and filings pile up against a repository
         // that does not exist. The check asks a machine that is polling now.
         let mut f = Fixture::new("repos-typo").with_public(false);
-        let device = f.enrolled();
+        let device = f.as_admin();
 
         // A daemon is polling and says what it serves.
         f.go(&Req::get(&format!("{}?repo=smart-coder", wire::route::WORK)).with_bearer(KEY));
@@ -4921,7 +4947,7 @@ mod tests {
         // override has to exist — and taking it is recorded, or the page could
         // not later explain why nothing is being drafted.
         let mut f = Fixture::new("repos-anyway").with_public(false);
-        let device = f.enrolled();
+        let device = f.as_admin();
 
         let res = f.go(
             &Req::post(private_route::REPOS, "name=not-yet-polling&anyway=yes")
@@ -4972,7 +4998,7 @@ mod tests {
         let mut f = Fixture::new("repos-disable")
             .with_public(false)
             .with_repos(&["intake"]);
-        let device = f.enrolled();
+        let device = f.as_admin();
         let filer = f.signed_in("jo@x.com");
         f.go(
             &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=intake").with_cookie(&filer),
@@ -5010,7 +5036,7 @@ mod tests {
         let mut f = Fixture::new("owners-unknown-repo")
             .with_public(false)
             .with_repos(&["intake"]);
-        let device = f.enrolled();
+        let device = f.as_admin();
 
         let res = f.go(
             &Req::post(private_route::OWNERS, "login=jamez667&repos=not-served")
@@ -5115,16 +5141,38 @@ mod tests {
         // backstop anyone reaches for at the moment they need it.
         let mut f = Fixture::new("revoke-route").with_public(false);
         let session = f.signed_in("jo@x.com");
-        let device = f.enrolled();
+        let device = f.as_admin();
 
-        let id = f.store.accounts().unwrap().live()[0].id.clone();
+        // The filer specifically. The administrator now holds an account too —
+        // they sign in with GitHub like everybody else — so "the only account"
+        // is no longer a way to name the one being revoked.
+        let id = f
+            .store
+            .accounts()
+            .unwrap()
+            .live()
+            .iter()
+            .find(|a| a.email_hint.contains("jo"))
+            .expect("the filer")
+            .id
+            .clone();
         let listed = f.go(&Req::get("/accounts").with_cookie(&device));
         assert_eq!(listed.status, 200);
         assert!(listed.body.contains("jo***@x.com"), "{}", listed.body);
 
         let res = f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
-        assert!(f.store.accounts().unwrap().live().is_empty());
+        let accounts = f.store.accounts().unwrap();
+        assert!(accounts.live().iter().all(|a| a.id != id), "still live");
+        // **And the administrator survived it.** Revoking a filer must not
+        // reach the account the server is administered from, which is a real
+        // hazard now that both are ordinary accounts.
+        assert_eq!(
+            f.go(&Req::get(private_route::REVIEW).with_cookie(&device))
+                .status,
+            200,
+            "revoking a filer locked out the administrator"
+        );
 
         // And the filer's session dies with it, without anyone walking sessions.
         let after = f.go(&Req::get(public_route::FILE).with_cookie(&session));
@@ -5155,7 +5203,7 @@ mod tests {
         // The caller asked for a state that now holds.
         let mut f = Fixture::new("revoke-twice").with_public(false);
         f.signed_in("jo@x.com");
-        let device = f.enrolled();
+        let device = f.as_admin();
         let id = f.store.accounts().unwrap().live()[0].id.clone();
 
         let path = format!("/accounts/{id}/revoke");
@@ -5226,7 +5274,7 @@ mod tests {
         // every public route goes through.
         let mut f = Fixture::new("policy-split").with_public(false);
         let account = f.signed_in("filer@example.test");
-        let device = f.enrolled();
+        let device = f.as_admin();
 
         let signin_link = format!("{}sometoken", public_route::SIGNIN_PREFIX);
         for path in [public_route::SIGNIN, public_route::FILE, &signin_link] {
@@ -5436,7 +5484,7 @@ mod tests {
         // weight paid for nobody — asserted so that "the whole server is
         // localised" does not creep in later without the decision being retaken.
         let mut f = Fixture::new("lang-private").with_public(false);
-        let device = f.enrolled();
+        let device = f.as_admin();
         let res = f.go(&Req::get(private_route::REVIEW)
             .with_cookie(&device)
             .with_lang(Some("fr"), None));
@@ -5527,7 +5575,7 @@ mod tests {
         let mut f = Fixture::new("cap-device")
             .with_public(false)
             .with_caps(1, 100);
-        let device = f.enrolled();
+        let device = f.as_admin();
         for i in 0..3 {
             let res = f.go(
                 &Req::post("/file", &format!("text=thing+{i}&repo=alpha&kind=bug"))
@@ -5739,14 +5787,14 @@ mod tests {
         assert_eq!(probe(public_route::LANDING), Bucket::PublicRead);
 
         // And nothing public shares a budget with enrolment.
-        assert_eq!(probe(private_route::ENROL), Bucket::Enrol);
-        assert_eq!(probe(private_route::REVIEW), Bucket::Enrol);
+        assert_eq!(probe(private_route::SETUP), Bucket::AnonPrivate);
+        assert_eq!(probe(private_route::REVIEW), Bucket::AnonPrivate);
     }
 
     #[test]
     fn an_enrolled_device_is_not_throttled_by_someone_elses_guessing() {
         let mut f = Fixture::new("throttle-isolated");
-        let token = f.enrolled();
+        let token = f.as_admin();
         for _ in 0..40 {
             f.go(&Req::post("/enrol", "code=GUESS&label=x"));
         }
@@ -5779,7 +5827,7 @@ mod tests {
     #[test]
     fn a_query_string_does_not_change_which_route_runs() {
         let mut f = Fixture::new("query");
-        let token = f.enrolled();
+        let token = f.as_admin();
         assert_eq!(
             f.go(&Req::get("/review?x=1").with_cookie(&token)).status,
             200
@@ -5789,7 +5837,7 @@ mod tests {
     #[test]
     fn a_listing_shows_what_needs_a_human_first() {
         let mut f = Fixture::new("order");
-        let token = f.enrolled();
+        let token = f.as_admin();
         let a = f.file(&token, "first", "alpha");
         let b = f.file(&token, "second", "beta");
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));

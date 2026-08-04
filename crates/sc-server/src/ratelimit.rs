@@ -24,9 +24,14 @@ const WINDOW_MS: u64 = 60_000;
 /// raised until it does nothing.
 const LIMIT: u32 = 240;
 
-/// Enrolment gets a tight budget: it is exactly where credential guessing
-/// happens, and no honest caller needs many tries.
-const ENROL_LIMIT: u32 = 20;
+/// Anonymous attempts at the private surface get a tight budget: that is where
+/// credential guessing happens, and no honest caller needs many tries.
+///
+/// It used to bound the private surface-code guessing, and now bounds session-cookie
+/// guessing plus claim-code guessing at `/setup`. The space being guessed got
+/// very much larger, and the argument for a tight budget did not change: an
+/// honest browser presents a cookie that works, or none.
+const ANON_PRIVATE_LIMIT: u32 = 20;
 
 /// Reading a public page.
 ///
@@ -50,7 +55,7 @@ const PUBLIC_WRITE_LIMIT: u32 = 30;
 /// per-email or per-`X-Forwarded-For` bucket here.
 ///
 /// Splitting by class buys the property that matters: **public traffic cannot
-/// starve enrolment**. One shared anonymous bucket meant 21 requests a minute
+/// starve the private surface**. One shared anonymous bucket meant 21 requests a minute
 /// from anywhere — a crawler would do it accidentally — locked the developer out
 /// of their own server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -58,8 +63,9 @@ pub enum Bucket {
     /// A known credential, keyed by its hash — never the credential itself, so a
     /// memory dump or a debug print leaks nothing.
     Credential(String),
-    /// Anonymous attempts to enrol a device.
-    Enrol,
+    /// Anonymous attempts at the private surface — a cookie that matches
+    /// nothing, or a claim code at `/setup`.
+    AnonPrivate,
     /// Anonymous reads of the public surface.
     PublicRead,
     /// Anonymous writes: filing, and spending a verification.
@@ -86,7 +92,7 @@ impl RateLimiter {
     /// Record a request. `false` means it should be refused.
     pub fn allow(&mut self, bucket: Bucket, now_ms: u64) -> bool {
         let limit = match bucket {
-            Bucket::Enrol => ENROL_LIMIT,
+            Bucket::AnonPrivate => ANON_PRIVATE_LIMIT,
             Bucket::PublicRead => PUBLIC_READ_LIMIT,
             Bucket::PublicWrite => PUBLIC_WRITE_LIMIT,
             Bucket::Credential(_) => LIMIT,
@@ -159,11 +165,11 @@ mod tests {
     }
 
     #[test]
-    fn public_traffic_cannot_starve_enrolment() {
+    fn public_traffic_cannot_starve_the_private_surface() {
         // The headline property of splitting the anonymous bucket. One shared
         // bucket meant 21 requests a minute from anywhere — a crawler would do it
         // accidentally — locked the developer out of their own server. Whatever
-        // the public surface is enduring, enrolment keeps working.
+        // the public surface is enduring, the private surface keeps working.
         let mut rl = RateLimiter::new();
         for _ in 0..(PUBLIC_READ_LIMIT * 2) {
             rl.allow(Bucket::PublicRead, 1000);
@@ -181,7 +187,7 @@ mod tests {
         );
 
         assert!(
-            rl.allow(Bucket::Enrol, 1000),
+            rl.allow(Bucket::AnonPrivate, 1000),
             "the developer can still enrol a device"
         );
         assert!(
@@ -191,15 +197,15 @@ mod tests {
     }
 
     #[test]
-    fn enrolment_keeps_its_tight_budget() {
-        // Guessing an enrolment code is the attack this bucket exists for, and
+    fn anon_private_keeps_its_tight_budget() {
+        // Guessing an the private surface code is the attack this bucket exists for, and
         // no honest caller needs many tries.
         let mut rl = RateLimiter::new();
-        for _ in 0..ENROL_LIMIT {
-            assert!(rl.allow(Bucket::Enrol, 1000));
+        for _ in 0..ANON_PRIVATE_LIMIT {
+            assert!(rl.allow(Bucket::AnonPrivate, 1000));
         }
-        assert!(!rl.allow(Bucket::Enrol, 1000));
-        const { assert!(ENROL_LIMIT < LIMIT) };
+        assert!(!rl.allow(Bucket::AnonPrivate, 1000));
+        const { assert!(ANON_PRIVATE_LIMIT < LIMIT) };
     }
 
     #[test]

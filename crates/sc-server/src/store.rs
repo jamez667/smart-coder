@@ -26,7 +26,6 @@ use sc_proto::{DcError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::account::{Accounts, Links};
-use crate::auth::Credentials;
 
 /// How long a claim may stand before the request returns to the queue.
 ///
@@ -381,10 +380,6 @@ impl Store {
 
     fn request_path(&self, id: &str) -> PathBuf {
         self.root.join("requests").join(format!("{id}.json"))
-    }
-
-    fn credentials_path(&self) -> PathBuf {
-        self.root.join("credentials.json")
     }
 
     fn accounts_path(&self) -> PathBuf {
@@ -871,21 +866,6 @@ impl Store {
         Ok(req)
     }
 
-    /// Read the credential store.
-    pub fn credentials(&self) -> Result<Credentials> {
-        match std::fs::read_to_string(self.credentials_path()) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| DcError::Eval(e.to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::default()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Write the credential store.
-    pub fn put_credentials(&self, creds: &Credentials) -> Result<()> {
-        let json = serde_json::to_string_pretty(creds).map_err(|e| DcError::Eval(e.to_string()))?;
-        write_atomic(&self.credentials_path(), json.as_bytes())
-    }
-
     /// Read the public account store.
     ///
     /// Read **lazily**, only on paths that need it — unlike
@@ -1065,12 +1045,12 @@ mod tests {
         // paths is a footgun — the backup that misses one looks like it worked.
         let (s, dir) = store("one-volume");
         file(&s, "r-1", "alpha");
-        let mut creds = Credentials::default();
-        creds.set_enrol_code("A", 0);
-        s.put_credentials(&creds).unwrap();
+        let mut admin = s.admin().unwrap();
+        admin.claim("jamez667", 1);
+        s.put_admin(&admin).unwrap();
 
         assert!(dir.join("requests").join("r-1.json").is_file());
-        assert!(dir.join("credentials.json").is_file());
+        assert!(dir.join("admin.json").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1992,18 +1972,6 @@ mod tests {
         file(&s, "r-1", "alpha");
         std::fs::write(dir.join("requests").join("r-2.json"), "{ truncated").unwrap();
         assert_eq!(s.all().unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn credentials_round_trip_and_default_when_absent() {
-        let (s, dir) = store("creds");
-        assert_eq!(s.credentials().unwrap(), Credentials::default());
-
-        let mut creds = Credentials::default();
-        creds.set_enrol_code("ABC-123", 0);
-        s.put_credentials(&creds).unwrap();
-        assert_eq!(s.credentials().unwrap(), creds);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

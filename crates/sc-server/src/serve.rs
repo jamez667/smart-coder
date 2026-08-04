@@ -133,9 +133,6 @@ const SCREEN_BATCH: usize = 4;
 pub fn run(cfg: &Config) -> Result<()> {
     let store = Store::open(&cfg.data_dir)?;
 
-    // Arm enrolment on first start, so a fresh container is usable without
-    // pre-configuration but is never *open*.
-    let code = arm_enrolment(&store, cfg)?;
     let claim_code = arm_claim(&store)?;
 
     // **Before anything reads a setting.** A wrong or missing key makes every
@@ -225,22 +222,6 @@ pub fn run(cfg: &Config) -> Result<()> {
                 "one key for every daemon means one rate budget, and rotating it \
                  locks out every machine at once",
             )
-            .emit();
-    }
-    if let Some(code) = &code {
-        // Logged once, at startup, because it is the only way in on a fresh
-        // install and nothing else will show it — it is stored hashed.
-        //
-        // **This line is a credential**, and it goes wherever the container log
-        // goes. On a host that ships logs to an aggregator, anyone who can read
-        // the aggregator can enrol a device. That is why the code now expires
-        // (see `auth::ENROL_TTL_MS`): the window is the minutes after a deploy
-        // you performed, not forever. Set `SC_SERVER_ENROL_CODE` and enrol
-        // promptly.
-        crate::log::warn("enrolment armed")
-            .with("code", code.clone())
-            .with("expires_in_s", crate::auth::ENROL_TTL_MS / 1000)
-            .with("note", "single use; open the site and type it")
             .emit();
     }
 
@@ -340,29 +321,6 @@ fn screen_pending(store: &Store, screener: &dyn Screener) -> Result<()> {
         let _ = store.finish_screening(&request.id, quarantine);
     }
     Ok(())
-}
-
-/// Make sure there is a way in, and return a code if one was freshly minted.
-///
-/// Re-arms on every start where nobody is enrolled, which is what makes
-/// [`crate::auth::ENROL_TTL_MS`] safe to enforce: a code that lapsed while the
-/// container was down is replaced by a fresh one here, so an expiring code
-/// cannot lock a developer out of their own install. The cost of letting one
-/// lapse is a restart.
-fn arm_enrolment(store: &Store, cfg: &Config) -> Result<Option<String>> {
-    let mut creds = store.credentials()?;
-    if !creds.live().is_empty() {
-        // Somebody is already enrolled; minting a code every restart would leave
-        // a standing way in that the developer never asked for.
-        return Ok(None);
-    }
-    let code = cfg
-        .enrol_code
-        .clone()
-        .unwrap_or_else(crate::auth::mint_enrol_code);
-    creds.set_enrol_code(&code, now_ms());
-    store.put_credentials(&creds)?;
-    Ok(Some(code))
 }
 
 /// Arm a claim code on a server nobody owns yet.
@@ -519,7 +477,8 @@ fn route_label(path: &str) -> &'static str {
         public_route::SCRIPT => "/public/app.js",
         public_route::FONT_BODY | public_route::FONT_DISPLAY => "/public/font",
         private_route::REVIEW => "/review",
-        private_route::ENROL => "/enrol",
+        private_route::SETUP => "/setup",
+        private_route::SETUP_GITHUB => "/setup/github",
         p if p.starts_with(public_route::SIGNIN_PREFIX) => "/public/signin/:token",
         p if p.starts_with(public_route::REQUEST_PREFIX) => "/public/request/:id",
         p if p.starts_with(wire::route::WORK) => "/api/v1/work",
@@ -721,7 +680,7 @@ mod tests {
         "/api/v1/work",
         "/review",
         "/review/:rest",
-        "/enrol",
+        "/setup",
         "other",
     ];
 
@@ -774,7 +733,7 @@ mod tests {
         assert_eq!(route_label(public_route::FONT_BODY), "/public/font");
         assert_eq!(route_label(public_route::FONT_DISPLAY), "/public/font");
         assert_eq!(route_label(private_route::REVIEW), "/review");
-        assert_eq!(route_label(private_route::ENROL), "/enrol");
+        assert_eq!(route_label(private_route::SETUP), "/setup");
         assert_eq!(route_label(wire::route::WORK), "/api/v1/work");
         assert_eq!(route_label(&wire::route::drafted("srv-1")), "/api/v1/work");
         assert_eq!(route_label("/public/signin/abc"), "/public/signin/:token");

@@ -30,7 +30,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{hash, matches, mint_enrol_code};
+use crate::auth::{hash, matches, mint_code};
 
 /// How long a minted claim code stays usable.
 ///
@@ -157,7 +157,7 @@ impl Admin {
 /// terminal and typed into a browser, so it trades length for typeability, which
 /// is safe only because it is single-use and short-lived.
 pub fn mint_claim_code() -> String {
-    mint_enrol_code()
+    mint_code()
 }
 
 #[cfg(test)]

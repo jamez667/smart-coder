@@ -588,6 +588,22 @@ fn blank_repo_form() -> String {
         .to_string()
 }
 
+/// Not found, with the way back in named.
+///
+/// **A bare 404 is a confusing answer to the developer whose cookie used to
+/// work.** Device enrolment is gone, so an enrolled browser now matches nothing
+/// and lands here — and without this line the only signal would be a page that
+/// says there is nothing at an address they used yesterday.
+///
+/// It leaks nothing: the sign-in link is already on the public landing page for
+/// anyone to see.
+pub fn not_found_for_admin() -> String {
+    shell(
+        "Not found",
+        "<h1>Not found</h1><p>There is nothing here.</p>         <p class=\"meta\">If you administer this server,          <a href=\"/public/auth/github\">sign in with GitHub</a>.</p>",
+    )
+}
+
 /// Claim an unclaimed server.
 ///
 /// **Three steps in dependency order**, and the order is forced rather than
@@ -677,48 +693,6 @@ pub fn setup_github_page(base_url: &str, error: Option<&str>) -> String {
              becomes this server's administrator.</p>",
             callback = esc(&callback),
         ),
-    )
-}
-
-/// The enrolment page, shown to a browser that is not enrolled.
-pub fn enrol_page() -> String {
-    shell(
-        "Enrol this device",
-        "<h1>Enrol this device</h1>\
-         <p>Read the enrolment code from the server's startup log and \
-         type it here.</p>\
-         <form method=\"post\" action=\"/enrol\">\
-         <label for=\"code\">Enrolment code</label>\
-         <input id=\"code\" name=\"code\" required autocapitalize=\"characters\" \
-         autocorrect=\"off\" spellcheck=\"false\" placeholder=\"XXX-XXX\">\
-         <label for=\"label\">What is this device?</label>\
-         <input id=\"label\" name=\"label\" placeholder=\"phone\">\
-         <button type=\"submit\">Enrol</button></form>\
-         <p class=\"meta\">The code works once. Each device gets its own \
-         credential, so losing one does not mean losing the others.</p>",
-    )
-}
-
-/// The same page, after a failed attempt.
-///
-/// The message is deliberately identical whatever went wrong — wrong code, no code
-/// armed, already spent. Distinguishing them tells a guesser which half they got
-/// right.
-pub fn enrol_page_with_error() -> String {
-    enrol_page().replace(
-        "<h1>Enrol this device</h1>",
-        "<h1>Enrol this device</h1>\
-         <p class=\"note\">That code did not work. Generate a fresh one and try \
-         again.</p>",
-    )
-}
-
-/// Shown once a device is enrolled.
-pub fn enrolled_page() -> String {
-    shell(
-        "Enrolled",
-        "<h1>Enrolled</h1>\
-         <p>This device is enrolled. <a href=\"/\">Go to the requests</a>.</p>",
     )
 }
 
@@ -1099,19 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn the_enrolment_page_names_only_a_way_in_that_exists() {
-        // It told the developer to run `smart-coder enrol`, which no crate
-        // implements — a page confidently instructing someone to run a command
-        // that does not exist is worse than one that says nothing.
-        let html = enrol_page();
-        assert!(html.contains("startup log"), "{html}");
-        assert!(
-            !html.contains("smart-coder enrol"),
-            "no such subcommand exists yet: {html}"
-        );
-    }
-
-    #[test]
     fn the_accounts_page_shows_a_hint_never_an_address() {
         // This page is the reason `email_hint` exists: enough to recognise the
         // account you meant to revoke, not enough to be a contact list.
@@ -1167,10 +1128,18 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_enrolment_reveals_nothing_about_why() {
-        let html = enrol_page_with_error();
+    fn a_failed_claim_reveals_nothing_about_why() {
+        // The same property the enrolment page had, moved to the page that now
+        // takes a one-time code: distinguishing "expired" from "wrong" from
+        // "already spent" tells a guesser which half they got right.
+        let html = setup_page(
+            "",
+            Some(
+                "That code did not work. It is printed in the container's log                  at startup, is single-use, and expires after thirty minutes.",
+            ),
+        );
         assert!(html.contains("did not work"), "{html}");
-        for leak in ["expired", "already used", "no code", "wrong code"] {
+        for leak in ["already spent", "no code is armed", "wrong code"] {
             assert!(!html.contains(leak), "{leak} leaks which half was right");
         }
     }
