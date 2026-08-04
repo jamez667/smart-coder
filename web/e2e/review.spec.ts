@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { server, signInWithPassword, type Server } from "./fixture";
+import { signInWithPassword } from "./fixture";
 
 // The review gate, asserted in a browser.
 //
@@ -12,32 +12,40 @@ import { server, signInWithPassword, type Server } from "./fixture";
 // The Rust original is named in each test, so the connection survives the file
 // they used to live in being deleted.
 //
-// **A scratch server per file**, claimed and populated through the real paths.
-// A review test that skipped when there was nothing to review would pass on a
-// broken build, which is worse than not having it.
+// **A real server, claimed and populated through the real paths**, stood up once
+// for the run by the global setup. A review test that skipped when there was
+// nothing to review would pass on a broken build, which is worse than not
+// having it at all.
 
-let sc: Server;
-let requestId: string;
+// The server, the credential and the request all come from the global setup —
+// one server for the run, claimed and populated through the real paths.
+const base = () => process.env.SC_BASE_URL!;
 
-test.beforeAll(async () => {
-  sc = await server();
-  requestId = await sc.fileAndDraft("The thing is broken and should not be.");
-});
-
-test.afterAll(() => sc?.stop());
+// **Signed in once, not per test.** A password sign-in lands in
+// `Bucket::AnonPrivate` — 20 a minute, because that is the bucket for credential
+// guessing — and a `beforeEach` that authenticates fresh for every test spends
+// the whole budget and then fails with a 429 that reads like a broken login.
+//
+// The limiter is right and the harness was wrong: a browser session is a thing
+// you get once and keep, which is what a person does too.
+let session: string | undefined;
 
 test.beforeEach(async ({ page, context }) => {
-  const session = await signInWithPassword(sc.base, sc.login, sc.password);
+  session ??= await signInWithPassword(
+    base(),
+    process.env.SC_ADMIN_LOGIN!,
+    process.env.SC_ADMIN_PASSWORD!,
+  );
   await context.addCookies([
     {
       name: "sc_device",
       value: session,
-      url: sc.base,
+      url: base(),
       httpOnly: true,
       sameSite: "Strict",
     },
   ]);
-  await page.goto(`${sc.base}/request/${requestId}`);
+  await page.goto(`/request/${process.env.SC_REQUEST_ID}`);
   await expect(page.locator("#decide")).toBeVisible();
 });
 

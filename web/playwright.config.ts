@@ -17,10 +17,12 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
+  globalSetup: "./e2e/global-setup.ts",
   use: {
-    // Set by the CI step, which stands the server up first. Locally this is the
-    // container on 8791.
-    baseURL: process.env.SC_BASE_URL ?? "http://127.0.0.1:8791",
+    // **Set by the global setup, never defaulted.** A fallback here is how the
+    // first version of this harness ended up testing the author's own container
+    // rather than a server it stood up — green locally, ECONNREFUSED in CI.
+    baseURL: process.env.SC_BASE_URL,
     trace: "retain-on-failure",
   },
   // **One project at a time.** The two share a rate-limit bucket on the server

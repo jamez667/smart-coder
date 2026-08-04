@@ -1,7 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { hostname } from "node:os";
 
 // A real server, claimed, with a real drafted request in it.
 //
@@ -16,14 +14,32 @@ import { join } from "node:path";
 // bundle, the same CSP.
 
 const IMAGE = process.env.SC_IMAGE ?? "sc-server:local";
-const PORT = process.env.SC_PORT ?? "8799";
-const NAME = "sc-e2e";
+const NAME = process.env.SC_CONTAINER ?? "sc-e2e";
 
 function docker(...args: string[]): string {
   return execFileSync("docker", args, { encoding: "utf-8" });
 }
 
+/// Are the tests themselves running inside a container?
+///
+/// **This decides how the server is reachable, and getting it wrong is a failure
+/// that only appears in CI.** On a developer's machine the tests run on the
+/// host, so a published port on `127.0.0.1` works. In CI they run in a
+/// Playwright container driving the Docker socket, so the server it starts is a
+/// *sibling*: `127.0.0.1` is the test container, not the server, and a published
+/// port is not reachable from there at all.
+///
+/// The answer is to address the sibling by container name on the shared network.
+function inContainer(): boolean {
+  return !!process.env.CI || /^[0-9a-f]{12}$/.test(hostname());
+}
+
 export interface Server {
+  /// Where to reach it.
+  ///
+  /// **Ask for this rather than assuming a port.** It differs between a
+  /// developer's machine and CI, and a spec that hardcoded one passed locally
+  /// and failed everywhere else.
   base: string;
   /// The administrator's credential, chosen during the claim.
   login: string;
@@ -33,44 +49,46 @@ export interface Server {
   stop(): void;
 }
 
-/// Stand up a scratch server, claim it, and file one request that has been
-/// drafted and is awaiting review.
+/// Stand up a scratch server and claim it.
 export async function server(): Promise<Server> {
   try {
     docker("rm", "-f", NAME);
   } catch {
     // Not running. Fine.
   }
-  // **Build the image if it is not there.** Locally it usually is, from the
-  // last `docker build`; in CI it never is, and a harness that assumed
-  // otherwise would fail with "no such image" rather than testing anything.
+  // **Build the image if it is not there.** Locally it usually is, from the last
+  // `docker build`; in CI it never is, and a harness that assumed otherwise
+  // would fail with "no such image" rather than testing anything.
   try {
     docker("image", "inspect", IMAGE);
   } catch {
-    execFileSync("docker", ["build", "-t", IMAGE, ".."], {
-      stdio: "inherit",
-    });
+    execFileSync("docker", ["build", "-t", IMAGE, ".."], { stdio: "inherit" });
   }
-  const dir = mkdtempSync(join(tmpdir(), "sc-e2e-"));
+
   const key = Array.from({ length: 32 }, () =>
     Math.floor(Math.random() * 256)
       .toString(16)
       .padStart(2, "0"),
   ).join("");
 
+  const sibling = inContainer();
+  // The base URL is not only how the tests reach it — the server validates its
+  // own cookies and builds its links from it, so this has to be the address that
+  // actually works from where the tests are.
+  const base = sibling ? `http://${NAME}:8420` : "http://127.0.0.1:8799";
+
   docker(
     "run",
     "-d",
     "--name",
     NAME,
-    "-p",
-    `${PORT}:8420`,
+    ...(sibling ? [] : ["-p", "8799:8420"]),
     "-e",
     `SC_SERVER_SECRET_KEY=${key}`,
     "-e",
-    "SC_SERVER_DAEMON_KEYS=harness:0123456789abcdef0123456789abcdef",
+    `SC_SERVER_DAEMON_KEYS=harness:${DAEMON_KEY}`,
     "-e",
-    `SC_SERVER_PUBLIC_BASE_URL=http://127.0.0.1:${PORT}`,
+    `SC_SERVER_PUBLIC_BASE_URL=${base}`,
     "-e",
     "SC_SERVER_PUBLIC_REPOS=intake",
     "-e",
@@ -84,7 +102,6 @@ export async function server(): Promise<Server> {
     IMAGE,
   );
 
-  const base = `http://127.0.0.1:${PORT}`;
   await waitFor(base);
 
   // The claim code is logged, in the clear, because it has to be — its value is
@@ -107,7 +124,7 @@ export async function server(): Promise<Server> {
   const setup = /sc_setup=([a-f0-9]+)/.exec(
     step1.headers.get("set-cookie") ?? "",
   )?.[1];
-  if (!setup) throw new Error("no setup cookie");
+  if (!setup) throw new Error(`no setup cookie (${step1.status})`);
 
   // Step two: choose the credential that owns this server.
   const step2 = await fetch(`${base}/setup/admin`, {
@@ -130,13 +147,11 @@ export async function server(): Promise<Server> {
       // store. A fixture that assembles a record by hand keeps passing after
       // the real path grows a rule, and the review gate is exactly where a
       // fixture must not diverge from what a request actually looks like.
-      // **Filed by the administrator, not by a magic-link filer.** The mail
-      // provider in this fixture is not real and the console mailer was removed,
-      // so there is no way to receive a link — and inventing one would mean the
-      // harness signing in by a path no user has.
       //
-      // What is under test here is the review gate, and a request filed from the
-      // private surface reaches it identically.
+      // Filed by the administrator rather than by a magic-link filer: the mail
+      // provider here is not real and the console mailer was removed, so there
+      // is no way to receive a link. A request filed from the private surface
+      // reaches the review gate identically.
       const admin = await signInWithPassword(base, login, password);
       await fetch(`${base}/file`, {
         method: "POST",
@@ -152,8 +167,8 @@ export async function server(): Promise<Server> {
       const poll = await fetch(`${base}/api/v1/work?repo=intake`, {
         headers: { Authorization: `Bearer ${DAEMON_KEY}` },
       });
-      // The wire calls it `item`, not `work` — the envelope carries a
-      // `type` and the payload sits beside it.
+      // The wire calls it `item`, not `work` — the envelope carries a `type` and
+      // the payload sits beside it.
       const work = (await poll.json()) as { item?: { id: string } };
       const id = work.item?.id;
       if (!id) throw new Error("the daemon was offered no work");
@@ -179,13 +194,12 @@ export async function server(): Promise<Server> {
       } catch {
         // Already gone.
       }
-      rmSync(dir, { recursive: true, force: true });
     },
   };
 }
 
 async function waitFor(base: string): Promise<void> {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 80; i++) {
     try {
       const res = await fetch(base, { redirect: "manual" });
       if (res.status < 500) return;
@@ -194,7 +208,7 @@ async function waitFor(base: string): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error("the server never came up");
+  throw new Error(`the server never came up at ${base}`);
 }
 
 const DAEMON_KEY = "0123456789abcdef0123456789abcdef";
@@ -207,7 +221,10 @@ const DAEMON_KEY = "0123456789abcdef0123456789abcdef";
 const SPEC = [
   "# What this changes",
   "",
-  ...Array.from({ length: 40 }, (_, i) => `Paragraph ${i + 1} of the drafted specification.`),
+  ...Array.from(
+    { length: 40 },
+    (_, i) => `Paragraph ${i + 1} of the drafted specification.`,
+  ),
 ].join("\n");
 
 /// Sign in with the password chosen at the claim.
@@ -222,7 +239,9 @@ export async function signInWithPassword(
     body: `login=${encodeURIComponent(login)}&password=${encodeURIComponent(password)}`,
     redirect: "manual",
   });
-  const session = /sc_device=([a-f0-9]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1];
+  const session = /sc_device=([a-f0-9]+)/.exec(
+    res.headers.get("set-cookie") ?? "",
+  )?.[1];
   if (!session) throw new Error(`the password sign-in failed: ${res.status}`);
   return session;
 }
