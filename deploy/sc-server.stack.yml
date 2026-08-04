@@ -301,6 +301,20 @@ services:
       # accounts would let an attacker's burned identities be swapped one for
       # one under a wall that looks intact.
       SC_SERVER_PUBLIC_MAX_DAILY: ${SC_SERVER_PUBLIC_MAX_DAILY:-}
+
+      # Drafting runs one repository may be sent into per rolling 24h.
+      #
+      # THE ONLY CAP THAT BOUNDS WHAT IS ACTUALLY SPENT. MAX_DAILY above limits
+      # what a stranger may FILE, and never limited re-admission: a request that
+      # has already been filed re-enters the queue for nothing every time it is
+      # sent back or released, and each re-entry is a full drafting run on your
+      # machine. A send-back loop was unbounded before this existed.
+      #
+      # Per repository rather than per person, because what is being spent is
+      # runs against a project — a number that stays true when a second owner is
+      # added, where a per-person cap would simply double. Your own send-backs
+      # count too: the cap says what a project may cost in a day.
+      SC_SERVER_PUBLIC_MAX_DRAFTS: ${SC_SERVER_PUBLIC_MAX_DRAFTS:-}
       SC_SERVER_PUBLIC_MAX_ACCOUNTS: ${SC_SERVER_PUBLIC_MAX_ACCOUNTS:-}
       SC_SERVER_PUBLIC_MAX_LINKS: ${SC_SERVER_PUBLIC_MAX_LINKS:-}
 

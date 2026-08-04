@@ -97,6 +97,12 @@ services:
       SC_SERVER_SCREEN_MODEL: ${SC_SERVER_SCREEN_MODEL:-}
 
       SC_SERVER_PUBLIC_MAX_DAILY: ${SC_SERVER_PUBLIC_MAX_DAILY:-}
+
+      # Drafting runs per repository per rolling 24h. Bounds re-admission —
+      # every send-back and release buys another full drafting run, which
+      # SC_SERVER_PUBLIC_MAX_DAILY never limited because it is checked at filing
+      # time. Per repository, not per person.
+      SC_SERVER_PUBLIC_MAX_DRAFTS: ${SC_SERVER_PUBLIC_MAX_DRAFTS:-}
       SC_SERVER_PUBLIC_MAX_ACCOUNTS: ${SC_SERVER_PUBLIC_MAX_ACCOUNTS:-}
       SC_SERVER_PUBLIC_MAX_LINKS: ${SC_SERVER_PUBLIC_MAX_LINKS:-}
       SC_SERVER_PUBLIC_SHOW_SPEC: ${SC_SERVER_PUBLIC_SHOW_SPEC:-}

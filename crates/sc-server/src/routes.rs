@@ -1025,6 +1025,18 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
                 return ask_to_approve(ctx, id);
             }
 
+            // The two verbs that put a request back in the claimable queue cost
+            // a drafting run each. Checked before the store is touched, and
+            // against the request's own repository — which has to be read first,
+            // because the budget is the repository's rather than the caller's.
+            if matches!(verb, "send-back" | "release") {
+                if let Ok(Some(r)) = ctx.store.get(id) {
+                    if let Err(res) = drafting_budget(ctx, &r.repo) {
+                        return res;
+                    }
+                }
+            }
+
             let outcome = match verb {
                 "approve/confirm" => {
                     let digest = form.get("digest").cloned().unwrap_or_default();
@@ -1268,6 +1280,55 @@ fn mine(ctx: &Ctx<'_>, account_id: &str) -> sc_proto::Result<Vec<Request>> {
         .collect())
 }
 
+/// Refuse a verb that would buy another drafting run when the repository has
+/// already spent its day.
+///
+/// **Called by every verb that re-admits work**, and a function rather than
+/// three copies for exactly that reason: `send-back` and `release` both move a
+/// request back to `Queued`, and a fourth added later either calls this or
+/// visibly does not.
+///
+/// The gap this closes was open from the moment a request could be re-admitted
+/// at all. `max_daily_filings` is checked when something is *filed*, keyed on
+/// the filer — so a request already filed re-enters the queue for nothing,
+/// however often. Each re-entry is a full drafting run on the developer's
+/// machine.
+///
+/// **The developer's own verbs are bounded too**, deliberately. The cap states
+/// what one project may cost in a day, and a send-back loop from a redraft that
+/// keeps coming back wrong is as easy for the developer to cause as for an
+/// owner. Reaching it should read as information about the day, not as a
+/// refusal of authority.
+fn drafting_budget(ctx: &Ctx<'_>, repo: &str) -> std::result::Result<(), Res> {
+    let Some(public) = ctx.public else {
+        return Ok(());
+    };
+    let since = ctx.now_ms.saturating_sub(crate::config::FILING_WINDOW_MS);
+    match ctx.store.drafts_since(repo, since) {
+        Ok(n) if n >= public.max_daily_drafts => {
+            crate::log::warn("drafting budget reached")
+                .with("repo", repo.to_string())
+                .with("drafts", n as u64)
+                .with("cap", public.max_daily_drafts as u64)
+                .emit();
+            Err(error(
+                429,
+                &format!(
+                    "{repo} has been drafted {n} times today, which is the limit. \
+                     Every send-back and release buys another full drafting run on \
+                     the developer's machine, so the cap is what stops one \
+                     repository spending a day's budget on one request."
+                ),
+            ))
+        }
+        Ok(_) => Ok(()),
+        // A store that cannot be read is not a budget decision. Refusing here
+        // would turn a transient read failure into a refusal that looks like a
+        // spend limit.
+        Err(_) => Ok(()),
+    }
+}
+
 /// The verbs an owner may reach.
 ///
 /// **Both decide *against* work**, and that is the whole rule. Their failure
@@ -1354,13 +1415,22 @@ fn owner_route(
                 return not_found();
             }
 
-            let owns = match ctx.store.get(id) {
-                Ok(Some(r)) => repos.contains(&r.repo),
-                Ok(None) => false,
+            // The repository is carried out of this read rather than fetched
+            // again: the ownership check and the drafting budget ask about the
+            // same record, and two reads could disagree.
+            let repo = match ctx.store.get(id) {
+                Ok(Some(r)) if repos.contains(&r.repo) => r.repo,
+                Ok(_) => return not_found(),
                 Err(e) => return error(500, &e.to_string()),
             };
-            if !owns {
-                return not_found();
+
+            // `send-back` puts the request back in the claimable queue, so it
+            // costs a drafting run on the developer's machine — bounded per
+            // repository, not per owner.
+            if matches!(verb, "send-back" | "release") {
+                if let Err(res) = drafting_budget(ctx, &repo) {
+                    return res;
+                }
             }
 
             let form = form_fields(&req.body);
@@ -1984,6 +2054,7 @@ mod tests {
                 }),
                 max_outstanding_links: 200,
                 max_daily_filings: crate::config::DEFAULT_MAX_DAILY_FILINGS,
+                max_daily_drafts: crate::config::DEFAULT_MAX_DAILY_DRAFTS,
                 max_accounts: crate::config::DEFAULT_MAX_ACCOUNTS,
                 show_spec: true,
                 // No owner role unless a test asks for one, which is the
@@ -2039,6 +2110,15 @@ mod tests {
             if let Some(p) = self.public.as_mut() {
                 p.max_daily_filings = daily;
                 p.max_accounts = accounts;
+            }
+            self
+        }
+
+        /// Tighten the drafting budget, so a test can reach it without
+        /// re-admitting sixty times.
+        fn with_draft_cap(mut self, drafts: usize) -> Fixture {
+            if let Some(p) = self.public.as_mut() {
+                p.max_daily_drafts = drafts;
             }
             self
         }
@@ -3444,6 +3524,88 @@ mod tests {
         let mine = all.iter().find(|r| r.repo == "intake").unwrap().id.clone();
         let theirs = all.iter().find(|r| r.repo == "other").unwrap().id.clone();
         (f, owner, mine, theirs)
+    }
+
+    #[test]
+    fn re_admitting_work_is_bounded_per_repository() {
+        // **The loop this closes was open.** `send_back` moves a request from
+        // `AwaitingReview` back to `Queued`, so it is drafted again — and owners
+        // have `send-back`. `max_daily_filings` never bounded it: that is
+        // checked when something is *filed*, and this request was filed once.
+        //
+        // Two drafting runs allowed, so the third re-admission is refused.
+        let (mut f, owner, mine, _) = owner_fixture("draft-budget");
+        let cap = 2;
+        f = f.with_draft_cap(cap);
+
+        // Loop until it is refused. Asserting *that it stops* rather than on
+        // which round: the count is of drafting runs, and a round both spends
+        // one (the claim) and asks for another (the send-back), so tying the
+        // test to a round number would be asserting arithmetic rather than the
+        // property.
+        let mut send_backs = 0;
+        let mut refused = false;
+        for _ in 0..20 {
+            // A daemon claims it — which is where a drafting run is counted —
+            // and hands back a spec.
+            f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+            let payload =
+                serde_json::to_string(&DraftedSpec::new(&mine, "# Spec", "specs/x")).unwrap();
+            f.go(&Req::post(&wire::route::drafted(&mine), &payload).with_bearer(KEY));
+
+            let res = f.go(&Req::post(
+                &format!("{}{mine}/send-back", public_route::REQUEST_PREFIX),
+                "note=again",
+            )
+            .with_cookie(&owner));
+            if res.status == 429 {
+                refused = true;
+                break;
+            }
+            send_backs += 1;
+        }
+
+        assert!(refused, "the loop never stopped — this is the hole itself");
+        assert!(
+            send_backs <= cap,
+            "{send_backs} send-backs got through a budget of {cap}"
+        );
+        // And the repository's spend is what stopped it.
+        let spent = f.store.drafts_since("intake", 0).unwrap();
+        assert!(spent >= cap, "{spent} runs against a cap of {cap}");
+    }
+
+    #[test]
+    fn the_drafting_budget_is_the_repositorys_and_not_the_callers() {
+        // Keyed on the repository, so a second owner does not double it — and
+        // so the developer's own send-backs count against the same day. What is
+        // being spent is runs against a project.
+        let (mut f, owner, mine, _) = owner_fixture("draft-budget-shared");
+        f = f.with_draft_cap(1);
+
+        // The developer spends the repository's budget.
+        f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
+        let payload = serde_json::to_string(&DraftedSpec::new(&mine, "# Spec", "specs/x")).unwrap();
+        f.go(&Req::post(&wire::route::drafted(&mine), &payload).with_bearer(KEY));
+
+        // And the owner finds it spent, without having spent any of it.
+        let res = f.go(&Req::post(
+            &format!("{}{mine}/send-back", public_route::REQUEST_PREFIX),
+            "note=again",
+        )
+        .with_cookie(&owner));
+        assert_eq!(res.status, 429, "{}", res.body);
+    }
+
+    #[test]
+    fn a_request_written_before_drafts_were_counted_still_loads() {
+        // The field is new; records on the live volume have none. An absent
+        // list reads as zero runs, which is the safe direction — it cannot
+        // refuse work on a count nobody recorded.
+        let older = r#"{"id":"r-1","text":"a thing","repo":"alpha","kind":"bug",
+                        "state":"queued","filed_ms":0}"#;
+        let r: crate::store::Request = serde_json::from_str(older).unwrap();
+        assert!(r.drafts.is_empty());
     }
 
     #[test]

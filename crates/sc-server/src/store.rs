@@ -247,6 +247,20 @@ pub struct Request {
     /// not `Claimed`, so a stale holder is as unrepresentable as a stale stamp.
     #[serde(default)]
     pub claimed_by: Option<String>,
+    /// When this request was handed to a daemon, one entry per hand-off.
+    ///
+    /// **What a drafting run actually costs is counted here**, because nothing
+    /// else records it: a redrafted request looks identical to a first draft,
+    /// and `filed_ms` says only when it arrived. Every re-admission — a
+    /// send-back, a release — buys another full run against the same record, and
+    /// without this there is nothing to count.
+    ///
+    /// Trimmed to [`crate::config::FILING_WINDOW_MS`] on write, so the vector is
+    /// bounded by the cap rather than by the record's age: a request redrafted
+    /// daily for a year would otherwise carry 365 entries in a file the review
+    /// page reads on every render.
+    #[serde(default)]
+    pub drafts: Vec<u64>,
 }
 
 impl Request {
@@ -271,6 +285,7 @@ impl Request {
             account_id: None,
             claimed_ms: None,
             claimed_by: None,
+            drafts: Vec::new(),
         }
     }
 
@@ -461,9 +476,17 @@ impl Store {
         else {
             return Ok(None);
         };
+        let now = now_ms();
         next.state = RequestState::Claimed;
-        next.claimed_ms = Some(now_ms());
+        next.claimed_ms = Some(now);
         next.claimed_by = Some(by.to_string());
+        // **The one place a drafting run begins**, so the one place it is
+        // counted. Recorded here rather than at the verbs that re-admit work,
+        // because those are several and this is one — and a verb added later
+        // that reaches `Queued` is counted without anyone remembering to.
+        next.drafts.push(now);
+        next.drafts
+            .retain(|t| now.saturating_sub(*t) <= crate::config::FILING_WINDOW_MS);
         self.put(&next)?;
         Ok(Some(next))
     }
@@ -690,6 +713,25 @@ impl Store {
             .iter()
             .filter(|r| r.filed_by(account_id) && r.filed_ms >= since_ms)
             .count())
+    }
+
+    /// How many drafting runs `repo` has been sent into since `since_ms`.
+    ///
+    /// Counted from the records, like [`filed_since`](Self::filed_since) and for
+    /// the same reason: a separate tally is state that drifts from the thing it
+    /// counts, and the records are already read on this path.
+    ///
+    /// **Keyed on the repository, not on who asked for the run.** What is being
+    /// spent is drafting runs against a project, which is the number the
+    /// developer pays for — and it stays true when a second owner is added,
+    /// where a per-person cap would simply double.
+    pub fn drafts_since(&self, repo: &str, since_ms: u64) -> Result<usize> {
+        Ok(self
+            .all()?
+            .iter()
+            .filter(|r| r.repo == repo)
+            .map(|r| r.drafts.iter().filter(|t| **t >= since_ms).count())
+            .sum())
     }
 
     /// Every request still waiting to be screened.

@@ -271,6 +271,13 @@ pub struct PublicConfig {
     /// a morning's worth of bugs does not reach it, and a loop hits it in
     /// seconds.
     pub max_daily_filings: usize,
+    /// How many drafting runs one repository may be sent into per rolling 24h.
+    ///
+    /// Bounds **re-admission**, which [`max_daily_filings`](Self::max_daily_filings)
+    /// never did: that one is checked when a request is filed, so a request
+    /// already filed re-enters the queue for free however often somebody sends
+    /// it back.
+    pub max_daily_drafts: usize,
     /// How many accounts may exist at all.
     ///
     /// Without this the per-account cap is weaker than it looks: an id the
@@ -370,6 +377,23 @@ pub const DEFAULT_MAX_DAILY_FILINGS: usize = 20;
 /// volume fills.
 pub const DEFAULT_MAX_ACCOUNTS: usize = 1_000;
 
+/// The default ceiling on drafting runs per repository per day.
+///
+/// **The only cap that bounds what is actually spent.**
+/// [`DEFAULT_MAX_DAILY_FILINGS`] bounds what a stranger may *file*, which was
+/// the whole threat model while filing was the only way work reached the queue.
+/// It never bounded *re-admission*: a request already filed has paid its filing,
+/// and every later send-back or release buys another full drafting run against
+/// the same record for nothing.
+///
+/// Sixty is generous for a project under real review — a redraft or two on each
+/// of a day's requests — and stops a send-back loop within minutes.
+///
+/// Note what the filing cap really allowed, which makes this the first genuine
+/// bound: twenty filings *per account*, against a default of a thousand
+/// accounts.
+pub const DEFAULT_MAX_DAILY_DRAFTS: usize = 60;
+
 /// The window the filing cap is measured over.
 ///
 /// Rolling rather than calendar: "resets at midnight" invites waiting for
@@ -424,6 +448,9 @@ pub mod env {
     pub const PUBLIC_SHOW_SPEC: &str = "SC_SERVER_PUBLIC_SHOW_SPEC";
     /// Requests one account may file per rolling 24h — the model-spend ceiling.
     pub const PUBLIC_MAX_DAILY: &str = "SC_SERVER_PUBLIC_MAX_DAILY";
+    /// Drafting runs one repository may be sent into per rolling 24h — the cap
+    /// on what re-admitting work costs.
+    pub const PUBLIC_MAX_DRAFTS: &str = "SC_SERVER_PUBLIC_MAX_DRAFTS";
     /// How many accounts may exist — what the per-account cap rests on.
     pub const PUBLIC_MAX_ACCOUNTS: &str = "SC_SERVER_PUBLIC_MAX_ACCOUNTS";
 
@@ -926,6 +953,7 @@ fn public_from(
         screen: screen_from(get)?,
         max_outstanding_links: count(get, env::PUBLIC_MAX_LINKS, DEFAULT_MAX_OUTSTANDING_LINKS)?,
         max_daily_filings: count(get, env::PUBLIC_MAX_DAILY, DEFAULT_MAX_DAILY_FILINGS)?,
+        max_daily_drafts: count(get, env::PUBLIC_MAX_DRAFTS, DEFAULT_MAX_DAILY_DRAFTS)?,
         max_accounts: count(get, env::PUBLIC_MAX_ACCOUNTS, DEFAULT_MAX_ACCOUNTS)?,
         // On unless explicitly turned off.
         show_spec: opt(get, env::PUBLIC_SHOW_SPEC)
