@@ -152,10 +152,10 @@ false positive and not on a miss, for exactly that reason.
 
 There are **four parties** now, and conflating them is the mistake to avoid.
 They authenticate differently because they are different things: a daemon is a
-long-lived machine credential, a *device* is the developer, an *account* is a
-member of the public who may file and read their own requests and nothing else,
-and an *owner* is somebody the developer has promoted, from `/owners` on an
-enrolled device, as responsible for a repository.
+long-lived machine credential, the *administrator* is whoever claimed this
+server and signs in with GitHub, an *account* is a member of the public who may
+file and read their own requests and nothing else, and an *owner* is somebody
+the administrator has promoted, at `/owners`, as responsible for a repository.
 
 The last is the newest and the one whose boundary matters most:
 
@@ -163,7 +163,7 @@ The last is the newest and the one whose boundary matters most:
 | --- | --- | --- | --- | --- | --- | --- |
 | Account | own repo's | no | no | no | no | no |
 | Owner | — | their repositories' | yes | their repositories' | **no** | no |
-| Device | yes | all | yes | yes | yes | yes |
+| Admin | yes | all | yes | yes | yes | yes |
 
 **Accepting is the one an owner does not get** <!--@ sc_server::routes::OWNER_VERBS -->,
 and the reason is not that it reaches the repository. It does not: the spec was
@@ -190,9 +190,16 @@ can file again. Releasing fails towards **spent** work, which is what the
 ceiling is for.
 
 That rule is **structural**. The private surface is entered through
-`let Some(Caller::Device { .. }) = caller` <!--@ crates/sc-server/src/routes.rs -->
+`let Some(Caller::Admin { .. }) = caller` <!--@ crates/sc-server/src/routes.rs -->
 and `accept` lives past that line, so there is no value of `Caller::Owner` which
 reaches it. Not a check inside a handler that a later reader could tidy away.
+
+**Both now arrive as a GitHub session**, so the whole burden of telling them
+apart sits in `identify` — one function, one branch. The administrator is
+checked **before** the roster and returns immediately, because an administrator
+who also appears in `owners.json` (easy: the seed may have put them there) would
+otherwise match `owner_for` first and be identified as an owner, losing their
+own server to a file they can edit from the UI.
 
 The same line does the same work twice more. Administering **owners**
 <!--@ crates/sc-server/src/routes.rs --> and **repositories**
@@ -258,8 +265,8 @@ second.
 ### The public → server
 
 ✅ **Built** <!--@ crates/sc-server/src/account.rs -->. The filing form is
-reachable **with no credential at all**; reviewing stays behind device
-enrolment. This is a real move of the trust boundary, so what makes it
+reachable **with no credential at all**; reviewing stays behind the
+administrator's GitHub sign-in. This is a real move of the trust boundary, so what makes it
 defensible is worth stating rather than assuming.
 
 **An account is the gate, not per-request verification.** An earlier design
@@ -339,7 +346,7 @@ would have every request read the same pre-write total and every one of them
 pass — an overshoot bounded by concurrency rather than by the cap.
 
 **The cap keys on the account id**, so requests the developer files from an
-enrolled device — which carry no account — are outside it. The ceiling bounds
+administrator — which carry no account — are outside it. The ceiling bounds
 what strangers spend of the developer's budget, not what the developer spends of
 their own.
 
@@ -396,25 +403,70 @@ calls it or visibly does not.
 ceiling and still unwelcome, and the developer finds that one by looking. What
 the ceilings buy is that the finding-out is not a bill.
 
-### The browser → server
+### Claiming the server
 
-- **Per-device credentials, not one shared secret.** This conflicts with the "one
-  developer, one token" instinct, and resolves against it: with a single token,
-  rotation is indistinguishable from re-enrolment, so the developer who rotates
-  *because* they are away from their desk locks themselves out and needs physical
-  access to recover. One *user*, several *devices*.
-- **The credential never lives in a query string.** `?k=` is good ergonomics for
-  a QR code and bad storage for a standing credential: it lands in browser
-  history, in the phone's bookmark, and in every proxy access log along the way.
-  A bookmarked URL is a credential at rest on the phone. A query parameter is
-  acceptable only to *bootstrap* a session, exchanged immediately for a cookie
-  scoped to the surface.
+✅ **Built** <!--@ crates/sc-server/src/admin.rs -->. A fresh volume arms a
+one-time code and logs it; `/setup` <!--@ crates/sc-server/src/routes.rs -->
+spends it and walks three steps; the GitHub login that finishes is written to
+`admin.json` and administers the server from then on.
+
+**Why a claim and not a setting.** The obvious way to name an administrator is
+an environment variable, and it is a trap: a typo'd login starts cleanly and
+nobody can *ever* administer the server — and because the answer lives in the
+environment, there is nothing on the volume to repair. The only fix is a
+redeploy, which makes "I mistyped my own username" cost the same as losing a
+machine. A record can be deleted; a variable has to be re-entered somewhere the
+running server cannot reach.
+
+**Why a code and not first-login-wins.** This surface is on a public hostname.
+Without a code, whoever reached `/setup` first would own the server, and losing
+that race once is permanent. Reading the code out of the container's log is the
+proof of ownership — the same proof a stack editor stood in for, and better
+evidence than holding a cookie.
+
+**Two proofs, deliberately separate.** The code proves you can read the logs;
+the GitHub sign-in proves who you are. Spending the code claims nothing on its
+own, so a code lifted from a log aggregator is not enough to take the server.
+The claim rides the OAuth state — already single-use, already expiring, already
+what the callback validates — rather than a cookie, which would be a second
+claim to authority that nothing spends.
+
+The three steps are in dependency order because each needs the one before it:
+the callback URL is absolute, so it cannot be shown until the address is known,
+and the sign-in cannot run until an application exists. One screen would show a
+URL that changed as somebody typed.
+
+`secure_cookies` stays **derived** from that address and the page says what it
+decided <!--@ sc_server::config::secure_for -->. "Is this a private network" is
+a question people answer wrong, and answering it wrong drops `Secure` from every
+session cookie without a word.
+
+A claimed server arms nothing however often it restarts, and `/setup` **404s**
+rather than refusing — so a stranger cannot tell a claimed server from one that
+never had the route. To start again: delete `admin.json` and restart.
+
+### What every browser request gets
+
+Requirements this surface owes whoever is on the other end of it, administrator and stranger alike.
+
 - **Write routes require a header**, not just a cookie. That is the CSRF defence:
   a hostile page can cause a cross-origin request but cannot set an arbitrary
   header.
 - **Constant-time comparison** everywhere a secret is checked.
 - **A bounded intake rate**, enforced **per credential** rather than per IP —
   behind a proxy every request shares one address.
+
+**The CSP is per-surface** <!--@ sc_server::routes::Policy -->. What does not
+vary is `default-src 'none'`, so no remote subresource is reachable from either
+half. What varies is `script-src`: `'self'` on the public surface, absent
+everywhere else.
+
+The policy rides on the response and is stamped in **one** place, at the
+dispatch site that already decides public-or-not, so a public handler cannot be
+written without it and a private one cannot accidentally acquire it.
+`Policy::Strict` is the `Default`, which fixes the direction the mistake falls
+in: a handler that forgets produces a public page whose script does not run —
+visible at once — rather than a private page that quietly permits one.
 
 `sc-web`'s existing token primitives are sound and worth reusing:
 `mint_token` <!--@ sc_web::mint_token --> is a real CSPRNG, and the constant-time
@@ -438,78 +490,69 @@ minted for anything longer. **No credential on this path is written to that file
 > no-referrer`, `Cache-Control: no-store`, and a CSP that forbids remote
 > subresources. None of these headers exist in `sc-web` today.
 >
-> ✅ **Built** <!--@ crates/sc-server/src/routes.rs -->. All three are returned
-> from one function and written on **every** response, because a header added per
-> route is a header eventually missing from one. Beyond them, a drafted spec is
-> rendered as escaped text in a `<pre>` — never as Markdown and never as HTML —
-> which removes the class rather than filtering it.
 >
-> **The CSP is now per-surface** <!--@ sc_server::routes::Policy -->, and the
-> paragraph above is what does **not** vary: `default-src 'none'` holds on both,
-> so no remote subresource is reachable from either. What varies is `script-src`,
-> which is `'self'` on the public surface and absent everywhere else — see the
-> transport section below for why that trade reversed there and only there.
->
-> The policy rides on the response and is stamped in **one** place, at the
-> dispatch site that already decides public-or-not, so a public handler cannot be
-> written without it. `Policy::Strict` is the `Default`, which fixes the direction
-> the mistake falls in: a handler that forgets produces a public page whose script
-> does not run — visible at once — rather than a private page that quietly permits
-> one.
 
-✅ **Built** <!--@ crates/sc-server/src/auth.rs -->, with two deviations recorded
-below.
+### The administrator → server
 
-Credentials are **hashed at rest** — SHA-256 of each device token, never the
-token. The data volume is the thing a Portainer user backs up and copies around,
-so it contains nothing that grants access. That also removes the length leak in
-`sc-web`'s `ct_eq`, which returns early on a length mismatch: comparing
-fixed-width hashes makes every comparison the same work.
+✅ **Built.** One identity, signing in with GitHub from any browser
+<!--@ crates/sc-server/src/oauth.rs -->.
 
-Enrolment is a **single-use** code, spent on the device it enrols. Each device
-gets its own credential and can be revoked alone, and a revoked device is *kept*
-rather than deleted so a list can say it was revoked.
+**This replaced per-device enrolment**, and the argument for that model
+dissolved rather than being answered. It held a credential per enrolled browser
+so that rotating one did not lock out the others — a real problem when there was
+no other way to prove who the developer was. GitHub sign-in already existed for
+owners, so the server had an identity provider and was still asking people to
+copy a code out of a container log into each browser separately. There is now
+nothing per-device to rotate, and "revoke this device" is "sign out", which
+GitHub already owns.
+
+**What survives is the rule underneath**: the volume holds hashes, never
+credentials <!--@ crates/sc-server/src/auth.rs -->. Comparing fixed-width hashes
+also removes the length leak in `sc-web`'s `ct_eq`, which returns early on a
+length mismatch.
+
+**The cost, stated plainly.** `accounts.json` is now the only credential store,
+so it is read on every cookie-bearing request — including one carrying a cookie
+that matches nothing, which is what a guesser sends, and which is resolved
+*before* the rate limiter runs. That is why it is cached the same way the roster
+is <!--@ sc_server::account::AccountsCache -->: a `stat` on every request and a
+parse only when the file changed. `max_accounts` now does double duty, bounding
+signup *and* bounding what one request can be made to parse.
+
+**Changing a secret needs a fresh sign-in** <!--@ sc_server::routes::SENSITIVE_VERBS -->.
+An administrator's session reaches accept, discard and owner promotion — the
+same blast radius the device cookie had, and acceptable for the same reasons.
+Secrets are where it stops being acceptable: somebody holding a stolen cookie
+must not be able to rotate the mail key and redirect every sign-in link. So a
+secret change requires the browser to have proved itself against GitHub within
+five minutes <!--@ sc_server::account::FRESH_AUTH_MS -->, which asks for the
+attacker to hold GitHub *at that moment* rather than a cookie taken at some
+point. Freshness is per **session**, not per account: proving yourself again on
+a laptop must not privilege a phone that has sat signed in for a month.
 
 **Deviation — CSRF.** This spec asks for a required header on write routes. The
 surface is server-rendered HTML forms, and a form cannot set a header — so
 requiring one would mean requiring script on the surface where script is exactly
 what makes a rendered model-authored spec dangerous. The defence is
-`SameSite=Strict` plus `form-action 'self'` instead. That is a genuinely weaker
+`SameSite` plus `form-action 'self'` instead. That is a genuinely weaker
 guarantee on very old browsers, and it is the trade this pass took deliberately
 rather than by omission.
 
 Script is now permitted on the *public* surface, so "a form cannot set a header"
 is no longer a hard constraint there. The deviation stands anyway, on the
-narrower ground it should always have rested on: `form-action 'self'` plus a
-`SameSite=Strict` cookie is the defence, and adding a header would not
-meaningfully strengthen it. The pages remain forms that work with script
-disabled — the script is progressive enhancement, not the transport.
+narrower ground it should always have rested on: `form-action 'self'` plus the
+cookie is the defence, and adding a header would not meaningfully strengthen it.
+The pages remain forms that work with script disabled — the script is
+progressive enhancement, not the transport.
 
-**Deviation — no `?k=` bootstrap.** The spec permits a query parameter to
-bootstrap, exchanged immediately. None is implemented: the enrolment code is
-typed into a form. The QR-code ergonomics are lost; the credential is never in a
-URL at all, so there is nothing to exchange and nothing to leak into a log.
+**Deviation — the only way in is a third party.** If GitHub is unreachable, or
+the OAuth application is deleted, nobody can administer this server until it
+returns. That is the price of removing the second credential path, and it is
+recorded here rather than discovered: the recovery is deleting `admin.json` and
+claiming again, which needs the volume and a restart.
 
 *Not built:* the daemon-side key is still absent from `DaemonConfig`, which
 carries only `repos`.
-
-*Not built:* **revocation has primitives but no surface.** `revoke` and the device
-list exist <!--@ crates/sc-server/src/auth.rs --> and are tested, but no route
-reaches them — so the lost-phone case that *justifies* per-device credentials
-cannot yet be acted on without editing `credentials.json` on the volume by hand.
-The argument for per-device credentials is only half-delivered until that route
-exists, and this is the most valuable outstanding piece of the auth work.
-
-*Not built:* **there is no way to arm a second enrolment code while one device is
-already enrolled.** One is minted at first start and written to the container
-log; once spent, enrolling a second device means an operator with access to the
-data volume. A `smart-coder enrol` subcommand is the obvious home for this and
-does not exist in any crate.
-
-Restarting is not the workaround it might look like: `arm_enrolment` mints a code
-only when *nothing* is enrolled, precisely so a restart cannot be used to reopen
-a server that is already in use. The thirty-minute expiry (see Deployment) bounds
-an *unspent* code's life; it does not add a way to arm a new one.
 
 > **On TLS.** A hosted server terminates TLS the ordinary way, at the edge, with
 > whatever its deployment already uses. The *daemon* holds no certificate and
@@ -534,7 +577,7 @@ worth*.
 #### The roster lives on the volume
 
 ✅ **Built** <!--@ crates/sc-server/src/roster.rs -->. Owners are a record in
-`owners.json`, administered at `/owners` from an enrolled device.
+`owners.json`, administered at `/owners` by the administrator.
 
 **They used to be an environment variable**, and that was defensible while the
 only writer was somebody editing a Portainer stack. It is a bad fit for a list
@@ -552,7 +595,7 @@ changed — a `stat`, not a parse, on the requests that get that far.
 The direction of promotion survives intact. The old guarantee was *"an owner is
 an account the configuration promotes — never one that promotes itself"*.
 Substituting **the developer** for the configuration keeps it exactly, because
-the only writer is past the device gate.
+the only writer is past the admin gate.
 
 `SC_SERVER_OWNERS` is kept as a **seed applied once**, so an existing deployment
 keeps its owners across the move and a fresh one can be bootstrapped without a
@@ -600,7 +643,7 @@ attacker which half they got right. The operator gets the real reason in the log
 
 *Not built:* the GitHub API is never asked whether a login can actually see a
 repository. The roster is **asserted by the developer, not verified** — the same
-gap as before the move, now behind a device-only page rather than a stack edit.
+gap as before the move, now behind an admin-only page rather than a stack edit.
 Adding the check later reads the same record and calls the API in addition.
 
 ## Filing a request
@@ -695,10 +738,21 @@ really enforced.
 ✅ **Built** <!--@ sc_server::routes::private_route::REPOS -->. Repositories are
 enabled and disabled at `/repos`, beside the owners and on the same volume.
 
-**Naming one in `SC_SERVER_PUBLIC_REPOS` still turns the surface on**, and that
-switch stays in configuration deliberately: a server that could open its own
-public surface from a UI is a different security posture than the one this spec
-argues for. The *list* is a seed applied once, exactly like the owners.
+**The on/off switch moved too, and the old argument did not survive.** This spec
+used to say it stayed in configuration deliberately, because a server that could
+open its own public surface from a UI is a different security posture. That was
+written when the UI was reachable by any enrolled browser and nothing in the
+system proved who had deployed it.
+
+The claim changed the premise. The only caller who can flip it is the
+administrator, who proved they can read this container's log — the same proof a
+stack editor stood in for, and better evidence than holding a cookie. The
+posture is preserved by *who* rather than by *where*.
+
+`SC_SERVER_PUBLIC_REPOS` is a seed, on/off half included. **A freshly claimed
+server has no public surface**, which is a safer default than the one it
+replaces: naming a repository in a stack used to turn the surface on as a side
+effect.
 
 **Enabling asks whether a daemon is actually serving that name**
 <!--@ sc_server::routes::enable_repo -->, and this is a **typo-catcher, not a
@@ -1241,44 +1295,82 @@ Both deployment files are checked against the config's environment module in
 both directions <!--@ crates/sc-server/src/config.rs -->, so a setting cannot be added to one
 and forgotten in the other — which would leave an operator on the Swarm stack
 with no box for a cap that exists.
-- **Configured from environment variables**
-  <!--@ crates/sc-server/src/config.rs -->, because a Portainer stack editor is
-  where a user configures a container. A config file baked into an image cannot
-  be edited without rebuilding, and mounting one to override it makes two sources
-  of truth.
+- **Five environment variables, and the rest is administered from the server's
+  own pages** <!--@ crates/sc-server/src/settings.rs -->. Where to listen, which
+  volume, the key the rest is sealed with, and `SC_SERVER_MAIL_TO_CONSOLE` —
+  which stays because its loopback guard runs at *load* time, and a runtime
+  write could not be covered by it. It prints sign-in links to the log, so the
+  guard is the whole safety of it.
 
-  **The roster is the deliberate exception, and the line is people versus
-  posture.** Owners and enabled repositories change when somebody joins, leaves
-  or starts a project — routinely, and by the developer rather than an operator
-  — and every edit through the stack meant a redeploy, which restarts the server
-  and drops what was in flight. Those live on the volume and are administered
-  from the review surface. What a *stack* still decides is whether the public
-  surface exists at all, what it may spend, and how it reaches the outside
-  world: the settings whose failure mode is a posture nobody meant, not a name
-  nobody updated. Both settings survive as seeds so nothing has to be
-  re-entered, and the server says out loud that it is ignoring them afterwards —
-  a setting that is present and inert is one somebody will edit expecting an
+  **This spec used to argue the opposite**, and the reversal is worth recording
+  rather than quietly overwriting. It said configuration belonged in the stack
+  because a Portainer editor is where a user configures a container, with the
+  roster as "the deliberate exception". The exception ate the rule, and the
+  reason it did is the one the exception was granted for: editing a stack means
+  a redeploy, which restarts the process and drops what was in flight. That is a
+  fair price for a bind address and a bad one for raising a ceiling that is
+  refusing filings right now, or fixing a mail key at the moment sign-in is
+  broken.
+
+  What is left in the stack is what a running server cannot change about itself:
+  the socket it listens on, the directory it opens, and the key it would need in
+  order to read its own settings. Everything else is read per request from the
+  volume, so an edit lands on the next request rather than the next restart
+  <!--@ sc_server::settings::SettingsCache -->.
+
+  **The old variables survive as seeds** — applied once, on a volume that has
+  never been administered, so an existing deployment upgrades without
+  re-entering anything. After that they are ignored and the server says so: a
+  setting that is present and inert is one somebody will edit expecting an
   effect.
-- **It refuses to start without a daemon key**, and refuses one shorter than 32
-  characters. Running open is not a degraded mode; it is the failure this whole
-  design exists to prevent, and a short key looks configured while being
+
+- **The three reversible secrets are sealed on the volume**
+  <!--@ crates/sc-server/src/seal.rs -->. A mail key is *replayed* to Brevo
+  rather than compared, so unlike every credential in `auth` it cannot be
+  hashed. Storing it plainly would have made a copied volume leak live
+  credentials for the first time — the exact property `auth`'s module doc
+  claims. So it is encrypted with `SC_SERVER_SECRET_KEY`, which is the one
+  secret that stays in the environment: a key beside its own ciphertext protects
+  nothing.
+
+  ChaCha20-Poly1305 rather than a bare cipher, and the tag is the point.
+  Secrecy is the obvious half; detecting tampering is the half that matters
+  more, because somebody who can write the volume but not read the key could
+  otherwise flip bits in a stored screening URL and have the server talk to a
+  host of their choosing.
+
+  A wrong or missing key is a **refusal to start**
+  <!--@ crates/sc-server/src/seal.rs -->, checked against a value known to be
+  present. Without it the server would boot, open nothing, and report no mail
+  provider and no screener — indistinguishable from a fresh install, and the
+  operator would re-enter secrets that were never lost.
+- **A daemon key is minted here, shown once, and stored hashed**
+  <!--@ sc_server::routes::private_route::DAEMONS -->. A freshly claimed server
+  has none, so nothing can claim work until one exists — the right resting
+  state, and better than an environment variable that sits in a stack editor in
+  plaintext for the life of the deployment. The seed still refuses one shorter
+  than 32 characters, because a short key looks configured while being
   guessable. `sc-web`'s `--no-token` has no equivalent here.
 - **Non-root, fixed uid.** The uid is pinned so a volume written by one image tag
   stays readable by the next — an image that changes it on upgrade greets the
   developer with permission errors on data that was fine yesterday.
-- **A fresh install is usable but never open.** With no enrolment code
-  configured, one is minted at first start and written to the container log. It
-  is stored hashed, so that log line is the only place it ever appears — and
-  that is a liability as much as a safeguard. **The container log's audience is
-  whatever scrapes it.** On a host shipping logs to an aggregator, the code's
-  exposure is the aggregator's exposure, and a code that never expired would be
-  a standing credential published to everyone who can run a query.
+- **A fresh install is usable but never open.** An unclaimed volume mints a
+  claim code at startup and writes it to the container log. It is stored hashed,
+  so that log line is the only place it ever appears — and that is a liability
+  as much as a safeguard. **The container log's audience is whatever scrapes
+  it.** On a host shipping logs to an aggregator, the code's exposure is the
+  aggregator's exposure, and a code that never expired would be a standing
+  credential published to everyone who can run a query.
 
-  So it **expires** <!--@ crates/sc-server/src/auth.rs -->. A minted code is
-  good for thirty minutes; `arm_enrolment` re-arms on any start where nothing is
-  enrolled, so a lapsed code costs a restart rather than a lockout. The bound is
-  time, because the audience cannot be bounded. A code set through
-  `SC_SERVER_ENROL_CODE` is chosen by the operator and never logged.
+  So it **expires** <!--@ sc_server::admin::CLAIM_TTL_MS -->. A minted code is
+  good for thirty minutes, and an unclaimed server arms a fresh one on any
+  start, so a lapsed code costs a restart rather than a lockout. The bound is
+  time, because the audience cannot be bounded.
+
+  **A claimed server arms nothing**, however often it restarts. Re-arming would
+  leave a standing way to take the server from its administrator, refreshed on
+  every deploy — and the code alone cannot claim anyway: it opens the door to
+  the GitHub sign-in that decides who owns this.
 
 ### Logs
 

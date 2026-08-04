@@ -40,18 +40,28 @@ services:
     image: ghcr.io/jamez667/sc-server:${SC_SERVER_TAG:-latest}
 
     environment:
-      # REQUIRED — one of these two. With neither, the server refuses to start
-      # rather than running open.
+      # ---------------------------------------------------------------------
+      # ALMOST NOTHING IS CONFIGURED HERE ANY MORE
+      # ---------------------------------------------------------------------
       #
-      # One key per daemon, `label:key` pairs — so each machine has its own rate
-      # budget, can be revoked alone, and is named in the log when it claims
-      # work: SC_SERVER_DAEMON_KEYS=laptop:0123…,office:89ab…
+      # Only BIND, PORT, DATA and SECRET_KEY are real configuration. Everything
+      # else below is a SEED: applied once on a volume that has never been
+      # administered, so an existing deployment upgrades without losing
+      # anything, and ignored after that with a line in the log saying so.
+      #
+      # The rest is set from the server's own pages and kept on the volume —
+      # who administers it, which repositories it collects for, mail, screening,
+      # the ceilings, and whether a public site exists at all.
+      #
+      # FIRST RUN: deploy with SECRET_KEY set, read the claim code from the log,
+      # open /setup and sign in with GitHub. That account administers the
+      # server. See sc-server.stack.yml for the long version.
+
+      # SEEDS — a machine's key is minted at /daemons and shown once. These
+      # carry an existing deployment's keys across, hashes and all.
       SC_SERVER_DAEMON_KEYS: ${SC_SERVER_DAEMON_KEYS:-}
-      # The single-key form, still read so an existing install keeps working.
-      # Filed under the label `default`.
       SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:-}
 
-      SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
       # The key the settings on the volume are encrypted with. Some settings
       # are replayed rather than compared (a mail key, a GitHub secret), so
       # they cannot be hashed; they live on the volume encrypted with this.
@@ -68,11 +78,12 @@ services:
       # the rest required, so the server refuses to start half-public.
       #
       # Comma-separated names — `smart-coder,memosy` — each needing a matching
-      # `queue add-repo` on the daemon. More than one requires
-      # SC_SERVER_PUBLIC_SITE_NAME and puts a picker on the filing form.
-      # Naming something here is what turns the surface ON, and that stays in
-      # this file. The list itself is a SEED applied once on a fresh volume;
-      # add and remove repositories at /repos afterwards.
+      # `queue add-repo` on the daemon.
+      #
+      # A SEED, including the on/off half. Naming something here used to be what
+      # turned the public surface on; that switch is now at /settings, because
+      # the only caller who can reach it proved they can read this container's
+      # log. Repositories are added and removed at /repos.
       SC_SERVER_PUBLIC_REPOS: ${SC_SERVER_PUBLIC_REPOS:-}
       # The single-repository form, still read so an existing install keeps
       # working. Both together are a union.
@@ -80,7 +91,7 @@ services:
 
       # A SEED for the owner list, applied ONCE on a fresh volume:
       # `login:repo|repo`, comma-separated between owners. Owners live on the
-      # volume and are administered at /owners from an enrolled device; this
+      # volume and are administered at /owners by the administrator; this
       # exists so an existing install keeps its owners and a fresh one can start
       # without a browser. Applied once and then ignored, with a log line saying
       # so — re-applying every boot would resurrect a revoked owner on restart.
@@ -89,10 +100,10 @@ services:
       # another owner. Nothing is checked against GitHub.
       SC_SERVER_OWNERS: ${SC_SERVER_OWNERS:-}
 
-      # The GitHub OAuth application owners sign in with. Callback URL is
-      # <SC_SERVER_PUBLIC_BASE_URL>/public/auth/github/callback. Both or
-      # neither — half an application is refused at startup, as is naming
-      # owners with no application for them to use.
+      # SEEDS. The GitHub OAuth application the administrator AND owners sign
+      # in with — /setup asks for it on a fresh server and shows the callback
+      # URL to paste. The secret is stored ENCRYPTED on the volume, and is never
+      # shown again once saved.
       SC_SERVER_GITHUB_CLIENT_ID: ${SC_SERVER_GITHUB_CLIENT_ID:-}
       SC_SERVER_GITHUB_CLIENT_SECRET: ${SC_SERVER_GITHUB_CLIENT_SECRET:-}
       # What the masthead calls the site. A label, not the routing key above.

@@ -1,33 +1,63 @@
 # A Portainer stack for the hosted intake surface (spec 18).
 #
-# Paste this into Portainer → Stacks → Add stack, set SC_SERVER_DAEMON_KEY in the
-# environment section, and deploy. Nothing else in this workspace is involved —
-# the daemon on the developer's machine dials out to this, and this never calls
-# back.
-#
-# Generate the key with:
-#     openssl rand -hex 32
-#
-# The same value goes in the daemon's config. It is the only thing that lets a
-# daemon claim work, so treat it like a password: 32+ random characters, and the
-# server refuses to start with anything shorter.
+# Paste this into Portainer → Stacks → Add stack, set SC_SERVER_SECRET_KEY, and
+# deploy. Nothing else in this workspace is involved — the daemon on the
+# developer's machine dials out to this, and this never calls back.
 #
 # ---------------------------------------------------------------------------
-# What you get with nothing but the key set: a private review surface. Enrol a
-# browser with the code printed to the log, file requests, read drafted specs,
-# approve or send back. Nobody else can reach anything.
-#
-# Setting SC_SERVER_PUBLIC_REPO additionally opens a public filing surface —
-# sign in by email, file a request, watch your own. That half is themed, has a
-# light/dark control and reads in English or French; the review half stays
-# private and is not translated, because it has one reader.
+# ALMOST NOTHING IS CONFIGURED HERE ANY MORE
 # ---------------------------------------------------------------------------
 #
-# BACK UP THE VOLUME. Credentials in it are hashed, so a copy grants nobody
-# access — but it is the only copy of every filed request and drafted spec, and
-# nothing else in this system holds them.
+# Four settings are real configuration: where to listen, which volume to use,
+# and the key that encrypts the rest. Everything else — who administers this
+# server, which repositories it collects for, the mail provider, the screening
+# model, the spend ceilings, whether the public site exists at all — is set from
+# the server's own pages and kept on the volume.
+#
+# That is not tidiness. Editing a stack means a redeploy, which restarts the
+# process and drops whatever was in flight. Fine for a bind address; a bad price
+# for raising a ceiling that is refusing filings right now.
+#
+# The variables further down are SEEDS. They are applied once, on a volume that
+# has never been administered, so an existing deployment keeps working across the
+# upgrade. After that they are ignored and the server says so in its log. Editing
+# one on a running server changes nothing.
+#
+# ---------------------------------------------------------------------------
+# FIRST RUN
+# ---------------------------------------------------------------------------
+#
+#   1. Deploy with SC_SERVER_SECRET_KEY set (`openssl rand -hex 32`).
+#   2. Read the container log. It prints a one-time claim code:
+#        "claim this server"  code=XXX-XXX
+#   3. Open https://your-address/setup and type it, with this server's address.
+#   4. Create a GitHub OAuth application when the page asks, and paste the
+#      callback URL it shows you.
+#   5. Sign in with GitHub. THAT ACCOUNT NOW ADMINISTERS THIS SERVER.
+#
+# Reading the log is the proof of ownership: whoever can see the container's
+# output is whoever deployed it. The code expires after thirty minutes and a
+# restart arms a fresh one, so letting it lapse costs a restart. A claimed
+# server arms nothing however often it restarts.
+#
+# There is no public site until you turn one on at /settings, and no machine can
+# claim work until you mint a key at /daemons.
+#
+# TO START AGAIN — a mistyped login, a lost GitHub account — delete admin.json
+# from the volume and restart. The claim code comes back.
+#
+# ---------------------------------------------------------------------------
+# BACK UP THE VOLUME
+# ---------------------------------------------------------------------------
+#
+# It holds every filed request and drafted spec, and nothing else in this system
+# does. Credentials in it are hashed and the three reversible secrets (mail key,
+# GitHub client secret, screening key) are ENCRYPTED with SC_SERVER_SECRET_KEY —
+# so a copy of the volume alone grants nobody anything. Keep the key somewhere
+# else, or the backup contains both halves and the encryption buys nothing.
 
 services:
+
   sc-server:
     # `latest` moves only on a `v*` tag, never on a push to main — so pulling it
     # gets a version somebody chose to release, not whatever landed last.
@@ -99,7 +129,7 @@ services:
     # sent. Sign-in tokens, query strings, cookies, addresses and client IPs are
     # deliberately absent; see `route_label` in `crates/sc-server/src/serve.rs`.
     #
-    # THE LOG IS AS PUBLIC AS WHATEVER READS IT — see SC_SERVER_ENROL_CODE.
+    # THE LOG IS AS PUBLIC AS WHATEVER READS IT — see the claim code above.
     # ------------------------------------------------------------------------
 
     environment:
@@ -132,17 +162,6 @@ services:
       # before the first one is moved across.
       SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:-}
 
-      # Optional. When unset, a single-use enrolment code is generated and
-      # logged on first start — so a fresh install is usable without
-      # pre-configuration but is never open.
-      #
-      # THAT LOG LINE IS A CREDENTIAL. It goes wherever this host ships
-      # container logs, so on a machine running a log aggregator, anyone who can
-      # query the aggregator can enrol a device and reach the review surface.
-      # The code therefore EXPIRES 30 MINUTES after it is minted (a restart arms
-      # a fresh one, so letting it lapse costs nothing). Enrol promptly, or set
-      # this to a value of your own — one set here is never logged.
-      SC_SERVER_ENROL_CODE: ${SC_SERVER_ENROL_CODE:-}
 
       # The key the settings stored on the VOLUME are encrypted with.
       #

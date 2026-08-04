@@ -67,10 +67,9 @@ struct Shared {
 /// and "I removed the last one and it came back" is the same bug with more
 /// steps.
 ///
-/// **`SC_SERVER_PUBLIC_REPOS` keeps one job beyond seeding**: naming it is
-/// still what turns the public surface on. That switch stays in configuration —
-/// a server that could open its own public surface from a UI is a different
-/// security posture than the one asked for.
+/// **`SC_SERVER_PUBLIC_REPOS` is a seed like the rest, on/off half included.**
+/// A freshly claimed server has no public surface: the switch lives in
+/// [`crate::settings::Settings::public`] and the administrator flips it.
 fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
     let configured: Vec<(String, Vec<String>)> = cfg
         .public
@@ -413,7 +412,7 @@ fn screen_pending(store: &Store, screener: &dyn Screener) -> Result<()> {
 
 /// Arm a claim code on a server nobody owns yet.
 ///
-/// The counterpart of [`arm_enrolment`], and it will replace it: reading this
+/// Reading this
 /// code out of the container log proves you own the deployment, which is the
 /// same proof a stack editor stands in for and better evidence than holding a
 /// cookie.

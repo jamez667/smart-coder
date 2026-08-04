@@ -120,9 +120,10 @@ pub mod private_route {
     pub const OWNERS: &str = "/owners";
     /// Which repositories the public surface collects for.
     ///
-    /// Device-only for the same structural reason. **Turning the surface
-    /// itself on stays in configuration** — a server that could open its own
-    /// public surface from a UI is a different security posture.
+    /// Admin-only for the same structural reason. **Turning the surface itself
+    /// on moved here too**: the only caller who can reach it proved they can
+    /// read this container's log, so the posture is preserved by *who* rather
+    /// than by *where*. See [`crate::settings::Settings::public`].
     pub const REPOS: &str = "/repos";
     /// Claim an unclaimed server. **Exists only while unclaimed.**
     pub const SETUP: &str = "/setup";

@@ -41,10 +41,6 @@ pub struct Config {
     /// once), and who holds a claim — a late report from a daemon presumed dead
     /// can otherwise overwrite a draft another machine is still working on.
     pub daemon_keys: Vec<DaemonKey>,
-    /// The one-time code that enrols a browser. Generated and printed at startup
-    /// when unset, so a fresh container is usable without pre-configuration but
-    /// is never *open*.
-    pub enrol_code: Option<String>,
     /// The key the settings on the volume are sealed with.
     ///
     /// **The one secret that must stay in the environment**, because it is what
@@ -463,7 +459,6 @@ pub mod env {
     /// A single daemon's key. Superseded by [`DAEMON_KEYS`], and still read: an
     /// install that predates the plural keeps working without a stack edit.
     pub const DAEMON_KEY: &str = "SC_SERVER_DAEMON_KEY";
-    pub const ENROL_CODE: &str = "SC_SERVER_ENROL_CODE";
     /// The key the settings on the volume are sealed with.
     ///
     /// Stays in the environment on purpose: it is what makes a copied
@@ -568,9 +563,6 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/data")),
             daemon_keys,
-            enrol_code: get(env::ENROL_CODE)
-                .map(|c| c.trim().to_string())
-                .filter(|c| !c.is_empty()),
             // Parsed here rather than where it is used, so a malformed key
             // is one startup error naming the setting instead of a failure
             // to open every secret, which reads as "nothing is configured".
@@ -1625,12 +1617,10 @@ mod tests {
             (env::BIND, "127.0.0.1"),
             (env::PORT, "9000"),
             (env::DATA_DIR, "/srv/state"),
-            (env::ENROL_CODE, "let-me-in"),
         ])
         .unwrap();
         assert_eq!(cfg.addr(), "127.0.0.1:9000");
         assert_eq!(cfg.data_dir, PathBuf::from("/srv/state"));
-        assert_eq!(cfg.enrol_code.as_deref(), Some("let-me-in"));
     }
 
     #[test]
@@ -1765,7 +1755,6 @@ mod tests {
             (env::BIND, ""),
             (env::PORT, ""),
             (env::DATA_DIR, ""),
-            (env::ENROL_CODE, ""),
             (env::PUBLIC_REPO, ""),
             (env::PUBLIC_BASE_URL, ""),
             (env::MAIL_PROVIDER, ""),
@@ -1784,7 +1773,6 @@ mod tests {
         assert_eq!(cfg.bind, "0.0.0.0");
         assert_eq!(cfg.port, 8420);
         assert_eq!(cfg.data_dir, PathBuf::from("/data"));
-        assert_eq!(cfg.enrol_code, None);
         assert!(!cfg.mail_to_console);
         // And a blank PUBLIC_REPO leaves the public surface off rather than
         // turning it on with an empty repository name.
@@ -2083,15 +2071,5 @@ mod tests {
         ])
         .expect("no public repo means no public surface, and no validation of it");
         assert!(cfg.public.is_none());
-    }
-
-    #[test]
-    fn an_absent_enrol_code_is_none_so_one_can_be_generated() {
-        // A fresh container should be usable without pre-configuration, but
-        // never open — the caller generates and prints one when this is None.
-        let cfg = load(&[(env::DAEMON_KEY, GOOD_KEY)]).unwrap();
-        assert!(cfg.enrol_code.is_none());
-        let blank = load(&[(env::DAEMON_KEY, GOOD_KEY), (env::ENROL_CODE, "  ")]).unwrap();
-        assert!(blank.enrol_code.is_none(), "blank is absent, not empty");
     }
 }
