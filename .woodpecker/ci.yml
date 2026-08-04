@@ -87,5 +87,11 @@ steps:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
+      # **The socket is mounted; the client is not.** Mounting
+      # `/var/run/docker.sock` grants access to the daemon and provides no
+      # `docker` binary to talk to it with — the image is Playwright's, and it
+      # has no reason to ship one. `spawnSync docker ENOENT` is what that looks
+      # like, and it reads like a missing mount rather than a missing client.
+      - apt-get update && apt-get install -y --no-install-recommends docker.io
       - cd web && npm ci
       - npx playwright test
