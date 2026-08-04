@@ -47,6 +47,57 @@ pub struct Settings {
     pub github_client_id: String,
     #[serde(default)]
     pub github_client_secret: Sealed,
+
+    /// Whether the public surface exists at all.
+    ///
+    /// **This used to be an environment variable on purpose**: a server that
+    /// could open its own public surface from a UI was a different security
+    /// posture. The claim changed the premise — the only caller who can reach
+    /// this proved they can read the container's logs, which is the same proof
+    /// the stack editor stood in for and better than holding a cookie. So the
+    /// switch moved, and a freshly claimed server starts with it **off**.
+    #[serde(default)]
+    pub public: bool,
+    /// What the masthead calls this site. A label, not a routing key.
+    #[serde(default)]
+    pub site_name: String,
+    /// May a filer read the spec drafted from their own request?
+    ///
+    /// `Option` so "never set" is distinguishable from "set to false", which is
+    /// what lets the default be *on* without that default overwriting a
+    /// deliberate no on every read.
+    #[serde(default)]
+    pub show_spec: Option<bool>,
+
+    /// How sign-in links are sent. Empty provider means no mail is configured.
+    #[serde(default)]
+    pub mail_provider: String,
+    #[serde(default)]
+    pub mail_key: Sealed,
+    #[serde(default)]
+    pub mail_from: String,
+    #[serde(default)]
+    pub mail_from_name: String,
+
+    /// The spam screener. Empty key means filings are not screened.
+    #[serde(default)]
+    pub screen_key: Sealed,
+    #[serde(default)]
+    pub screen_url: String,
+    #[serde(default)]
+    pub screen_model: String,
+
+    /// The four spend ceilings. `None` means "use the built-in default", so a
+    /// value never set does not have to be re-stated to keep working.
+    #[serde(default)]
+    pub max_daily_filings: Option<usize>,
+    #[serde(default)]
+    pub max_daily_drafts: Option<usize>,
+    #[serde(default)]
+    pub max_accounts: Option<usize>,
+    #[serde(default)]
+    pub max_outstanding_links: Option<usize>,
+
     /// Set the first time the environment is applied. See the module doc.
     #[serde(default)]
     pub seeded: bool,
@@ -77,6 +128,58 @@ impl Settings {
         self.github_client_secret = crate::seal::seal(key, secret.trim(), now_ms);
     }
 
+    /// Is mail configured well enough to send a sign-in link?
+    pub fn has_mail(&self) -> bool {
+        !self.mail_provider.is_empty() && self.mail_key.is_set() && !self.mail_from.is_empty()
+    }
+
+    /// Is screening configured?
+    ///
+    /// A key alone is enough — the URL and model have defaults, and demanding
+    /// all three would make the common case (Gemini) three fields instead of
+    /// one.
+    pub fn has_screening(&self) -> bool {
+        self.screen_key.is_set()
+    }
+
+    /// The mail settings, if they are complete and readable.
+    pub fn mail(&self, key: Option<&SealKey>) -> Option<crate::config::MailConfig> {
+        if !self.has_mail() {
+            return None;
+        }
+        let provider = crate::mail::Provider::parse(&self.mail_provider)?;
+        Some(crate::config::MailConfig {
+            provider,
+            api_key: crate::seal::open(key?, &self.mail_key)?,
+            from: self.mail_from.clone(),
+            from_name: if self.mail_from_name.is_empty() {
+                crate::config::DEFAULT_MAIL_FROM_NAME.to_string()
+            } else {
+                self.mail_from_name.clone()
+            },
+        })
+    }
+
+    /// The screening settings, if they are complete and readable.
+    pub fn screen(&self, key: Option<&SealKey>) -> Option<crate::config::ScreenConfig> {
+        if !self.has_screening() {
+            return None;
+        }
+        Some(crate::config::ScreenConfig {
+            api_key: crate::seal::open(key?, &self.screen_key)?,
+            url: if self.screen_url.is_empty() {
+                crate::config::DEFAULT_SCREEN_URL.to_string()
+            } else {
+                self.screen_url.clone()
+            },
+            model: if self.screen_model.is_empty() {
+                crate::config::DEFAULT_SCREEN_MODEL.to_string()
+            } else {
+                self.screen_model.clone()
+            },
+        })
+    }
+
     /// Apply the environment **once**, the first time this volume is used.
     ///
     /// `true` when this call was the seeding, so the caller knows to write.
@@ -99,6 +202,30 @@ impl Settings {
         } else if let Some(id) = from.github_id {
             self.github_client_id = id.trim().to_string();
         }
+
+        self.public = from.public;
+        if let Some(name) = from.site_name {
+            self.site_name = name.trim().to_string();
+        }
+        self.show_spec = from.show_spec;
+
+        if let (Some(mail), Some(key)) = (from.mail, key) {
+            self.mail_provider = mail.provider.slug().to_string();
+            self.mail_key = crate::seal::seal(key, &mail.api_key, now_ms);
+            self.mail_from = mail.from.clone();
+            self.mail_from_name = mail.from_name.clone();
+        }
+        if let (Some(screen), Some(key)) = (from.screen, key) {
+            self.screen_key = crate::seal::seal(key, &screen.api_key, now_ms);
+            self.screen_url = screen.url.clone();
+            self.screen_model = screen.model.clone();
+        }
+
+        self.max_daily_filings = from.max_daily_filings;
+        self.max_daily_drafts = from.max_daily_drafts;
+        self.max_accounts = from.max_accounts;
+        self.max_outstanding_links = from.max_outstanding_links;
+
         self.seeded = true;
         true
     }
@@ -113,6 +240,16 @@ pub struct Seed<'a> {
     pub base_url: Option<&'a str>,
     pub github_id: Option<&'a str>,
     pub github_secret: Option<&'a str>,
+    pub site_name: Option<&'a str>,
+    /// Whether the environment described a public surface at all.
+    pub public: bool,
+    pub show_spec: Option<bool>,
+    pub mail: Option<&'a crate::config::MailConfig>,
+    pub screen: Option<&'a crate::config::ScreenConfig>,
+    pub max_daily_filings: Option<usize>,
+    pub max_daily_drafts: Option<usize>,
+    pub max_accounts: Option<usize>,
+    pub max_outstanding_links: Option<usize>,
 }
 
 /// The settings, and the file state they were read from.
@@ -216,6 +353,7 @@ mod tests {
             base_url: Some("https://one.example"),
             github_id: Some("id-one"),
             github_secret: Some("secret-one"),
+            ..Seed::default()
         };
 
         let mut s = Settings::default();

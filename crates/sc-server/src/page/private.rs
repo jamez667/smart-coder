@@ -577,6 +577,182 @@ pub fn repos_page(
     )
 }
 
+/// What this server does — the settings that used to be environment variables.
+///
+/// **Secrets render as presence and a date, never as values.** There is no read
+/// path for a stored secret anywhere in this server, which removes the class of
+/// leak rather than gating it: no page, cache or screenshot can hold a live key.
+///
+/// `fresh` says whether this browser proved itself against GitHub recently
+/// enough to change one. The fields render either way and are disabled when it
+/// has not — being told to prove it again *after* typing a key is worse than
+/// being told before.
+pub fn settings_page(
+    s: &crate::settings::Settings,
+    fresh: bool,
+    saved: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let note = match (saved, error) {
+        (_, Some(e)) => format!("<p class=\"note\">{}</p>", esc(e)),
+        (Some(what), None) => format!("<p class=\"note\">{} saved.</p>", esc(what)),
+        _ => String::new(),
+    };
+
+    let now = crate::store::now_ms();
+    let secret = |label: &str, field: &str, sealed: &crate::seal::Sealed| {
+        let state = if sealed.is_set() {
+            format!(
+                "<span class=\"tag\">set</span> \
+                 <span class=\"meta\">changed {}</span>",
+                esc(&ago(sealed.set_ms, now))
+            )
+        } else {
+            "<span class=\"meta\">not set</span>".to_string()
+        };
+        format!(
+            "<label for=\"{field}\">{label}</label>{state}\
+             <input id=\"{field}\" name=\"{field}\" type=\"password\" \
+             autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
+             placeholder=\"leave blank to keep\"{disabled}>",
+            field = esc(field),
+            label = esc(label),
+            state = state,
+            disabled = if fresh { "" } else { " disabled" },
+        )
+    };
+
+    let gate = if fresh {
+        "<p class=\"meta\">This browser proved itself recently, so these can be \
+         changed. Blank means keep what is there.</p>"
+            .to_string()
+    } else {
+        format!(
+            "<p class=\"note\">Changing a secret needs a fresh sign-in, and it has \
+             been more than five minutes. <a href=\"{}\">Prove it again</a>, then \
+             come back.</p>",
+            esc(crate::routes::public_route::AUTH_GITHUB)
+        )
+    };
+
+    let disabled = if fresh { "" } else { " disabled" };
+
+    shell(
+        "Settings",
+        &format!(
+            "<h1>Settings</h1>{note}\
+             <h2>The public site</h2>\
+             <p class=\"meta\">Whether strangers can file requests at all. \
+             Currently {public_state}.</p>\
+             <form method=\"post\" action=\"/settings/public\">\
+             <button type=\"submit\">{toggle}</button></form>\
+             <form method=\"post\" action=\"/settings/site\">\
+             <label for=\"site_name\">What the masthead calls it</label>\
+             <input id=\"site_name\" name=\"site_name\" value=\"{site}\" \
+             placeholder=\"{host}\">\
+             <label class=\"check\"><input type=\"checkbox\" name=\"show_spec\" \
+             value=\"yes\"{spec}> Let a filer read the spec drafted from their \
+             own request</label>\
+             <button type=\"submit\">Save</button></form>\
+             <h2>Address and secrets</h2>\
+             <p class=\"meta\">Sign-in links are built from the address. Changing \
+             it <strong>signs everybody out</strong>, including you: the cookies \
+             belong to the old one.</p>{gate}\
+             <form method=\"post\" action=\"/settings/secret\">\
+             <label for=\"base_url\">This address</label>\
+             <input id=\"base_url\" name=\"base_url\" value=\"{base}\"{disabled}>\
+             {mail_key}{gh_secret}{screen_key}\
+             <button type=\"submit\"{disabled}>Save</button></form>\
+             <h2>Sending email</h2>\
+             <form method=\"post\" action=\"/settings/mail\">\
+             <label for=\"mail_provider\">Provider</label>\
+             <input id=\"mail_provider\" name=\"mail_provider\" value=\"{provider}\" \
+             placeholder=\"brevo, resend or postmark\">\
+             <label for=\"mail_from\">From address</label>\
+             <input id=\"mail_from\" name=\"mail_from\" value=\"{from}\">\
+             <label for=\"mail_from_name\">From name</label>\
+             <input id=\"mail_from_name\" name=\"mail_from_name\" value=\"{from_name}\">\
+             <button type=\"submit\">Save</button></form>\
+             <h2>Screening</h2>\
+             <p class=\"meta\">{screening_state}</p>\
+             <form method=\"post\" action=\"/settings/screen\">\
+             <label for=\"screen_url\">Endpoint</label>\
+             <input id=\"screen_url\" name=\"screen_url\" value=\"{screen_url}\" \
+             placeholder=\"{screen_url_default}\">\
+             <label for=\"screen_model\">Model</label>\
+             <input id=\"screen_model\" name=\"screen_model\" value=\"{screen_model}\" \
+             placeholder=\"{screen_model_default}\">\
+             <button type=\"submit\">Save</button></form>\
+             <h2>What it may spend</h2>\
+             <p class=\"meta\">Blank means the built-in default.</p>\
+             <form method=\"post\" action=\"/settings/caps\">\
+             <label for=\"max_daily_filings\">Filings per person per day</label>\
+             <input id=\"max_daily_filings\" name=\"max_daily_filings\" value=\"{f}\">\
+             <label for=\"max_daily_drafts\">Drafting runs per repository per day</label>\
+             <input id=\"max_daily_drafts\" name=\"max_daily_drafts\" value=\"{d}\">\
+             <label for=\"max_accounts\">Accounts</label>\
+             <input id=\"max_accounts\" name=\"max_accounts\" value=\"{a}\">\
+             <label for=\"max_outstanding_links\">Unspent sign-in links</label>\
+             <input id=\"max_outstanding_links\" name=\"max_outstanding_links\" value=\"{l}\">\
+             <button type=\"submit\">Save</button></form>\
+             <p><a href=\"/\">Back to the queue</a></p>",
+            note = note,
+            public_state = if s.public {
+                "<span class=\"tag\">on</span>"
+            } else {
+                "<span class=\"meta\">off, so the public site serves nothing</span>"
+            },
+            toggle = if s.public {
+                "Turn it off"
+            } else {
+                "Turn it on"
+            },
+            site = esc(&s.site_name),
+            host = esc(&crate::config::host_label(&s.base_url)),
+            spec = if s.show_spec.unwrap_or(true) {
+                " checked"
+            } else {
+                ""
+            },
+            base = esc(&s.base_url),
+            disabled = disabled,
+            gate = gate,
+            mail_key = secret("Mail API key", "mail_key", &s.mail_key),
+            gh_secret = secret(
+                "GitHub client secret",
+                "github_client_secret",
+                &s.github_client_secret
+            ),
+            screen_key = secret("Screening API key", "screen_key", &s.screen_key),
+            provider = esc(&s.mail_provider),
+            from = esc(&s.mail_from),
+            from_name = esc(&s.mail_from_name),
+            screening_state = if s.has_screening() {
+                "Filings are screened before a daemon may claim them."
+            } else {
+                "No key, so filings are NOT screened — they queue exactly as filed."
+            },
+            screen_url = esc(&s.screen_url),
+            screen_url_default = esc(crate::config::DEFAULT_SCREEN_URL),
+            screen_model = esc(&s.screen_model),
+            screen_model_default = esc(crate::config::DEFAULT_SCREEN_MODEL),
+            f = s
+                .max_daily_filings
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            d = s
+                .max_daily_drafts
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            a = s.max_accounts.map(|v| v.to_string()).unwrap_or_default(),
+            l = s
+                .max_outstanding_links
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        ),
+    )
+}
+
 fn blank_repo_form() -> String {
     "<form method=\"post\" action=\"/repos\">\
      <label for=\"name\">Repository name</label>\

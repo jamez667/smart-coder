@@ -35,8 +35,9 @@ struct Shared {
     store: Store,
     daemon_keys: Vec<crate::config::DaemonKey>,
     limiter: Mutex<RateLimiter>,
-    public: Option<crate::config::PublicConfig>,
-    mailer: Box<dyn Mailer>,
+    /// Console mail, when the loopback-guarded switch is on. Otherwise the
+    /// mailer is built per request from the settings — see `mailer_for`.
+    mail_to_console: bool,
     /// Serialises read-modify-write on `accounts.json` and `links.json`.
     write_lock: Mutex<()>,
     /// Who is polling, and for what. Shared like the limiter above.
@@ -115,6 +116,59 @@ fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Apply the environment's public settings **once**, on a fresh volume.
+///
+/// The same seed-not-source-of-truth rule as the roster: without the flag, a
+/// redeploy would silently revert every change made at `/settings`, which is
+/// the restart back door in a different disguise.
+///
+/// **Turning the surface on is part of the seed**, because naming a repository
+/// in the environment used to be what did it. A volume seeded from a
+/// configuration that had a public surface keeps one; a fresh claim starts with
+/// it off, and the administrator turns it on deliberately.
+fn seed_settings(store: &Store, cfg: &Config) -> Result<()> {
+    let mut settings = store.settings()?;
+    let p = cfg.public.as_ref();
+
+    let seed = crate::settings::Seed {
+        base_url: p.map(|p| p.base_url.as_str()),
+        github_id: p
+            .and_then(|p| p.github.as_ref())
+            .map(|g| g.client_id.as_str()),
+        github_secret: p
+            .and_then(|p| p.github.as_ref())
+            .map(|g| g.client_secret.as_str()),
+        site_name: p.map(|p| p.site_name.as_str()),
+        public: p.is_some(),
+        show_spec: p.map(|p| p.show_spec),
+        mail: p.and_then(|p| p.mail.as_ref()),
+        screen: p.and_then(|p| p.screen.as_ref()),
+        max_daily_filings: p.map(|p| p.max_daily_filings),
+        max_daily_drafts: p.map(|p| p.max_daily_drafts),
+        max_accounts: p.map(|p| p.max_accounts),
+        max_outstanding_links: p.map(|p| p.max_outstanding_links),
+    };
+
+    if !settings.seed(seed, cfg.seal_key.as_ref(), now_ms()) {
+        if p.is_some() {
+            // Said out loud: a setting that is present and inert is one somebody
+            // will edit expecting an effect.
+            crate::log::warn("public settings ignored")
+                .with(
+                    "note",
+                    "the settings on the volume are authoritative; edit them at                      /settings",
+                )
+                .emit();
+        }
+        return Ok(());
+    }
+    store.put_settings(&settings)?;
+    crate::log::info("settings seeded")
+        .with("public", settings.public)
+        .emit();
+    Ok(())
+}
+
 /// How often the screening sweep looks for new filings.
 ///
 /// Screening runs here rather than inline on the filing request: this server is
@@ -148,13 +202,13 @@ pub fn run(cfg: &Config) -> Result<()> {
     .map_err(DcError::Eval)?;
 
     seed_roster(&store, cfg)?;
+    seed_settings(&store, cfg)?;
 
     let shared = Arc::new(Shared {
         store: store.clone(),
         daemon_keys: cfg.daemon_keys.clone(),
         limiter: Mutex::new(RateLimiter::new()),
-        public: cfg.public.clone(),
-        mailer: build_mailer(cfg),
+        mail_to_console: cfg.mail_to_console,
         write_lock: Mutex::new(()),
         seen: Mutex::new(crate::daemons::Seen::default()),
         roster: Mutex::new(crate::roster::RosterCache::default()),
@@ -240,7 +294,7 @@ pub fn run(cfg: &Config) -> Result<()> {
             .emit();
     }
 
-    spawn_screening(cfg, store);
+    spawn_screening(Arc::clone(&shared));
 
     for request in server.incoming_requests() {
         let shared = Arc::clone(&shared);
@@ -256,32 +310,33 @@ pub fn run(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// The mailer the configuration asks for.
-fn build_mailer(cfg: &Config) -> Box<dyn Mailer> {
-    // Checked first, and it is why `PublicConfig::mail` is `None` in this mode:
-    // there is no provider to fall back to, so this cannot be bypassed by a
-    // later branch.
-    if cfg.mail_to_console {
-        crate::log::warn("mail to console")
-            .with("setting", crate::config::env::MAIL_TO_CONSOLE)
-            .with(
-                "note",
-                "sign-in links are logged instead of emailed; anyone who can \
-                 read this log can sign in as anyone",
-            )
-            .emit();
-        return Box::new(crate::mail::Console);
+/// The mailer as the settings currently describe it.
+///
+/// **Built per request rather than once at startup**, because a mail key is now
+/// editable from a page — and a key fixed at the moment sign-in is broken is
+/// worth nothing if it waits for a redeploy.
+///
+/// The cost is a fresh `ureq::Agent`, and therefore a fresh TLS handshake, per
+/// sign-in. That is affordable precisely here: sending a link is rare,
+/// human-paced, and already bounded by `max_outstanding_links`. It would not be
+/// affordable on the poll path.
+///
+/// `mail_to_console` is checked **first** and stays in the environment: it
+/// prints sign-in links to the log, and its loopback guard runs at load time
+/// where a runtime write could not be covered by it.
+fn mailer_for(shared: &Shared, public: Option<&crate::config::PublicConfig>) -> Arc<dyn Mailer> {
+    if shared.mail_to_console {
+        return Arc::new(crate::mail::Console);
     }
-    match cfg.public.as_ref().and_then(|p| p.mail.as_ref()) {
-        Some(m) => Box::new(HttpMailer::new(
+    match public.and_then(|p| p.mail.as_ref()) {
+        Some(m) => Arc::new(HttpMailer::new(
             m.provider,
             &m.api_key,
             &m.from,
             &m.from_name,
         )),
-        // No public surface means no sign-in links to send. Failing loudly if
-        // one is somehow attempted beats pretending to have sent it.
-        None => Box::new(crate::mail::Unconfigured),
+        // Nothing configured. Failing loudly beats pretending to have sent.
+        None => Arc::new(crate::mail::Unconfigured),
     }
 }
 
@@ -291,15 +346,44 @@ fn build_mailer(cfg: &Config) -> Box<dyn Mailer> {
 /// piggybacking on request dispatch: dispatch runs on every request *and* every
 /// 250ms long-poll tick, so a directory scan there would run thousands of times
 /// an hour for work that needs doing every couple of seconds.
-fn spawn_screening(cfg: &Config, store: Store) {
-    let Some(screen) = cfg.public.as_ref().and_then(|p| p.screen.clone()) else {
-        return;
-    };
+fn spawn_screening(shared: Arc<Shared>) {
+    // **Spawned unconditionally.** It used to return early when screening was
+    // off, which made turning it *on* at runtime impossible — there was no loop
+    // left to observe the change. The tick costs a `stat` when screening is off.
     std::thread::spawn(move || {
-        let screener = HttpScreener::new(&screen.url, &screen.api_key, &screen.model);
+        // The live screener, rebuilt only when the settings that describe it
+        // change. Rebuilding every tick would discard its connection pool thirty
+        // times a minute for nothing.
+        let mut built: Option<(crate::config::ScreenConfig, HttpScreener)> = None;
+
         loop {
             std::thread::sleep(SCREEN_TICK);
-            if let Err(e) = screen_pending(&store, &screener) {
+
+            let wanted = public_now(&shared).and_then(|p| p.screen);
+            match wanted {
+                None => {
+                    // Screening is off. Skip the sweep rather than exiting, or
+                    // turning it off would be irreversible. Filings queue
+                    // unscreened, which is what `None` has always meant.
+                    built = None;
+                    continue;
+                }
+                Some(cfg) => {
+                    if built.as_ref().map(|(c, _)| c) != Some(&cfg) {
+                        let screener = HttpScreener::new(&cfg.url, &cfg.api_key, &cfg.model);
+                        crate::log::info("screening configured")
+                            .with("model", cfg.model.clone())
+                            .with("url", cfg.url.clone())
+                            .emit();
+                        built = Some((cfg, screener));
+                    }
+                }
+            }
+
+            let Some((_, screener)) = built.as_ref() else {
+                continue;
+            };
+            if let Err(e) = screen_pending(&shared.store, screener) {
                 // Never fatal. A screener that cannot run must not stop the
                 // server, and the requests it did not reach stay pending.
                 crate::log::error("screening sweep failed")
@@ -497,6 +581,77 @@ fn route_label(path: &str) -> &'static str {
 /// charged to the caller's rate budget: they are the server's own polling, and
 /// counting them made one held poll cost about 120 requests — enough for an idle
 /// daemon to lock itself out of its own server.
+/// The public surface as it is configured right now.
+///
+/// **`None` when the switch is off**, which makes every public route 404 — the
+/// surface does not exist rather than existing and refusing. A freshly claimed
+/// server is in exactly that state until somebody turns it on.
+///
+/// The environment is still read at startup and seeded into the settings once;
+/// what this reads is the settings, which is where an edit lands.
+fn public_now(shared: &Shared) -> Option<crate::config::PublicConfig> {
+    let settings = match shared.settings.lock() {
+        Ok(mut c) => c.current(&shared.store.settings_path()),
+        Err(p) => p.into_inner().current(&shared.store.settings_path()),
+    };
+    if !settings.public {
+        return None;
+    }
+    let repos = match shared.roster.lock() {
+        Ok(mut c) => c.current(&shared.store.roster_path()).enabled(),
+        Err(p) => p
+            .into_inner()
+            .current(&shared.store.roster_path())
+            .enabled(),
+    };
+
+    let key = shared.seal_key.as_ref();
+    Some(crate::config::PublicConfig {
+        repos: crate::config::Repos::from(repos),
+        // Falls back to the address rather than being required: a masthead is a
+        // label, and refusing to serve over one is a worse failure than an ugly
+        // heading.
+        site_name: if settings.site_name.is_empty() {
+            crate::config::host_label(&settings.base_url)
+        } else {
+            settings.site_name.clone()
+        },
+        base_url: settings.base_url.clone(),
+        // **Derived, never stored.** Whether cookies carry `Secure` follows from
+        // the address, so the two cannot drift apart into a surface that thinks
+        // it is private while serving over the internet.
+        secure_cookies: crate::config::secure_for(&settings.base_url),
+        mail: settings.mail(key),
+        screen: settings.screen(key),
+        show_spec: settings.show_spec.unwrap_or(true),
+        max_daily_filings: settings
+            .max_daily_filings
+            .unwrap_or(crate::config::DEFAULT_MAX_DAILY_FILINGS),
+        max_daily_drafts: settings
+            .max_daily_drafts
+            .unwrap_or(crate::config::DEFAULT_MAX_DAILY_DRAFTS),
+        max_accounts: settings
+            .max_accounts
+            .unwrap_or(crate::config::DEFAULT_MAX_ACCOUNTS),
+        max_outstanding_links: settings
+            .max_outstanding_links
+            .unwrap_or(crate::config::DEFAULT_MAX_OUTSTANDING_LINKS),
+        // Read from the roster on the request path; this field is the seed and
+        // is no longer consulted to decide anything.
+        owners: Vec::new(),
+        github: if settings.has_github() {
+            settings
+                .github_secret(key)
+                .map(|client_secret| crate::config::GithubConfig {
+                    client_id: settings.github_client_id.clone(),
+                    client_secret,
+                })
+        } else {
+            None
+        },
+    })
+}
+
 fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
     let now = now_ms();
     let mut guard = match shared.limiter.lock() {
@@ -508,21 +663,17 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
     };
     guard.sweep(now);
 
-    // **Which repositories collect is read per request, not frozen at startup**
-    // — the same reasoning as the roster it comes from, and it is the same
-    // file. Disabling one has to stop the picker offering it on the next
-    // request; a snapshot would keep taking filings for something the developer
-    // turned off, and only stop at the next restart.
+    // **The public surface is assembled per request, not frozen at startup.**
     //
-    // Through the same mtime cache, so this is a `stat` and not a parse.
-    let public = shared.public.as_ref().map(|p| {
-        let mut p = p.clone();
-        if let Ok(mut cache) = shared.roster.lock() {
-            p.repos =
-                crate::config::Repos::from(cache.current(&shared.store.roster_path()).enabled());
-        }
-        p
-    });
+    // Every part of it is now editable from `/settings`, and an edit has to take
+    // effect on the next request rather than the next restart — a cap raised to
+    // stop refusing filings, or a mail key fixed at the moment sign-in is
+    // broken, is worth nothing if it waits for a redeploy.
+    //
+    // Both reads go through mtime caches, so the steady state is two `stat`
+    // calls and no parsing.
+    let public = public_now(shared);
+    let mailer = mailer_for(shared, public.as_ref());
 
     let mut ctx = Ctx {
         store: &shared.store,
@@ -530,7 +681,7 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         limiter: &mut guard,
         now_ms: now,
         public: public.as_ref(),
-        mailer: shared.mailer.as_ref(),
+        mailer: mailer.as_ref(),
         write_lock: &shared.write_lock,
         seen: &shared.seen,
         roster: &shared.roster,

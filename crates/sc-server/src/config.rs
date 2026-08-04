@@ -404,6 +404,12 @@ pub struct ScreenConfig {
 pub const DEFAULT_SCREEN_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /// Cheapest and fastest of the Gemini family.
+/// What a sign-in email is signed by, when nobody says otherwise.
+///
+/// Named rather than inline, because the settings page defaults to the same
+/// thing and two copies of a default drift.
+pub const DEFAULT_MAIL_FROM_NAME: &str = "Smart Coder";
+
 pub const DEFAULT_SCREEN_MODEL: &str = "gemini-2.5-flash-lite";
 
 /// The default ceiling on unspent sign-in links.
@@ -1079,7 +1085,8 @@ fn mail_from(get: &impl Fn(&str) -> Option<String>) -> std::result::Result<MailC
         provider,
         api_key,
         from,
-        from_name: opt(get, env::MAIL_FROM_NAME).unwrap_or_else(|| "Smart Coder".to_string()),
+        from_name: opt(get, env::MAIL_FROM_NAME)
+            .unwrap_or_else(|| DEFAULT_MAIL_FROM_NAME.to_string()),
     })
 }
 
@@ -1145,6 +1152,15 @@ pub fn check_base_url(base_url: &str) -> std::result::Result<(), String> {
 /// than asking.
 pub fn secure_for(base_url: &str) -> bool {
     !is_private_host(base_url.trim())
+}
+
+/// A masthead for an address nobody has named.
+///
+/// The host, stripped of scheme and port. A label is cosmetic, so falling back
+/// to something plain beats refusing to serve — which is what the environment
+/// path did when several repositories made the old default ambiguous.
+pub fn host_label(base_url: &str) -> String {
+    host_of(base_url.trim()).to_string()
 }
 
 fn host_of(url: &str) -> &str {

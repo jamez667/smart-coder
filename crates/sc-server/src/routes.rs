@@ -128,6 +128,16 @@ pub mod private_route {
     pub const SETUP: &str = "/setup";
     /// Step two of setup: the GitHub application.
     pub const SETUP_GITHUB: &str = "/setup/github";
+    /// What this server does. Device-only, like every other admin page.
+    pub const SETTINGS: &str = "/settings";
+    /// The address and the three secrets. **Needs a fresh sign-in** — see
+    /// [`SENSITIVE_VERBS`](super::SENSITIVE_VERBS).
+    pub const SETTINGS_SECRET: &str = "/settings/secret";
+    pub const SETTINGS_PUBLIC: &str = "/settings/public";
+    pub const SETTINGS_SITE: &str = "/settings/site";
+    pub const SETTINGS_MAIL: &str = "/settings/mail";
+    pub const SETTINGS_SCREEN: &str = "/settings/screen";
+    pub const SETTINGS_CAPS: &str = "/settings/caps";
 }
 
 /// The verbs that decide a request's fate.
@@ -1213,6 +1223,10 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             revoke_owner(ctx, login)
         }
 
+        // What this server does.
+        ("GET", private_route::SETTINGS) => show_settings(ctx, None, None),
+        ("POST", p) if p.starts_with("/settings") => settings_write(ctx, req, p),
+
         // Which repositories collect publicly.
         ("GET", private_route::REPOS) => repos_page(ctx, None),
 
@@ -2292,6 +2306,175 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
     }
 }
 
+/// The routes that change a secret, and therefore need a fresh sign-in.
+///
+/// Named once so the test proving each one refuses a stale session iterates this
+/// list rather than a copy that goes stale when a second is added. A route added
+/// here without a `require_fresh` call fails that test, which is the safe
+/// direction for the omission to fall.
+pub const SENSITIVE_VERBS: [&str; 1] = [private_route::SETTINGS_SECRET];
+
+/// Refuse a change made on a session that has not proved itself recently.
+///
+/// **This is what a secret costs on top of a session.** An administrator's
+/// session already reaches accept, discard and owner promotion; that is the same
+/// blast radius the device cookie had. Secrets are where it stops being
+/// acceptable — somebody holding a stolen cookie must not be able to rotate the
+/// mail key and redirect every sign-in link — so this asks for GitHub *at that
+/// moment* rather than at some point in the past.
+fn require_fresh(ctx: &Ctx<'_>) -> std::result::Result<(), Res> {
+    if ctx.fresh_auth {
+        return Ok(());
+    }
+    Err(show_settings(
+        ctx,
+        None,
+        Some(
+            "Changing a secret needs a fresh sign-in, and it has been more than \
+             five minutes since this browser last proved itself. Sign in again, \
+             then change it.",
+        ),
+    ))
+}
+
+/// What this server does.
+fn show_settings(ctx: &Ctx<'_>, saved: Option<&str>, problem: Option<&str>) -> Res {
+    match ctx.store.settings() {
+        Ok(s) => Res::html(
+            if problem.is_some() { 400 } else { 200 },
+            crate::page::settings_page(&s, ctx.fresh_auth, saved, problem),
+        ),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Change something.
+///
+/// One handler for every settings form, because they share a shape: read under
+/// the lock, mutate, write, invalidate, re-render. Splitting them would be six
+/// copies of that sequence and six chances to forget the invalidate.
+fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
+    // **The gate, before anything is read.** Only the secret form needs it, and
+    // it is checked here rather than inside that arm so the list above is the
+    // single place the requirement is stated.
+    if SENSITIVE_VERBS.contains(&path) {
+        if let Err(res) = require_fresh(ctx) {
+            return res;
+        }
+    }
+
+    let form = form_fields(&req.body);
+    let field = |name: &str| form.get(name).map(|v| v.trim().to_string());
+    // A blank number is "use the default", not zero — the page says so.
+    let cap = |name: &str| -> Option<Option<usize>> {
+        match field(name) {
+            None => Some(None),
+            Some(v) if v.is_empty() => Some(None),
+            Some(v) => v.parse::<usize>().ok().map(Some),
+        }
+    };
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut s = match ctx.store.settings() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+
+    let saved = match path {
+        private_route::SETTINGS_PUBLIC => {
+            // A toggle rather than a checkbox: an unticked box submits nothing,
+            // so a form that could turn it *on* could never turn it off.
+            s.public = !s.public;
+            // Names the direction, so the confirmation is not the same sentence
+            // whichever way it went.
+            if s.public {
+                "The public site is now on, and that"
+            } else {
+                "The public site is now off, and that"
+            }
+        }
+        private_route::SETTINGS_SITE => {
+            s.site_name = field("site_name").unwrap_or_default();
+            s.show_spec = Some(field("show_spec").is_some());
+            "The site"
+        }
+        private_route::SETTINGS_MAIL => {
+            let provider = field("mail_provider").unwrap_or_default();
+            if !provider.is_empty() && crate::mail::Provider::parse(&provider).is_none() {
+                return show_settings(
+                    ctx,
+                    None,
+                    Some("That is not a provider this server can send with. One of: brevo, resend, postmark."),
+                );
+            }
+            s.mail_provider = provider;
+            s.mail_from = field("mail_from").unwrap_or_default();
+            s.mail_from_name = field("mail_from_name").unwrap_or_default();
+            "Email"
+        }
+        private_route::SETTINGS_SCREEN => {
+            s.screen_url = field("screen_url").unwrap_or_default();
+            s.screen_model = field("screen_model").unwrap_or_default();
+            "Screening"
+        }
+        private_route::SETTINGS_CAPS => {
+            let (Some(f), Some(d), Some(a), Some(l)) = (
+                cap("max_daily_filings"),
+                cap("max_daily_drafts"),
+                cap("max_accounts"),
+                cap("max_outstanding_links"),
+            ) else {
+                return show_settings(ctx, None, Some("Those have to be whole numbers, or blank."));
+            };
+            s.max_daily_filings = f;
+            s.max_daily_drafts = d;
+            s.max_accounts = a;
+            s.max_outstanding_links = l;
+            "The ceilings"
+        }
+        private_route::SETTINGS_SECRET => {
+            if let Some(base) = field("base_url") {
+                if let Err(e) = crate::config::check_base_url(&base) {
+                    return show_settings(ctx, None, Some(&format!("That address {e}")));
+                }
+                s.base_url = base;
+            }
+            let Some(key) = ctx.seal_key else {
+                return show_settings(
+                    ctx,
+                    None,
+                    Some(
+                        "This server has no sealing key, so it cannot store a \
+                         secret. Set SC_SERVER_SECRET_KEY and restart.",
+                    ),
+                );
+            };
+            // **Blank means keep.** A form that cleared a key every time it was
+            // submitted for another reason would be a trap.
+            for (name, slot) in [
+                ("mail_key", &mut s.mail_key),
+                ("github_client_secret", &mut s.github_client_secret),
+                ("screen_key", &mut s.screen_key),
+            ] {
+                if let Some(v) = form.get(name).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                    *slot = crate::seal::seal(key, v, ctx.now_ms);
+                }
+            }
+            "The address and secrets"
+        }
+        _ => return Res::html(404, crate::page::not_found()),
+    };
+
+    // Administered, so the environment must not seed over it on the next boot.
+    s.seeded = true;
+    if let Err(e) = ctx.store.put_settings(&s) {
+        return error(500, &e.to_string());
+    }
+    invalidate_settings(ctx);
+    drop(_guard);
+    show_settings(ctx, Some(saved), None)
+}
+
 /// Make the next request re-read the settings.
 fn invalidate_settings(ctx: &Ctx<'_>) {
     if let Ok(mut cache) = ctx.settings.lock() {
@@ -3313,6 +3496,186 @@ mod tests {
             200,
             "a session opened this instant did not work"
         );
+    }
+
+    #[test]
+    fn the_public_surface_is_turned_on_from_the_settings_page() {
+        // The switch that used to be an environment variable. A freshly claimed
+        // server has it off, and turning it on is deliberate rather than a side
+        // effect of naming a repository.
+        let mut f = Fixture::new("settings-public").with_public(false);
+        let admin = f.as_admin();
+
+        // The fixture's `with_public` writes the *config*, which is only a seed
+        // now; the volume decides.
+        assert!(!f.store.settings().unwrap().public);
+
+        let res = f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(f.store.settings().unwrap().public);
+
+        // And it is a toggle, so it can be turned off again. A checkbox could
+        // not: an unticked box submits nothing.
+        f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
+        assert!(!f.store.settings().unwrap().public);
+    }
+
+    #[test]
+    fn a_secret_is_saved_sealed_and_never_rendered_back() {
+        // **The claim the whole settings surface rests on.** Asserted against
+        // the response body *and* the file, because those are the two places a
+        // secret could escape to.
+        let mut f = Fixture::new("settings-secret").with_public(false);
+        let admin = f.as_admin();
+
+        let res = f.go(&Req::post(
+            private_route::SETTINGS_SECRET,
+            "base_url=https%3A%2F%2Fspecs.example.test&mail_key=xkeysib-very-secret",
+        )
+        .with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(!res.body.contains("xkeysib-very-secret"), "{}", res.body);
+        // The page says it is set, and when.
+        assert!(res.body.contains("set"), "{}", res.body);
+
+        let raw = std::fs::read_to_string(f.store.settings_path()).unwrap();
+        assert!(!raw.contains("xkeysib-very-secret"), "{raw}");
+
+        let settings = f.store.settings().unwrap();
+        assert!(settings.mail_key.is_set());
+        assert_eq!(
+            crate::seal::open(f.seal_key.as_ref().unwrap(), &settings.mail_key).as_deref(),
+            Some("xkeysib-very-secret"),
+            "and it can still be read back by the server"
+        );
+    }
+
+    #[test]
+    fn a_blank_secret_keeps_the_one_that_is_there() {
+        // A form submitted for another reason must not clear a key. That would
+        // be a trap, and the failure would be silent until a sign-in bounced.
+        let mut f = Fixture::new("settings-blank").with_public(false);
+        let admin = f.as_admin();
+
+        f.go(&Req::post(private_route::SETTINGS_SECRET, "mail_key=first-key").with_cookie(&admin));
+        let before = f.store.settings().unwrap().mail_key.clone();
+        assert!(before.is_set(), "the first write landed");
+
+        f.go(&Req::post(
+            private_route::SETTINGS_SECRET,
+            "base_url=https%3A%2F%2Fspecs.example.test&mail_key=",
+        )
+        .with_cookie(&admin));
+        assert_eq!(
+            f.store.settings().unwrap().mail_key,
+            before,
+            "a blank field cleared a key"
+        );
+    }
+
+    #[test]
+    fn every_sensitive_verb_refuses_a_stale_session() {
+        // **What a secret costs on top of a session.** Iterates the shared
+        // constant, so a verb added later is covered without anyone remembering
+        // to extend this list.
+        let mut f = Fixture::new("settings-stale").with_public(false);
+        let admin = f.as_admin();
+
+        // Long enough that the session is no longer freshly proved.
+        f.now_ms += crate::account::FRESH_AUTH_MS * 4;
+
+        for path in SENSITIVE_VERBS {
+            let res = f.go(&Req::post(path, "mail_key=sneaky").with_cookie(&admin));
+            assert_eq!(res.status, 400, "{path} took a stale session: {}", res.body);
+            assert!(res.body.contains("fresh sign-in"), "{}", res.body);
+        }
+        assert!(
+            !f.store.settings().unwrap().mail_key.is_set(),
+            "a stale session wrote a secret"
+        );
+
+        // The non-sensitive forms still work: only secrets need the hop.
+        let res = f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+    }
+
+    #[test]
+    fn a_bad_address_is_refused_by_the_same_rule_the_environment_used() {
+        // One function, two callers — so the rule cannot hold at boot and not
+        // here. Plain http on a public address puts a sign-in link in the clear.
+        let mut f = Fixture::new("settings-bad-url").with_public(false);
+        let admin = f.as_admin();
+
+        let res = f.go(&Req::post(
+            private_route::SETTINGS_SECRET,
+            "base_url=http%3A%2F%2Fspecs.example.test",
+        )
+        .with_cookie(&admin));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(f.store.settings().unwrap().base_url.is_empty());
+    }
+
+    #[test]
+    fn a_cap_can_be_raised_without_a_restart() {
+        // The point of moving these off the environment: a ceiling raised to
+        // stop refusing filings is worth nothing if it waits for a redeploy.
+        let mut f = Fixture::new("settings-caps").with_public(false);
+        let admin = f.as_admin();
+
+        let res = f.go(
+            &Req::post(private_route::SETTINGS_CAPS, "max_daily_filings=7").with_cookie(&admin),
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(f.store.settings().unwrap().max_daily_filings, Some(7));
+
+        // Blank is "the built-in default", not zero — which would be a surface
+        // that accepts nothing and reads as broken.
+        f.go(&Req::post(private_route::SETTINGS_CAPS, "max_daily_filings=").with_cookie(&admin));
+        assert_eq!(f.store.settings().unwrap().max_daily_filings, None);
+
+        // And nonsense is refused rather than silently defaulted.
+        let res = f.go(
+            &Req::post(private_route::SETTINGS_CAPS, "max_daily_filings=lots").with_cookie(&admin),
+        );
+        assert_eq!(res.status, 400, "{}", res.body);
+    }
+
+    #[test]
+    fn a_provider_this_server_cannot_send_with_is_refused() {
+        // Caught here rather than at the next sign-in, where the failure would
+        // be somebody else's link never arriving.
+        let mut f = Fixture::new("settings-provider").with_public(false);
+        let admin = f.as_admin();
+
+        let res = f.go(
+            &Req::post(private_route::SETTINGS_MAIL, "mail_provider=sendgrid").with_cookie(&admin),
+        );
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(
+            res.body.contains("brevo"),
+            "and it says what does work: {}",
+            res.body
+        );
+        assert!(f.store.settings().unwrap().mail_provider.is_empty());
+    }
+
+    #[test]
+    fn an_owner_cannot_reach_the_settings_page() {
+        // The same structural argument as the roster: past the gate, so no
+        // value of `Caller::Owner` gets here.
+        let (mut f, session, _mine, _theirs) = owner_fixture("settings-owner");
+        assert_eq!(
+            f.go(&Req::get(private_route::SETTINGS).with_cookie(&session))
+                .status,
+            404
+        );
+        for path in [
+            private_route::SETTINGS_PUBLIC,
+            private_route::SETTINGS_SECRET,
+        ] {
+            let res = f.go(&Req::post(path, "mail_key=x").with_cookie(&session));
+            assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
+        }
     }
 
     #[test]
