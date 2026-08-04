@@ -211,13 +211,6 @@ pub struct Strings {
     /// need a culprit, only to know that coming back later is the answer.
     pub signin_no_mail: &'static str,
     /// Names the other role, so somebody who is an owner knows this page has
-    /// a second way in and everybody else can ignore it.
-    /// The way out of the dialog, to the sign-in page that carries the
-    /// password form. Worded as a question about the reader rather than about
-    /// the mechanism, because somebody who is neither an owner nor the
-    /// administrator should be able to skip it without wondering what they are
-    /// missing.
-    pub signin_other_ways: &'static str,
     /// Heads the password form, naming who it is for.
     ///
     /// **Both named roles, not just owners.** The administrator signs in here
@@ -449,7 +442,6 @@ mod tests {
             s.signin_submit,
             s.signin_no_password,
             s.signin_no_mail,
-            s.signin_other_ways,
             s.signin_password_heading,
             s.signin_wrong,
             s.signin_user_label,

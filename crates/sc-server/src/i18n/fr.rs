@@ -40,11 +40,10 @@ pub static STRINGS: Strings = Strings {
     signin_email_label: "E-mail",
     signin_email_placeholder: "vous@exemple.com",
     signin_submit: "Envoyez-moi un lien",
-    signin_other_ways: "Vous relisez un projet dont vous êtes responsable ? Autre méthode",
     signin_user_label: "Nom d'utilisateur",
     signin_password_label: "Mot de passe",
     signin_wrong: "Cela n'a pas fonctionné. Vérifiez le nom et le mot de passe, puis réessayez dans un instant.",
-    signin_password_heading: "Vous relisez un projet dont vous êtes responsable ?",
+    signin_password_heading: "Vous gérez un projet ici, ou ce serveur ?",
     signin_password_submit: "Se connecter",
     signin_no_mail: "Ce site ne peut pas envoyer de liens de connexion pour le moment. Réessayez plus tard.",
     signin_no_password: "Pas de mot de passe. Nous envoyons un lien à usage unique, \

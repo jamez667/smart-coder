@@ -372,7 +372,12 @@ font-weight:500;text-decoration:none;cursor:pointer}
    and the accessibility half of that list is what such overlays usually skip. */
 dialog{max-width:380px;width:calc(100% - 2rem);padding:1.75rem;
 border:1px solid var(--line);border-radius:var(--radius);
-background:var(--surface);color:var(--fg);box-shadow:var(--shadow)}
+background:var(--surface);color:var(--fg);box-shadow:var(--shadow);
+/* Two forms live in here now — email above, password below. On a short
+   viewport (a phone in landscape) that is taller than the screen, and a
+   `<dialog>` does not scroll its own content by default: the overflow is
+   simply unreachable, which would put the submit button out of reach. */
+max-height:calc(100dvh - 2rem);overflow-y:auto}
 dialog::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
 dialog h2{margin:0 0 var(--s2);border:0;padding:0;font-size:1.25rem}
 dialog p{color:var(--dim);font-size:.9rem}
@@ -559,7 +564,15 @@ aria-label=\"{close}\">\u{00d7}</button>\
 autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
 placeholder=\"{placeholder}\">\
 <button type=\"submit\">{submit}</button></form>\
-<p class=\"meta\">{note}<br><a href=\"/public/signin\">{other}</a></p></dialog>",
+<p class=\"meta\">{note}</p>\
+<h2>{pw_heading}</h2>\
+<form method=\"post\" action=\"{pw_action}\">\
+<label for=\"dlg-login\">{user}</label>\
+<input id=\"dlg-login\" name=\"login\" required \
+autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\">\
+<label for=\"dlg-password\">{pass}</label>\
+<input id=\"dlg-password\" name=\"password\" type=\"password\" required>\
+<button type=\"submit\">{pw_submit}</button></form></dialog>",
             signin = esc(s.nav_signin),
             close = esc(s.dialog_close),
             title = esc(s.signin_title),
@@ -568,16 +581,22 @@ placeholder=\"{placeholder}\">\
             placeholder = esc(s.signin_email_placeholder),
             submit = esc(s.signin_submit),
             note = esc(s.signin_no_password),
-            // **The dialog is the path almost everybody takes**, so the other
-            // way in has to be reachable from it or it may as well not exist —
-            // which is exactly what happened to the GitHub flow it replaced:
-            // built, tested, reachable, and linked from nowhere.
+            // **Both ways in, in the dialog itself.** This used to be a link
+            // onward to `/public/signin`, on the reasoning that a masthead
+            // rendered from fourteen places meant fourteen chances to post a
+            // password to the wrong action. That was wrong: the fourteen callers
+            // all render *this* markup, so there is one action here to get right,
+            // exactly as there is for the email form above it.
             //
-            // A link onward rather than the form itself. The form is short
-            // enough to inline, but this masthead is rendered from fourteen
-            // places and a password field in every one of them is fourteen
-            // chances to post it to the wrong action. One page owns it.
-            other = esc(s.signin_other_ways),
+            // What the link actually produced was two sign-in surfaces where the
+            // one almost everybody sees could not sign in the two people who most
+            // need to — the administrator of a server whose public surface is off
+            // has no filing page to reach the full one from.
+            pw_heading = esc(s.signin_password_heading),
+            pw_action = esc(crate::routes::public_route::SIGNIN_PASSWORD),
+            user = esc(s.signin_user_label),
+            pass = esc(s.signin_password_label),
+            pw_submit = esc(s.signin_password_submit),
         );
     }
     format!(
@@ -957,6 +976,34 @@ pub(crate) mod corpus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sign_in_dialog_carries_both_ways_in() {
+        // **The dialog is the path almost everybody takes**, and for a while it
+        // was the only one that could not sign in the two people who most need
+        // to. It held the email form and a *link* to the password form, on the
+        // reasoning that a masthead rendered from fourteen places was fourteen
+        // chances to post a password to the wrong action — but the fourteen
+        // callers all render this one function, so there was only ever one
+        // action to get right.
+        //
+        // The link made it worse than cosmetic: an administrator whose public
+        // surface is off has no filing page to reach the full sign-in page from.
+        let nav = account_nav(Locale::En, false);
+        assert!(nav.contains("action=\"/public/signin\""), "{nav}");
+        assert!(
+            nav.contains(&format!(
+                "action=\"{}\"",
+                crate::routes::public_route::SIGNIN_PASSWORD
+            )),
+            "the password form posts to its own route: {nav}"
+        );
+        assert!(nav.contains("type=\"password\""), "{nav}");
+
+        // Signed in, neither form is offered — this is the account menu then.
+        let signed = account_nav(Locale::En, true);
+        assert!(!signed.contains("type=\"password\""), "{signed}");
+    }
 
     #[test]
     fn escaping_covers_every_character_that_matters() {
