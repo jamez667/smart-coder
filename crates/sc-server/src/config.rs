@@ -96,33 +96,43 @@ pub const DEFAULT_DAEMON_LABEL: &str = "default";
 /// somewhere that spelled the comparison slightly differently — and *that* is
 /// the comparison a stranger's input is checked against.
 ///
-/// Non-empty by construction: parsing is the only way to build one from operator
-/// input and it refuses an empty set, so no later reader has to decide what a
-/// public surface serving no repositories would mean.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// **No longer non-empty by construction.** That invariant was load-bearing
+/// while parsing operator input was the only way to build one: an empty set
+/// could not arise, so no reader had to decide what it meant.
+///
+/// A developer who can disable the last repository from the UI makes it real. A
+/// type that declares it unrepresentable does not prevent that — it moves the
+/// failure from a value a reader must handle to a panic inside `first()`, which
+/// is strictly worse. So [`first`](Repos::first) returns an `Option` and the
+/// surface serves with nothing on offer, saying why the form cannot take
+/// anything. Not refuse-to-boot, which would make the admin page unreachable
+/// exactly when it is needed, and not 404, which teaches a filer at a working
+/// address nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Repos(Vec<String>);
 
 impl Repos {
     /// Build a set from names already known to be good.
     ///
     /// For tests and for callers holding a validated list. [`public_repos`] is
-    /// what enforces non-emptiness and uniqueness on operator input; this trusts
-    /// its caller, and panics rather than constructing the empty set the rest of
-    /// this type promises cannot exist.
+    /// what enforces uniqueness on operator input; this trusts its caller.
     pub fn new(names: &[&str]) -> Repos {
-        assert!(
-            !names.is_empty(),
-            "a public surface serving no repositories is what this type exists \
-             to make unrepresentable"
-        );
         Repos(names.iter().map(|n| n.to_string()).collect())
     }
 
-    /// The first one — what a form pre-selects, and what a single-repository
-    /// deployment always gets.
-    pub fn first(&self) -> &str {
-        // Safe: neither constructor can produce an empty set.
-        &self.0[0]
+    /// The first one — what a single-repository deployment always gets.
+    ///
+    /// `None` when nothing is enabled, which the admin page makes reachable.
+    pub fn first(&self) -> Option<&str> {
+        self.0.first().map(String::as_str)
+    }
+
+    /// Is nothing enabled?
+    ///
+    /// Worth asking directly: the page that says *why* it cannot take a filing
+    /// is the whole reason the empty set is allowed to exist.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Did the operator nominate this repository for public intake?
@@ -143,12 +153,25 @@ impl Repos {
 
     /// Is this a surface for exactly one repository?
     ///
-    /// Asked rather than `len() == 1` at the call sites, and *instead* of a
-    /// `len`: the two questions this type is ever asked are "which names" and
-    /// "is there only one", and a bare `len` invites a companion `is_empty`
-    /// whose only honest answer is a constant `false`.
+    /// Asked rather than `len() == 1` at the call sites, and still *instead* of
+    /// a `len`. The reasoning has shrunk rather than gone: a bare `len` used to
+    /// invite an `is_empty` whose only honest answer was a constant `false`,
+    /// and now that emptiness is reachable there is a real
+    /// [`is_empty`](Repos::is_empty) beside this — which is exactly the
+    /// question worth naming, rather than a number every caller re-interprets.
     pub fn is_single(&self) -> bool {
         self.0.len() == 1
+    }
+}
+
+impl From<Vec<String>> for Repos {
+    /// From the roster, which is where the enabled set actually lives.
+    ///
+    /// No validation, deliberately: the names were checked when they were
+    /// enabled, and re-refusing here would mean a record written yesterday could
+    /// stop a server booting today — the failure mode a record exists to avoid.
+    fn from(names: Vec<String>) -> Repos {
+        Repos(names)
     }
 }
 
@@ -655,7 +678,11 @@ fn daemon_keys(
 /// The daemon matches these byte-for-byte against its own `queue add-repo`
 /// names, so a name nobody could plausibly have typed there is a typo — and a
 /// long one would also be rendered into a picker on every page.
-const MAX_REPO_NAME: usize = 128;
+///
+/// Shared with the admin route that enables one, rather than copied: the two
+/// write into the same set, and a bound enforced in one place is a bound the
+/// other can be used to get around.
+pub const MAX_REPO_NAME: usize = 128;
 
 /// The repositories the public surface collects for, from either setting.
 ///
@@ -940,7 +967,13 @@ fn public_from(
         // the join says nothing — so the operator is made to name their site.
         site_name: match opt(get, env::PUBLIC_SITE_NAME) {
             Some(name) => name,
-            None if repos.is_single() => repos.first().to_string(),
+            // "Is there exactly one" and "here it is" folded into a single
+            // match on the `Option`, so there is no branch left where the two
+            // could disagree and panic.
+            None if repos.is_single() => match repos.first() {
+                Some(only) => only.to_string(),
+                None => String::new(),
+            },
             None => {
                 return Err(format!(
                     "{} is required when {} names more than one repository: the \
@@ -1186,7 +1219,7 @@ mod tests {
         assert_eq!(p.repos.names(), ["intake", "memosy"]);
         assert!(!p.repos.is_single());
         // The operator's order, because it is the order the picker offers.
-        assert_eq!(p.repos.first(), "intake");
+        assert_eq!(p.repos.first(), Some("intake"));
     }
 
     #[test]

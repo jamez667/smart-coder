@@ -85,6 +85,7 @@ pub static STRINGS: Strings = Strings {
     owner_discard: "Écarter",
     owner_release: "Libérer — ce n'est pas du spam",
     owner_release_note: "Le filtrage l'a retenu. Lisez-le et décidez ; le laisser ici ne décide rien.",
+    file_no_repos: "Ce site ne reçoit pas de demandes pour le moment : aucun projet n'est ouvert. Réessayez plus tard.",
     file_repo_unknown: "Ce projet ne reçoit pas de demandes ici.",
     file_mine_heading: "Ce que vous avez déposé",
     file_nothing_yet: "Vous n'avez encore rien déposé.",

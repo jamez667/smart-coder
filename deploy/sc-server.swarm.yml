@@ -62,6 +62,9 @@ services:
       # Comma-separated names — `smart-coder,memosy` — each needing a matching
       # `queue add-repo` on the daemon. More than one requires
       # SC_SERVER_PUBLIC_SITE_NAME and puts a picker on the filing form.
+      # Naming something here is what turns the surface ON, and that stays in
+      # this file. The list itself is a SEED applied once on a fresh volume;
+      # add and remove repositories at /repos afterwards.
       SC_SERVER_PUBLIC_REPOS: ${SC_SERVER_PUBLIC_REPOS:-}
       # The single-repository form, still read so an existing install keeps
       # working. Both together are a union.

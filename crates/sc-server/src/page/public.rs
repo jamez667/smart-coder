@@ -371,21 +371,26 @@ pub fn public_file_page(
         ));
     }
 
-    public_shell_as(
-        locale,
-        s.file_title,
-        &format!(
-            "<h1>{title}</h1>\
-             <form method=\"post\" action=\"/public\">\
+    // **Nothing enabled is a real state**, reachable the moment a developer
+    // disables the last repository from the admin page. The form is replaced by
+    // the reason rather than rendered over an empty picker: a form that looks
+    // fileable and refuses every submission teaches a filer that the site is
+    // broken, when in fact it is between configurations.
+    //
+    // The page still serves. A 404 would tell somebody at a working address
+    // nothing, and refusing to boot would put the page that fixes this out of
+    // reach exactly when it is needed.
+    let form = if repos.is_empty() {
+        format!("<p class=\"meta\">{}</p>", esc(s.file_no_repos))
+    } else {
+        format!(
+            "<form method=\"post\" action=\"/public\">\
              <label for=\"text\">{prompt}</label>\
              <textarea id=\"text\" name=\"text\" required maxlength=\"{bytes}\" \
              placeholder=\"{placeholder}\"></textarea>\
              {repo}{kind}\
              <button type=\"submit\">{submit}</button></form>\
-             <p class=\"meta\">{cap_before}{words}{cap_after}{spec_note}</p>\
-             <h2>{mine_heading}</h2>{items}\
-             <p class=\"meta\"><a href=\"/public/signout\">{signout}</a></p>",
-            title = esc(s.file_title),
+             <p class=\"meta\">{cap_before}{words}{cap_after}{spec_note}</p>",
             prompt = esc(s.file_prompt),
             bytes = crate::routes::MAX_BYTES,
             placeholder = esc(s.file_placeholder),
@@ -400,6 +405,18 @@ pub fn public_file_page(
             } else {
                 String::new()
             },
+        )
+    };
+
+    public_shell_as(
+        locale,
+        s.file_title,
+        &format!(
+            "<h1>{title}</h1>{form}\
+             <h2>{mine_heading}</h2>{items}\
+             <p class=\"meta\"><a href=\"/public/signout\">{signout}</a></p>",
+            title = esc(s.file_title),
+            form = form,
             mine_heading = esc(s.file_mine_heading),
             items = items,
             signout = esc(s.file_signout),

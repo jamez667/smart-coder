@@ -110,6 +110,28 @@ impl Seen {
         }
     }
 
+    /// Which live daemon **named this repository outright**, if any.
+    ///
+    /// **Not [`coverage`](Seen::coverage), and the difference is the point.**
+    /// `coverage` treats a daemon that declared nothing as serving everything,
+    /// which is right for "is this request stuck?" — it is serving *something*
+    /// and the server cannot say it is not this. It is wrong for enabling a
+    /// repository, where the same generosity would rubber-stamp a misspelling
+    /// into a permanent record.
+    ///
+    /// So this asks the narrower question and answers `None` when nobody has
+    /// said the name. That is **not proof of a typo**: `Seen` is empty for the
+    /// first half-minute after a restart, and a daemon on an older build never
+    /// declares anything. The caller has to treat a `None` as "cannot confirm"
+    /// and offer a way past it, not as a refusal.
+    pub fn declared_by(&self, repo: &str, now_ms: u64) -> Option<String> {
+        self.by_label
+            .iter()
+            .filter(|(_, e)| now_ms.saturating_sub(e.last_ms) <= FRESH_MS && e.declared)
+            .find(|(_, e)| e.repos.iter().any(|r| r == repo))
+            .map(|(label, _)| label.clone())
+    }
+
     /// Every repository a live daemon offers, sorted, for telling an operator
     /// what *is* on offer when the one they wanted is not.
     pub fn offered(&self, now_ms: u64) -> Vec<String> {
@@ -194,6 +216,31 @@ mod tests {
         assert_eq!(seen.offered(1_000), ["alpha", "beta", "gamma"]);
         // And a daemon that has gone quiet is not counted.
         assert!(seen.offered(1_000 + FRESH_MS + 1).is_empty());
+    }
+
+    #[test]
+    fn only_a_daemon_that_named_a_repository_confirms_it() {
+        // **Where this parts company with `coverage`.** A daemon that declared
+        // nothing covers everything for the purpose of "is this stuck?", and
+        // must confirm nothing for the purpose of "did I spell this right?" —
+        // otherwise enabling `smrt-coder` would look confirmed.
+        let mut seen = Seen::default();
+        seen.saw("old", &[], false, 1_000);
+        assert_eq!(seen.coverage("smrt-coder", 1_000), Coverage::Served);
+        assert_eq!(seen.declared_by("smrt-coder", 1_000), None);
+
+        seen.saw("laptop", &repos(&["smart-coder"]), true, 1_000);
+        assert_eq!(
+            seen.declared_by("smart-coder", 1_000).as_deref(),
+            Some("laptop"),
+            "named by the machine that offered it"
+        );
+        assert_eq!(seen.declared_by("smrt-coder", 1_000), None);
+
+        // And a daemon that has gone quiet confirms nothing — which is why a
+        // `None` cannot mean "refuse": this is also the state for the first
+        // half-minute after a restart.
+        assert_eq!(seen.declared_by("smart-coder", 1_000 + FRESH_MS + 1), None);
     }
 
     #[test]

@@ -46,18 +46,25 @@ struct Shared {
     roster: Mutex<crate::roster::RosterCache>,
 }
 
-/// Apply `SC_SERVER_OWNERS` **once**, the first time this volume is used.
+/// Apply `SC_SERVER_OWNERS` and `SC_SERVER_PUBLIC_REPOS` **once**, the first
+/// time this volume is used.
 ///
-/// The setting is kept so an existing deployment keeps working and a fresh one
-/// can be bootstrapped without a browser. It is a seed and not a source of
-/// truth: re-applying it every boot would resurrect an owner revoked through
-/// the UI, which is the failure "revocation takes effect on the next request"
-/// exists to prevent, arriving by the back door of a restart.
+/// Both settings are kept so an existing deployment keeps working and a fresh
+/// one can be bootstrapped without a browser. They are seeds and not sources of
+/// truth: re-applying them every boot would resurrect an owner revoked through
+/// the UI, and re-enable a repository the developer turned off — the failure
+/// "it takes effect on the next request" exists to prevent, arriving by the
+/// back door of a restart.
 ///
-/// The flag is set even when the setting is empty. Otherwise the first boot
-/// *with* owners configured would seed a volume that had already been
-/// administered, and "I removed the last owner and one came back" is the same
-/// bug with more steps.
+/// The flag is set even when both are empty. Otherwise the first boot *with*
+/// something configured would seed a volume that had already been administered,
+/// and "I removed the last one and it came back" is the same bug with more
+/// steps.
+///
+/// **`SC_SERVER_PUBLIC_REPOS` keeps one job beyond seeding**: naming it is
+/// still what turns the public surface on. That switch stays in configuration —
+/// a server that could open its own public surface from a UI is a different
+/// security posture than the one asked for.
 fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
     let configured: Vec<(String, Vec<String>)> = cfg
         .public
@@ -70,17 +77,27 @@ fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
         })
         .unwrap_or_default();
 
+    let repos: Vec<String> = cfg
+        .public
+        .as_ref()
+        .map(|p| p.repos.names().to_vec())
+        .unwrap_or_default();
+
     let mut roster = store.roster()?;
-    if !roster.seed(&configured, now_ms()) {
-        if !configured.is_empty() {
-            // Said out loud, because a setting that is present and ignored is
-            // one somebody will edit expecting an effect.
-            crate::log::warn("owners setting ignored")
+    if !roster.seed(&configured, &repos, now_ms()) {
+        // Said out loud, because a setting that is present and ignored is one
+        // somebody will edit expecting an effect. Both are named: an operator
+        // adding a repository to the stack and seeing nothing happen needs to
+        // be told where it is actually decided.
+        if !configured.is_empty() || !repos.is_empty() {
+            crate::log::warn("roster settings ignored")
                 .with(
                     "note",
-                    "the roster on the volume is authoritative; edit owners at /owners",
+                    "the roster on the volume is authoritative; edit owners and \
+                     repositories at /owners and /repos",
                 )
-                .with("count", configured.len() as u64)
+                .with("owners", configured.len() as u64)
+                .with("repos", repos.len() as u64)
                 .emit();
         }
         return Ok(());
@@ -88,6 +105,7 @@ fn seed_roster(store: &Store, cfg: &Config) -> Result<()> {
     store.put_roster(&roster)?;
     crate::log::info("roster seeded")
         .with("owners", configured.len() as u64)
+        .with("repos", repos.len() as u64)
         .emit();
     Ok(())
 }
@@ -478,12 +496,29 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         Err(poisoned) => poisoned.into_inner(),
     };
     guard.sweep(now);
+
+    // **Which repositories collect is read per request, not frozen at startup**
+    // — the same reasoning as the roster it comes from, and it is the same
+    // file. Disabling one has to stop the picker offering it on the next
+    // request; a snapshot would keep taking filings for something the developer
+    // turned off, and only stop at the next restart.
+    //
+    // Through the same mtime cache, so this is a `stat` and not a parse.
+    let public = shared.public.as_ref().map(|p| {
+        let mut p = p.clone();
+        if let Ok(mut cache) = shared.roster.lock() {
+            p.repos =
+                crate::config::Repos::from(cache.current(&shared.store.roster_path()).enabled());
+        }
+        p
+    });
+
     let mut ctx = Ctx {
         store: &shared.store,
         daemon_keys: &shared.daemon_keys,
         limiter: &mut guard,
         now_ms: now,
-        public: shared.public.as_ref(),
+        public: public.as_ref(),
         mailer: shared.mailer.as_ref(),
         write_lock: &shared.write_lock,
         seen: &shared.seen,

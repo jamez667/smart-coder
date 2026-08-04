@@ -480,6 +480,114 @@ pub fn owners_page(roster: &crate::roster::Roster, served: &crate::config::Repos
     )
 }
 
+/// Which repositories the public surface collects for.
+///
+/// `unconfirmed` is a name no polling daemon declared. The page **questions it
+/// rather than refusing**: `Seen` is empty for the first half-minute after a
+/// restart and an older daemon declares nothing, so a `None` is "cannot
+/// confirm" and not "wrong". It names the case, says what *is* on offer, and
+/// offers to proceed anyway.
+pub fn repos_page(
+    roster: &crate::roster::Roster,
+    offered: &[String],
+    unconfirmed: Option<&str>,
+) -> String {
+    let mut rows = String::new();
+    for r in &roster.repos {
+        let action = if r.disabled {
+            "<span class=\"meta\">not collecting</span>".to_string()
+        } else {
+            format!(
+                "<form method=\"post\" action=\"/repos/{}/disable\">\
+                 <button type=\"submit\">Stop collecting</button></form>",
+                esc(&r.name)
+            )
+        };
+        // The two claims kept apart: a machine said it serves this, or the
+        // developer asserted it. A page that showed them alike could not
+        // explain why nothing is being drafted.
+        let who = match &r.served_by {
+            Some(label) => format!("confirmed by {}", esc(label)),
+            None => "enabled without confirmation".to_string(),
+        };
+        rows.push_str(&format!(
+            "<div class=\"item\"><strong>{name}</strong>\
+             <div class=\"meta\">{who} · added {when}</div>{action}</div>",
+            name = esc(&r.name),
+            who = who,
+            when = esc(&ago(r.added_ms, crate::store::now_ms())),
+            action = action,
+        ));
+    }
+    if roster.repos.is_empty() {
+        rows.push_str(
+            "<p class=\"meta\">Nothing is being collected. The public form says \
+             so rather than taking filings nothing will pick up.</p>",
+        );
+    }
+
+    let on_offer = if offered.is_empty() {
+        "<p class=\"meta\">No daemon is polling right now, so nothing can be \
+         confirmed. That is also the state for the first half-minute after a \
+         restart.</p>"
+            .to_string()
+    } else {
+        format!(
+            "<p class=\"meta\">Daemons are currently offering: {}.</p>",
+            esc(&offered.join(", "))
+        )
+    };
+
+    // The override, offered only where it is the answer to a question just
+    // asked. A permanent "enable anyway" checkbox would be ticked out of habit,
+    // which is exactly the reflex the check exists to interrupt.
+    let form = match unconfirmed {
+        Some(name) => format!(
+            "<h2>Nothing is serving {name}</h2>\
+             <p class=\"meta\">No daemon that is polling right now declared \
+             <strong>{name}</strong>. That usually means a typo, and it is much \
+             cheaper to fix here than after filings pile up against a name \
+             nothing will claim.</p>{on_offer}\
+             <form method=\"post\" action=\"/repos\">\
+             <input type=\"hidden\" name=\"name\" value=\"{name}\">\
+             <input type=\"hidden\" name=\"anyway\" value=\"yes\">\
+             <button type=\"submit\">Collect for {name} anyway</button></form>\
+             <p class=\"meta\">Enabling it without confirmation is recorded as \
+             such, so this page can still tell the two apart later.</p>\
+             <h2>Or collect for something else</h2>{blank}",
+            name = esc(name),
+            on_offer = on_offer,
+            blank = blank_repo_form(),
+        ),
+        None => format!(
+            "<h2>Collect for a repository</h2>{on_offer}{}",
+            blank_repo_form()
+        ),
+    };
+
+    shell(
+        "Repositories",
+        &format!(
+            "<h1>Repositories</h1>\
+             <p class=\"meta\">Which projects the public site takes requests \
+             for. Stopping one closes the door and keeps what already came \
+             through it.</p>{rows}{form}\
+             <p><a href=\"/\">Back to the queue</a></p>"
+        ),
+    )
+}
+
+fn blank_repo_form() -> String {
+    "<form method=\"post\" action=\"/repos\">\
+     <label for=\"name\">Repository name</label>\
+     <input id=\"name\" name=\"name\" required autocapitalize=\"off\" \
+     autocorrect=\"off\" spellcheck=\"false\">\
+     <button type=\"submit\">Collect for it</button></form>\
+     <p class=\"meta\">Exactly as the daemon knows it — the name is matched \
+     character for character.</p>"
+        .to_string()
+}
+
 /// The enrolment page, shown to a browser that is not enrolled.
 pub fn enrol_page() -> String {
     shell(

@@ -175,10 +175,20 @@ services:
       # (The review page says so when that happens, naming the repository.)
       #
       # With more than one, the filing form offers a picker and the filer
-      # chooses; a repository not in this list is refused rather than quietly
-      # filed against another. Setting this also requires
+      # chooses; a repository not in the enabled set is refused rather than
+      # quietly filed against another. Setting this also requires
       # SC_SERVER_PUBLIC_SITE_NAME, since a masthead cannot be derived from a
       # set.
+      #
+      # NAMING SOMETHING HERE IS WHAT TURNS THE PUBLIC SURFACE ON, and that
+      # switch stays in this file deliberately — a server that could open its
+      # own public surface from a UI is a different security posture.
+      #
+      # The LIST, though, is a SEED. Like SC_SERVER_OWNERS below it is applied
+      # once on a fresh volume and ignored after that, with a log line saying
+      # so; add and remove repositories at /repos on the review surface. Editing
+      # this on a volume that has already started changes nothing except
+      # whether the surface exists at all.
       #
       # Point these at scratch repositories rather than your main ones: public
       # work queues behind your own work in the same repository.

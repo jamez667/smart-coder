@@ -78,6 +78,7 @@ pub static STRINGS: Strings = Strings {
     owner_discard: "Discard it",
     owner_release: "Release it — this is not spam",
     owner_release_note: "Screening held this back. Read it and decide; leaving it here decides nothing.",
+    file_no_repos: "This site is not collecting requests just now — no project is open for them. Try again later.",
     file_repo_unknown: "That project does not take requests here.",
     file_mine_heading: "What you have filed",
     file_nothing_yet: "You have not filed anything yet.",

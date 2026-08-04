@@ -260,6 +260,12 @@ pub struct Strings {
     /// for. Deliberately says nothing about which ones it *does* — the picker
     /// already lists those to anyone who reached the form honestly.
     pub file_repo_unknown: &'static str,
+    /// Shown instead of the form when no repository is enabled.
+    ///
+    /// A real state, reachable the moment a developer disables the last one.
+    /// It says the site is between configurations rather than broken, and
+    /// names nobody: a filer cannot act on it and does not need a culprit.
+    pub file_no_repos: &'static str,
     pub file_mine_heading: &'static str,
     pub file_nothing_yet: &'static str,
     pub file_signout: &'static str,
@@ -458,6 +464,7 @@ mod tests {
             s.owner_release,
             s.owner_release_note,
             s.file_repo_unknown,
+            s.file_no_repos,
             s.file_mine_heading,
             s.file_nothing_yet,
             s.file_signout,

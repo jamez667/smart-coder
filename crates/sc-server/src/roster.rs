@@ -38,6 +38,14 @@ use serde::{Deserialize, Serialize};
 pub struct Roster {
     #[serde(default)]
     pub owners: Vec<OwnerRecord>,
+    /// Which repositories this surface collects for.
+    ///
+    /// Empty is a real state, not a broken one: a developer who can disable the
+    /// last repository makes it reachable, and the form says why it cannot take
+    /// anything rather than the server refusing to boot. Refusing would make
+    /// the page that fixes it unreachable exactly when it is needed.
+    #[serde(default)]
+    pub repos: Vec<RepoRecord>,
     /// Set the first time a seed is applied.
     ///
     /// Without it the environment would re-apply on every boot, and an owner
@@ -72,6 +80,29 @@ pub struct OwnerRecord {
     /// cannot answer "did I already deal with that?".
     #[serde(default)]
     pub revoked: bool,
+}
+
+/// A repository this surface collects for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoRecord {
+    /// Matched **exactly** against the daemon's own `queue add-repo` name, and
+    /// against what a filer's form submits. A fuzzy match here would reintroduce
+    /// the ambiguity a closed set exists to remove.
+    pub name: String,
+    /// Which daemon confirmed it was serving this when it was enabled.
+    ///
+    /// `None` records that nobody had — the developer enabled it anyway, past
+    /// the check. Kept rather than dropped so the two cases stay
+    /// distinguishable: "a machine said it serves this" and "I asserted it" are
+    /// different claims, and a page that showed them alike could not explain why
+    /// nothing is being drafted.
+    #[serde(default)]
+    pub served_by: Option<String>,
+    pub added_ms: u64,
+    /// Disabling stops collection without losing the record, so the page can
+    /// say a name *was* served — the same reasoning as a revoked owner.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl OwnerRecord {
@@ -125,15 +156,68 @@ impl Roster {
     /// with owners configured would seed a volume that had already been
     /// administered, and "I removed the last owner and one came back" is the
     /// same bug with more steps.
-    pub fn seed(&mut self, owners: &[(String, Vec<String>)], now_ms: u64) -> bool {
+    pub fn seed(
+        &mut self,
+        owners: &[(String, Vec<String>)],
+        repos: &[String],
+        now_ms: u64,
+    ) -> bool {
         if self.seeded {
             return false;
         }
-        for (login, repos) in owners {
-            self.set_owner(login, repos, now_ms);
+        for name in repos {
+            // `served_by: None` — no daemon has polled yet at startup, and
+            // asserting one would be a claim nothing made. The configuration
+            // *is* the developer's assertion, which is the same thing the
+            // override records.
+            self.enable(name, None, now_ms);
+        }
+        for (login, owned) in owners {
+            self.set_owner(login, owned, now_ms);
         }
         self.seeded = true;
         true
+    }
+
+    /// The enabled repository names, in the order they were added — which is
+    /// the order the picker offers.
+    pub fn enabled(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .filter(|r| !r.disabled)
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
+    /// Enable a repository, or re-enable one that was disabled.
+    ///
+    /// Replaces rather than appends, for the reason [`set_owner`](Roster::set_owner)
+    /// does: two records for one name would make "disable that repository"
+    /// ambiguous.
+    pub fn enable(&mut self, name: &str, served_by: Option<String>, now_ms: u64) {
+        let name = name.trim().to_string();
+        self.repos.retain(|r| r.name != name);
+        self.repos.push(RepoRecord {
+            name,
+            served_by,
+            added_ms: now_ms,
+            disabled: false,
+        });
+    }
+
+    /// Stop collecting for a repository. `true` if one was enabled and now is not.
+    pub fn disable(&mut self, name: &str) -> bool {
+        match self
+            .repos
+            .iter_mut()
+            .find(|r| r.name == name && !r.disabled)
+        {
+            Some(r) => {
+                r.disabled = true;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Revoke an owner. `true` if one was live and now is not.
@@ -301,33 +385,96 @@ mod tests {
         // different door and only on a restart, which is where it would go
         // unnoticed longest.
         let configured = vec![("jamez667".to_string(), vec!["intake".to_string()])];
+        let repos = vec!["intake".to_string()];
 
         let mut roster = Roster::default();
-        assert!(roster.seed(&configured, 1), "the first boot seeds");
+        assert!(roster.seed(&configured, &repos, 1), "the first boot seeds");
         assert!(roster.owner_for("jamez667").is_some());
+        assert_eq!(roster.enabled(), ["intake"]);
 
-        // The developer revokes them through the UI, then the container
-        // restarts with the setting still in place.
+        // The developer revokes the owner and stops collecting for the
+        // repository, then the container restarts with both settings still in
+        // place.
         assert!(roster.revoke("jamez667"));
-        assert!(!roster.seed(&configured, 2), "a later boot does not");
+        assert!(roster.disable("intake"));
+        assert!(
+            !roster.seed(&configured, &repos, 2),
+            "a later boot does not"
+        );
         assert!(
             roster.owner_for("jamez667").is_none(),
             "a revoked owner came back on a restart"
+        );
+        assert!(
+            roster.enabled().is_empty(),
+            "a disabled repository came back on a restart"
         );
     }
 
     #[test]
     fn an_empty_seed_still_marks_the_volume_administered() {
-        // Otherwise the first boot *with* owners configured would seed a volume
-        // somebody had already administered — and "I removed the last owner and
-        // one came back" is the same bug with more steps.
+        // Otherwise the first boot *with* something configured would seed a
+        // volume somebody had already administered — and "I removed the last
+        // one and it came back" is the same bug with more steps.
         let mut roster = Roster::default();
-        assert!(roster.seed(&[], 1));
+        assert!(roster.seed(&[], &[], 1));
         assert!(roster.seeded);
 
         let configured = vec![("jamez667".to_string(), vec!["intake".to_string()])];
-        assert!(!roster.seed(&configured, 2), "already administered");
+        assert!(
+            !roster.seed(&configured, &["intake".to_string()], 2),
+            "already administered"
+        );
         assert!(roster.owner_for("jamez667").is_none());
+        assert!(roster.enabled().is_empty());
+    }
+
+    #[test]
+    fn a_disabled_repository_is_kept_and_collects_nothing() {
+        let mut roster = Roster::default();
+        roster.enable("intake", Some("laptop".into()), 1);
+        roster.enable("other", None, 1);
+        assert_eq!(roster.enabled(), ["intake", "other"]);
+
+        assert!(roster.disable("intake"));
+        assert_eq!(roster.enabled(), ["other"]);
+        // Kept, so the page can say a name *was* collected for.
+        assert_eq!(roster.repos.len(), 2);
+        // And disabling twice is not a second event.
+        assert!(!roster.disable("intake"));
+
+        // Re-enabling is the same call, and records who confirmed it this time.
+        roster.enable("intake", None, 2);
+        assert_eq!(roster.enabled(), ["other", "intake"]);
+        assert_eq!(roster.repos.len(), 2, "replaced, not appended");
+    }
+
+    #[test]
+    fn how_a_repository_was_enabled_survives_the_round_trip() {
+        // "A machine said it serves this" and "I asserted it" are different
+        // claims, and a page that could not tell them apart could not explain
+        // why nothing is being drafted.
+        let mut roster = Roster::default();
+        roster.enable("confirmed", Some("laptop".into()), 1);
+        roster.enable("asserted", None, 1);
+
+        let json = serde_json::to_string(&roster).unwrap();
+        let back: Roster = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.repos[0].served_by.as_deref(), Some("laptop"));
+        assert_eq!(back.repos[1].served_by, None);
+    }
+
+    #[test]
+    fn a_roster_written_before_repositories_existed_still_loads() {
+        // Commit 4 wrote owners with no `repos` key at all. A volume that
+        // upgrades must not fail to parse — that is the one file the developer
+        // cannot lose.
+        let old = r#"{"owners":[{"login":"jamez667","repos":["intake"],
+                      "added_ms":1,"revoked":false}],"seeded":true}"#;
+        let roster: Roster = serde_json::from_str(old).unwrap();
+        assert!(roster.owner_for("jamez667").is_some());
+        assert!(roster.enabled().is_empty());
+        assert!(roster.seeded, "and it is not seeded a second time");
     }
 
     #[test]

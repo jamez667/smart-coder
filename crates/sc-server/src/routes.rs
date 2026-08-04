@@ -120,6 +120,12 @@ pub mod private_route {
     /// argument that an owner cannot promote an owner. It is not a check inside
     /// the handler that somebody could forget to write.
     pub const OWNERS: &str = "/owners";
+    /// Which repositories the public surface collects for.
+    ///
+    /// Device-only for the same structural reason. **Turning the surface
+    /// itself on stays in configuration** — a server that could open its own
+    /// public surface from a UI is a different security posture.
+    pub const REPOS: &str = "/repos";
 }
 
 /// The verbs that decide a request's fate.
@@ -1050,6 +1056,24 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             revoke_owner(ctx, login)
         }
 
+        // Which repositories collect publicly.
+        ("GET", private_route::REPOS) => repos_page(ctx, None),
+
+        ("POST", private_route::REPOS) => {
+            let form = form_fields(&req.body);
+            let name = form.get("name").map(|n| n.trim()).unwrap_or_default();
+            // The override the refusal page offers. A separate field rather
+            // than a second route, so the record of *which* case it was is
+            // written by the same handler that decided it.
+            let anyway = form.get("anyway").is_some_and(|v| v == "yes");
+            enable_repo(ctx, name, anyway)
+        }
+
+        ("POST", p) if p.starts_with("/repos/") && p.ends_with("/disable") => {
+            let name = p.trim_start_matches("/repos/").trim_end_matches("/disable");
+            disable_repo(ctx, name)
+        }
+
         ("GET", p) if p.starts_with("/request/") => {
             let id = p.trim_start_matches("/request/");
             match ctx.store.get(id) {
@@ -1403,6 +1427,94 @@ fn revoke_owner(ctx: &mut Ctx<'_>, login: &str) -> Res {
         invalidate_roster(ctx);
     }
     Res::html(200, crate::page::owners_page(&roster, &public.repos))
+}
+
+/// Which repositories collect publicly.
+///
+/// `unconfirmed` carries the name a daemon could not be found for, so the page
+/// can offer the override instead of a bare error.
+fn repos_page(ctx: &Ctx<'_>, unconfirmed: Option<&str>) -> Res {
+    if ctx.public.is_none() {
+        return Res::html(404, crate::page::not_found());
+    }
+    let offered = match ctx.seen.lock() {
+        Ok(seen) => seen.offered(ctx.now_ms),
+        Err(p) => p.into_inner().offered(ctx.now_ms),
+    };
+    match ctx.store.roster() {
+        Ok(r) => Res::html(200, crate::page::repos_page(&r, &offered, unconfirmed)),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Collect publicly for a repository.
+///
+/// **The daemon check is a typo-catcher, not a security gate**, and is built as
+/// one. Enabling `smrt-coder` writes a name nothing will ever claim: filings
+/// pile up against a repository that does not exist, and the surface looks
+/// broken rather than misconfigured. Asking a machine that is polling right now
+/// catches that at the moment it is cheapest to fix.
+///
+/// It cannot be a refusal, because a `None` is not proof of a typo:
+/// [`Seen`](crate::daemons::Seen) is empty for the first half-minute after a
+/// restart, and a daemon on an older build declares nothing at all. So an
+/// unconfirmed name is *questioned* — the page names the case, lists what is
+/// actually on offer, and offers to proceed. Taking the override records
+/// `served_by: None`, so a repository enabled without confirmation stays
+/// visibly distinguishable from one a machine vouched for.
+fn enable_repo(ctx: &mut Ctx<'_>, name: &str, anyway: bool) -> Res {
+    if ctx.public.is_none() {
+        return Res::html(404, crate::page::not_found());
+    }
+    if name.is_empty() || name.len() > crate::config::MAX_REPO_NAME {
+        return error(400, "a repository name is required");
+    }
+
+    let served_by = match ctx.seen.lock() {
+        Ok(seen) => seen.declared_by(name, ctx.now_ms),
+        Err(p) => p.into_inner().declared_by(name, ctx.now_ms),
+    };
+    if served_by.is_none() && !anyway {
+        return repos_page(ctx, Some(name));
+    }
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    roster.enable(name, served_by, ctx.now_ms);
+    // This volume has now been administered; see `set_owner`.
+    roster.seeded = true;
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    repos_page(ctx, None)
+}
+
+/// Stop collecting for a repository.
+///
+/// **Nothing already filed is touched.** Disabling closes the door; it does not
+/// discard what came through it, and the developer's own review surface still
+/// shows every request. Deleting them would make this button destructive in a
+/// way its name does not say.
+fn disable_repo(ctx: &mut Ctx<'_>, name: &str) -> Res {
+    if ctx.public.is_none() {
+        return Res::html(404, crate::page::not_found());
+    }
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if roster.disable(name) {
+        if let Err(e) = ctx.store.put_roster(&roster) {
+            return error(500, &e.to_string());
+        }
+        invalidate_roster(ctx);
+    }
+    repos_page(ctx, None)
 }
 
 /// Make the next identification re-read the roster.
@@ -1867,6 +1979,18 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
     res
 }
 
+/// A filing that named no repository this surface collects for.
+///
+/// Deliberately says nothing about which ones it *does* — the picker already
+/// lists those to anyone who reached the form honestly.
+fn refuse_repo(locale: Locale) -> Res {
+    Res::html(
+        400,
+        crate::page::public_message(locale.strings().file_repo_unknown, locale),
+    )
+    .with_policy(Policy::PublicScript)
+}
+
 /// File a request from the public surface.
 ///
 /// The repository is **chosen from the configured set, never taken from the
@@ -1900,16 +2024,17 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
     // A surface serving one repository renders no field, so an absent name is
     // normal there and takes the only one. With several, absent means the form
     // was not the thing that sent this.
+    //
+    // With **none** enabled, `first()` is `None` and this falls through to the
+    // refusal below — which is right: there is nothing to file against, and the
+    // page a filer arrived on already says so.
     let repo = match form.get("repo").map(|r| r.trim()) {
-        None | Some("") if public.repos.is_single() => public.repos.first().to_string(),
+        None | Some("") if public.repos.is_single() => match public.repos.first() {
+            Some(only) => only.to_string(),
+            None => return refuse_repo(locale),
+        },
         Some(named) if public.repos.accepts(named) => named.to_string(),
-        _ => {
-            return Res::html(
-                400,
-                crate::page::public_message(locale.strings().file_repo_unknown, locale),
-            )
-            .with_policy(Policy::PublicScript)
-        }
+        _ => return refuse_repo(locale),
     };
     let text = form.get("text").cloned().unwrap_or_default();
     let text = text.trim();
@@ -2284,7 +2409,19 @@ mod tests {
 
         /// Serve a second repository, so the picker and its validation are
         /// reachable.
+        ///
+        /// Writes **both** the roster and the resolved set on `PublicConfig`.
+        /// In production `serve.rs` resolves the second from the first on every
+        /// request; this fixture builds `Ctx` directly, so it does that step by
+        /// hand — and writing the roster too keeps the admin page's view and
+        /// the request path's view from disagreeing inside one test.
         fn with_repos(mut self, names: &[&str]) -> Fixture {
+            let mut roster = self.store.roster().unwrap();
+            for name in names {
+                roster.enable(name, Some("test-daemon".into()), self.now_ms);
+            }
+            roster.seeded = true;
+            self.store.put_roster(&roster).unwrap();
             if let Some(p) = self.public.as_mut() {
                 p.repos = crate::config::Repos::new(names);
             }
@@ -4157,6 +4294,124 @@ mod tests {
         let res = f.go(&Req::post("/owners/jamez667/revoke", "").with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(f.store.roster().unwrap().owner_for("jamez667").is_none());
+    }
+
+    #[test]
+    fn a_repository_no_daemon_declared_is_not_enabled_by_accident() {
+        // **A typo-catcher, not a gate.** Enabling `smrt-coder` writes a name
+        // nothing will ever claim, and filings pile up against a repository
+        // that does not exist. The check asks a machine that is polling now.
+        let mut f = Fixture::new("repos-typo").with_public(false);
+        let device = f.enrolled();
+
+        // A daemon is polling and says what it serves.
+        f.go(&Req::get(&format!("{}?repo=smart-coder", wire::route::WORK)).with_bearer(KEY));
+
+        let res = f.go(&Req::post(private_route::REPOS, "name=smrt-coder").with_cookie(&device));
+        assert_eq!(res.status, 200, "questioned, not refused: {}", res.body);
+        assert!(
+            f.store.roster().unwrap().enabled().is_empty(),
+            "a misspelling was written on the first ask"
+        );
+        // The page says which case it is and what *is* on offer, rather than a
+        // bare error somebody would click past.
+        assert!(res.body.contains("smrt-coder"), "{}", res.body);
+        assert!(res.body.contains("smart-coder"), "{}", res.body);
+
+        // Confirmed by a daemon: enabled outright, and recorded as confirmed.
+        let res = f.go(&Req::post(private_route::REPOS, "name=smart-coder").with_cookie(&device));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let roster = f.store.roster().unwrap();
+        assert_eq!(roster.enabled(), ["smart-coder"]);
+        assert_eq!(roster.repos[0].served_by.as_deref(), Some("test-daemon"));
+    }
+
+    #[test]
+    fn an_unconfirmed_repository_can_be_enabled_anyway_and_says_so() {
+        // A `None` is not proof of a typo: `Seen` is empty for the first half
+        // minute after a restart, and an older daemon declares nothing. So the
+        // override has to exist — and taking it is recorded, or the page could
+        // not later explain why nothing is being drafted.
+        let mut f = Fixture::new("repos-anyway").with_public(false);
+        let device = f.enrolled();
+
+        let res = f.go(
+            &Req::post(private_route::REPOS, "name=not-yet-polling&anyway=yes")
+                .with_cookie(&device),
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        let roster = f.store.roster().unwrap();
+        assert_eq!(roster.enabled(), ["not-yet-polling"]);
+        assert_eq!(
+            roster.repos[0].served_by, None,
+            "an assertion is not a confirmation"
+        );
+    }
+
+    #[test]
+    fn a_surface_with_no_repositories_still_serves_and_says_why() {
+        // Reachable the moment a developer disables the last one. Not a 404 —
+        // that teaches somebody at a working address nothing — and not a
+        // refusal to boot, which would put the page that fixes it out of reach
+        // exactly when it is needed.
+        let mut f = Fixture::new("repos-none").with_public(false);
+        if let Some(p) = f.public.as_mut() {
+            p.repos = crate::config::Repos::default();
+        }
+        let session = f.signed_in("jo@x.com");
+
+        let res = f.go(&Req::get(public_route::FILE).with_cookie(&session));
+        assert_eq!(res.status, 200, "the page still serves");
+        assert!(
+            !res.body.contains("<textarea"),
+            "a form that always refuses is worse than none: {}",
+            res.body
+        );
+
+        // And a filing submitted anyway is refused rather than landing
+        // somewhere nobody chose.
+        let res =
+            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        assert_eq!(res.status, 400);
+        assert!(f.store.all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabling_a_repository_keeps_what_already_came_through_it() {
+        // Disabling closes the door; it does not discard what came through it.
+        // Deleting would make the button destructive in a way its name does not
+        // say — and the developer's own review surface still shows the work.
+        let mut f = Fixture::new("repos-disable")
+            .with_public(false)
+            .with_repos(&["intake"]);
+        let device = f.enrolled();
+        let filer = f.signed_in("jo@x.com");
+        f.go(
+            &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=intake").with_cookie(&filer),
+        );
+        assert_eq!(f.store.all().unwrap().len(), 1);
+
+        let res = f.go(&Req::post("/repos/intake/disable", "").with_cookie(&device));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(f.store.roster().unwrap().enabled().is_empty());
+        assert_eq!(f.store.all().unwrap().len(), 1, "the filing survived");
+    }
+
+    #[test]
+    fn an_owner_cannot_reach_the_repository_switch() {
+        // The same structural argument as the roster: the only writer lives
+        // past the device gate. An owner who could enable a repository could
+        // enable one they own and collect for it.
+        let (mut f, session, _mine, _theirs) = owner_fixture("repos-owner");
+
+        for (path, body) in [
+            (private_route::REPOS, "name=whatever&anyway=yes"),
+            ("/repos/intake/disable", ""),
+        ] {
+            let res = f.go(&Req::post(path, body).with_cookie(&session));
+            assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
+        }
+        assert_eq!(f.store.roster().unwrap().enabled(), ["intake", "other"]);
     }
 
     #[test]
