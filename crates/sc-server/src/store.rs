@@ -399,6 +399,16 @@ impl Store {
         self.root.join("oauth-states.json")
     }
 
+    fn admin_path(&self) -> PathBuf {
+        self.root.join("admin.json")
+    }
+
+    /// Public, because [`SettingsCache`](crate::settings::SettingsCache) stats
+    /// this file on every request and reads it only when it has changed.
+    pub fn settings_path(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
     /// Where the roster lives.
     ///
     /// Public, unlike its siblings, because [`RosterCache`](crate::roster::RosterCache)
@@ -916,6 +926,39 @@ impl Store {
         let json =
             serde_json::to_string_pretty(states).map_err(|e| DcError::Eval(e.to_string()))?;
         write_atomic(&self.oauth_states_path(), json.as_bytes())
+    }
+
+    /// What this server does — the settings that used to be environment
+    /// variables.
+    ///
+    /// Its own file rather than a field beside the roster: this is written by
+    /// the administrator from a settings page, the roster from an owners page,
+    /// and sharing a file would put two unrelated edits under one rewrite.
+    pub fn settings(&self) -> Result<crate::settings::Settings> {
+        read_json(&self.settings_path())
+    }
+
+    pub fn put_settings(&self, settings: &crate::settings::Settings) -> Result<()> {
+        let json =
+            serde_json::to_string_pretty(settings).map_err(|e| DcError::Eval(e.to_string()))?;
+        write_atomic(&self.settings_path(), json.as_bytes())
+    }
+
+    /// Who administers this server.
+    ///
+    /// A file of its own rather than a field on the roster, for the reason
+    /// `oauth-states.json` has one: the roster is written by the administrator
+    /// as routine work, and this is written once at setup and almost never
+    /// again. Sharing a file would put a claim and a day's owner edits under the
+    /// same rewrite — and this is the file somebody deletes to recover a server,
+    /// which must not take the owner list with it.
+    pub fn admin(&self) -> Result<crate::admin::Admin> {
+        read_json(&self.admin_path())
+    }
+
+    pub fn put_admin(&self, admin: &crate::admin::Admin) -> Result<()> {
+        let json = serde_json::to_string_pretty(admin).map_err(|e| DcError::Eval(e.to_string()))?;
+        write_atomic(&self.admin_path(), json.as_bytes())
     }
 
     /// Read the roster.

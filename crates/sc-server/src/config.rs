@@ -959,14 +959,7 @@ fn public_from(
             env::PUBLIC_REPOS
         )
     })?;
-    if !base_url.starts_with("https://") && !is_private_host(&base_url) {
-        return Err(format!(
-            "{} must be https:// — a sign-in link is a credential in a URL, and \
-             plain HTTP puts it in the clear. (http://localhost is allowed for \
-             trying it locally.)",
-            env::PUBLIC_BASE_URL
-        ));
-    }
+    check_base_url(&base_url).map_err(|e| format!("{}: {e}", env::PUBLIC_BASE_URL))?;
 
     // Console mail waives the provider settings, because supplying a Brevo key
     // to a server that will not call Brevo is a hurdle with no purpose. The
@@ -1120,6 +1113,40 @@ fn screen_from(
 ///
 /// Handles the bracketed form (`http://[::1]:8420`), because splitting an IPv6
 /// authority on `:` otherwise returns an empty host and quietly fails open.
+/// Is this an address sign-in links can safely be built from?
+///
+/// **One function, two callers**: this runs at startup on the environment and
+/// again on the setup form, so the rule cannot hold in one place and not the
+/// other. A base URL entered through a page is the same credential-bearing
+/// address as one set in a stack.
+pub fn check_base_url(base_url: &str) -> std::result::Result<(), String> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("an absolute address is required - a sign-in link cannot be                     built from the Host header, which is attacker-controlled"
+            .to_string());
+    }
+    if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
+        return Err("an absolute address, starting https://".to_string());
+    }
+    if !base_url.starts_with("https://") && !is_private_host(base_url) {
+        return Err(
+            "must be https:// - a sign-in link is a credential in a URL, and plain              HTTP puts it in the clear. (http://localhost is allowed for trying it              locally.)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Will cookies carry `Secure` for this address?
+///
+/// Derived, never configured. "Is this a private network" is a question people
+/// answer wrong, and answering it wrong drops `Secure` from every session
+/// cookie silently. Exposed so the setup form can *show* what it decided rather
+/// than asking.
+pub fn secure_for(base_url: &str) -> bool {
+    !is_private_host(base_url.trim())
+}
+
 fn host_of(url: &str) -> &str {
     let authority = url
         .trim_start_matches("http://")

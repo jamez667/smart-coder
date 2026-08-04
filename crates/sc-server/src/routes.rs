@@ -126,6 +126,10 @@ pub mod private_route {
     /// itself on stays in configuration** — a server that could open its own
     /// public surface from a UI is a different security posture.
     pub const REPOS: &str = "/repos";
+    /// Claim an unclaimed server. **Exists only while unclaimed.**
+    pub const SETUP: &str = "/setup";
+    /// Step two of setup: the GitHub application.
+    pub const SETUP_GITHUB: &str = "/setup/github";
 }
 
 /// The verbs that decide a request's fate.
@@ -420,6 +424,14 @@ pub struct Ctx<'a> {
     /// made owners-in-configuration right and had to survive the move off it.
     /// See [`crate::roster::RosterCache`].
     pub roster: &'a Mutex<crate::roster::RosterCache>,
+    /// What this server does, re-read from the volume when it changes.
+    pub settings: &'a Mutex<crate::settings::SettingsCache>,
+    /// The key sealed settings are read with, when one is configured.
+    ///
+    /// `None` means nothing can be sealed or opened — see [`crate::seal`]. A
+    /// server given a wrong key refuses to boot rather than arriving here, so
+    /// `None` here really is "no key", not "the wrong one".
+    pub seal_key: Option<&'a crate::seal::SealKey>,
     /// Set when the HTTP layer is re-checking a long poll it already holds.
     ///
     /// The hold re-runs [`handle`] every 250ms looking for work that may have
@@ -493,6 +505,16 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         return enrol(ctx, req, creds);
     }
 
+    // Setup, likewise reachable without a credential, and for the same reason:
+    // it is how the first one is obtained. Guarded by the single-use claim code.
+    //
+    // **It stops existing the moment the server is claimed.** Not "exists and
+    // refuses" — a 404 means a stranger cannot tell a claimed server from one
+    // that never had setup, and there is no page for them to keep trying.
+    if path == private_route::SETUP || path == private_route::SETUP_GITHUB {
+        return setup_route(ctx, req, method, &path);
+    }
+
     // The public surface, matched **before** the device gate below — that gate is
     // what makes everything past it private, so anything reachable without a
     // device must be handled here or not at all.
@@ -560,13 +582,48 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 /// and `set_language` records the standing objection to redirects on a surface
 /// anyone can reach. A link also stays inside the CSP as written, where a form
 /// posting to github.com would be refused by `form-action 'self'`.
+/// The GitHub application, wherever it is configured.
+///
+/// **Settings first, then the environment.** An application entered through
+/// setup lives on the volume; one from the stack is the older path and stays
+/// readable so an existing deployment keeps working. Asked in one place so the
+/// two cannot disagree about which is in force.
+fn github_app(ctx: &Ctx<'_>) -> Option<(String, String)> {
+    let settings = match ctx.settings.lock() {
+        Ok(mut cache) => cache.current(&ctx.store.settings_path()),
+        Err(p) => p.into_inner().current(&ctx.store.settings_path()),
+    };
+    if settings.has_github() {
+        if let Some(secret) = settings.github_secret(ctx.seal_key) {
+            return Some((settings.github_client_id.clone(), secret));
+        }
+    }
+    ctx.public
+        .and_then(|p| p.github.as_ref())
+        .map(|g| (g.client_id.clone(), g.client_secret.clone()))
+}
+
+/// Begin the sign-in that will claim this server.
+///
+/// The same hop as an ordinary sign-in, marked on the state so the callback
+/// knows the login it resolves should own the server. Marked there rather than
+/// on a cookie because the state is already single-use, already expires, and is
+/// already what the callback validates.
+fn start_github_claim(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
+    start_github_inner(ctx, locale, true)
+}
+
 fn start_github(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
-    let Some(github) = ctx.public.and_then(|p| p.github.as_ref()) else {
+    start_github_inner(ctx, locale, false)
+}
+
+fn start_github_inner(ctx: &mut Ctx<'_>, locale: Locale, claiming: bool) -> Res {
+    let Some((client_id, client_secret)) = github_app(ctx) else {
         // No application configured: the route does not exist, rather than
         // existing and failing after a trip to GitHub.
         return Res::html(404, crate::page::public_not_found(locale));
     };
-    let client = crate::oauth::HttpGithub::new(&github.client_id, &github.client_secret);
+    let client = crate::oauth::HttpGithub::new(&client_id, &client_secret);
 
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut states = match ctx.store.oauth_states() {
@@ -582,7 +639,11 @@ fn start_github(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
             crate::page::public_message(locale.strings().github_busy, locale),
         );
     }
-    let state = states.issue(ctx.now_ms);
+    let state = if claiming {
+        states.issue_claim(ctx.now_ms)
+    } else {
+        states.issue(ctx.now_ms)
+    };
     if let Err(e) = ctx.store.put_oauth_states(&states) {
         return error(500, &e.to_string());
     }
@@ -600,10 +661,10 @@ fn start_github(ctx: &mut Ctx<'_>, locale: Locale) -> Res {
 /// work, try again", and distinguishing a forged state from an expired one for
 /// them would tell an attacker which half they got right.
 fn finish_github(ctx: &mut Ctx<'_>, req: &Req, locale: Locale) -> Res {
-    let Some(github) = ctx.public.and_then(|p| p.github.as_ref()) else {
+    let Some((client_id, client_secret)) = github_app(ctx) else {
         return Res::html(404, crate::page::public_not_found(locale));
     };
-    let client = crate::oauth::HttpGithub::new(&github.client_id, &github.client_secret);
+    let client = crate::oauth::HttpGithub::new(&client_id, &client_secret);
     finish_github_with(ctx, req, locale, &client)
 }
 
@@ -624,6 +685,11 @@ fn finish_github_with(
         )
     };
 
+    // Set from the state below, which is the only place that knows. A claim
+    // rides the hop rather than a cookie because the state is already single-use
+    // and already validated here.
+    let claiming;
+
     let query = crate::query::CallbackQuery::parse(&req.path);
     let (Some(code), Some(state)) = (query.code, query.state) else {
         // GitHub sends `?error=access_denied` when somebody declines, and that
@@ -640,8 +706,9 @@ fn finish_github_with(
             Ok(s) => s,
             Err(e) => return error(500, &e.to_string()),
         };
-        if states.consume(&state, ctx.now_ms).is_err() {
-            return failed();
+        match states.consume(&state, ctx.now_ms) {
+            Ok(was_claiming) => claiming = was_claiming,
+            Err(_) => return failed(),
         }
         if let Err(e) = ctx.store.put_oauth_states(&states) {
             return error(500, &e.to_string());
@@ -661,11 +728,42 @@ fn finish_github_with(
         }
     };
 
+    // **The second half of the claim.** The code proved whoever started this can
+    // read the container's logs; GitHub has now proved who they are. Written
+    // before the account, so a server that fails to record the account is still
+    // owned rather than left claimable by the next person to read the log.
+    //
+    // Re-checked here rather than trusted from `/setup`: `Admin::claim` is
+    // reached only when the server is *still* unclaimed, so two people who both
+    // spent a code cannot both end up owning it — the first to finish wins and
+    // the second is an ordinary sign-in.
+    if claiming {
+        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut admin = match ctx.store.admin() {
+            Ok(a) => a,
+            Err(e) => return error(500, &e.to_string()),
+        };
+        if !admin.claimed() {
+            admin.claim(&login, ctx.now_ms);
+            if let Err(e) = ctx.store.put_admin(&admin) {
+                return error(500, &e.to_string());
+            }
+            crate::log::warn("server claimed")
+                .with("login", login.to_ascii_lowercase())
+                .with("note", "this account now administers this server")
+                .emit();
+        }
+    }
+
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut accounts = match ctx.store.accounts() {
         Ok(a) => a,
         Err(e) => return error(500, &e.to_string()),
     };
+    // **The administrator is exempt from the signup cap.** Otherwise a flood
+    // that reaches the ceiling locks out the one person who can stop it — and
+    // the surface that stops it is behind their sign-in.
+    let is_admin = ctx.store.admin().map(|a| a.is(&login)).unwrap_or(false);
 
     // Keyed on the login rather than on an email: a GitHub profile's address is
     // often absent and can be several, so it is not an identity this can rely
@@ -681,7 +779,7 @@ fn finish_github_with(
         Some(account) => account.id,
         None => {
             let cap = ctx.public.map(|p| p.max_accounts).unwrap_or(0);
-            if accounts.accounts.len() >= cap {
+            if !is_admin && accounts.accounts.len() >= cap {
                 crate::log::warn("signup refused")
                     .with("accounts", accounts.accounts.len() as u64)
                     .with("cap", cap as u64)
@@ -1992,7 +2090,151 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
 /// the URL. Offering a link where the route 404s is the same bug pointing the
 /// other way.
 fn has_github(ctx: &Ctx<'_>) -> bool {
-    ctx.public.is_some_and(|p| p.github.is_some())
+    github_app(ctx).is_some()
+}
+
+/// Claim an unclaimed server.
+///
+/// **Every arm 404s once claimed**, so setup stops existing rather than existing
+/// and refusing — a stranger cannot tell a claimed server from one that never
+/// had this route, and there is nothing to keep trying.
+fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
+    let gone = || Res::html(404, crate::page::not_found());
+
+    let admin = match ctx.store.admin() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if admin.claimed() {
+        return gone();
+    }
+    let settings = match ctx.store.settings() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+
+    match (method, path) {
+        ("GET", private_route::SETUP) => {
+            // Step two when step one is already done, so a reload does not send
+            // somebody back to a code they have already spent.
+            if !settings.base_url.is_empty() {
+                return Res::html(
+                    200,
+                    crate::page::setup_github_page(&settings.base_url, None),
+                );
+            }
+            Res::html(200, crate::page::setup_page("", None))
+        }
+
+        ("POST", private_route::SETUP) => {
+            let form = form_fields(&req.body);
+            let base_url = form.get("base_url").map(|b| b.trim()).unwrap_or_default();
+            let code = form.get("code").map(|c| c.trim()).unwrap_or_default();
+
+            // **The address is checked before the code is spent.** A typo in the
+            // address must not burn the one code the operator has, leaving them
+            // to restart the container to get another.
+            if let Err(e) = crate::config::check_base_url(base_url) {
+                return Res::html(400, crate::page::setup_page(base_url, Some(&e)));
+            }
+
+            let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut admin = match ctx.store.admin() {
+                Ok(a) => a,
+                Err(e) => return error(500, &e.to_string()),
+            };
+            if !admin.spend(code, ctx.now_ms) {
+                // One message for every failure — wrong, expired, already spent.
+                // Distinguishing them tells a guesser which half they got right.
+                return Res::html(
+                    400,
+                    crate::page::setup_page(
+                        base_url,
+                        Some(
+                            "That code did not work. It is printed in the                              container's log at startup, is single-use, and                              expires after thirty minutes — restart the server                              for a fresh one.",
+                        ),
+                    ),
+                );
+            }
+            if let Err(e) = ctx.store.put_admin(&admin) {
+                return error(500, &e.to_string());
+            }
+
+            let mut settings = match ctx.store.settings() {
+                Ok(s) => s,
+                Err(e) => return error(500, &e.to_string()),
+            };
+            settings.base_url = base_url.to_string();
+            // This volume has now been administered, so the environment must not
+            // seed over it on the next boot.
+            settings.seeded = true;
+            if let Err(e) = ctx.store.put_settings(&settings) {
+                return error(500, &e.to_string());
+            }
+            invalidate_settings(ctx);
+
+            Res::html(200, crate::page::setup_github_page(base_url, None))
+        }
+
+        ("POST", private_route::SETUP_GITHUB) => {
+            // The code is already spent by now, so reaching this without a base
+            // URL means somebody skipped a step rather than failed one.
+            if settings.base_url.is_empty() {
+                return Res::html(400, crate::page::setup_page("", None));
+            }
+            let form = form_fields(&req.body);
+            let id = form.get("client_id").map(|v| v.trim()).unwrap_or_default();
+            let secret = form
+                .get("client_secret")
+                .map(|v| v.trim())
+                .unwrap_or_default();
+            if id.is_empty() || secret.is_empty() {
+                return Res::html(
+                    400,
+                    crate::page::setup_github_page(
+                        &settings.base_url,
+                        Some("Both halves are needed: an id without a secret is a                               sign-in button that always fails."),
+                    ),
+                );
+            }
+            let Some(key) = ctx.seal_key else {
+                return Res::html(
+                    400,
+                    crate::page::setup_github_page(
+                        &settings.base_url,
+                        Some("This server has no sealing key, so it cannot store a                               secret. Set SC_SERVER_SECRET_KEY and restart."),
+                    ),
+                );
+            };
+
+            let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut settings = match ctx.store.settings() {
+                Ok(s) => s,
+                Err(e) => return error(500, &e.to_string()),
+            };
+            settings.set_github(key, id, secret, ctx.now_ms);
+            settings.seeded = true;
+            if let Err(e) = ctx.store.put_settings(&settings) {
+                return error(500, &e.to_string());
+            }
+            invalidate_settings(ctx);
+            drop(_guard);
+
+            // Straight into the sign-in that decides who owns this. An
+            // interstitial with a link rather than a redirect, for the reason
+            // `oauth` gives.
+            start_github_claim(ctx, req.locale())
+        }
+
+        _ => gone(),
+    }
+}
+
+/// Make the next request re-read the settings.
+fn invalidate_settings(ctx: &Ctx<'_>) {
+    if let Ok(mut cache) = ctx.settings.lock() {
+        cache.invalidate();
+    }
 }
 
 /// A filing that named no repository this surface collects for.
@@ -2318,6 +2560,8 @@ mod tests {
         write_lock: Mutex<()>,
         seen: Mutex<crate::daemons::Seen>,
         roster: Mutex<crate::roster::RosterCache>,
+        settings: Mutex<crate::settings::SettingsCache>,
+        seal_key: Option<crate::seal::SealKey>,
         /// Advanced by tests that need a link to expire.
         now_ms: u64,
         /// One entry by default, so most tests read as a single-daemon server.
@@ -2360,6 +2604,10 @@ mod tests {
                 write_lock: Mutex::new(()),
                 seen: Mutex::new(crate::daemons::Seen::default()),
                 roster: Mutex::new(crate::roster::RosterCache::default()),
+                settings: Mutex::new(crate::settings::SettingsCache::default()),
+                // Every fixture can seal, so a test never has to think about
+                // it unless it is the thing under test.
+                seal_key: crate::seal::SealKey::parse(&crate::auth::mint_secret()).ok(),
                 now_ms: 1_000,
                 daemon_keys: one_key("test-daemon", KEY),
             }
@@ -2482,6 +2730,8 @@ mod tests {
                 write_lock: &self.write_lock,
                 seen: &self.seen,
                 roster: &self.roster,
+                settings: &self.settings,
+                seal_key: self.seal_key.as_ref(),
                 rechecking: false,
             };
             handle(&mut ctx, req)
@@ -2499,6 +2749,8 @@ mod tests {
                 write_lock: &self.write_lock,
                 seen: &self.seen,
                 roster: &self.roster,
+                settings: &self.settings,
+                seal_key: self.seal_key.as_ref(),
                 rechecking: true,
             };
             handle(&mut ctx, req)
@@ -3705,6 +3957,8 @@ mod tests {
             write_lock: &f.write_lock,
             seen: &f.seen,
             roster: &f.roster,
+            settings: &f.settings,
+            seal_key: f.seal_key.as_ref(),
             rechecking: false,
         };
         finish_github_with(&mut ctx, &req, Locale::En, gh)
@@ -3721,6 +3975,185 @@ mod tests {
             .and_then(|rest| rest.split('"').next())
             .expect("the page carries the state")
             .to_string()
+    }
+
+    /// Arm a claim code, as a fresh server's startup does.
+    fn armed(f: &mut Fixture, code: &str) {
+        let mut admin = f.store.admin().unwrap();
+        assert!(admin.arm(code, f.now_ms));
+        f.store.put_admin(&admin).unwrap();
+    }
+
+    #[test]
+    fn setting_up_claims_the_server_for_whoever_signs_in() {
+        // **The whole first-run path**, end to end: the code proves you can read
+        // the container's log, and GitHub proves who you are. Neither alone is
+        // enough, which is why they are separate steps.
+        let mut f = Fixture::new("setup-claim").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        // Step one: the code and the address.
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(
+            f.store.settings().unwrap().base_url,
+            "https://specs.example.test"
+        );
+        // The callback URL is shown for copying, now that it can be.
+        assert!(
+            res.body
+                .contains("https://specs.example.test/public/auth/github/callback"),
+            "{}",
+            res.body
+        );
+
+        // Step two: the application.
+        let res = f.go(&Req::post(
+            private_route::SETUP_GITHUB,
+            "client_id=cid&client_secret=csecret",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let settings = f.store.settings().unwrap();
+        assert!(settings.has_github());
+        // Stored sealed: the secret is not in the file.
+        let raw = std::fs::read_to_string(f.store.settings_path()).unwrap();
+        assert!(!raw.contains("csecret"), "{raw}");
+
+        // Step three: the sign-in that decides who owns this. Nobody yet.
+        assert!(!f.store.admin().unwrap().claimed());
+        let state = res
+            .body
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the page carries the state")
+            .to_string();
+
+        let res = callback(
+            &mut f,
+            "code",
+            &state,
+            &StubGithub {
+                login: Ok("JameZ667".into()),
+            },
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        let admin = f.store.admin().unwrap();
+        assert!(admin.is("jamez667"), "lowercased on the way in");
+
+        // And setup is gone.
+        assert_eq!(f.go(&Req::get(private_route::SETUP)).status, 404);
+        assert_eq!(
+            f.go(&Req::post(
+                private_route::SETUP,
+                "code=ABC-123&base_url=https%3A%2F%2Fx.test"
+            ))
+            .status,
+            404
+        );
+    }
+
+    #[test]
+    fn a_bad_address_does_not_burn_the_claim_code() {
+        // **The code is the scarce thing.** Spending it on a typo would leave
+        // the operator restarting the container to get another, which is a
+        // needless indignity in the one flow that has to work first time.
+        let mut f = Fixture::new("setup-bad-url").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=ABC-123&base_url=http%3A%2F%2Fspecs.example.test",
+        ));
+        assert_eq!(res.status, 400, "plain http on a public address");
+        assert!(res.body.contains("https"), "{}", res.body);
+
+        // Still armed, and the right address now works.
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+    }
+
+    #[test]
+    fn a_wrong_code_says_one_thing_and_leaves_the_real_one_usable() {
+        // One message for wrong, expired and already-spent alike: distinguishing
+        // them tells a guesser which half they got right. And a wrong guess must
+        // not spend somebody else's code, or a stranger who cannot read the log
+        // could still deny the claim to the person who can.
+        let mut f = Fixture::new("setup-wrong-code").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=WRONG-1&base_url=https%3A%2F%2Fspecs.example.test",
+        ));
+        assert_eq!(res.status, 400);
+
+        let res = f.go(&Req::post(
+            private_route::SETUP,
+            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
+        ));
+        assert_eq!(res.status, 200, "the real code still works: {}", res.body);
+    }
+
+    #[test]
+    fn the_setup_page_says_what_it_decided_about_cookies() {
+        // Derived, not asked. "Is this a private network" is a question people
+        // answer wrong, and answering it wrong drops `Secure` from every session
+        // cookie without a word.
+        let public = crate::page::setup_page("https://specs.example.test", None);
+        assert!(public.contains("Secure"), "{public}");
+        let private = crate::page::setup_page("http://localhost:8420", None);
+        assert!(private.contains("not</strong> be marked"), "{private}");
+    }
+
+    #[test]
+    fn a_claimed_server_has_no_setup_and_arms_no_code() {
+        // Otherwise every restart would print a fresh key to the
+        // administrator's own front door.
+        let mut f = Fixture::new("setup-claimed").with_public(false);
+        let mut admin = f.store.admin().unwrap();
+        admin.claim("jamez667", 1);
+        f.store.put_admin(&admin).unwrap();
+
+        assert_eq!(f.go(&Req::get(private_route::SETUP)).status, 404);
+        assert_eq!(
+            f.go(&Req::post(
+                private_route::SETUP_GITHUB,
+                "client_id=a&client_secret=b"
+            ))
+            .status,
+            404
+        );
+    }
+
+    #[test]
+    fn an_ordinary_sign_in_does_not_claim_anything() {
+        // The claim rides the state, so only a hop that started at /setup can
+        // finish as one. Somebody signing in normally on an unclaimed server is
+        // just an account.
+        let mut f = Fixture::new("setup-not-claim")
+            .with_public(false)
+            .with_github();
+        let state = start(&mut f);
+        let res = callback(
+            &mut f,
+            "code",
+            &state,
+            &StubGithub {
+                login: Ok("stranger".into()),
+            },
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(
+            !f.store.admin().unwrap().claimed(),
+            "an ordinary sign-in claimed the server"
+        );
     }
 
     #[test]

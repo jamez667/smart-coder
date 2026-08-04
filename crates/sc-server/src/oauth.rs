@@ -65,6 +65,20 @@ pub struct State {
     pub issued_ms: u64,
     #[serde(default)]
     pub consumed: bool,
+    /// Set when this hop was started to **claim an unclaimed server**.
+    ///
+    /// The claim needs two proofs and they arrive at different moments: the code
+    /// proves you can read the container's logs, and the GitHub sign-in proves
+    /// who you are. The first is spent at `/setup`, and this rides the second
+    /// back so the callback knows the login it resolved should own the server
+    /// rather than merely sign in.
+    ///
+    /// **On the state rather than a cookie**, because the state is already
+    /// single-use, already expires, and is already the thing the callback
+    /// validates. A cookie saying "I am claiming" would be a second claim to
+    /// authority that nothing spends.
+    #[serde(default)]
+    pub claiming: bool,
 }
 
 impl State {
@@ -108,11 +122,25 @@ impl States {
     /// The plaintext is returned **once** and never stored, so the file grants
     /// nobody the ability to complete somebody else's sign-in.
     pub fn issue(&mut self, now_ms: u64) -> String {
+        self.issue_for(now_ms, false)
+    }
+
+    /// Start a sign-in that will **claim the server** when it completes.
+    ///
+    /// Separate from [`issue`](States::issue) rather than a parameter on it, so
+    /// every ordinary sign-in is non-claiming by construction and only a caller
+    /// that means it can ask for the other thing.
+    pub fn issue_claim(&mut self, now_ms: u64) -> String {
+        self.issue_for(now_ms, true)
+    }
+
+    fn issue_for(&mut self, now_ms: u64, claiming: bool) -> String {
         let token = mint_secret();
         self.states.push(State {
             token_hash: hash(&token),
             issued_ms: now_ms,
             consumed: false,
+            claiming,
         });
         token
     }
@@ -126,7 +154,10 @@ impl States {
     ///
     /// **Single use.** Without that, a callback URL captured from a browser's
     /// history or a referrer log could be replayed to sign in again.
-    pub fn consume(&mut self, token: &str, now_ms: u64) -> std::result::Result<(), StateError> {
+    /// Returns whether this hop was started to claim the server, which the
+    /// callback needs and cannot ask any other way — the state is spent here, so
+    /// reading it afterwards is not an option.
+    pub fn consume(&mut self, token: &str, now_ms: u64) -> std::result::Result<bool, StateError> {
         let Some(state) = self
             .states
             .iter_mut()
@@ -141,7 +172,7 @@ impl States {
             return Err(StateError::Invalid);
         }
         state.consumed = true;
-        Ok(())
+        Ok(state.claiming)
     }
 
     /// Drop what can no longer be spent.
@@ -312,7 +343,7 @@ mod tests {
         let mut states = States::default();
         let token = states.issue(1_000);
 
-        assert_eq!(states.consume(&token, 1_000), Ok(()));
+        assert_eq!(states.consume(&token, 1_000), Ok(false));
         assert_eq!(states.consume(&token, 1_000), Err(StateError::AlreadyUsed));
     }
 
@@ -356,7 +387,7 @@ mod tests {
         // "Now" is before it was issued. It must not read as freshly minted for
         // the next forty-nine days.
         assert!(!states.states[0].expired(1));
-        assert_eq!(states.consume(&token, 1), Ok(()));
+        assert_eq!(states.consume(&token, 1), Ok(false));
     }
 
     #[test]

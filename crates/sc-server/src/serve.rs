@@ -44,6 +44,9 @@ struct Shared {
     /// Who may review what. Re-read from the volume when the file changes —
     /// see [`crate::roster::RosterCache`] for why not a startup snapshot.
     roster: Mutex<crate::roster::RosterCache>,
+    /// What this server does. Same mtime cache, same reasoning.
+    settings: Mutex<crate::settings::SettingsCache>,
+    seal_key: Option<crate::seal::SealKey>,
 }
 
 /// Apply `SC_SERVER_OWNERS` and `SC_SERVER_PUBLIC_REPOS` **once**, the first
@@ -133,6 +136,17 @@ pub fn run(cfg: &Config) -> Result<()> {
     // Arm enrolment on first start, so a fresh container is usable without
     // pre-configuration but is never *open*.
     let code = arm_enrolment(&store, cfg)?;
+    let claim_code = arm_claim(&store)?;
+
+    // **Before anything reads a setting.** A wrong or missing key makes every
+    // sealed value unreadable, and without this the server would boot happily
+    // and report nothing configured — indistinguishable from a fresh install,
+    // and the operator would re-enter secrets that were never lost.
+    crate::seal::usable(
+        cfg.seal_key.as_ref(),
+        Some(&store.settings()?.github_client_secret),
+    )
+    .map_err(DcError::Eval)?;
 
     seed_roster(&store, cfg)?;
 
@@ -145,6 +159,8 @@ pub fn run(cfg: &Config) -> Result<()> {
         write_lock: Mutex::new(()),
         seen: Mutex::new(crate::daemons::Seen::default()),
         roster: Mutex::new(crate::roster::RosterCache::default()),
+        settings: Mutex::new(crate::settings::SettingsCache::default()),
+        seal_key: cfg.seal_key.clone(),
     });
 
     let server = tiny_http::Server::http(cfg.addr())
@@ -225,6 +241,18 @@ pub fn run(cfg: &Config) -> Result<()> {
             .with("code", code.clone())
             .with("expires_in_s", crate::auth::ENROL_TTL_MS / 1000)
             .with("note", "single use; open the site and type it")
+            .emit();
+    }
+
+    if let Some(code) = claim_code {
+        // **This line is a credential**, with the same caveat as the enrolment
+        // code above: it goes wherever the container log goes, so it expires.
+        // Unlike that one it is armed *only while the server is unclaimed*, so a
+        // claimed server prints nothing however often it restarts.
+        crate::log::warn("claim this server")
+            .with("code", code.clone())
+            .with("expires_in_s", crate::admin::CLAIM_TTL_MS / 1000)
+            .with("note", "open /setup and type it")
             .emit();
     }
 
@@ -334,6 +362,27 @@ fn arm_enrolment(store: &Store, cfg: &Config) -> Result<Option<String>> {
         .unwrap_or_else(crate::auth::mint_enrol_code);
     creds.set_enrol_code(&code, now_ms());
     store.put_credentials(&creds)?;
+    Ok(Some(code))
+}
+
+/// Arm a claim code on a server nobody owns yet.
+///
+/// The counterpart of [`arm_enrolment`], and it will replace it: reading this
+/// code out of the container log proves you own the deployment, which is the
+/// same proof a stack editor stands in for and better evidence than holding a
+/// cookie.
+///
+/// **Armed only while unclaimed.** A claimed server prints nothing however often
+/// it restarts — re-arming would leave a standing way to take the server from
+/// its administrator, refreshed on every deploy.
+fn arm_claim(store: &Store) -> Result<Option<String>> {
+    let mut admin = store.admin()?;
+    if admin.claimed() {
+        return Ok(None);
+    }
+    let code = crate::admin::mint_claim_code();
+    admin.arm(&code, now_ms());
+    store.put_admin(&admin)?;
     Ok(Some(code))
 }
 
@@ -523,6 +572,8 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         write_lock: &shared.write_lock,
         seen: &shared.seen,
         roster: &shared.roster,
+        settings: &shared.settings,
+        seal_key: shared.seal_key.as_ref(),
         rechecking,
     };
     routes::handle(&mut ctx, req)

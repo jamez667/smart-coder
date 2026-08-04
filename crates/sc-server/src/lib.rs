@@ -27,6 +27,7 @@
 //! up in their IDE when they choose to.
 
 pub mod account;
+pub mod admin;
 pub mod auth;
 pub mod config;
 pub mod daemons;
@@ -43,6 +44,7 @@ pub mod screen;
 pub mod screen_eval;
 pub mod seal;
 pub mod serve;
+pub mod settings;
 pub mod store;
 
 pub use config::Config;

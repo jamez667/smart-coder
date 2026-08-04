@@ -588,6 +588,98 @@ fn blank_repo_form() -> String {
         .to_string()
 }
 
+/// Claim an unclaimed server.
+///
+/// **Three steps in dependency order**, and the order is forced rather than
+/// chosen: the GitHub callback URL is absolute, so it cannot be shown until the
+/// base address is known, and the sign-in cannot run until an application
+/// exists. Asking for everything on one screen would show a callback URL that
+/// changes as somebody types.
+///
+/// `error` is a message from a rejected submission, re-rendered above the form
+/// with what was typed still in it.
+pub fn setup_page(base_url: &str, error: Option<&str>) -> String {
+    let note = match error {
+        Some(e) => format!("<p class=\"note\">{}</p>", esc(e)),
+        None => String::new(),
+    };
+
+    // **Says what it decided rather than asking.** Whether cookies carry
+    // `Secure` is derived from the address — "is this a private network" is a
+    // question people answer wrong, and answering it wrong drops `Secure` from
+    // every session cookie without a word. Shown live is impossible without
+    // script, so it is shown for whatever has been entered so far.
+    let decided = if base_url.trim().is_empty() {
+        String::new()
+    } else if crate::config::secure_for(base_url) {
+        "<p class=\"meta\">Cookies will be marked <code>Secure</code>.</p>".to_string()
+    } else {
+        "<p class=\"meta\">That looks like a private address, so cookies will \
+         <strong>not</strong> be marked <code>Secure</code>. Right for a LAN or \
+         localhost, wrong for anything reachable from the internet.</p>"
+            .to_string()
+    };
+
+    shell(
+        "Set up this server",
+        &format!(
+            "<h1>Set up this server</h1>\
+             <p class=\"meta\">Nobody administers this server yet. The code below \
+             was printed to the container's log when it started — reading it is \
+             how this server knows you are the person who deployed it.</p>{note}\
+             <form method=\"post\" action=\"/setup\">\
+             <label for=\"code\">Claim code</label>\
+             <input id=\"code\" name=\"code\" required autocapitalize=\"characters\" \
+             autocorrect=\"off\" spellcheck=\"false\" placeholder=\"XXX-XXX\">\
+             <label for=\"base_url\">This server's address</label>\
+             <input id=\"base_url\" name=\"base_url\" required autocapitalize=\"off\" \
+             autocorrect=\"off\" spellcheck=\"false\" \
+             placeholder=\"https://requests.example.com\" value=\"{base}\">\
+             <button type=\"submit\">Continue</button></form>{decided}\
+             <p class=\"meta\">The address is where people reach this server. \
+             Sign-in links are built from it, so it has to be the real one and it \
+             has to be <code>https://</code> unless you are on a private network.</p>",
+            base = esc(base_url),
+        ),
+    )
+}
+
+/// Step two: the GitHub application, now that the callback URL is known.
+pub fn setup_github_page(base_url: &str, error: Option<&str>) -> String {
+    let note = match error {
+        Some(e) => format!("<p class=\"note\">{}</p>", esc(e)),
+        None => String::new(),
+    };
+    let callback = format!(
+        "{}/public/auth/github/callback",
+        base_url.trim_end_matches('/')
+    );
+
+    shell(
+        "Set up this server",
+        &format!(
+            "<h1>Sign-in</h1>\
+             <p class=\"meta\">You sign in to this server with GitHub, which means \
+             it needs an OAuth application of its own. Create one at GitHub → \
+             Settings → Developer settings → OAuth Apps.</p>{note}\
+             <p>Paste this as the <strong>Authorization callback URL</strong>:</p>\
+             <pre>{callback}</pre>\
+             <form method=\"post\" action=\"/setup/github\">\
+             <label for=\"client_id\">Client ID</label>\
+             <input id=\"client_id\" name=\"client_id\" required autocapitalize=\"off\" \
+             autocorrect=\"off\" spellcheck=\"false\">\
+             <label for=\"client_secret\">Client secret</label>\
+             <input id=\"client_secret\" name=\"client_secret\" type=\"password\" required \
+             autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\">\
+             <button type=\"submit\">Save and sign in</button></form>\
+             <p class=\"meta\">The secret is stored encrypted and is never shown \
+             again. The next step signs you in, and the account you sign in with \
+             becomes this server's administrator.</p>",
+            callback = esc(&callback),
+        ),
+    )
+}
+
 /// The enrolment page, shown to a browser that is not enrolled.
 pub fn enrol_page() -> String {
     shell(
