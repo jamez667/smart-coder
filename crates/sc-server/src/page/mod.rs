@@ -556,7 +556,7 @@ aria-label=\"{close}\">\u{00d7}</button>\
 autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
 placeholder=\"{placeholder}\">\
 <button type=\"submit\">{submit}</button></form>\
-<p class=\"meta\">{note}</p></dialog>",
+<p class=\"meta\">{note}<br><a href=\"/public/signin\">{other}</a></p></dialog>",
             signin = esc(s.nav_signin),
             close = esc(s.dialog_close),
             title = esc(s.signin_title),
@@ -565,6 +565,17 @@ placeholder=\"{placeholder}\">\
             placeholder = esc(s.signin_email_placeholder),
             submit = esc(s.signin_submit),
             note = esc(s.signin_no_password),
+            // **The dialog is the path almost everybody takes**, so the other
+            // way in has to be reachable from it or it may as well not exist —
+            // which is exactly what happened to the GitHub flow.
+            //
+            // A link onward rather than the option itself: whether there *is* a
+            // GitHub application is a question only the routes can answer, and
+            // the shell that renders this masthead is called from fourteen
+            // places that have no `Ctx`. Threading a flag through all of them to
+            // reach one dialog would put the same condition in fourteen more
+            // hands. The sign-in page asks it once, in the one place that knows.
+            other = esc(s.signin_other_ways),
         );
     }
     format!(
@@ -886,7 +897,7 @@ pub(crate) mod corpus {
             all.extend([
                 ("landing_page", landing_page(l)),
                 ("signin_page", signin_page()),
-                ("signin_page_in", signin_page_in(l)),
+                ("signin_page_in", signin_page_in(l, true)),
                 ("signin_sent_page", signin_sent_page(l)),
                 ("signin_confirm_page", signin_confirm_page("abc123", l)),
                 ("signin_failed_page", signin_failed_page(true, l)),
@@ -1005,7 +1016,7 @@ mod tests {
         // state it cannot leave — so this asserts the structure rather than the
         // symptom. Counting inputs is crude, but it is exactly the thing that
         // went wrong, and a second one cannot reappear unnoticed.
-        let html = signin_page_in(Locale::En);
+        let html = signin_page_in(Locale::En, true);
         assert_eq!(
             html.matches("type=\"checkbox\"").count(),
             1,
@@ -1037,7 +1048,7 @@ mod tests {
         // document at all — no flash before a handler attaches, and nothing for
         // a stylesheet rule to hide. Without script it is the only way to change
         // language, and it is present and working.
-        let html = signin_page_in(Locale::En);
+        let html = signin_page_in(Locale::En, true);
         let form = html
             .split("id=\"langform\"")
             .nth(1)

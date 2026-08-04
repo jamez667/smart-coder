@@ -34,6 +34,9 @@ pub static STRINGS: Strings = Strings {
     signin_email_label: "Email",
     signin_email_placeholder: "you@example.com",
     signin_submit: "Email me a link",
+    signin_other_ways: "Reviewing a project you own? Sign in another way",
+    signin_owner_note: "Reviewing a project you own?",
+    signin_owner_link: "Sign in with GitHub",
     signin_no_password: "No password. We send a link that works once, for fifteen minutes.",
 
     sent_title: "Check your email",

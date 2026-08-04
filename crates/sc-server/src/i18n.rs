@@ -205,6 +205,15 @@ pub struct Strings {
     pub signin_email_placeholder: &'static str,
     pub signin_submit: &'static str,
     pub signin_no_password: &'static str,
+    /// Names the other role, so somebody who is an owner knows this page has
+    /// a second way in and everybody else can ignore it.
+    /// The way out of the dialog, to the page that knows whether there is a
+    /// GitHub application. Worded as a question about the reader rather than
+    /// about the mechanism, because somebody who is not an owner should be
+    /// able to skip it without wondering what they are missing.
+    pub signin_other_ways: &'static str,
+    pub signin_owner_note: &'static str,
+    pub signin_owner_link: &'static str,
 
     pub sent_title: &'static str,
     pub sent_body: &'static str,
@@ -427,6 +436,9 @@ mod tests {
             s.signin_email_placeholder,
             s.signin_submit,
             s.signin_no_password,
+            s.signin_other_ways,
+            s.signin_owner_note,
+            s.signin_owner_link,
             s.sent_title,
             s.sent_body,
             s.sent_nothing_yet,

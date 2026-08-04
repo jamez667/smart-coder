@@ -73,7 +73,10 @@ fn main() {
         let code = locale.code();
         let pages: [(String, String); 8] = [
             (format!("landing-{code}.html"), page::landing_page(locale)),
-            (format!("signin-{code}.html"), page::signin_page_in(locale)),
+            (
+                format!("signin-{code}.html"),
+                page::signin_page_in(locale, true),
+            ),
             (format!("sent-{code}.html"), page::signin_sent_page(locale)),
             (
                 format!("confirm-{code}.html"),

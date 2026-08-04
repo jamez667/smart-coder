@@ -78,8 +78,11 @@ pub fn landing_page(locale: Locale) -> String {
 }
 
 /// Ask for a sign-in link.
+///
+/// No GitHub link: this exists for callers with no `Ctx` to ask, and
+/// offering a route that may be a 404 is worse than offering none.
 pub fn signin_page() -> String {
-    signin_page_in(Locale::default())
+    signin_page_in(Locale::default(), false)
 }
 
 /// Ask for a sign-in link, in a chosen language.
@@ -87,7 +90,7 @@ pub fn signin_page() -> String {
 /// Split from [`signin_page`] because the language route renders this one *after*
 /// the choice and before the cookie has been read back — the only caller that
 /// knows the locale from something other than the request.
-pub fn signin_page_in(locale: Locale) -> String {
+pub fn signin_page_in(locale: Locale, github: bool) -> String {
     let s = locale.strings();
     public_shell(
         locale,
@@ -100,14 +103,40 @@ pub fn signin_page_in(locale: Locale) -> String {
              autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
              placeholder=\"{placeholder}\">\
              <button type=\"submit\">{submit}</button></form>\
-             <p class=\"meta\">{note}</p>",
+             <p class=\"meta\">{note}</p>{owner}",
             title = esc(s.signin_title),
             intro = esc(s.signin_intro),
             email = esc(s.signin_email_label),
             placeholder = esc(s.signin_email_placeholder),
             submit = esc(s.signin_submit),
             note = esc(s.signin_no_password),
+            owner = github_link_in(locale, github),
         ),
+    )
+}
+
+/// The way in for an owner, when there is an application for them to use.
+///
+/// **Rendered on exactly the condition `start_github` exists on.** The flow was
+/// built, reachable and tested, and nothing linked to it — so an owner's only
+/// way in was to know the URL and type it. A route with no link is a route
+/// nobody uses, and it looked from the outside like the feature was missing.
+///
+/// Below the email form rather than beside it: filing is what almost everybody
+/// arriving here wants, and an owner signing in is doing something rarer and
+/// knows they are.
+fn github_link_in(locale: Locale, github: bool) -> String {
+    if !github {
+        // No application configured, so `/public/auth/github` is a 404. A button
+        // to it would be a promise the server cannot keep.
+        return String::new();
+    }
+    let s = locale.strings();
+    format!(
+        "<p class=\"meta\">{note}<br>\
+         <a href=\"/public/auth/github\">{link}</a></p>",
+        note = esc(s.signin_owner_note),
+        link = esc(s.signin_owner_link),
     )
 }
 
@@ -639,7 +668,7 @@ mod tests {
         // English phonemes — which is the accessibility failure this whole
         // feature is supposed to fix, not cause.
         for locale in Locale::ALL {
-            let html = signin_page_in(locale);
+            let html = signin_page_in(locale, true);
             assert!(
                 html.contains(&format!("<html lang=\"{}\"", locale.code())),
                 "{locale}: {html}"
@@ -658,7 +687,7 @@ mod tests {
         r.spec = Some("# Spec".to_string());
 
         let pages = [
-            signin_page_in(Locale::Fr),
+            signin_page_in(Locale::Fr, true),
             signin_sent_page(Locale::Fr),
             signin_confirm_page("t", Locale::Fr),
             signin_failed_page(true, Locale::Fr),

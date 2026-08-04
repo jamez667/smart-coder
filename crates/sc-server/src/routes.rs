@@ -1223,7 +1223,9 @@ fn public_route(
         },
 
         // Ask for a link. Reachable signed-out — it is how one signs in.
-        ("GET", public_route::SIGNIN) => Res::html(200, crate::page::signin_page_in(locale)),
+        ("GET", public_route::SIGNIN) => {
+            Res::html(200, crate::page::signin_page_in(locale, has_github(ctx)))
+        }
 
         // Start a GitHub sign-in, and come back from one. Both reachable
         // signed-out for the same reason.
@@ -1269,7 +1271,7 @@ fn public_route(
         // Everything below needs a signed-in filer.
         _ => match account_id {
             Some(id) => signed_in_route(ctx, req, method, path, &id, locale),
-            None => Res::html(200, crate::page::signin_page_in(locale)),
+            None => Res::html(200, crate::page::signin_page_in(locale, has_github(ctx))),
         },
     }
 }
@@ -1915,7 +1917,10 @@ fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         }
     }
     let secure = secure_attr(ctx);
-    let mut res = Res::html(200, crate::page::signin_page_in(req.locale()));
+    let mut res = Res::html(
+        200,
+        crate::page::signin_page_in(req.locale(), has_github(ctx)),
+    );
     // Max-Age=0 so the browser drops it rather than carrying a dead token.
     res.set_cookie = Some(format!(
         "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0"
@@ -1967,7 +1972,7 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
         .unwrap_or_default();
 
     let secure = secure_attr(ctx);
-    let mut res = Res::html(200, crate::page::signin_page_in(locale));
+    let mut res = Res::html(200, crate::page::signin_page_in(locale, has_github(ctx)));
     // Not `HttpOnly`: this is a preference, not a credential, and the public
     // surface's script may read it. `SameSite=Lax` rather than `Strict` so that
     // arriving from an external link — which is how somebody reaches a filing
@@ -1977,6 +1982,17 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
         locale.code()
     ));
     res
+}
+
+/// Is there a GitHub application for an owner to sign in with?
+///
+/// **The same condition [`start_github`] exists on**, asked in one place so the
+/// button and the route cannot drift apart. They already had: the flow was
+/// built and reachable and no page linked to it, so the only way in was to know
+/// the URL. Offering a link where the route 404s is the same bug pointing the
+/// other way.
+fn has_github(ctx: &Ctx<'_>) -> bool {
+    ctx.public.is_some_and(|p| p.github.is_some())
 }
 
 /// A filing that named no repository this surface collects for.
@@ -3786,10 +3802,31 @@ mod tests {
     }
 
     #[test]
-    fn github_sign_in_does_not_exist_without_an_application() {
-        // The route 404s rather than existing and failing after a trip to
-        // GitHub — a button that always fails is worse than no button.
+    fn github_sign_in_is_linked_exactly_where_it_exists() {
+        // **The bug this pins.** The route was built, reachable and tested —
+        // and nothing on any page linked to it, so an owner's only way in was
+        // to know the URL and type it. From the outside the feature looked
+        // missing, because a route with no link is a route nobody uses.
+        //
+        // Asserted in both directions against the SAME condition the route
+        // itself uses, because the two failures are the same drift pointing
+        // opposite ways: a link with no route is a promise that 404s.
+        let mut f = Fixture::new("gh-linked").with_public(false).with_github();
+        let html = f.go(&Req::get(public_route::SIGNIN)).body;
+        assert!(
+            html.contains(public_route::AUTH_GITHUB),
+            "the route exists and no page links to it: {html}"
+        );
+        assert_eq!(f.go(&Req::get(public_route::AUTH_GITHUB)).status, 200);
+
+        // And with no application, neither the route nor the link. A button
+        // that always fails is worse than no button.
         let mut f = Fixture::new("gh-none").with_public(false);
+        let html = f.go(&Req::get(public_route::SIGNIN)).body;
+        assert!(
+            !html.contains(public_route::AUTH_GITHUB),
+            "linked to a route that does not exist: {html}"
+        );
         assert_eq!(f.go(&Req::get(public_route::AUTH_GITHUB)).status, 404);
     }
 
