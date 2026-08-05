@@ -133,14 +133,11 @@ export const api = {
 /// secret anywhere in this server, and the API does not add one — so the key
 /// fields here are booleans, and the forms that write them are always blank.
 export interface SettingsView {
-  // The address, the site name and the mail settings are environment variables
-  // and are not on this surface at all — there is nothing here to read or
-  // write. See `crates/sc-server/src/settings.rs` for why they moved.
+  // The address, the site name, the mail settings and the screener are all
+  // environment variables — there is nothing here to read or write. What is
+  // left is operational: a switch, a flag and four ceilings.
   public: boolean;
   show_spec: boolean | null;
-  screen_url: string;
-  screen_model: string;
-  screen_key_set: boolean;
   max_daily_filings: number | null;
   max_daily_drafts: number | null;
   max_accounts: number | null;

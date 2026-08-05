@@ -591,7 +591,7 @@ pub fn settings_page(
     // Where this server answers, from the environment. The settings no longer
     // hold it, so the page is told rather than reading it.
     host: &str,
-    fresh: bool,
+    _fresh: bool,
     saved: Option<&str>,
     error: Option<&str>,
 ) -> String {
@@ -600,44 +600,6 @@ pub fn settings_page(
         (Some(what), None) => format!("<p class=\"note\">{} saved.</p>", esc(what)),
         _ => String::new(),
     };
-
-    let now = crate::store::now_ms();
-    let secret = |label: &str, field: &str, sealed: &crate::seal::Sealed| {
-        let state = if sealed.is_set() {
-            format!(
-                "<span class=\"tag\">set</span> \
-                 <span class=\"meta\">changed {}</span>",
-                esc(&ago(sealed.set_ms, now))
-            )
-        } else {
-            "<span class=\"meta\">not set</span>".to_string()
-        };
-        format!(
-            "<label for=\"{field}\">{label}</label>{state}\
-             <input id=\"{field}\" name=\"{field}\" type=\"password\" \
-             autocapitalize=\"off\" autocorrect=\"off\" spellcheck=\"false\" \
-             placeholder=\"leave blank to keep\"{disabled}>",
-            field = esc(field),
-            label = esc(label),
-            state = state,
-            disabled = if fresh { "" } else { " disabled" },
-        )
-    };
-
-    let gate = if fresh {
-        "<p class=\"meta\">This browser proved itself recently, so these can be \
-         changed. Blank means keep what is there.</p>"
-            .to_string()
-    } else {
-        format!(
-            "<p class=\"note\">Changing a secret needs a fresh sign-in, and it has \
-             been more than five minutes. <a href=\"{}\">Sign in again</a>, then \
-             come back.</p>",
-            esc(crate::routes::public_route::SIGNIN)
-        )
-    };
-
-    let disabled = if fresh { "" } else { " disabled" };
 
     shell(
         "Settings",
@@ -655,25 +617,11 @@ pub fn settings_page(
              <button type=\"submit\">Save</button></form>\
              <h2>Set in the stack, not here</h2>\
              <p class=\"meta\">This server answers at <strong>{host}</strong>. \
-             The address, the site name and the mail settings are environment \
-             variables — change them where the container is configured and \
-             redeploy. They used to be editable here and seeded from the stack, \
-             which meant a variable could be set, correct, and silently \
-             ignored.</p>\
-             <h2>Secrets</h2>{gate}\
-             <form method=\"post\" action=\"/settings/secret\">\
-             {screen_key}\
-             <button type=\"submit\"{disabled}>Save</button></form>\
-             <h2>Screening</h2>\
-             <p class=\"meta\">{screening_state}</p>\
-             <form method=\"post\" action=\"/settings/screen\">\
-             <label for=\"screen_url\">Endpoint</label>\
-             <input id=\"screen_url\" name=\"screen_url\" value=\"{screen_url}\" \
-             placeholder=\"{screen_url_default}\">\
-             <label for=\"screen_model\">Model</label>\
-             <input id=\"screen_model\" name=\"screen_model\" value=\"{screen_model}\" \
-             placeholder=\"{screen_model_default}\">\
-             <button type=\"submit\">Save</button></form>\
+             The address, the site name, the mail settings and the spam screener \
+             are environment variables — change them where the container is \
+             configured and redeploy. They used to be editable here and seeded \
+             from the stack, which meant a variable could be set, correct, and \
+             silently ignored.</p>\
              <h2>What it may spend</h2>\
              <p class=\"meta\">Blank means the built-in default.</p>\
              <form method=\"post\" action=\"/settings/caps\">\
@@ -704,18 +652,6 @@ pub fn settings_page(
             } else {
                 ""
             },
-            disabled = disabled,
-            gate = gate,
-            screen_key = secret("Screening API key", "screen_key", &s.screen_key),
-            screening_state = if s.has_screening() {
-                "Filings are screened before a daemon may claim them."
-            } else {
-                "No key, so filings are NOT screened — they queue exactly as filed."
-            },
-            screen_url = esc(&s.screen_url),
-            screen_url_default = esc(crate::config::DEFAULT_SCREEN_URL),
-            screen_model = esc(&s.screen_model),
-            screen_model_default = esc(crate::config::DEFAULT_SCREEN_MODEL),
             f = s
                 .max_daily_filings
                 .map(|v| v.to_string())

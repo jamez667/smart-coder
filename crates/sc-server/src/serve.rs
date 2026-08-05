@@ -65,7 +65,6 @@ struct Shared {
     /// sealing it in the settings file avoided. Changing it also means a
     /// redeploy. Both were accepted for one source of truth.
     env_public: Option<crate::config::PublicConfig>,
-    seal_key: Option<crate::seal::SealKey>,
 }
 
 /// Apply `SC_SERVER_OWNERS` and `SC_SERVER_PUBLIC_REPOS` **once**, the first
@@ -149,14 +148,13 @@ fn seed_settings(store: &Store, cfg: &Config) -> Result<()> {
     let seed = crate::settings::Seed {
         public: p.is_some(),
         show_spec: p.map(|p| p.show_spec),
-        screen: p.and_then(|p| p.screen.as_ref()),
         max_daily_filings: p.map(|p| p.max_daily_filings),
         max_daily_drafts: p.map(|p| p.max_daily_drafts),
         max_accounts: p.map(|p| p.max_accounts),
         max_outstanding_links: p.map(|p| p.max_outstanding_links),
     };
 
-    if !settings.seed(seed, cfg.seal_key.as_ref(), now_ms()) {
+    if !settings.seed(seed) {
         if p.is_some() {
             // Said out loud: a setting that is present and inert is one somebody
             // will edit expecting an effect.
@@ -202,14 +200,6 @@ pub fn run(cfg: &Config) -> Result<()> {
     // sealed value unreadable, and without this the server would boot happily
     // and report nothing configured — indistinguishable from a fresh install,
     // and the operator would re-enter secrets that were never lost.
-    // Checked against the screening key, which is the only sealed value left —
-    // the mail key moved to the environment, where nothing seals it.
-    // **Whichever value this points at has to be one that actually gets set**:
-    // pointing it at a field nothing writes turns the check into a no-op that
-    // still looks present.
-    crate::seal::usable(cfg.seal_key.as_ref(), Some(&store.settings()?.screen_key))
-        .map_err(DcError::Eval)?;
-
     seed_roster(&store, cfg)?;
     seed_settings(&store, cfg)?;
 
@@ -222,7 +212,6 @@ pub fn run(cfg: &Config) -> Result<()> {
         roster: Mutex::new(crate::roster::RosterCache::default()),
         settings: Mutex::new(crate::settings::SettingsCache::default()),
         accounts: Mutex::new(crate::account::AccountsCache::default()),
-        seal_key: cfg.seal_key.clone(),
         ui: cfg.ui,
         env_public: cfg.public.clone(),
     });
@@ -615,7 +604,6 @@ fn public_now(shared: &Shared) -> Option<crate::config::PublicConfig> {
             .enabled(),
     };
 
-    let key = shared.seal_key.as_ref();
     // **The address, the name and the mail settings come from the environment.**
     // Everything else on this struct is read from the settings file, which is
     // where an edit through the interface lands. The split is deliberate: these
@@ -637,7 +625,7 @@ fn public_now(shared: &Shared) -> Option<crate::config::PublicConfig> {
         secure_cookies: crate::config::secure_for(&base_url),
         base_url,
         mail: env.and_then(|e| e.mail.clone()),
-        screen: settings.screen(key),
+        screen: env.and_then(|e| e.screen.clone()),
         show_spec: settings.show_spec.unwrap_or(true),
         max_daily_filings: settings
             .max_daily_filings
@@ -703,7 +691,6 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         roster: &shared.roster,
         settings: &shared.settings,
         accounts: &shared.accounts,
-        seal_key: shared.seal_key.as_ref(),
         // Filled in by `handle` before dispatch, beside the caller.
         fresh_auth: false,
         rechecking,

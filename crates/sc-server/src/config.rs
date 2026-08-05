@@ -49,14 +49,6 @@ pub struct Config {
     /// credential in [`crate::auth`] is, so they are encrypted instead, and an
     /// encryption key stored beside its ciphertext protects nothing.
     ///
-    /// `None` is legal and means nothing can be sealed or opened. A server that
-    /// has never been given secrets through the UI does not need one, and
-    /// refusing to start without it would demand a key from every deployment
-    /// that will never store a secret. What must never happen is *silently
-    /// behaving as though nothing were configured* when a sealed file is present
-    /// and the key is missing or wrong — see the startup check in
-    /// [`crate::serve`].
-    pub seal_key: Option<crate::seal::SealKey>,
     /// Serve the single-page interface rather than the rendered pages.
     ///
     /// Temporary: it exists while both surfaces are built, and goes away with
@@ -435,16 +427,7 @@ pub mod env {
     /// A single daemon's key. Superseded by [`DAEMON_KEYS`], and still read: an
     /// install that predates the plural keeps working without a stack edit.
     pub const DAEMON_KEY: &str = "SC_SERVER_DAEMON_KEY";
-    /// The key the settings on the volume are sealed with.
-    ///
-    /// Stays in the environment on purpose: it is what makes a copied
-    /// volume inert, and a key stored beside its own ciphertext protects
-    /// nothing.
-    pub const SECRET_KEY: &str = "SC_SERVER_SECRET_KEY";
-
     /// Set to turn the public surface on. Everything below is then required.
-    /// The GitHub OAuth application's client id. Public — it appears in the URL
-    /// The GitHub OAuth application's client secret. **Never leaves this
     /// Who may review work, and for which repositories:
     /// `jamez667@example.test:smart-coder|memosy,someone:memosy`.
     ///
@@ -540,16 +523,6 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/data")),
             daemon_keys,
-            // Parsed here rather than where it is used, so a malformed key
-            // is one startup error naming the setting instead of a failure
-            // to open every secret, which reads as "nothing is configured".
-            seal_key: match opt(&get, env::SECRET_KEY) {
-                Some(raw) => Some(
-                    crate::seal::SealKey::parse(&raw)
-                        .map_err(|e| format!("{}: {e}", env::SECRET_KEY))?,
-                ),
-                None => None,
-            },
             // Read again here rather than threaded out of `public_from`, which
             // returns `None` when the public surface is off — and the switch is
             // meaningless in that case anyway, since nothing sends mail.

@@ -295,10 +295,6 @@ impl ReviewRequest {
 pub struct SettingsView {
     pub public: bool,
     pub show_spec: Option<bool>,
-    pub screen_url: String,
-    pub screen_model: String,
-    /// Is a screening key stored? **Not the key.**
-    pub screen_key_set: bool,
     pub max_daily_filings: Option<usize>,
     pub max_daily_drafts: Option<usize>,
     pub max_accounts: Option<usize>,
@@ -310,9 +306,6 @@ impl SettingsView {
         SettingsView {
             public: s.public,
             show_spec: s.show_spec,
-            screen_url: s.screen_url.clone(),
-            screen_model: s.screen_model.clone(),
-            screen_key_set: s.screen_key.is_set(),
             max_daily_filings: s.max_daily_filings,
             max_daily_drafts: s.max_daily_drafts,
             max_accounts: s.max_accounts,

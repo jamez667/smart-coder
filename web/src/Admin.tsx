@@ -103,25 +103,13 @@ export function Settings() {
 
       <h2>Set in the stack, not here</h2>
       <p className="meta">
-        The address, the site name and the mail settings are environment
-        variables. Change them where the container is configured, then redeploy.
+        The address, the site name, the mail settings and the spam screener are
+        environment variables. Change them where the container is configured,
+        then redeploy.
         They used to be editable here and seeded from the stack, which meant a
         variable could be set, correct, and silently ignored.
       </p>
 
-      <h2>Screening key</h2>
-      <p className="meta">
-        {s.screen_key_set
-          ? "A screening key is set."
-          : "No screening key is set, so filings are not screened."}{" "}
-        The value is never shown — leaving the field blank keeps what is there.
-        Changing it needs a sign-in from the last five minutes.
-      </p>
-      <SettingsForm
-        secret
-        fields={[{ name: "screen_key", label: "Screening key", value: "" }]}
-        onSave={save}
-      />
 
       <h2>Ceilings</h2>
       <p className="meta">

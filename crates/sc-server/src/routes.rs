@@ -534,10 +534,6 @@ pub struct Ctx<'a> {
     pub accounts: &'a Mutex<crate::account::AccountsCache>,
     /// The key sealed settings are read with, when one is configured.
     ///
-    /// `None` means nothing can be sealed or opened — see [`crate::seal`]. A
-    /// server given a wrong key refuses to boot rather than arriving here, so
-    /// `None` here really is "no key", not "the wrong one".
-    pub seal_key: Option<&'a crate::seal::SealKey>,
     /// Set when this request's session proved itself with a password within
     /// [`FRESH_AUTH_MS`](crate::account::FRESH_AUTH_MS).
     ///
@@ -1188,37 +1184,18 @@ fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) 
 
 /// Write one group of settings.
 ///
-/// **The freshness gate is here, before anything is read**, and it applies to
-/// exactly the fields that are secrets. Somebody holding a stolen cookie must
-/// not be able to rotate the mail key and redirect every sign-in link, so those
-/// ask for the password *at that moment* rather than at some point in the past.
+/// **There is no freshness gate here any more**, because there is no secret left
+/// to write. The mail key and the screening key are environment variables; what
+/// this surface still holds is a switch, a flag and four ceilings.
 fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
-    let text = |k: &str| {
-        body.get(k)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
     let flag = |k: &str| body.get(k).and_then(|v| v.as_bool());
     // A number that is absent or null means "use the built-in default", which is
     // not the same as zero — the settings page has always said so.
     let cap = |k: &str| body.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
 
-    // Only the screening key is a secret this surface still writes; the mail key
-    // and the address moved to the environment.
-    let touches_secret = body.get("screen_key").is_some();
-    // **The same rule as the page, a different refusal.** `require_fresh`
-    // answers by re-rendering the settings page with a note on it, which is
-    // right for a form post and unreadable to a `fetch`. The condition is the
-    // one thing that must not diverge, so it is read from the same field rather
-    // than re-derived.
-    if touches_secret && !ctx.fresh_auth {
-        return error(
-            401,
-            "changing a secret needs a fresh sign-in - it has been more than five              minutes since this browser last proved itself",
-        );
-    }
-
+    // **No secret is writable here any more**, so there is no freshness gate.
+    // The mail key and the screening key are environment variables; what is left
+    // on this surface is a switch, a flag and four ceilings.
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut s = match ctx.store.settings() {
         Ok(s) => s,
@@ -1249,28 +1226,6 @@ fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
                 &format!("{gone} is set in the environment - change it in the stack and redeploy"),
             );
         }
-    }
-    if body.get("screen_url").is_some() {
-        s.screen_url = text("screen_url");
-    }
-    if body.get("screen_model").is_some() {
-        s.screen_model = text("screen_model");
-    }
-    // **A blank secret keeps the one that is there.** Clearing a key has to be
-    // deliberate, and an empty field is what a browser sends for a value the
-    // page never showed — see the settings page, which renders presence and
-    // never a value.
-    let sealed = |name: &str| -> Option<&str> {
-        body.get(name)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-    };
-    if let Some(raw) = sealed("screen_key") {
-        let Some(key) = ctx.seal_key else {
-            return error(400, "this server has no sealing key");
-        };
-        s.screen_key = crate::seal::seal(key, raw, ctx.now_ms);
     }
 
     for (name, field) in [
@@ -3574,11 +3529,6 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
                 ),
             );
         }
-        private_route::SETTINGS_SCREEN => {
-            s.screen_url = field("screen_url").unwrap_or_default();
-            s.screen_model = field("screen_model").unwrap_or_default();
-            "Screening"
-        }
         private_route::SETTINGS_CAPS => {
             let (Some(f), Some(d), Some(a), Some(l)) = (
                 cap("max_daily_filings"),
@@ -3594,28 +3544,16 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
             s.max_outstanding_links = l;
             "The ceilings"
         }
+        // **Nothing on this surface is a secret any more.** The route stays so
+        // an old form does not 404 into a rendered page, and says where to go.
         private_route::SETTINGS_SECRET => {
-            // The address is an environment variable and is not written here.
-            let Some(key) = ctx.seal_key else {
-                return show_settings(
-                    ctx,
-                    None,
-                    Some(
-                        "This server has no sealing key, so it cannot store a \
-                         secret. Set SC_SERVER_SECRET_KEY and restart.",
-                    ),
-                );
-            };
-            // **Blank means keep.** A form that cleared a key every time it was
-            // submitted for another reason would be a trap.
-            if let Some(v) = form
-                .get("screen_key")
-                .map(|v| v.trim())
-                .filter(|v| !v.is_empty())
-            {
-                s.screen_key = crate::seal::seal(key, v, ctx.now_ms);
-            }
-            "The address and secrets"
+            return show_settings(
+                ctx,
+                None,
+                Some(
+                    "Secrets are set in the environment now - change them where the container is configured, then redeploy.",
+                ),
+            );
         }
         _ => return Res::html(404, crate::page::not_found()),
     };
@@ -3980,7 +3918,6 @@ mod tests {
         roster: Mutex<crate::roster::RosterCache>,
         settings: Mutex<crate::settings::SettingsCache>,
         accounts: Mutex<crate::account::AccountsCache>,
-        seal_key: Option<crate::seal::SealKey>,
         /// Advanced by tests that need a link to expire.
         now_ms: u64,
         /// One entry by default, so most tests read as a single-daemon server.
@@ -4027,7 +3964,6 @@ mod tests {
                 accounts: Mutex::new(crate::account::AccountsCache::default()),
                 // Every fixture can seal, so a test never has to think about
                 // it unless it is the thing under test.
-                seal_key: crate::seal::SealKey::parse(&crate::auth::mint_secret()).ok(),
                 now_ms: 1_000,
                 daemon_keys: one_key("test-daemon", KEY),
             }
@@ -4150,7 +4086,6 @@ mod tests {
                 roster: &self.roster,
                 settings: &self.settings,
                 accounts: &self.accounts,
-                seal_key: self.seal_key.as_ref(),
                 // Filled in by `handle` before dispatch, beside the caller.
                 fresh_auth: false,
                 rechecking: false,
@@ -4173,7 +4108,6 @@ mod tests {
                 roster: &self.roster,
                 settings: &self.settings,
                 accounts: &self.accounts,
-                seal_key: self.seal_key.as_ref(),
                 fresh_auth: false,
                 rechecking: true,
                 ui: false,
@@ -4888,87 +4822,6 @@ mod tests {
         // not: an unticked box submits nothing.
         f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
         assert!(!f.store.settings().unwrap().public);
-    }
-
-    #[test]
-    fn a_secret_is_saved_sealed_and_never_rendered_back() {
-        // **The claim the whole settings surface rests on.** Asserted against
-        // the response body *and* the file, because those are the two places a
-        // secret could escape to.
-        let mut f = Fixture::new("settings-secret").with_public(false);
-        let admin = f.as_admin();
-
-        let res = f.go(&Req::post(
-            private_route::SETTINGS_SECRET,
-            "base_url=https%3A%2F%2Fspecs.example.test&screen_key=xkeysib-very-secret",
-        )
-        .with_cookie(&admin));
-        assert_eq!(res.status, 200, "{}", res.body);
-        assert!(!res.body.contains("xkeysib-very-secret"), "{}", res.body);
-        // The page says it is set, and when.
-        assert!(res.body.contains("set"), "{}", res.body);
-
-        let raw = std::fs::read_to_string(f.store.settings_path()).unwrap();
-        assert!(!raw.contains("xkeysib-very-secret"), "{raw}");
-
-        let settings = f.store.settings().unwrap();
-        assert!(settings.screen_key.is_set());
-        assert_eq!(
-            crate::seal::open(f.seal_key.as_ref().unwrap(), &settings.screen_key).as_deref(),
-            Some("xkeysib-very-secret"),
-            "and it can still be read back by the server"
-        );
-    }
-
-    #[test]
-    fn a_blank_secret_keeps_the_one_that_is_there() {
-        // A form submitted for another reason must not clear a key. That would
-        // be a trap, and the failure would be silent until a sign-in bounced.
-        let mut f = Fixture::new("settings-blank").with_public(false);
-        let admin = f.as_admin();
-
-        f.go(
-            &Req::post(private_route::SETTINGS_SECRET, "screen_key=first-key").with_cookie(&admin),
-        );
-        let before = f.store.settings().unwrap().screen_key.clone();
-        assert!(before.is_set(), "the first write landed");
-
-        f.go(&Req::post(
-            private_route::SETTINGS_SECRET,
-            "base_url=https%3A%2F%2Fspecs.example.test&screen_key=",
-        )
-        .with_cookie(&admin));
-        assert_eq!(
-            f.store.settings().unwrap().screen_key,
-            before,
-            "a blank field cleared a key"
-        );
-    }
-
-    #[test]
-    fn every_sensitive_verb_refuses_a_stale_session() {
-        // **What a secret costs on top of a session.** Iterates the shared
-        // constant, so a verb added later is covered without anyone remembering
-        // to extend this list.
-        let mut f = Fixture::new("settings-stale").with_public(false);
-        let admin = f.as_admin();
-
-        // Long enough that the session is no longer freshly proved.
-        f.now_ms += crate::account::FRESH_AUTH_MS * 4;
-
-        for path in SENSITIVE_VERBS {
-            let res = f.go(&Req::post(path, "screen_key=sneaky").with_cookie(&admin));
-            assert_eq!(res.status, 400, "{path} took a stale session: {}", res.body);
-            assert!(res.body.contains("fresh sign-in"), "{}", res.body);
-        }
-        assert!(
-            !f.store.settings().unwrap().screen_key.is_set(),
-            "a stale session wrote a secret"
-        );
-
-        // The non-sensitive forms still work: only secrets need the hop.
-        let res = f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
-        assert_eq!(res.status, 200, "{}", res.body);
     }
 
     #[test]
@@ -6337,32 +6190,6 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_endpoint_returns_presence_and_never_a_secret() {
-        // **There is no read path for a stored secret anywhere in this server**,
-        // and adding a JSON API must not create one. The page renders whether a
-        // key is set and when; so does this.
-        let mut f = Fixture::new("api-settings").with_public(false);
-        let admin = f.as_admin();
-
-        let res = f.go(&Req::get("/api/v1/ui/settings").with_cookie(&admin));
-        assert_eq!(res.status, 200, "{}", res.body);
-        assert!(
-            !res.body.contains(KEY),
-            "the mail key must never be readable: {}",
-            res.body
-        );
-        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
-        assert!(v.get("screen_key").is_none(), "not even the ciphertext");
-        assert!(
-            v["screen_key_set"].is_boolean(),
-            "only whether one is there"
-        );
-        // The address and the mail settings are not on this surface at all.
-        assert!(v.get("base_url").is_none());
-        assert!(v.get("mail_key").is_none());
-    }
-
-    #[test]
     fn the_accounts_endpoint_carries_a_hint_and_no_address() {
         // The hint is `j***@example.com` — enough to recognise an account you
         // meant to revoke, not enough to be a contact list. The hash and the
@@ -6641,59 +6468,6 @@ mod tests {
         for path in [crate::api::ui::SCRIPT_PATH, crate::api::ui::STYLE_PATH] {
             assert_eq!(bucket_for(&None, path), Bucket::PublicRead, "{path}");
         }
-    }
-
-    #[test]
-    fn changing_a_secret_needs_a_freshly_proved_session() {
-        // **The one gate that is about time rather than identity.** A stolen
-        // cookie carries the administrator's authority for as long as it lives;
-        // rotating the mail key would redirect every sign-in link on the server,
-        // so that asks for the password *at that moment*.
-        //
-        // The API must not be the way around it.
-        let mut f = Fixture::new("api-fresh").with_public(false);
-        let admin = f.as_admin();
-
-        // **The screening key is the only secret this surface still writes.**
-        // The address and the mail key are environment variables now. The
-        // fixture has a sealing key, so the write succeeds when fresh and the
-        // gate is what makes the difference.
-        let body = "{\"screen_key\":\"sk-live-000\"}";
-
-        // Fresh: it goes through.
-        let fresh = f.go(&api_post("/api/v1/ui/settings", body).with_cookie(&admin));
-        assert_eq!(fresh.status, 200, "{}", fresh.body);
-
-        // Stale: the session was opened long enough ago that it no longer counts.
-        f.now_ms += crate::account::FRESH_AUTH_MS + 1;
-        let stale = f.go(&api_post("/api/v1/ui/settings", body).with_cookie(&admin));
-        assert_eq!(
-            stale.status, 401,
-            "a stale session rotated a secret: {}",
-            stale.body
-        );
-
-        // And an ordinary setting is unaffected — the gate is on the secrets,
-        // not on the page.
-        let ordinary =
-            f.go(&api_post("/api/v1/ui/settings", "{\"show_spec\":true}").with_cookie(&admin));
-        assert_eq!(ordinary.status, 200, "{}", ordinary.body);
-    }
-
-    #[test]
-    fn a_blank_secret_through_the_api_keeps_the_one_that_is_there() {
-        // The page renders presence and never a value, so a browser submitting
-        // the form sends an empty field for a key it was never shown. Treating
-        // that as "clear it" would wipe the mail key every time somebody changed
-        // the site name.
-        let mut f = Fixture::new("api-blank-secret").with_public(false);
-        let admin = f.as_admin();
-        let before = f.store.settings().unwrap().screen_key.clone();
-
-        let res =
-            f.go(&api_post("/api/v1/ui/settings", "{\"screen_key\":\"\"}").with_cookie(&admin));
-        assert_eq!(res.status, 200, "{}", res.body);
-        assert_eq!(f.store.settings().unwrap().screen_key, before);
     }
 
     #[test]

@@ -90,34 +90,26 @@ test("every administrative page is reachable from the menu", async ({
   }
 });
 
-test("the settings page never shows a stored secret", async ({ page }) => {
-  // If this is going to fail, say what the client believed rather than only
-  // which heading appeared.
+test("the settings page holds no secret at all", async ({ page }) => {
+  // **There is nothing here to leak any more.** Every secret is an environment
+  // variable: the mail key, the screening key, the address. The page says where
+  // they live rather than offering a field that would silently do nothing.
+  //
+  // This replaces a test that checked the fields were blank and of type
+  // password — the stronger property is that they do not exist.
   await page.goto("/settings");
   const seen = await page.evaluate(() => ({
     path: window.location.pathname,
     h1: document.querySelector("h1")?.textContent,
-    routedOn: document.documentElement.dataset.scPath,
-    role: document.documentElement.dataset.scRole,
   }));
-  expect(
-    seen.h1,
-    `at ${seen.path} the interface routed on "${seen.routedOn}" as "${seen.role}" and drew "${seen.h1}"`,
-  ).toBe("Settings");
-
-  // **There is no read path for a stored secret anywhere in this server**, and
-  // the interface must not invent one. The page says whether a key is set; the
-  // field it would be typed into is empty.
-  await page.goto("/settings");
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
-  await expect(page.locator("#screen_key")).toHaveValue("");
-  // And it is a password field, so a screenshot or a shoulder does not read it
-  // back either.
-  await expect(page.locator("#screen_key")).toHaveAttribute("type", "password");
-  // **The mail key is not on this page at all**, because it is an environment
-  // variable now — there is no field to leave empty.
-  await expect(page.locator("#mail_key")).toHaveCount(0);
-  await expect(page.locator("#base_url")).toHaveCount(0);
+  expect(seen.h1, `at ${seen.path} the interface drew "${seen.h1}"`).toBe(
+    "Settings",
+  );
+  for (const gone of ["#mail_key", "#screen_key", "#base_url", "#site_name"]) {
+    await expect(page.locator(gone)).toHaveCount(0);
+  }
+  // And it says where they are instead.
+  await expect(page.getByText("Set in the stack, not here")).toBeVisible();
 });
 
 test("a minted machine key is shown once, in the response and nowhere else", async ({

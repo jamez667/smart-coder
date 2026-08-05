@@ -1,58 +1,4 @@
-# A Portainer stack for the hosted intake surface (spec 18).
-#
-# Paste this into Portainer → Stacks → Add stack, set SC_SERVER_SECRET_KEY, and
-# deploy. Nothing else in this workspace is involved — the daemon on the
-# developer's machine dials out to this, and this never calls back.
-#
-# ---------------------------------------------------------------------------
-# ALMOST NOTHING IS CONFIGURED HERE ANY MORE
-# ---------------------------------------------------------------------------
-#
-# Four settings are real configuration: where to listen, which volume to use,
-# and the key that encrypts the rest. Everything else — who administers this
-# server, which repositories it collects for, the mail provider, the screening
-# model, the spend ceilings, whether the public site exists at all — is set from
-# the server's own pages and kept on the volume.
-#
-# That is not tidiness. Editing a stack means a redeploy, which restarts the
-# process and drops whatever was in flight. Fine for a bind address; a bad price
-# for raising a ceiling that is refusing filings right now.
-#
-# The variables further down are SEEDS. They are applied once, on a volume that
-# has never been administered, so an existing deployment keeps working across the
-# upgrade. After that they are ignored and the server says so in its log. Editing
-# one on a running server changes nothing.
-#
-# ---------------------------------------------------------------------------
-# FIRST RUN
-# ---------------------------------------------------------------------------
-#
-#   1. Deploy with SC_SERVER_SECRET_KEY set (`openssl rand -hex 32`).
-#   2. Read the container log. It prints a one-time claim code:
-#        "claim this server"  code=XXX-XXX
-#   3. Open https://your-address/setup and type it, with this server's address.
-#   4. Create a GitHub OAuth application when the page asks, and paste the
-#      callback URL it shows you.
-#   5. Sign in with GitHub. THAT ACCOUNT NOW ADMINISTERS THIS SERVER.
-#
-# Reading the log is the proof of ownership: whoever can see the container's
-# output is whoever deployed it. The code expires after thirty minutes and a
-# restart arms a fresh one, so letting it lapse costs a restart. A claimed
-# server arms nothing however often it restarts.
-#
-# There is no public site until you turn one on at /settings, and no machine can
-# claim work until you mint a key at /daemons.
-#
-# TO START AGAIN — a mistyped login, a lost GitHub account — delete admin.json
-# from the volume and restart. The claim code comes back.
-#
-# ---------------------------------------------------------------------------
-# BACK UP THE VOLUME
-# ---------------------------------------------------------------------------
-#
-# It holds every filed request and drafted spec, and nothing else in this system
-# does. Credentials in it are hashed and the three reversible secrets (mail key,
-# GitHub client secret, screening key) are ENCRYPTED with SC_SERVER_SECRET_KEY —
+
 # so a copy of the volume alone grants nobody anything. Keep the key somewhere
 # else, or the backup contains both halves and the encryption buys nothing.
 
@@ -162,29 +108,6 @@ services:
       # before the first one is moved across.
       SC_SERVER_DAEMON_KEY: ${SC_SERVER_DAEMON_KEY:-}
 
-
-      # The key the settings stored on the VOLUME are encrypted with.
-      #
-      # Some settings have to be replayed rather than merely compared -- a
-      # mail API key is sent to Brevo, a GitHub client secret is sent to
-      # GitHub -- so they cannot be stored as hashes the way device tokens
-      # and daemon keys are. Once they are editable from the review surface
-      # they live on the volume, and they are encrypted there.
-      #
-      # THIS IS THE ONE SECRET THAT MUST STAY HERE. It is what makes the
-      # volume safe to back up and copy: a key stored beside its own
-      # ciphertext protects nothing. Someone who takes a copy of /data and
-      # not this line has taken nothing usable.
-      #
-      # Generate one with `openssl rand -hex 32`, or leave it unset and read
-      # the one this server logs on a first start. LOSING IT means the stored
-      # secrets cannot be read and have to be entered again -- it is not a
-      # lockout, since who administers this server is recorded separately.
-      #
-      # A server that has never been given a secret through the UI does not
-      # need one. A WRONG one is refused at startup rather than quietly
-      # behaving as though nothing were configured.
-      SC_SERVER_SECRET_KEY: ${SC_SERVER_SECRET_KEY:-}
 
       # These carry their defaults *inside the image*, so they are substituted
       # to their real values rather than to an empty string. Passing an empty

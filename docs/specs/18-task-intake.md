@@ -1433,32 +1433,39 @@ with no box for a cap that exists.
   volume, so an edit lands on the next request rather than the next restart
   <!--@ sc_server::settings::SettingsCache -->.
 
-  **The old variables survive as seeds** — applied once, on a volume that has
-  never been administered, so an existing deployment upgrades without
-  re-entering anything. After that they are ignored and the server says so: a
-  setting that is present and inert is one somebody will edit expecting an
-  effect.
+  **The remaining variables survive as seeds** — the public switch, the spec
+  flag and the four ceilings — applied once on a volume that has never been
+  administered, so an existing deployment upgrades without re-entering anything.
 
-- **The three reversible secrets are sealed on the volume**
-  <!--@ crates/sc-server/src/seal.rs -->. A mail key is *replayed* to Brevo
-  rather than compared, so unlike every credential in `auth` it cannot be
-  hashed. Storing it plainly would have made a copied volume leak live
-  credentials for the first time — the exact property `auth`'s module doc
-  claims. So it is encrypted with `SC_SERVER_SECRET_KEY`, which is the one
-  secret that stays in the environment: a key beside its own ciphertext protects
-  nothing.
+  The address, the site name, the mail settings and the screener are **not**
+  among them: they are read from the environment on every boot. Seeding them was
+  the mistake this section above records, because a seeded value that the UI can
+  also change is one the stack appears to set and does not.
 
-  ChaCha20-Poly1305 rather than a bare cipher, and the tag is the point.
-  Secrecy is the obvious half; detecting tampering is the half that matters
-  more, because somebody who can write the volume but not read the key could
-  otherwise flip bits in a stored screening URL and have the server talk to a
-  host of their choosing.
+- ~~**The three reversible secrets are sealed on the volume.**~~ **Withdrawn,
+  and the module with it.** Sealing existed because a mail key is *replayed*
+  rather than compared, so unlike every credential in `auth` it could not be
+  hashed — and a volume holding one in the clear would have leaked live
+  credentials, which is the property `auth`'s module doc claims for the whole
+  system. ChaCha20-Poly1305 with its tag answered that, and the argument was
+  sound.
 
-  A wrong or missing key is a **refusal to start**
-  <!--@ crates/sc-server/src/seal.rs -->, checked against a value known to be
-  present. Without it the server would boot, open nothing, and report no mail
-  provider and no screener — indistinguishable from a fresh install, and the
-  operator would re-enter secrets that were never lost.
+  It stopped having a subject. The mail key moved to the environment, the
+  screening key followed it, and nothing reversible was left on the volume. A
+  sealing key that seals nothing is worse than none: it is a required variable, a
+  boot check that always passes, and four hundred lines that the next reader has
+  to understand before discovering they protect nothing. So `seal.rs`, the
+  `Sealed` type, the boot canary and `SC_SERVER_SECRET_KEY` are all gone.
+
+  **What was traded away is real and is not recovered elsewhere.** A key in the
+  environment is readable by `docker inspect`, by `/proc/<pid>/environ`, and by
+  anything that can see the process; sealed on the volume it was not. Rotating
+  one is now a redeploy rather than a form. That was accepted for a single source
+  of truth, after a variable set correctly in the stack was silently ignored by a
+  volume that had already been claimed — which is the failure that started this.
+
+  If a secret ever needs *storing* again rather than *reading*, this section is
+  the argument for how, and the git history holds the implementation.
 - **A daemon key is minted here, shown once, and stored hashed**
   <!--@ sc_server::routes::private_route::DAEMONS -->. A freshly claimed server
   has none, so nothing can claim work until one exists — the right resting
