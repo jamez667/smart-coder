@@ -39,3 +39,8 @@ crates/sc-server/assets/ui/
 node_modules/
 web/test-results/
 web/playwright-report/
+# TypeScript's incremental-build caches. Machine-local timestamps and file
+# hashes, rewritten by every `tsc` run — committing them means a diff on every
+# build that says nothing about the source, and a merge conflict in a file
+# nobody can usefully resolve.
+*.tsbuildinfo
