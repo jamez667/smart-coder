@@ -106,6 +106,39 @@ export function App() {
       }[path]
     : undefined;
 
+  // **An address this interface does not know says so.**
+  //
+  // The server answers its own 404 for anything outside the set it serves the
+  // document for — but inside that set the client decides, and it used to fall
+  // through to whatever the caller's role renders by default. So `/nonsense`
+  // showed a signed-in reviewer their review list, with the address bar saying
+  // something else entirely: the one failure mode worse than a 404, because it
+  // looks like it worked.
+  //
+  // Listed rather than inferred. A regex over `/request/...` would also match
+  // `/requests`, and a set that has to be updated when a route is added is the
+  // kind of omission a reader notices immediately.
+  //
+  // **This must match `wants_document` on the server exactly.** The server
+  // decides which addresses get this bundle at all; a path it serves and this
+  // does not is a working address showing "Not found", and a path this claims
+  // and it does not can never arrive. Note what is deliberately absent:
+  // `/public/signin/{token}` is the magic-link landing and is still rendered by
+  // the server, because it is a navigation out of an email rather than a route
+  // within the application.
+  const known =
+    path === "/" ||
+    path === "/public" ||
+    path === "/public/signin" ||
+    path === "/review" ||
+    path === "/setup" ||
+    path === "/settings" ||
+    path === "/owners" ||
+    path === "/repos" ||
+    path === "/daemons" ||
+    path === "/accounts" ||
+    /^\/(public\/)?request\/[^/]+$/.test(path);
+
   // **What the interface decided, readable from a test.** The admin pages
   // failed in CI drawing the review list, and nothing on the page could say
   // whether that was the path, the capability, or the order they were evaluated
@@ -149,7 +182,9 @@ export function App() {
       <Masthead me={me} onSignIn={() => setSigningIn(true)} onGo={go} />
       <main>
         {problem && <p className="note">{problem}</p>}
-        {admin ? (
+        {!known ? (
+          <NotFound />
+        ) : admin ? (
           admin
         ) : open ? (
           <ReviewDetail
@@ -209,6 +244,23 @@ function Landing() {
           one, and it stays that way.
         </p>
       </section>
+    </>
+  );
+}
+
+/// An address the interface does not serve.
+///
+/// Says the same thing the server's own 404 says, because a reader who followed
+/// a stale link should not be able to tell which of the two answered — the
+/// distinction is about who routed, and that is not their problem.
+function NotFound() {
+  return (
+    <>
+      <h1>Not found</h1>
+      <p>There is nothing at this address.</p>
+      <p className="meta">
+        <a href="/">Back to the start</a>
+      </p>
     </>
   );
 }

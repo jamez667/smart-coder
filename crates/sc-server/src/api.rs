@@ -424,6 +424,41 @@ impl AccountView {
 /// The consequence to know about: **a frontend change is a Rust rebuild.** The
 /// dev loop avoids that by serving the interface from Vite and proxying the API,
 /// so the two only meet at build time.
+/// The answer to a browser asking for an address that does not exist.
+///
+/// **A document rather than a JSON body**, because the caller is a person who
+/// typed or followed a URL, not a `fetch` — and a browser shown `{"error":...}`
+/// renders it as text on a white page. This replaces three renderers in the page
+/// layer that differed only in their wording and their way back.
+///
+/// Deliberately not the application shell. Serving the interface here would mean
+/// a mistyped address answers 200 with a working masthead, which is the opposite
+/// of the honesty a 404 is for; it also cannot be done, because the shell's
+/// script would need a policy this response does not carry.
+///
+/// The link back is `/` and nothing else. The old private 404 pointed at
+/// `/public/signin` for the benefit of an administrator whose enrolled-device
+/// cookie had stopped matching — a transition that is over, and a sign-in link
+/// on a 404 is one more thing to reason about for a reader who is simply lost.
+pub const NOT_FOUND: &str = concat!(
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<title>Not found</title>",
+    // Inline, and the one place in this server where that is right: a stylesheet
+    // link would be a second request that can itself fail, on the page whose
+    // whole job is to work when something already has. `style-src` allows
+    // `'unsafe-inline'` on every policy, so this needs no relaxation.
+    "<style>body{font:16px/1.6 system-ui,sans-serif;margin:0;",
+    "min-height:100vh;display:grid;place-items:center;text-align:center;",
+    "background:#fbfaf8;color:#1a1a1a}",
+    "a{color:#3b5bdb}",
+    "@media(prefers-color-scheme:dark){body{background:#16161a;color:#e8e6e3}",
+    "a{color:#8da2fb}}</style></head><body><main>",
+    "<h1>Not found</h1><p>There is nothing at this address.</p>",
+    "<p><a href=\"/\">Back to the start</a></p>",
+    "</main></body></html>"
+);
+
 pub mod ui {
     /// The document. Every route the interface owns answers this same HTML —
     /// the client reads the path and decides what to draw.

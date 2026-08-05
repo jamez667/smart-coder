@@ -739,7 +739,7 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
             }
             // No public surface configured: this 404 is not *on* that surface, so
             // it is served strict like every other non-public response.
-            None => Res::html(404, crate::page::not_found()),
+            None => Res::html(404, crate::api::NOT_FOUND),
         };
     }
 
@@ -769,7 +769,7 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         // existing; a claimed server always has a password, so there is always
         // somewhere to point.
         if method == "GET" {
-            return Res::html(404, crate::page::not_found_for_admin());
+            return Res::html(404, crate::api::NOT_FOUND);
         }
         return error(401, "unauthorized");
     };
@@ -2413,7 +2413,7 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
                     let who = who_serves(ctx, &r.repo);
                     Res::html(200, crate::page::detail(&r, &who))
                 }
-                Ok(None) => Res::html(404, crate::page::not_found()),
+                Ok(None) => Res::html(404, crate::api::NOT_FOUND),
                 Err(e) => error(500, &e.to_string()),
             }
         }
@@ -2470,7 +2470,7 @@ fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res 
             }
         }
 
-        _ => Res::html(404, crate::page::not_found()),
+        _ => Res::html(404, crate::api::NOT_FOUND),
     }
 }
 
@@ -2559,7 +2559,7 @@ fn public_route(
                     // Unreachable past `is_public_path`, which only matches when
                     // a surface exists — but the surface is what holds the set,
                     // so this asks rather than unwrapping.
-                    None => Res::html(404, crate::page::public_not_found(locale)),
+                    None => Res::html(404, crate::api::NOT_FOUND),
                 },
                 Err(e) => error(500, &e.to_string()),
             },
@@ -2650,7 +2650,7 @@ fn signed_in_route(
                 200,
                 crate::page::public_file_page(&list, &repos, show_spec, locale),
             ),
-            (Ok(_), None) => Res::html(404, crate::page::public_not_found(locale)),
+            (Ok(_), None) => Res::html(404, crate::api::NOT_FOUND),
             (Err(e), _) => error(500, &e.to_string()),
         },
         ("POST", public_route::FILE) => file_publicly(ctx, req, account_id),
@@ -2666,12 +2666,12 @@ fn signed_in_route(
                 }
                 // Somebody else's request is *not found*, not forbidden:
                 // "forbidden" would confirm the id exists.
-                Ok(_) => Res::html(404, crate::page::public_not_found(locale)),
+                Ok(_) => Res::html(404, crate::api::NOT_FOUND),
                 Err(e) => error(500, &e.to_string()),
             }
         }
 
-        _ => Res::html(404, crate::page::public_not_found(locale)),
+        _ => Res::html(404, crate::api::NOT_FOUND),
     }
 }
 
@@ -2732,7 +2732,7 @@ fn owners_page(ctx: &Ctx<'_>) -> Res {
 /// boot on and a record cannot.
 fn set_owner(ctx: &mut Ctx<'_>, login: &str, repos: &[String]) -> Res {
     let Some(public) = ctx.public else {
-        return Res::html(404, crate::page::not_found());
+        return Res::html(404, crate::api::NOT_FOUND);
     };
     if let Err(e) = check_login(login) {
         return error(400, &e);
@@ -2767,7 +2767,7 @@ fn set_owner(ctx: &mut Ctx<'_>, login: &str, repos: &[String]) -> Res {
 /// Demote somebody.
 fn revoke_owner(ctx: &mut Ctx<'_>, login: &str) -> Res {
     let Some(public) = ctx.public else {
-        return Res::html(404, crate::page::not_found());
+        return Res::html(404, crate::api::NOT_FOUND);
     };
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut roster = match ctx.store.roster() {
@@ -2999,7 +2999,7 @@ fn owner_route(
     repos: &[String],
     locale: Locale,
 ) -> Res {
-    let not_found = || Res::html(404, crate::page::public_not_found(locale));
+    let not_found = || Res::html(404, crate::api::NOT_FOUND);
 
     match (method, path) {
         // Their list, wherever they land.
@@ -3254,7 +3254,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     let Some(repos) = ctx.public.map(|p| p.repos.clone()) else {
         // Unreachable: signing in is a public route and only exists when a
         // surface does.
-        return Res::html(404, crate::page::public_not_found(locale));
+        return Res::html(404, crate::api::NOT_FOUND);
     };
 
     let mut res = Res::html(
@@ -3369,7 +3369,7 @@ fn has_mail(ctx: &Ctx<'_>) -> bool {
 /// and refusing — a stranger cannot tell a claimed server from one that never
 /// had this route, and there is nothing to keep trying.
 fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
-    let gone = || Res::html(404, crate::page::not_found());
+    let gone = || Res::html(404, crate::api::NOT_FOUND);
 
     let admin = match ctx.store.admin() {
         Ok(a) => a,
@@ -3786,7 +3786,7 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
                 ),
             );
         }
-        _ => return Res::html(404, crate::page::not_found()),
+        _ => return Res::html(404, crate::api::NOT_FOUND),
     };
 
     // Administered, so the environment must not seed over it on the next boot.
@@ -4002,7 +4002,7 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
         kind,
     ) {
         Ok(request) => Res::html(200, crate::page::public_filed(&request, locale)),
-        Err(FilingRefused::NoSurface) => Res::html(404, crate::page::public_not_found(locale)),
+        Err(FilingRefused::NoSurface) => Res::html(404, crate::api::NOT_FOUND),
         Err(FilingRefused::Repo) => refuse_repo(locale),
         Err(FilingRefused::Store(e)) => error(500, &e),
         Err(other) => Res::html(
@@ -4022,7 +4022,7 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
 fn ask_to_accept(ctx: &mut Ctx<'_>, id: &str) -> Res {
     let req = match ctx.store.get(id) {
         Ok(Some(r)) => r,
-        Ok(None) => return Res::html(404, crate::page::not_found()),
+        Ok(None) => return Res::html(404, crate::api::NOT_FOUND),
         Err(e) => return error(500, &e.to_string()),
     };
     if req.state != RequestState::AwaitingReview {
@@ -4896,6 +4896,61 @@ mod tests {
             f.store.all().unwrap().len(),
             cap,
             "the one over the cap was not written"
+        );
+    }
+
+    #[test]
+    fn the_client_knows_exactly_the_paths_the_server_serves_a_document_for() {
+        // **Two lists that must agree, in two languages.** The server decides
+        // which addresses get the bundle; the client decides what to draw once
+        // it has it. A path the server serves and the client does not know is a
+        // working address rendering "Not found"; a path the client claims and
+        // the server does not is one that can never arrive.
+        //
+        // Read out of the bundle rather than restated here, so this fails when
+        // somebody edits one side alone — which is the whole failure mode. The
+        // assertion is deliberately crude: it checks each path is *compared
+        // against*, not that the expression means what it says. A test that
+        // parsed TypeScript would be a second implementation of the thing it
+        // checks.
+        //
+        // **`===` is load-bearing.** The first version looked for the quoted
+        // path alone and passed while the client was missing one entirely:
+        // `"daemons"` appears in the bundle as an API path segment, so the
+        // literal was always found and the test asserted nothing. Minification
+        // rewrites the comparison to `B==="/daemons"` but keeps the operator, so
+        // pinning to that is what makes this a real check. Verified by deleting
+        // a path from the client and watching this fail.
+        let client = crate::api::ui::SCRIPT;
+
+        for path in [
+            public_route::LANDING,
+            public_route::FILE,
+            public_route::SIGNIN,
+            private_route::REVIEW,
+            private_route::SETTINGS,
+            private_route::REPOS,
+            private_route::OWNERS,
+            private_route::DAEMONS,
+            private_route::ACCOUNTS,
+            private_route::SETUP,
+        ] {
+            assert!(
+                wants_document(path),
+                "{path} should be served the interface"
+            );
+            assert!(
+                client.contains(&format!("===\"{path}\"")),
+                "the client does not know {path}, so it will draw Not found there"
+            );
+        }
+
+        // **The magic-link landing is deliberately not among them.** It is a
+        // navigation out of an email that the server still renders itself, so
+        // the client must not claim it — see `wants_document`.
+        assert!(
+            !wants_document("/public/signin/sometoken"),
+            "the magic-link landing is server-rendered"
         );
     }
 
