@@ -271,6 +271,18 @@ impl Req {
         }
     }
 
+    /// A POST to the JSON API, with the content type it demands.
+    ///
+    /// Separate from [`Req::post`] rather than a flag on it: the content type is
+    /// half of what stops a `<form>` reaching these endpoints, so a test that
+    /// sets it should have to say so.
+    #[cfg(test)]
+    pub fn post_json(path: &str, body: &str) -> Req {
+        let mut req = Req::post(path, body);
+        req.content_type = Some("application/json".into());
+        req
+    }
+
     /// The language this request is rendered in.
     ///
     /// Computed rather than stored, so there is no way to have a `Req` whose
@@ -774,6 +786,89 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 /// One page for every failure — no such account, wrong password, still backing
 /// off. Distinguishing them tells a guesser which half they got right, and the
 /// backoff is counted by [`Accounts::check_password`] whichever it was.
+/// Check a password and, if it holds, open or refresh the session for it.
+///
+/// **Split out so the form and the JSON endpoint cannot drift.** Everything that
+/// decides whether somebody gets in lives here exactly once — the backoff that
+/// records failures, the re-authentication onto the browser's existing session —
+/// and the two callers differ only in what they render from the answer. A second
+/// copy of this is a second place for the backoff to be forgotten.
+///
+/// `Err(())` is deliberately uninformative: no caller may tell a wrong password
+/// from an unknown login from a backoff, because neither may the person asking.
+fn check_password_for_session(
+    ctx: &mut Ctx<'_>,
+    req: &Req,
+    login: &str,
+    password: &str,
+) -> Result<String, ()> {
+    if login.is_empty() || password.is_empty() {
+        return Err(());
+    }
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut accounts = match ctx.store.accounts() {
+        Ok(a) => a,
+        Err(_) => return Err(()),
+    };
+
+    // The check records the attempt either way, so the write below has to
+    // happen on failure too — otherwise the backoff would never accumulate.
+    let outcome = accounts.check_password(login, password, ctx.now_ms);
+    if ctx.store.put_accounts(&accounts).is_err() {
+        return Err(());
+    }
+    invalidate_accounts(ctx);
+
+    let id = match outcome {
+        Ok(id) => id,
+        Err(retry_at) => {
+            // Logged for the operator, never shown: the answer says the same
+            // thing whichever failure it was.
+            crate::log::warn("password refused")
+                .with("login", login.to_ascii_lowercase())
+                .with("retry_in_s", retry_at.saturating_sub(ctx.now_ms) / 1000)
+                .emit();
+            drop(_guard);
+            return Err(());
+        }
+    };
+
+    // **A re-authentication lands on the browser's existing session** rather
+    // than opening a second one beside it. Otherwise proving yourself again
+    // would mean signing out and back in, and the stale session would stay live
+    // next to the fresh one — two credentials where the point was to refresh
+    // one.
+    let session = match req
+        .cookie_token
+        .as_deref()
+        .filter(|t| accounts.refresh_session(t, ctx.now_ms))
+    {
+        Some(existing) => existing.to_string(),
+        None => accounts.open_session(&id, ctx.now_ms),
+    };
+    if ctx.store.put_accounts(&accounts).is_err() {
+        return Err(());
+    }
+    invalidate_accounts(ctx);
+    drop(_guard);
+
+    crate::log::info("signed in")
+        .with("login", login.to_ascii_lowercase())
+        .emit();
+    Ok(session)
+}
+
+/// The cookie a fresh session is carried in.
+///
+/// **`Strict`, where the GitHub return needed `Lax`.** That relaxation existed
+/// only because the browser arrived back from github.com; a password POST is
+/// same-origin, so the tighter setting is available and is taken.
+fn session_cookie(ctx: &Ctx<'_>, session: &str) -> String {
+    let secure = secure_attr(ctx);
+    format!("{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000")
+}
+
 fn sign_in_with_password(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     let locale = req.locale();
     let form = form_fields(&req.body);
@@ -793,74 +888,23 @@ fn sign_in_with_password(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         .with_policy(Policy::PublicScript)
     };
 
-    if login.is_empty() || password.is_empty() {
+    let Ok(session) = check_password_for_session(ctx, req, login, password) else {
         return refused(ctx);
-    }
-
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut accounts = match ctx.store.accounts() {
-        Ok(a) => a,
-        Err(e) => return error(500, &e.to_string()),
     };
 
-    // The check records the attempt either way, so the write below has to
-    // happen on failure too — otherwise the backoff would never accumulate.
-    let outcome = accounts.check_password(login, password, ctx.now_ms);
-    if let Err(e) = ctx.store.put_accounts(&accounts) {
-        return error(500, &e.to_string());
-    }
-    invalidate_accounts(ctx);
-
-    let id = match outcome {
-        Ok(id) => id,
-        Err(retry_at) => {
-            // Logged for the operator, never shown: the page says the same
-            // thing whichever failure it was.
-            crate::log::warn("password refused")
-                .with("login", login.to_ascii_lowercase())
-                .with("retry_in_s", retry_at.saturating_sub(ctx.now_ms) / 1000)
-                .emit();
-            drop(_guard);
-            return refused(ctx);
-        }
-    };
-
-    // **A re-authentication lands on the browser's existing session** rather
-    // than opening a second one beside it. Otherwise proving yourself again
-    // would mean signing out and back in, and the stale session would stay live
-    // next to the fresh one — two credentials where the point was to refresh
-    // one.
-    let session = match req
-        .cookie_token
-        .as_deref()
-        .filter(|t| accounts.refresh_session(t, ctx.now_ms))
-    {
-        Some(existing) => existing.to_string(),
-        None => accounts.open_session(&id, ctx.now_ms),
-    };
-    if let Err(e) = ctx.store.put_accounts(&accounts) {
-        return error(500, &e.to_string());
-    }
-    invalidate_accounts(ctx);
-    drop(_guard);
-
-    crate::log::info("signed in")
-        .with("login", login.to_ascii_lowercase())
-        .emit();
-
-    let secure = secure_attr(ctx);
     let repos = ctx.public.map(|p| p.repos.clone()).unwrap_or_default();
     let mut res = Res::html(
         200,
         crate::page::public_file_page(&[], &repos, false, locale),
     );
-    // **`Strict`, where the GitHub return needed `Lax`.** That relaxation
-    // existed only because the browser arrived from github.com; a password POST
-    // is same-origin, so the tighter setting is available and taken.
-    res.set_cookie = Some(format!(
-        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
-    ));
+    res.set_cookie = Some(session_cookie(ctx, &session));
     res
+}
+
+/// One of the interface's API paths, spelled from the prefix rather than by
+/// hand — a literal here would keep matching nothing if `PREFIX` ever moved.
+fn api_path(rest: &str) -> String {
+    format!("{}{rest}", crate::api::PREFIX)
 }
 
 /// Which budget this request is counted against.
@@ -896,7 +940,18 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         // looser (30/min against 20) and *shared*, so somebody grinding
         // passwords would lock every filer out of asking for a magic link. The
         // path is public; the traffic is not.
-        None if path == public_route::SIGNIN_PASSWORD => Bucket::AnonPrivate,
+        //
+        // **Both spellings of the route, and this is load-bearing.** The
+        // interface posts JSON to `/api/v1/ui/signin/password` while the form
+        // posts to `/public/signin/password`; if only one were named here the
+        // other would fall through to the generic API arm and get a different
+        // budget, which is a bypass rather than an oversight.
+        None if path == public_route::SIGNIN_PASSWORD || path == api_path("signin/password") => {
+            Bucket::AnonPrivate
+        }
+        // Asking for a link costs an email either way it is asked for, so the
+        // JSON endpoint shares the form's bucket rather than the API's.
+        None if path == api_path("signin") || path == api_path("signout") => Bucket::PublicWrite,
         // **`/me` is what a stranger's browser asks first.** The landing page is
         // public and the client cannot render it without knowing whether anybody
         // is signed in, so this is a page read in every sense that matters to a
@@ -1122,6 +1177,13 @@ fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) 
     match rest {
         "setup/code" => return api_spend_code(ctx, req),
         "setup/admin" => return api_claim(ctx, req),
+        // **The three ways in and out, above the gate for the same reason the
+        // wizard is**: requiring an administrator to sign in would be circular.
+        // They are guarded instead by the same-origin check every mutating call
+        // passes, by the backoff on the account, and by the rate limiter.
+        "signin" => return api_request_link(ctx, req),
+        "signin/password" => return api_sign_in_with_password(ctx, req),
+        "signout" => return api_sign_out(ctx, req),
         _ => {}
     }
 
@@ -1673,6 +1735,103 @@ enum AdminView {
     Repos,
     Daemons,
     Accounts,
+}
+
+/// Ask for a magic link, from the interface.
+///
+/// **The answer is identical in every case** — unknown address, existing
+/// account, revoked account, malformed input, over the outstanding cap. Only
+/// what gets *sent* differs, so this cannot be used to discover whether an
+/// address has an account. The form route this mirrors makes the same promise
+/// and both call the same `try_send_link`, so neither can drift into leaking it.
+fn api_request_link(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    // **Refused outright when nothing can send.** Every other failure here is
+    // deliberately indistinguishable; that argument does not reach this one,
+    // because "this server has no mail provider" is not a fact about any person,
+    // and silently accepting an address nobody will ever act on is worse.
+    if !has_mail(ctx) {
+        return error(503, req.locale().strings().signin_no_mail);
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_str(&req.body).unwrap_or(serde_json::Value::Null);
+    let raw = body
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    if let Err(e) = try_send_link(ctx, raw) {
+        // Logged for the operator, never shown: the answer must look the same
+        // whether or not mail went out.
+        //
+        // `warn`, not `error`: the common cause is the outstanding-links cap,
+        // which is the design working.
+        crate::log::warn("sign-in link not sent")
+            .text("err", e)
+            .emit();
+    }
+    Res::json(200, "{\"sent\":true}")
+}
+
+/// Sign in with a password, from the interface.
+///
+/// The check itself is [`check_password_for_session`], shared with the form
+/// route — see there for why it is one implementation rather than two.
+fn api_sign_in_with_password(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    let body: serde_json::Value =
+        serde_json::from_str(&req.body).unwrap_or(serde_json::Value::Null);
+    let login = body
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let password = body
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let Ok(session) = check_password_for_session(ctx, req, &login, &password) else {
+        // **One message for every failure**, matching what the form renders. A
+        // client that could tell "no such login" from "wrong password" would be
+        // an account enumerator.
+        return error(401, req.locale().strings().signin_wrong);
+    };
+
+    let mut res = Res::json(200, "{\"signed_in\":true}");
+    res.set_cookie = Some(session_cookie(ctx, &session));
+    res
+}
+
+/// Sign out, from the interface.
+///
+/// **Revokes the session server-side**, not merely dropping the cookie: a token
+/// that still opens a door is not signed out just because this browser forgot
+/// it.
+fn api_sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    if let Some(token) = req.cookie_token.as_deref() {
+        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Ok(mut accounts) = ctx.store.accounts() {
+            let hashed = crate::auth::hash(token);
+            if let Some(s) = accounts
+                .sessions
+                .iter_mut()
+                .find(|s| s.token_hash == hashed)
+            {
+                s.revoked = true;
+                let _ = ctx.store.put_accounts(&accounts);
+                invalidate_accounts(ctx);
+            }
+        }
+    }
+    let secure = secure_attr(ctx);
+    let mut res = Res::json(200, "{\"signed_out\":true}");
+    // Max-Age=0 so the browser drops it rather than carrying a dead token.
+    res.set_cookie = Some(format!(
+        "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0"
+    ));
+    res
 }
 
 /// The request list, answered according to who is asking.
@@ -4412,6 +4571,119 @@ mod tests {
         // And once something offers it, the request is merely waiting its turn.
         f.go(&Req::get(&format!("{}?repo=alpha", wire::route::WORK)).with_bearer(KEY));
         assert_eq!(coverage(&mut f, &token), "served");
+    }
+
+    #[test]
+    fn signing_in_over_json_sets_the_same_session_as_the_form() {
+        // The interface posts JSON; the magic-link email still lands on a form.
+        // **Both must open the same kind of session** — a second implementation
+        // is where the backoff, the cookie flags, or the session refresh quietly
+        // stop matching, which is why `check_password_for_session` is shared.
+        let mut f = Fixture::new("json-signin");
+        f.as_admin();
+
+        let res = f.go(&Req::post_json(
+            "/api/v1/ui/signin/password",
+            r#"{"login":"jamez667@example.test","password":"fixture-password"}"#,
+        ));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        let cookie = res.set_cookie.clone().expect("a session");
+        assert!(cookie.contains("HttpOnly"), "not readable from script");
+        assert!(
+            cookie.contains("SameSite=Strict"),
+            "the GitHub-era Lax relaxation is gone and must not come back"
+        );
+
+        // And it actually signs somebody in, rather than merely answering 200.
+        let token = cookie_token(&res).expect("a session was opened");
+        let me = f.go(&Req::get("/api/v1/ui/me").with_cookie(&token));
+        assert!(
+            me.body.contains("administrator"),
+            "the session the JSON endpoint opened is a real one: {}",
+            me.body
+        );
+    }
+
+    #[test]
+    fn a_refused_password_says_the_same_thing_however_it_was_wrong() {
+        // **The refusal must not be an account enumerator.** A client that could
+        // tell "no such login" from "wrong password" would let somebody map who
+        // has an account here, which is what the form route refuses to do — so
+        // the JSON one has to refuse identically.
+        let mut f = Fixture::new("json-signin-refused");
+        f.as_admin();
+
+        let wrong_password = f.go(&Req::post_json(
+            "/api/v1/ui/signin/password",
+            r#"{"login":"jamez667@example.test","password":"not it"}"#,
+        ));
+        let no_such_login = f.go(&Req::post_json(
+            "/api/v1/ui/signin/password",
+            r#"{"login":"nobody@example.test","password":"not it"}"#,
+        ));
+
+        assert_eq!(wrong_password.status, 401);
+        assert_eq!(no_such_login.status, 401);
+        assert_eq!(
+            wrong_password.body, no_such_login.body,
+            "these two must be indistinguishable"
+        );
+        assert!(
+            wrong_password.set_cookie.is_none(),
+            "a refusal hands out nothing"
+        );
+    }
+
+    #[test]
+    fn signing_out_over_json_revokes_rather_than_forgetting() {
+        // **Dropping the cookie is not signing out.** A token this browser
+        // forgot but the server still honours is one anybody holding it can
+        // still use, so the session has to die server-side.
+        let mut f = Fixture::new("json-signout").with_public(false);
+        let session = f.signed_in("filer@example.test");
+
+        let res = f.go(&Req::post_json("/api/v1/ui/signout", "{}").with_cookie(&session));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert!(
+            res.set_cookie
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Max-Age=0"),
+            "the browser is told to drop it too"
+        );
+
+        // The old token is now worth nothing, which is the part that matters.
+        let after = f.go(&Req::get("/api/v1/ui/me").with_cookie(&session));
+        assert!(
+            after.body.contains("anonymous"),
+            "the revoked session must not still identify anybody: {}",
+            after.body
+        );
+    }
+
+    #[test]
+    fn asking_for_a_link_over_json_cannot_be_used_to_find_accounts() {
+        // The form route answers identically whatever happened, so that probing
+        // addresses reveals nothing. **The JSON endpoint inherits that promise**
+        // — and a client is a much easier thing to probe with than a form.
+        let mut f = Fixture::new("json-link").with_public(false);
+        f.signed_in("known@example.test");
+
+        let known = f.go(&Req::post_json(
+            "/api/v1/ui/signin",
+            r#"{"email":"known@example.test"}"#,
+        ));
+        let unknown = f.go(&Req::post_json(
+            "/api/v1/ui/signin",
+            r#"{"email":"stranger@example.test"}"#,
+        ));
+
+        assert_eq!(known.status, unknown.status);
+        assert_eq!(
+            known.body, unknown.body,
+            "whether an address has an account must not be readable from here"
+        );
     }
 
     #[test]
@@ -8592,6 +8864,19 @@ mod tests {
 
         // Sending mail and spending a link cost something; reading a page does
         // not, and starving reads would itself be the denial of service.
+        // **The JSON endpoints share their form's budget, not the API's.** The
+        // interface posts to `/api/v1/ui/signin/password`; if that fell through
+        // to the generic API arm, credential guessing would have found a route
+        // with a different allowance and the `AnonPrivate` reasoning above would
+        // protect only the spelling nobody uses.
+        assert_eq!(
+            probe("/api/v1/ui/signin/password"),
+            Bucket::AnonPrivate,
+            "guessing passwords over JSON is still guessing passwords"
+        );
+        assert_eq!(probe("/api/v1/ui/signin"), Bucket::PublicWrite);
+        assert_eq!(probe("/api/v1/ui/signout"), Bucket::PublicWrite);
+
         assert_eq!(probe(public_route::SIGNIN), Bucket::PublicWrite);
         assert_eq!(probe("/public/signin/abc"), Bucket::PublicWrite);
         assert_eq!(probe(public_route::FILE), Bucket::PublicRead);

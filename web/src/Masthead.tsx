@@ -1,4 +1,4 @@
-import type { Me } from "./api";
+import { api, type Me } from "./api";
 
 /// The bar across the top, on every page.
 ///
@@ -104,12 +104,19 @@ function AccountMenu({ me, onGo }: { me: Me; onGo: (to: string) => void }) {
           </>
         )}
         <hr />
-        {/* **A real form to a real route.** Signing out revokes a session and
-            clears a cookie, which is a server concern; posting it is simpler
-            than a fetch plus a reload, and it works the same either way. */}
-        <form method="post" action="/public/signout">
-          <button type="submit">Sign out</button>
-        </form>
+        {/* Signing out revokes the session server-side and clears the cookie,
+            then reloads — the server decides what every view may show, so
+            asking it once beats teaching each component to forget. This was a
+            native form POST, which worked only while a rendered page existed to
+            return to. */}
+        <button
+          type="button"
+          onClick={() => {
+            api.signOut().finally(() => window.location.reload());
+          }}
+        >
+          Sign out
+        </button>
       </div>
     </details>
   );

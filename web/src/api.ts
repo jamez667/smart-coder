@@ -115,6 +115,22 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   me: () => get<Me>("me"),
+
+  /// Ask for a magic link.
+  ///
+  /// **Resolves the same way whatever happened**, because the server answers the
+  /// same way: an address with an account, one without, and one over the cap are
+  /// indistinguishable on purpose. A client that surfaced the difference would
+  /// undo that, so there is nothing here to surface.
+  requestLink: (email: string) => post<{ sent: boolean }>("signin", { email }),
+  /// Sign in with a password. Rejects with one message for every failure — the
+  /// server will not say which, and neither should the dialog.
+  signInWithPassword: (login: string, password: string) =>
+    post<{ signed_in: boolean }>("signin/password", { login, password }),
+  /// Sign out. **Revokes the session on the server**, rather than only dropping
+  /// the cookie here — a token this browser forgot but the server still honours
+  /// is not signed out.
+  signOut: () => post<{ signed_out: boolean }>("signout", {}),
   requests: <T = FiledRequest[] | ReviewRequest[]>() => get<T>("requests"),
   request: <T = FiledRequest | ReviewRequest>(id: string) =>
     get<T>(`requests/${encodeURIComponent(id)}`),
