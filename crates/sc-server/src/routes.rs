@@ -59,6 +59,27 @@ fn secure_attr(ctx: &Ctx<'_>) -> &'static str {
     }
 }
 
+/// The same question, during setup, where the answer above is wrong.
+///
+/// **A server being claimed has no public surface yet**, so [`secure_attr`]
+/// falls back to `Secure` — and on `http://127.0.0.1` the browser then discards
+/// the setup cookie, which is precisely the failure that function's own doc
+/// describes: the request succeeds, the cookie is dropped, and the next step has
+/// forgotten. The wizard becomes a loop back to step one.
+///
+/// During setup the address being typed *is* the source of truth, and it has
+/// already passed [`crate::config::check_base_url`] — which permits plain HTTP
+/// only for a private host. So this asks the same question of the same value,
+/// and a deployed server still cannot be talked into dropping `Secure`, because
+/// its address had to be `https://` to get this far.
+fn secure_attr_for(base_url: &str) -> &'static str {
+    if crate::config::secure_for(base_url) {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
 /// The cookie remembering the reader's chosen language.
 ///
 /// Separate from [`COOKIE`] and **not** `HttpOnly`: it holds a preference, not a
@@ -970,6 +991,15 @@ fn api_route(
             Ok(body) => Res::json(200, body),
             Err(e) => error(500, &e.to_string()),
         },
+
+        // **The wizard, which is reachable with no credential at all** — it is
+        // how the first one is obtained. Guarded by the single-use claim code
+        // instead, and by the token that binds the rest of it to one browser.
+        //
+        // Every arm stops existing the moment the server is claimed: not
+        // "exists and refuses", because a 404 means a stranger cannot tell a
+        // claimed server from one that never had setup.
+        ("GET", "setup") => api_setup_state(ctx, req),
         // The caller's own requests, or the ones they review. **One path, three
         // answers**, exactly as `GET /` is three pages — which is the shape the
         // HTML surface already had and the client already has to understand.
@@ -996,7 +1026,7 @@ fn api_route(
         // stamping site gives: a guard added per handler is a guard eventually
         // missing from one.
         ("POST", rest) => {
-            if let Err(refusal) = same_origin(ctx, req) {
+            if let Err(refusal) = same_origin(ctx, req, rest) {
                 return refusal;
             }
             api_write(ctx, req, caller, rest)
@@ -1026,7 +1056,7 @@ fn api_route(
 /// A request with no `Origin` at all is allowed through: `curl` sends none, and
 /// so do the tests. That is not a hole — a caller with no browser is not a
 /// caller a browser can be tricked into being.
-fn same_origin(ctx: &Ctx<'_>, req: &Req) -> std::result::Result<(), Res> {
+fn same_origin(ctx: &Ctx<'_>, req: &Req, path: &str) -> std::result::Result<(), Res> {
     let json = req
         .content_type
         .as_deref()
@@ -1041,8 +1071,35 @@ fn same_origin(ctx: &Ctx<'_>, req: &Req) -> std::result::Result<(), Res> {
     // from — it is what sign-in links are built from and what decides whether
     // cookies carry `Secure`, so a mismatch here is a request from somewhere
     // else by definition.
-    let ours = ctx.public.map(|p| p.base_url.as_str()).unwrap_or_default();
+    //
+    // **Read from the settings, not from `ctx.public`.** A server being set up
+    // has no public surface, so that source is empty — and an empty `ours`
+    // refused *everything*, including the wizard that is the only way to give
+    // the server an address in the first place. The setup flow could not
+    // complete on a fresh volume, which is the one flow with no fallback.
+    // **Either source, because they hold it at different times.** The public
+    // config carries it once a surface is configured; the settings hold it from
+    // the moment step one of the wizard stores it, which is before any surface
+    // exists. Reading only the first refused the wizard on a fresh volume;
+    // reading only the second misses a server configured from the environment.
+    let ours = ctx
+        .public
+        .map(|p| p.base_url.clone())
+        .filter(|b| !b.is_empty())
+        .or_else(|| ctx.store.settings().ok().map(|s| s.base_url))
+        .unwrap_or_default();
     if !ours.is_empty() && origin.trim_end_matches('/') == ours.trim_end_matches('/') {
+        return Ok(());
+    }
+    // **Nothing configured means nothing to compare against**, and that is only
+    // true of a server nobody has claimed. Exempting the wizard lets a fresh
+    // volume be set up at all; exempting *everything* would turn an unconfigured
+    // server into one with no CSRF defence, which the first version of this did
+    // — an evil origin could discard a request and the test caught it.
+    //
+    // Anything else on a server with no address is refused. There is nothing
+    // there to reach yet anyway.
+    if ours.is_empty() && path.starts_with("setup/") {
         return Ok(());
     }
     Err(error(403, "cross-origin"))
@@ -1056,6 +1113,21 @@ fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) 
             return error(404, "no such endpoint");
         };
         return api_verb(ctx, req, caller, id, verb);
+    }
+
+    // **The wizard, before the administrator gate below** — it is how the first
+    // administrator comes to exist, so requiring one would be circular. It is
+    // guarded instead by the single-use claim code and by the token binding the
+    // rest of it to one browser.
+    //
+    // Reached through here rather than beside the read arms so it passes the
+    // same-origin check like every other mutating call. A guard added per
+    // handler is a guard eventually missing from one, and this is the handler it
+    // would be missing from.
+    match rest {
+        "setup/code" => return api_spend_code(ctx, req),
+        "setup/admin" => return api_claim(ctx, req),
+        _ => {}
     }
 
     // Everything below administers the server. **The same gate the private
@@ -1461,6 +1533,201 @@ fn api_verb(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, id: &str, ver
     }
 }
 
+/// Where the wizard has got to.
+///
+/// **The state is explicit here where the pages left it implicit.** A `GET
+/// /setup` returned step one or step two depending on three things at once —
+/// whether the server was claimed, whether an address was set, and whether this
+/// browser held the token. A client cannot infer that from a rendered page, so
+/// the server says it.
+fn api_setup_state(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    let admin = match ctx.store.admin() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    // Claimed means gone, for the same reason the page 404s: a stranger must
+    // not be able to tell a claimed server from one that never had a wizard.
+    if admin.claimed() {
+        return error(404, "no such endpoint");
+    }
+    let settings = match ctx.store.settings() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let mine = admin.setting_up(req.cookie_setup.as_deref(), ctx.now_ms);
+    let body = serde_json::json!({
+        // `code` or `admin` — which step this browser may take.
+        //
+        // **Not simply "is there an address".** Seeding fills that in on a
+        // migrated volume, which made "step one is done" true for everybody
+        // from the first boot — so the token has to be part of the answer.
+        "step": if mine && !settings.base_url.is_empty() { "admin" } else { "code" },
+        "base_url": settings.base_url,
+        "min_password": crate::auth::MIN_PASSWORD,
+    });
+    match serde_json::to_string(&body) {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Step one: spend the claim code and name the address.
+fn api_spend_code(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    let body: serde_json::Value = match serde_json::from_str(&req.body) {
+        Ok(v) => v,
+        Err(e) => return error(400, &format!("that body is not JSON: {e}")),
+    };
+    let code = body
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    let base_url = body
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+
+    // **The address is checked before the code is spent.** A typo in the address
+    // must not burn the one code the operator has, leaving them to restart the
+    // container to get another.
+    if let Err(e) = crate::config::check_base_url(base_url) {
+        return error(400, &e);
+    }
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut admin = match ctx.store.admin() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if admin.claimed() {
+        return error(404, "no such endpoint");
+    }
+    let Some(setup_token) = admin.spend(code, ctx.now_ms) else {
+        // **One message for every failure** — wrong, expired, already spent.
+        // Distinguishing them tells a guesser which half they got right.
+        return error(400, "that code was not accepted");
+    };
+    if let Err(e) = ctx.store.put_admin(&admin) {
+        return error(500, &e.to_string());
+    }
+
+    let mut settings = match ctx.store.settings() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    settings.base_url = base_url.to_string();
+    if let Err(e) = ctx.store.put_settings(&settings) {
+        return error(500, &e.to_string());
+    }
+    invalidate_settings(ctx);
+    drop(_guard);
+
+    // The token binding the rest of the wizard to this browser. `Lax` rather
+    // than `Strict` matches the cookie the pages set, and it is not a session:
+    // it grants nothing once the server is claimed.
+    let secure = secure_attr_for(base_url);
+    let mut res = Res::json(200, "{\"step\":\"admin\"}");
+    res.set_cookie = Some(format!(
+        "{SETUP_COOKIE}={setup_token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
+        crate::admin::CLAIM_TTL_MS / 1000
+    ));
+    res
+}
+
+/// Step two: choose the credential that will own this server.
+fn api_claim(ctx: &mut Ctx<'_>, req: &Req) -> Res {
+    let body: serde_json::Value = match serde_json::from_str(&req.body) {
+        Ok(v) => v,
+        Err(e) => return error(400, &format!("that body is not JSON: {e}")),
+    };
+    let login = body
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    let password = body
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut admin = match ctx.store.admin() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    if admin.claimed() {
+        return error(404, "no such endpoint");
+    }
+    // **The step that hands the server over**, so it is bound to the browser
+    // that spent the code. Without this, everything past step one is guarded
+    // only by the server being unclaimed, and whoever arrives next sets their
+    // own password and owns it.
+    if !admin.setting_up(req.cookie_setup.as_deref(), ctx.now_ms) {
+        return error(
+            400,
+            "start again from the claim code - setting this server up has to be finished in the browser that started it",
+        );
+    }
+    if let Err(e) = check_login(login) {
+        return error(400, &e);
+    }
+
+    let mut accounts = match ctx.store.accounts() {
+        Ok(a) => a,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let account = match accounts.create_login(login, password, ctx.now_ms) {
+        Ok(a) => a,
+        Err(e) => return error(400, &e),
+    };
+    let session = accounts.open_session(&account.id, ctx.now_ms);
+    if let Err(e) = ctx.store.put_accounts(&accounts) {
+        return error(500, &e.to_string());
+    }
+    invalidate_accounts(ctx);
+
+    // **The account is written before the claim.** A server that recorded the
+    // claim and then failed to store the account would be owned by a login
+    // nobody can sign in as — unrecoverable without deleting the volume. This
+    // ordering fails the other way: an unclaimed server with a spare account,
+    // which the next attempt simply names differently.
+    admin.claim(login, ctx.now_ms);
+    if let Err(e) = ctx.store.put_admin(&admin) {
+        return error(500, &e.to_string());
+    }
+
+    let mut settings = match ctx.store.settings() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    settings.seeded = true;
+    if let Err(e) = ctx.store.put_settings(&settings) {
+        return error(500, &e.to_string());
+    }
+    invalidate_settings(ctx);
+    drop(_guard);
+
+    crate::log::warn("server claimed")
+        .with("login", login.to_ascii_lowercase())
+        .with("note", "this account now administers this server")
+        .emit();
+
+    // Signed in already: they just proved themselves by choosing the credential,
+    // and asking them to type it again immediately would be ceremony.
+    //
+    // **From the address, not from `ctx.public`.** A server being claimed has no
+    // public surface yet, so the usual answer is `Secure` — and over plain HTTP
+    // the browser discards the session, so the claim succeeds and the reader is
+    // immediately signed out. The address decided this at step one.
+    let secure = secure_attr_for(&settings.base_url);
+    let mut res = Res::json(200, "{\"claimed\":true}");
+    res.set_cookie = Some(format!(
+        "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
+    ));
+    res
+}
+
 /// Which administrative list is being asked for.
 ///
 /// An enum rather than five near-identical handlers, so the admin gate and the
@@ -1632,6 +1899,11 @@ fn wants_document(path: &str) -> bool {
         || path == private_route::DAEMONS
         || path == private_route::ACCOUNTS
         || path.starts_with("/request/")
+        // **The wizard.** Reachable with no credential, because it is how the
+        // first one comes to exist. The document grants nothing: the endpoints
+        // behind it still demand the claim code, and they 404 once the server is
+        // claimed.
+        || path == private_route::SETUP
 }
 
 /// Who is calling, if anyone.
@@ -3012,7 +3284,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             // it, every step after this one is guarded only by the server being
             // unclaimed, and somebody arriving mid-way could supply their own
             // password and take the server.
-            let secure = secure_attr(ctx);
+            let secure = secure_attr_for(base_url);
             let mut res = Res::html(200, crate::page::setup_admin_page(base_url, None));
             res.set_cookie = Some(format!(
                 "{SETUP_COOKIE}={setup_token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
@@ -3118,7 +3390,11 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             // Signed in already: they just proved themselves by choosing the
             // credential, and asking them to type it again immediately would be
             // ceremony rather than security.
-            let secure = secure_attr(ctx);
+            // From the address rather than `ctx.public`, for the reason
+            // `secure_attr_for` gives: a server being claimed has no public
+            // surface, and `Secure` over plain HTTP means the reader is signed
+            // out the instant they claim it.
+            let secure = secure_attr_for(&settings.base_url);
             let mut res = Res::html(200, crate::page::claimed_page(login));
             res.set_cookie = Some(format!(
                 "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
@@ -6561,6 +6837,217 @@ mod tests {
             "{}",
             revoked.body
         );
+    }
+
+    #[test]
+    fn the_wizard_claims_a_server_through_the_api() {
+        // **The whole first-run path**, end to end. The code proves you can read
+        // the container's log; the step after it sets the credential that will
+        // own the server, and is bound to the browser that spent the code.
+        let mut f = Fixture::new("api-setup").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        // Before anything: the wizard says which step this browser may take.
+        let state = f.go(&Req::get("/api/v1/ui/setup"));
+        assert_eq!(state.status, 200, "{}", state.body);
+        let v: serde_json::Value = serde_json::from_str(&state.body).unwrap();
+        assert_eq!(v["step"], "code");
+
+        // Step one.
+        let spent = f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"https://specs.example.test\"}",
+        ));
+        assert_eq!(spent.status, 200, "{}", spent.body);
+        let setup = spent
+            .set_cookie
+            .as_deref()
+            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
+            .and_then(|c| c.split(';').next())
+            .expect("a setup token was issued")
+            .to_string();
+        // Nobody owns it yet: spending the code is one proof, not the claim.
+        assert!(!f.store.admin().unwrap().claimed());
+
+        // The state now reflects the browser holding the token.
+        let state = f.go(&Req::get("/api/v1/ui/setup").with_setup(&setup));
+        let v: serde_json::Value = serde_json::from_str(&state.body).unwrap();
+        assert_eq!(v["step"], "admin");
+
+        // Step two.
+        let claimed = f.go(&api_post(
+            "/api/v1/ui/setup/admin",
+            "{\"login\":\"JameZ667@example.test\",\"password\":\"correct-horse-battery\"}",
+        )
+        .with_setup(&setup));
+        assert_eq!(claimed.status, 200, "{}", claimed.body);
+        assert!(
+            f.store.admin().unwrap().is("jamez667@example.test"),
+            "lowercased on the way in"
+        );
+
+        // The password is stored hashed and never rendered back.
+        assert!(!claimed.body.contains("correct-horse-battery"));
+        let raw = std::fs::read_to_string(f.store.accounts_path()).unwrap();
+        assert!(!raw.contains("correct-horse-battery"), "{raw}");
+        assert!(raw.contains("$argon2id$"), "and it is the slow hash");
+
+        // And they are signed in already — they just chose the credential.
+        let session = cookie_token(&claimed).expect("signed in");
+        assert_eq!(
+            f.go(&Req::get("/api/v1/ui/settings").with_cookie(&session))
+                .status,
+            200
+        );
+
+        // The wizard is gone.
+        assert_eq!(f.go(&Req::get("/api/v1/ui/setup")).status, 404);
+    }
+
+    #[test]
+    fn a_bad_address_through_the_api_does_not_burn_the_code() {
+        // The operator has one code and getting another means restarting the
+        // container. A typo in the address must not cost them that.
+        let mut f = Fixture::new("api-setup-typo").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        let refused = f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"not-an-address\"}",
+        ));
+        assert_eq!(refused.status, 400, "{}", refused.body);
+
+        // The code still works.
+        let spent = f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"https://specs.example.test\"}",
+        ));
+        assert_eq!(spent.status, 200, "{}", spent.body);
+    }
+
+    #[test]
+    fn every_wrong_code_through_the_api_gets_the_same_answer() {
+        // Wrong, expired and already spent are three different facts, and
+        // telling them apart tells a guesser which half they got right.
+        let mut f = Fixture::new("api-setup-codes").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        let wrong = f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"XYZ-999\",\"base_url\":\"https://specs.example.test\"}",
+        ));
+        // Spend the real one, then try it again.
+        f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"https://specs.example.test\"}",
+        ));
+        let spent = f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"https://specs.example.test\"}",
+        ));
+        assert_eq!(wrong.status, 400);
+        assert_eq!(spent.status, 400);
+        assert_eq!(wrong.body, spent.body, "one answer, not two");
+    }
+
+    #[test]
+    fn a_half_finished_setup_cannot_be_taken_over_through_the_api() {
+        // **The hole this closes, and it was live on the pages.** Setup is more
+        // than one step and the code is spent at the first, so everything after
+        // it was guarded only by the server being unclaimed. Choosing the
+        // password decides who owns the server — an interloper who reached step
+        // two would have set their own and taken it.
+        let mut f = Fixture::new("api-setup-interloper").with_public(false);
+        armed(&mut f, "ABC-123");
+
+        f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"https://specs.example.test\"}",
+        ));
+
+        // Somebody else, holding no token, tries to finish it.
+        let stolen = f.go(&api_post(
+            "/api/v1/ui/setup/admin",
+            "{\"login\":\"interloper@x.com\",\"password\":\"correct-horse-battery\"}",
+        ));
+        assert_eq!(stolen.status, 400, "{}", stolen.body);
+        assert!(!f.store.admin().unwrap().claimed(), "and nobody owns it");
+    }
+
+    #[test]
+    fn the_wizard_does_not_exist_once_the_server_is_claimed() {
+        // 404 rather than a refusal: a stranger must not be able to tell a
+        // claimed server from one that never had a wizard.
+        let mut f = Fixture::new("api-setup-gone").with_public(false);
+        f.as_admin();
+
+        assert_eq!(f.go(&Req::get("/api/v1/ui/setup")).status, 404);
+        assert_eq!(
+            f.go(&api_post(
+                "/api/v1/ui/setup/code",
+                "{\"code\":\"ABC-123\",\"base_url\":\"https://x.test\"}"
+            ))
+            .status,
+            404
+        );
+    }
+
+    #[test]
+    fn setting_up_over_plain_http_does_not_send_a_secure_cookie() {
+        // **Found in a browser, not here.** A server being claimed has no public
+        // surface, so `secure_attr` falls back to `Secure` — and over
+        // `http://127.0.0.1` the browser silently discards both the setup token
+        // and the session that follows. The wizard loops back to step one, and
+        // the claim signs the reader straight out.
+        //
+        // Its own doc predicted exactly this: "the request succeeds, the cookie
+        // is dropped, and the next page has forgotten. That reads as a bug in
+        // the feature." It was one, on the only flow with no fallback.
+        //
+        // The address is the source of truth during setup, and it has already
+        // been validated — plain HTTP is permitted only for a private host.
+        assert_eq!(secure_attr_for("http://127.0.0.1:8420"), "");
+        assert_eq!(secure_attr_for("http://192.168.1.9:8420"), "");
+        assert_eq!(secure_attr_for("https://specs.example.test"), "; Secure");
+
+        // End to end: the cookie a local trial actually receives.
+        let mut f = Fixture::new("setup-secure").with_public(false);
+        armed(&mut f, "ABC-123");
+        let spent = f.go(&api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"http://127.0.0.1:8420\"}",
+        ));
+        let cookie = spent.set_cookie.as_deref().expect("a setup token");
+        assert!(!cookie.contains("Secure"), "{cookie}");
+    }
+
+    #[test]
+    fn the_wizard_is_reachable_before_the_server_has_an_address() {
+        // **The origin check refused the flow that gives the server an origin.**
+        // `same_origin` compared against the configured address, a fresh volume
+        // has none, and an empty one matched nothing — so every setup POST was
+        // 403 and the wizard could not complete. Found in a browser: the page
+        // showed "cross-origin" and stayed on step one.
+        //
+        // The exemption is narrow. Only `setup/` is allowed through, and only
+        // while there is no address to check against.
+        // **No `with_public`**, because that builder gives the fixture an
+        // address — and an address is exactly what a server being set up does
+        // not have yet. Using it would test the case that already worked.
+        let mut f = Fixture::new("setup-origin");
+        armed(&mut f, "ABC-123");
+
+        let mut req = api_post(
+            "/api/v1/ui/setup/code",
+            "{\"code\":\"ABC-123\",\"base_url\":\"http://127.0.0.1:8420\"}",
+        );
+        req.origin = Some("http://127.0.0.1:8420".into());
+        assert_eq!(f.go(&req).status, 200, "the wizard is reachable");
+
+        // And nothing else is: an unconfigured server is not an open one.
+        let mut other = api_post("/api/v1/ui/daemons", "{\"label\":\"x\"}");
+        other.origin = Some("https://evil.example".into());
+        assert_ne!(f.go(&other).status, 200);
     }
 
     /// Every page an administrator is expected to find.

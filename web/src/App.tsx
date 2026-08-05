@@ -10,6 +10,7 @@ import { Masthead } from "./Masthead";
 import { SignInDialog } from "./SignInDialog";
 import { ReviewDetail, ReviewList } from "./Review";
 import { Accounts, Daemons, Owners, Repos, Settings } from "./Admin";
+import { Setup } from "./Setup";
 
 /// The whole interface.
 ///
@@ -20,6 +21,16 @@ import { Accounts, Daemons, Owners, Repos, Settings } from "./Admin";
 /// Routing is `history.pushState` over `window.location.pathname`, with no
 /// router library: there are four addresses. A router would be a dependency and
 /// a concept in service of a `switch`.
+/// What the masthead is told before `/me` has answered.
+///
+/// The wizard renders before that request lands, and a masthead needs *some*
+/// caller. A stranger is the safe one: it draws a sign-in button and names
+/// nothing.
+const ANONYMOUS: Me = {
+  role: "anonymous",
+  can: { file: false, review: false, accept: false, administer: false },
+};
+
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [mine, setMine] = useState<FiledRequest[]>([]);
@@ -104,6 +115,27 @@ export function App() {
   if (typeof document !== "undefined") {
     document.documentElement.dataset.scPath = path;
     document.documentElement.dataset.scRole = me?.role ?? "loading";
+  }
+
+  // **The wizard, before anything else.** An unclaimed server has no
+  // administrator to sign in as, so this is the only thing a visitor to
+  // `/setup` can usefully be shown.
+  if (path === "/setup") {
+    return (
+      <>
+        <Masthead me={me ?? ANONYMOUS} onSignIn={() => setSigningIn(true)} onGo={go} />
+        <main>
+          <Setup
+            onClaimed={() => {
+              // Claimed and signed in: reload rather than route, so `/me` is
+              // asked again and the whole interface comes back as the
+              // administrator.
+              window.location.assign("/review");
+            }}
+          />
+        </main>
+      </>
+    );
   }
 
   if (!me) {

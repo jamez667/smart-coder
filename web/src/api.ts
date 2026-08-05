@@ -216,3 +216,33 @@ export const admin = {
   revoke: <T>(list: "owners" | "repos" | "daemons" | "accounts", id: string) =>
     post<T>(`${list}/${encodeURIComponent(id)}/revoke`, {}),
 };
+
+/// Where the wizard has got to.
+///
+/// **The server says which step, rather than the client inferring it.** The
+/// rendered pages decided from three things at once — whether the server was
+/// claimed, whether an address was set, and whether this browser held the setup
+/// token — and a client cannot see the third at all.
+export interface SetupState {
+  step: "code" | "admin";
+  base_url: string;
+  min_password: number;
+}
+
+/// Claiming the server. Reachable with no credential, because it is how the
+/// first one comes to exist.
+export const setup = {
+  /// Throws with status 404 once the server is claimed: the wizard stops
+  /// existing rather than refusing, so a stranger cannot tell a claimed server
+  /// from one that never had it.
+  state: () => get<SetupState>("setup"),
+  /// Step one. The address is validated before the code is spent, so a typo
+  /// does not burn the one code the operator has.
+  spendCode: (code: string, base_url: string) =>
+    post<{ step: string }>("setup/code", { code, base_url }),
+  /// Step two, bound to the browser that spent the code by a cookie the server
+  /// set. Without that binding, whoever arrived next could set their own
+  /// password and own the server.
+  claim: (login: string, password: string) =>
+    post<{ claimed: boolean }>("setup/admin", { login, password }),
+};
