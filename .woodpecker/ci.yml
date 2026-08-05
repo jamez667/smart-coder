@@ -77,7 +77,12 @@ steps:
   #
   # It builds the image and drives it, so what is tested is what ships.
   - name: browser
-    image: mcr.microsoft.com/playwright:v1.49.1-jammy
+    # **This tag and the `@playwright/test` version must match exactly.** The
+    # image ships the browsers; the package expects a specific build of them, and
+    # a mismatch fails with "Executable doesn't exist" rather than anything about
+    # versions. The dependency is pinned without a caret for the same reason —
+    # a range lets npm float the package while the image stays put.
+    image: mcr.microsoft.com/playwright:v1.62.1-jammy
     # **Needs the repository's `volumes` trust flag.** The harness stands up the
     # real image and drives it, so what is tested is what ships — the same
     # binary, the same embedded bundle, the same CSP. Without the flag Woodpecker
