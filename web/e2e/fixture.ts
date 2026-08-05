@@ -82,14 +82,23 @@ export async function server(): Promise<Server> {
   let network: string | undefined;
   if (sibling) {
     try {
-      network = docker(
+      // **Separated, because a container can be on more than one.** The first
+      // attempt used `{{$k}}` with no delimiter and got `bridgewp_01k..._default`
+      // — two names run together, which Docker then reported as one network it
+      // could not find. A newline between them is the difference between reading
+      // the answer and reading a concatenation of answers.
+      const attached = docker(
         "inspect",
         "-f",
-        "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+        "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}\n{{end}}",
         hostname(),
       )
-        .trim()
-        .split(/\s+/)[0];
+        .split("\n")
+        .map((n) => n.trim())
+        .filter(Boolean);
+      // The workflow's own network rather than the default bridge: that is the
+      // one the other steps and their siblings can resolve names on.
+      network = attached.find((n) => n !== "bridge") ?? attached[0];
     } catch {
       // Not a container the daemon knows, which means the detection above was
       // wrong. Fall through to a published port and let `waitFor` say so.
