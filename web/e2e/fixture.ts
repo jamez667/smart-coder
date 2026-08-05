@@ -108,7 +108,21 @@ export async function server(): Promise<Server> {
   // The base URL is not only how the tests reach it — the server validates its
   // own cookies and builds its links from it, so this has to be the address that
   // actually works from where the tests are.
-  const base = network ? `http://${NAME}:8420` : "http://127.0.0.1:8799";
+  //
+  // **By IP, not by container name.** `http://sc-e2e:8420` is refused at boot,
+  // and rightly: `check_base_url` demands `https://` unless the host is private,
+  // because a sign-in link is a credential in a URL — and a container name is
+  // neither https nor private. That rule is not worth weakening for a test.
+  //
+  // Docker hands out `172.16-31.x` on its networks, which the rule already
+  // accepts — but the address is not known until the container exists, and the
+  // container will not boot without being told it. `startOnNetwork` breaks that
+  // circle: start, read the address the daemon assigned, restart with it. Two
+  // starts of something that boots in milliseconds, against either weakening the
+  // check or pre-allocating a subnet Woodpecker did not create.
+  const base = network
+    ? `http://${startOnNetwork(network, env(key, "http://127.0.0.1:8420"))}:8420`
+    : "http://127.0.0.1:8799";
 
   docker(
     "run",
@@ -116,22 +130,7 @@ export async function server(): Promise<Server> {
     "--name",
     NAME,
     ...(network ? ["--network", network] : ["-p", "8799:8420"]),
-    "-e",
-    `SC_SERVER_SECRET_KEY=${key}`,
-    "-e",
-    `SC_SERVER_DAEMON_KEYS=harness:${DAEMON_KEY}`,
-    "-e",
-    `SC_SERVER_PUBLIC_BASE_URL=${base}`,
-    "-e",
-    "SC_SERVER_PUBLIC_REPOS=intake",
-    "-e",
-    "SC_SERVER_MAIL_PROVIDER=brevo",
-    "-e",
-    "SC_SERVER_MAIL_KEY=xkeysib-harness-not-real-00000000",
-    "-e",
-    "SC_SERVER_MAIL_FROM=noreply@example.test",
-    "-e",
-    "SC_SERVER_UI=1",
+    ...env(key, base),
     IMAGE,
   );
 
@@ -229,6 +228,42 @@ export async function server(): Promise<Server> {
       }
     },
   };
+}
+
+/// Start the container, note the address the daemon gave it, and remove it.
+///
+/// The server refuses to boot without a valid base URL, and its base URL is an
+/// address that does not exist until it does. This breaks that circle the cheap
+/// way rather than by making the server less strict.
+function startOnNetwork(network: string, envArgs: string[]): string {
+  docker("run", "-d", "--name", NAME, "--network", network, ...envArgs, IMAGE);
+  const ip = docker(
+    "inspect",
+    "-f",
+    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+    NAME,
+  ).trim();
+  // Removed rather than left running: the caller starts it again with the
+  // address it now knows, and a half-configured server listening on the
+  // network is a thing a later test could reach by accident.
+  docker("rm", "-f", NAME);
+  if (!ip) throw new Error(`no address was assigned on ${network}`);
+  return ip;
+}
+
+/// The server's environment, all of it in one place so the two starts cannot
+/// drift apart.
+function env(key: string, base: string): string[] {
+  return [
+    "-e", `SC_SERVER_SECRET_KEY=${key}`,
+    "-e", `SC_SERVER_DAEMON_KEYS=harness:${DAEMON_KEY}`,
+    "-e", `SC_SERVER_PUBLIC_BASE_URL=${base}`,
+    "-e", "SC_SERVER_PUBLIC_REPOS=intake",
+    "-e", "SC_SERVER_MAIL_PROVIDER=brevo",
+    "-e", "SC_SERVER_MAIL_KEY=xkeysib-harness-not-real-00000000",
+    "-e", "SC_SERVER_MAIL_FROM=noreply@example.test",
+    "-e", "SC_SERVER_UI=1",
+  ];
 }
 
 async function waitFor(base: string): Promise<void> {
