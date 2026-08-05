@@ -232,6 +232,19 @@ pub struct ReviewRequest {
     /// has no use for it — see [`ReviewRequest::of`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_dir: Option<String>,
+    /// Whether any machine is offering to draft this request's repository.
+    ///
+    /// `served`, `no-daemon-seen` or `unserved`. **The one diagnostic that
+    /// answers "why has nothing happened to this"**, and the three cases send an
+    /// operator to three different places: start a daemon, fix a repository name
+    /// that does not match what `queue add-repo` was given, or wait.
+    ///
+    /// It nearly did not survive the move. The rendered page built this reasoning
+    /// from the poll record and the API had no field for it, so the test covering
+    /// it was deleted as having no subject — which was true, and the right answer
+    /// was to give it one rather than to lose the diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<&'static str>,
     /// The digest of the spec as sent.
     ///
     /// **This is the accept handshake, not a checksum for its own sake.** The
@@ -263,6 +276,15 @@ impl ReviewRequest {
     /// `full` is the administrator. An owner gets everything except the artifact
     /// directory, which is a path on a machine they do not have.
     pub fn of(r: &crate::store::Request, full: bool) -> Self {
+        Self::with_coverage(r, full, None)
+    }
+
+    /// The same, told whether anything serves this request's repository.
+    pub fn with_coverage(
+        r: &crate::store::Request,
+        full: bool,
+        coverage: Option<crate::daemons::Coverage>,
+    ) -> Self {
         ReviewRequest {
             id: r.id.clone(),
             summary: r.summary().to_string(),
@@ -275,6 +297,11 @@ impl ReviewRequest {
             spec: r.spec.clone(),
             note: r.note.clone(),
             artifact_dir: if full { r.artifact_dir.clone() } else { None },
+            coverage: coverage.map(|c| match c {
+                crate::daemons::Coverage::Served => "served",
+                crate::daemons::Coverage::NoDaemonSeen => "no-daemon-seen",
+                crate::daemons::Coverage::Unserved => "unserved",
+            }),
             spec_digest: r.spec.as_deref().map(crate::auth::hash),
         }
     }

@@ -46,8 +46,6 @@ test.beforeAll(() => {
     `SC_SERVER_PUBLIC_BASE_URL=http://127.0.0.1:${PORT}`,
     "-e",
     "SC_SERVER_PUBLIC_REPOS=intake",
-    "-e",
-    "SC_SERVER_UI=1",
     // **Unclaimed, but configured.** The address is an environment variable
     // now, so a fresh volume has one before anybody reaches the wizard — what
     // the wizard establishes is who owns the server, and nothing else.

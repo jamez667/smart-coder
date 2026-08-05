@@ -462,9 +462,11 @@ decided <!--@ sc_server::config::secure_for -->. "Is this a private network" is
 a question people answer wrong, and answering it wrong drops `Secure` from every
 session cookie without a word.
 
-A claimed server arms nothing however often it restarts, and `/setup` **404s**
-rather than refusing — so a stranger cannot tell a claimed server from one that
-never had the route. To start again: delete `admin.json` and restart.
+A claimed server arms nothing however often it restarts. `/setup` now answers
+the interface's document to anybody, as every browser path does; what **404s**
+once the server is claimed is the wizard's API behind it — so a stranger still
+cannot tell a claimed server from one that never had the route, which is the
+property, unchanged. To start again: delete `admin.json` and restart.
 
 ### What every browser request gets
 
@@ -479,8 +481,8 @@ Requirements this surface owes whoever is on the other end of it, administrator 
 
 **The CSP is per-surface** <!--@ sc_server::routes::Policy -->. What does not
 vary is `default-src 'none'`, so no remote subresource is reachable from either
-half. What varies is `script-src`: `'self'` on the public surface, absent
-everywhere else.
+half. What varies is `script-src`: `'self'` on every browser document, public and
+administrative alike, and absent on the JSON API and the daemon's routes.
 
 The policy rides on the response and is stamped in **one** place, at the
 dispatch site that already decides public-or-not, so a public handler cannot be
@@ -563,8 +565,9 @@ Script is now permitted on the *public* surface, so "a form cannot set a header"
 is no longer a hard constraint there. The deviation stands anyway, on the
 narrower ground it should always have rested on: `form-action 'self'` plus the
 cookie is the defence, and adding a header would not meaningfully strengthen it.
-The pages remain forms that work with script disabled — the script is
-progressive enhancement, not the transport.
+The surface is the single-page interface and does not work with script
+disabled. The CSRF defence is unchanged by that, because it never rested on the
+transport.
 
 **Deviation — the only way in is a third party.** If GitHub is unreachable, or
 the OAuth application is deleted, nobody can administer this server until it
@@ -956,6 +959,18 @@ The cost of that argument being won is not aesthetic. It is a JS toolchain, a
 dependency tree, and a supply chain, added to the one component that faces the
 network, in a project whose entire premise is a self-contained local binary.
 
+A request carries a `coverage` field — `served`, `no-daemon-seen` or `unserved`
+<!--@ crates/sc-server/src/api.rs -->, read from the poll register. **The two
+unserved cases name different fixes on purpose.** Nothing polling at all means
+start a daemon; daemons polling that do not offer this repository means the name
+does not match what `queue add-repo` was given, which is the way this system most
+often wedges. One message for both would send half the operators to the wrong
+place.
+
+It nearly did not survive the move to JSON: the reasoning was built in the
+rendered page, the DTO had no field for it, and the test covering it briefly had
+no subject. Giving it one was the answer rather than losing the diagnostic.
+
 ### Reversed: that argument was won
 
 **This surface is now a JSON API and a single-page application.** The paragraph
@@ -1113,6 +1128,20 @@ better behaviour on the connection this feature was designed for.
 The single-file rule is honoured in spirit rather than by `include_str!`: the
 markup is generated in Rust because it renders per-request state, and the CSS is
 one inlined constant. No build step, no bundler, no `node_modules`.
+
+**The staging is over.** `SC_SERVER_UI` selected between the two surfaces while
+both were built; it is deleted from the config, the dispatch site and both
+deployment files, and the interface is the only browser surface. Every browser
+path answers its document with 200 to anybody, and the authorization gate sits on
+the JSON API behind them <!--@ crates/sc-server/src/routes.rs -->, which still
+404s a caller who may not see the data. So what a guesser learns is that an
+address is served, never whether it holds anything.
+
+The tests that pinned this moved with it. They asserted a private *path* 404s;
+they now assert the *endpoint* behind it refuses. This section previously
+predicted they would move to a browser harness instead — retargeting them in
+process is the stronger gate, and it keeps the property provable without a
+container.
 
 ### The public surface is designed, themed and translated
 

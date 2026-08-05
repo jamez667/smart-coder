@@ -49,11 +49,6 @@ pub struct Config {
     /// credential in [`crate::auth`] is, so they are encrypted instead, and an
     /// encryption key stored beside its ciphertext protects nothing.
     ///
-    /// Serve the single-page interface rather than the rendered pages.
-    ///
-    /// Temporary: it exists while both surfaces are built, and goes away with
-    /// the pages. See [`env::UI`].
-    pub ui: bool,
     /// The public, self-serve filing surface — **absent unless asked for**.
     ///
     /// `Option` rather than a bool plus loose fields, so a route cannot read a
@@ -435,18 +430,6 @@ pub mod env {
     /// else, so an entry here is the only thing granting sight of a project's
     /// drafted specs.
     pub const OWNERS: &str = "SC_SERVER_OWNERS";
-    /// Serve the single-page interface instead of the rendered pages.
-    ///
-    /// **A switch rather than a replacement, and only while both exist.** Spec
-    /// 18 stages this move: the API and the interface are built and proven
-    /// before the pages are deleted, and until that last step a server can be
-    /// run either way — which is what makes the staging reversible rather than
-    /// merely sequential.
-    ///
-    /// It goes away with the pages. A permanent flag would be two surfaces to
-    /// keep working forever, which is the cost this whole change exists to stop
-    /// paying.
-    pub const UI: &str = "SC_SERVER_UI";
     /// The repositories the public surface collects for, comma-separated:
     /// `smart-coder,memosy`. Setting this or [`PUBLIC_REPO`] turns the surface
     /// on.
@@ -526,11 +509,6 @@ impl Config {
             // Read again here rather than threaded out of `public_from`, which
             // returns `None` when the public surface is off — and the switch is
             // meaningless in that case anyway, since nothing sends mail.
-            // **Anything but empty is on.** A switch with a vocabulary of
-            // truthy words is a switch somebody sets to "false" and finds
-            // enabled; presence is unambiguous, and this one is temporary
-            // besides.
-            ui: opt(&get, env::UI).is_some_and(|v| !v.trim().is_empty()),
             public: public_from(&get)?,
         })
     }

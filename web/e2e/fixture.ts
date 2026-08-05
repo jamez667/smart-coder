@@ -263,7 +263,6 @@ function env(key: string, base: string): string[] {
     "-e", "SC_SERVER_MAIL_PROVIDER=brevo",
     "-e", "SC_SERVER_MAIL_KEY=xkeysib-harness-not-real-00000000",
     "-e", "SC_SERVER_MAIL_FROM=noreply@example.test",
-    "-e", "SC_SERVER_UI=1",
   ];
 }
 

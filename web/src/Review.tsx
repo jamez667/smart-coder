@@ -79,6 +79,19 @@ export function ReviewDetail({
         {request.repo}
       </p>
 
+      {/* **Why nothing has happened yet**, shown only while it is still waiting
+          — once something has drafted it, coverage is history rather than a
+          diagnosis. The two unserved cases name different fixes on purpose:
+          starting a daemon and correcting a repository name are not the same
+          problem, and one message for both sends half the operators wrong. */}
+      {request.state === "queued" && request.coverage !== "served" && (
+        <p className="meta" role="status">
+          {request.coverage === "no-daemon-seen"
+            ? "Nothing has polled this server recently, so nothing will pick this up. Start a daemon."
+            : "Daemons are polling, but none offers this repository. Check the name matches what `queue add-repo` was given."}
+        </p>
+      )}
+
       {/* **The bypass is visible rather than hidden.** Hiding it does not remove
           it — it only lets the system believe nobody used one. Replaces
           `the_skip_link_is_visible_rather_than_hidden`. */}

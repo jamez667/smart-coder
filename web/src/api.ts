@@ -54,6 +54,10 @@ export interface ReviewRequest {
   note?: string;
   /// Administrator only — a path on their own machine.
   artifact_dir?: string;
+  /// Whether any machine currently offers to draft this repository:
+  /// `served`, `no-daemon-seen` or `unserved`. **The answer to "why has nothing
+  /// happened to this"**, and the last two send an operator to different places.
+  coverage?: "served" | "no-daemon-seen" | "unserved";
   /// **Thread this back when accepting.** It binds the accept to the exact bytes
   /// that were read: if a redraft lands in between, the digest stops matching
   /// and the server refuses rather than approving text nobody saw.

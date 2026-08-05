@@ -46,11 +46,6 @@ struct Shared {
     settings: Mutex<crate::settings::SettingsCache>,
     /// Who is signed in. On the hot path — see `AccountsCache`.
     accounts: Mutex<crate::account::AccountsCache>,
-    /// Serve the single-page interface rather than the rendered pages.
-    ///
-    /// Read once at startup because it decides which of two surfaces this
-    /// process is, which is not a thing to change under a running server.
-    ui: bool,
     /// The address, the site name and the mail settings, as the environment
     /// gave them.
     ///
@@ -212,7 +207,6 @@ pub fn run(cfg: &Config) -> Result<()> {
         roster: Mutex::new(crate::roster::RosterCache::default()),
         settings: Mutex::new(crate::settings::SettingsCache::default()),
         accounts: Mutex::new(crate::account::AccountsCache::default()),
-        ui: cfg.ui,
         env_public: cfg.public.clone(),
     });
 
@@ -694,7 +688,6 @@ fn dispatch(shared: &Shared, req: &Req, rechecking: bool) -> Res {
         // Filled in by `handle` before dispatch, beside the caller.
         fresh_auth: false,
         rechecking,
-        ui: shared.ui,
     };
     routes::handle(&mut ctx, req)
 }
