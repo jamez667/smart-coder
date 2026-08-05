@@ -1,26 +1,48 @@
-//! The public surface's words, in the languages it has them in.
+//! The interface's words, in the languages it has them in.
 //!
-//! Only the **public** half is translated. The private review pages had exactly
-//! one reader — the developer running the server — and translating them would
-//! have been catalogue weight paid for nobody.
+//! ## Everything is translated, and that reverses what this module used to say
 //!
-//! ## Most of this currently has no reader, and is kept deliberately
+//! This module doc read "only the **public** half is translated": the private
+//! review pages had one reader, and a catalogue for them was weight paid for
+//! nobody. **That is overturned.** The whole interface is translated — the
+//! landing page, the sign-in dialog, the review pages, the administrative lists
+//! and the setup wizard.
 //!
-//! The server-rendered pages this was written for are gone. What still reads a
-//! catalogue is the magic-link landing — the one document left, reached from an
-//! email by somebody who may not read English — plus the coarse state labels and
-//! the filing refusals the JSON API sends already translated. That is around a
-//! fifth of the fields below.
+//! The argument that won is already written a few hundred lines below, on
+//! `nav_admin_*`: those menu entries were translated because the one
+//! administrator per server *may not read English*, and the masthead around them
+//! already was. That argument was never about the menu. A menu in French whose
+//! every entry opens an English page is worse than an English menu — it promises
+//! a translated surface and then withdraws it one click later, and the reader
+//! who needed the translation is the one who finds out. The pages the menu
+//! points at get the same treatment as the menu.
 //!
-//! The rest are **not deleted**, and the reasoning is worth stating because the
-//! dead-code check will never make this decision for anyone: every field is read
-//! by `fields()` in the tests, so nothing warns. The interface is English-only
-//! today, and deleting the other four fifths would throw away a finished French
-//! translation to save a few kilobytes of `&'static str` in a binary that already
-//! carries two fonts. Whoever gives the client a language control wants these;
-//! whoever decides this product ships in one language should delete the `Fr`
-//! variant and this whole module together, rather than thinning it a field at a
-//! time until the two catalogues quietly disagree about what exists.
+//! The setup wizard is included for a sharper reason. It is the **first** thing
+//! anybody sees on a fresh server, before there is an account, a cookie or a
+//! preference — so `Accept-Language` is the only signal there will ever be, and
+//! it is the one screen where getting the language wrong means the reader cannot
+//! claim the server at all. The recovery is deleting a file off a volume.
+//!
+//! What is still deliberately **untranslated** is narrow and mechanical:
+//! repository names, email addresses, machine labels, a minted key, the `SC`
+//! monogram, decorative glyphs, wire values a form submits, and the intake
+//! *kinds* as slugs. Those are identifiers or data, not prose — see
+//! `kind_feature`/`kind_bug` for the one place a slug gains a translated label
+//! while the wire value stays put.
+//!
+//! ## Who reads a catalogue
+//!
+//! Two readers, and they want the same catalogue for different reasons:
+//!
+//! - the **server itself**, for the handful of strings it sends already
+//!   translated — the coarse state labels, the filing refusals, and the
+//!   magic-link landing, which is the one document this server still renders;
+//! - the **client**, which fetches the whole negotiated catalogue once from
+//!   `GET /api/v1/ui/strings` and renders every screen out of it.
+//!
+//! The client is why the four fifths of this module that had no reader now have
+//! one. Nothing here was deleted while it was waiting, and this is what it was
+//! waiting for.
 //!
 //! ## A missing translation does not compile
 //!
@@ -169,14 +191,20 @@ fn from_accept_language(header: &str) -> Option<Locale> {
     best.map(|(l, _)| l)
 }
 
-/// Every string the public surface renders.
+/// Every string the interface renders.
 ///
 /// One field per string. See the module docs for why this is a struct and not a
 /// map — in short, a language missing one of these does not compile.
 ///
 /// Field names describe **where the string appears**, not what it says, so a
 /// reworded string does not want a renamed field.
-#[derive(Debug)]
+///
+/// **`Serialize` is what the client eats.** `GET /api/v1/ui/strings` sends this
+/// derived form — a flat object of field name to text — so the wire shape is the
+/// struct definition rather than a second list somebody maintains beside it. A
+/// field added here reaches the client with nothing else edited, which is the
+/// same reason `fields()` in the tests reads the struct out of its own source.
+#[derive(Debug, serde::Serialize)]
 pub struct Strings {
     // -- the shell ----------------------------------------------------------
     /// The product name in the masthead. Not translated in any catalogue — it is
@@ -360,6 +388,265 @@ pub struct Strings {
     pub error_too_long: &'static str,
     pub not_found_title: &'static str,
     pub not_found_body: &'static str,
+
+    // =======================================================================
+    // Everything below is read by the **client** rather than by a renderer in
+    // this crate, and arrives there through `GET /api/v1/ui/strings`.
+    //
+    // Grouped by the component that draws them, because that is the unit
+    // somebody edits. Where the client's English and an older field above
+    // disagreed, the client's wording won and the field above was rewritten to
+    // match it — the interface is what a reader actually sees, and a catalogue
+    // that quietly says something else is a second source of truth.
+    // =======================================================================
+
+    // -- the masthead --------------------------------------------------------
+    /// The account menu's own entry for a filer's own requests. Distinct from
+    /// `file_mine_heading`, which heads the page it opens: a menu entry and a
+    /// page title are edited independently and one is often shorter.
+    pub nav_mine: &'static str,
+    /// A reviewer who is *not* the administrator gets one extra entry, since the
+    /// administrative block above it does not exist for them.
+    pub nav_review: &'static str,
+    /// The account menu's sign-out. Separate from `file_signout`, which was the
+    /// rendered filing page's button — same words today, different callers.
+    pub nav_signout: &'static str,
+    /// The theme toggle's `title`, and its screen-reader text. The glyphs beside
+    /// it are decorative and hidden from one, so these carry the whole meaning.
+    pub theme_to_light: &'static str,
+    pub theme_to_dark: &'static str,
+
+    // -- the landing page's footer -------------------------------------------
+    /// The footer says the brand and then the tagline. **The client used to
+    /// hardcode both into one sentence**, which put the product name back into a
+    /// translatable string after `footer_tagline` was deliberately split to keep
+    /// it out — so the renderer joins `brand` and this, and neither catalogue
+    /// holds the other's half.
+    ///
+    /// Distinct from `footer_tagline` above, which the magic-link landing uses:
+    /// the client's wording is "ask for a change, get a spec back" and the
+    /// rendered page's is "file a request, read the spec it becomes". Two
+    /// readers arriving from two places; kept separate rather than unified,
+    /// because unifying them is a wording decision and not a translation one.
+    pub footer_tagline_app: &'static str,
+
+    // -- the sign-in dialog --------------------------------------------------
+    /// What the dialog says once a link has been asked for.
+    ///
+    /// **The same words whether or not an account existed**, because the server
+    /// answers identically — saying "check your email" only when there was a
+    /// mailbox to send to would give back everything that identical answer buys.
+    pub signin_sent: &'static str,
+    /// Under the email form. The client's version adds the sentence the
+    /// catalogue's `signin_no_password` lacked: that filing for the first time
+    /// is what creates the account. That is the whole reason a stranger can use
+    /// this at all, so it stays.
+    pub signin_no_password_note: &'static str,
+
+    // -- filing --------------------------------------------------------------
+    /// The filing page's heading, which is a question rather than a title.
+    pub filing_heading: &'static str,
+    /// The textarea's label. Deliberately not the same string as the heading
+    /// above it — a label repeating its own heading reads to a screen reader as
+    /// the question asked twice.
+    pub filing_text_label: &'static str,
+    pub filing_text_placeholder: &'static str,
+    /// The kind picker's label, and the two options.
+    ///
+    /// **The options are translated; the values they submit are not.** `feature`
+    /// and `bug` are wire values the server matches on and the developer reads
+    /// on the review page — translating those would have a filer and a reviewer
+    /// naming the same kind differently.
+    pub filing_kind_label: &'static str,
+    pub kind_feature: &'static str,
+    pub kind_bug: &'static str,
+    /// The repository picker's label. Shown only when the surface serves more
+    /// than one; the names in it are never translated.
+    pub filing_repo_label: &'static str,
+    pub filing_submit: &'static str,
+    /// Shown after a successful filing, in place of a navigation.
+    pub filing_done: &'static str,
+    /// Shown instead of the form when this surface serves no repository. A real
+    /// state, reachable the moment the last one is disabled — and it says the
+    /// site is between configurations rather than broken.
+    pub filing_none_title: &'static str,
+    pub filing_none_body: &'static str,
+
+    // -- the review list -----------------------------------------------------
+    pub review_heading: &'static str,
+    pub review_empty_title: &'static str,
+    pub review_empty_body: &'static str,
+
+    // -- one request, and the decision about it ------------------------------
+    /// The two diagnostics under a request nothing has picked up.
+    ///
+    /// **Two messages rather than one**, because "no machine has polled at all"
+    /// and "machines are polling and none offers this repository" send an
+    /// operator to two different places, and one message for both sends half of
+    /// them to the wrong one.
+    pub review_no_daemon: &'static str,
+    pub review_unserved: &'static str,
+    /// The bypass link. Visible rather than hidden: hiding it does not remove
+    /// it, it only lets the system believe nobody used one.
+    pub review_skip_to_decision: &'static str,
+    pub review_asked_heading: &'static str,
+    pub review_spec_heading: &'static str,
+    pub review_note_heading: &'static str,
+    /// Precedes the artifact directory: `"It landed in "` + the path. See the
+    /// module docs on why there is no `{}` here. The path is on the
+    /// administrator's own machine and is never translated.
+    ///
+    /// **A prefix alone, with no matching suffix**, because the sentence ends at
+    /// the value in both catalogues. An empty `_after` field would have been a
+    /// field every future language has to fill with nothing, and the
+    /// no-empty-string test would need an exception naming it — a permanent hole
+    /// in a check, bought to keep a symmetry no reader benefits from.
+    pub review_landed_before: &'static str,
+    /// Heads the decision controls.
+    pub review_decide_heading: &'static str,
+    /// The send-back form: its label, its placeholder, and its button.
+    pub review_send_back_label: &'static str,
+    pub review_send_back_placeholder: &'static str,
+    pub review_send_back_submit: &'static str,
+    pub review_accept: &'static str,
+    pub review_discard: &'static str,
+    /// Under the controls. Says that closing the page is not a decision, which
+    /// is the thing a reviewer most needs permission to do.
+    pub review_leaving_decides_nothing: &'static str,
+    pub review_quarantine_leaving: &'static str,
+
+    // -- raw states and kinds, as a reviewer is shown them --------------------
+    //
+    // **These are the wire values, given faces.** `ReviewRequest.state` and
+    // `kind` arrive as `queued`, `quarantined`, `feature` — code identifiers,
+    // rendered straight into the page. A reviewer is a person, and a person
+    // reading "awaiting-review" is reading a variable name.
+    //
+    // Distinct from `state_*` above, which are the **coarse** labels a filer
+    // sees and the server has already translated. A reviewer decides on the
+    // difference between `Quarantined` and `Queued`; a filer is deliberately not
+    // told there is one. Two sets of words for two audiences, and merging them
+    // would leak the screening states to the audience they are hidden from.
+    pub review_state_screening: &'static str,
+    pub review_state_quarantined: &'static str,
+    pub review_state_queued: &'static str,
+    pub review_state_claimed: &'static str,
+    pub review_state_awaiting_review: &'static str,
+    pub review_state_accepted: &'static str,
+    pub review_state_discarded: &'static str,
+    pub review_state_failed: &'static str,
+
+    // -- the interface's own 404 ---------------------------------------------
+    //
+    // Says the same thing the server's rendered 404 says, because a reader who
+    // followed a stale link should not be able to tell which of the two answered
+    // — the distinction is about who routed, and that is not their problem.
+    pub app_not_found_title: &'static str,
+    pub app_not_found_body: &'static str,
+    pub app_not_found_link: &'static str,
+
+    // -- the administrative pages --------------------------------------------
+    //
+    // One reader per server, who may not read English. See the module doc.
+    pub admin_saved: &'static str,
+    pub admin_save: &'static str,
+    pub admin_add: &'static str,
+    pub admin_revoke: &'static str,
+    pub admin_revoked_tag: &'static str,
+
+    /// Settings.
+    pub settings_heading: &'static str,
+    pub settings_public_heading: &'static str,
+    pub settings_public_note: &'static str,
+    pub settings_public_on: &'static str,
+    pub settings_public_off: &'static str,
+    pub settings_filers_heading: &'static str,
+    pub settings_show_spec: &'static str,
+    pub settings_stack_heading: &'static str,
+    pub settings_stack_note: &'static str,
+    pub settings_ceilings_heading: &'static str,
+    pub settings_ceilings_note: &'static str,
+    pub settings_max_filings: &'static str,
+    pub settings_max_drafts: &'static str,
+    pub settings_max_accounts: &'static str,
+    pub settings_max_links: &'static str,
+
+    /// Owners.
+    pub owners_heading: &'static str,
+    pub owners_note: &'static str,
+    pub owners_add_heading: &'static str,
+    pub owners_email_label: &'static str,
+    pub owners_repos_label: &'static str,
+
+    /// Repositories.
+    pub repos_heading: &'static str,
+    /// Split around the repository name, which is never translated:
+    /// `"No machine has offered "` + `intake` + `". Enabling it anyway …"`.
+    pub repos_unserved_before: &'static str,
+    pub repos_unserved_after: &'static str,
+    pub repos_enable_anyway: &'static str,
+    /// Shown in place of a machine's label when nothing has offered a
+    /// repository. A phrase rather than a dash, because a blank column reads as
+    /// a rendering fault.
+    pub repos_no_machine: &'static str,
+    pub repos_off_tag: &'static str,
+    pub repos_turn_off: &'static str,
+    pub repos_add_heading: &'static str,
+    pub repos_name_label: &'static str,
+    pub repos_enable: &'static str,
+
+    /// Machines.
+    pub daemons_heading: &'static str,
+    /// Split around the machine's label, which is the operator's own word and is
+    /// never translated: `label` + `" — this key is shown once …"`.
+    pub daemons_minted_after: &'static str,
+    pub daemons_add_heading: &'static str,
+    pub daemons_label_label: &'static str,
+    pub daemons_mint: &'static str,
+
+    /// Who can file.
+    pub accounts_heading: &'static str,
+    pub accounts_note: &'static str,
+    pub accounts_password_tag: &'static str,
+
+    // -- the setup wizard ----------------------------------------------------
+    //
+    // **The first screen on a fresh server**, before there is an account or a
+    // preference — so `Accept-Language` is the only signal, and it is the one
+    // screen where the wrong language means the server cannot be claimed at all.
+    pub setup_code_heading: &'static str,
+    pub setup_code_intro: &'static str,
+    pub setup_code_label: &'static str,
+    /// Split around the address: `"This server answers at "` + the URL + `",
+    /// which is set where the container is configured."` The URL is never
+    /// translated.
+    pub setup_base_url_before: &'static str,
+    pub setup_base_url_after: &'static str,
+    pub setup_continue: &'static str,
+    pub setup_admin_heading: &'static str,
+    pub setup_admin_intro: &'static str,
+    pub setup_admin_intro_strong: &'static str,
+    pub setup_email_label: &'static str,
+    pub setup_password_label: &'static str,
+    /// Split around **two** values: the minimum length, and the filename.
+    ///
+    /// `"At least "` + `12` + `" characters. …"` + `admin.json` + `" from the
+    /// volume …"`. `admin.json` is a filename and is never translated.
+    ///
+    /// The middle piece carries a hazard the English does not have: French
+    /// "caractère" agrees in number with the count, and `min_password` is
+    /// configurable — so it can legitimately be 1. `min_password_chars_one`
+    /// exists for that case and the renderer picks between them, which is the
+    /// only plural rule this catalogue has and the only one it needs.
+    pub setup_min_password_before: &'static str,
+    pub setup_min_password_chars: &'static str,
+    /// The singular of the word above, for a minimum of one. See its docs.
+    pub setup_min_password_chars_one: &'static str,
+    /// Between the count and the filename.
+    pub setup_min_password_after: &'static str,
+    /// After the filename, closing the sentence.
+    pub setup_min_password_tail: &'static str,
+    pub setup_claim: &'static str,
 }
 
 #[cfg(test)]
@@ -549,6 +836,114 @@ mod tests {
             s.error_too_long,
             s.not_found_title,
             s.not_found_body,
+            s.nav_mine,
+            s.nav_review,
+            s.nav_signout,
+            s.theme_to_light,
+            s.theme_to_dark,
+            s.footer_tagline_app,
+            s.signin_sent,
+            s.signin_no_password_note,
+            s.filing_heading,
+            s.filing_text_label,
+            s.filing_text_placeholder,
+            s.filing_kind_label,
+            s.kind_feature,
+            s.kind_bug,
+            s.filing_repo_label,
+            s.filing_submit,
+            s.filing_done,
+            s.filing_none_title,
+            s.filing_none_body,
+            s.review_heading,
+            s.review_empty_title,
+            s.review_empty_body,
+            s.review_no_daemon,
+            s.review_unserved,
+            s.review_skip_to_decision,
+            s.review_asked_heading,
+            s.review_spec_heading,
+            s.review_note_heading,
+            s.review_landed_before,
+            s.review_decide_heading,
+            s.review_send_back_label,
+            s.review_send_back_placeholder,
+            s.review_send_back_submit,
+            s.review_accept,
+            s.review_discard,
+            s.review_leaving_decides_nothing,
+            s.review_quarantine_leaving,
+            s.review_state_screening,
+            s.review_state_quarantined,
+            s.review_state_queued,
+            s.review_state_claimed,
+            s.review_state_awaiting_review,
+            s.review_state_accepted,
+            s.review_state_discarded,
+            s.review_state_failed,
+            s.app_not_found_title,
+            s.app_not_found_body,
+            s.app_not_found_link,
+            s.admin_saved,
+            s.admin_save,
+            s.admin_add,
+            s.admin_revoke,
+            s.admin_revoked_tag,
+            s.settings_heading,
+            s.settings_public_heading,
+            s.settings_public_note,
+            s.settings_public_on,
+            s.settings_public_off,
+            s.settings_filers_heading,
+            s.settings_show_spec,
+            s.settings_stack_heading,
+            s.settings_stack_note,
+            s.settings_ceilings_heading,
+            s.settings_ceilings_note,
+            s.settings_max_filings,
+            s.settings_max_drafts,
+            s.settings_max_accounts,
+            s.settings_max_links,
+            s.owners_heading,
+            s.owners_note,
+            s.owners_add_heading,
+            s.owners_email_label,
+            s.owners_repos_label,
+            s.repos_heading,
+            s.repos_unserved_before,
+            s.repos_unserved_after,
+            s.repos_enable_anyway,
+            s.repos_no_machine,
+            s.repos_off_tag,
+            s.repos_turn_off,
+            s.repos_add_heading,
+            s.repos_name_label,
+            s.repos_enable,
+            s.daemons_heading,
+            s.daemons_minted_after,
+            s.daemons_add_heading,
+            s.daemons_label_label,
+            s.daemons_mint,
+            s.accounts_heading,
+            s.accounts_note,
+            s.accounts_password_tag,
+            s.setup_code_heading,
+            s.setup_code_intro,
+            s.setup_code_label,
+            s.setup_base_url_before,
+            s.setup_base_url_after,
+            s.setup_continue,
+            s.setup_admin_heading,
+            s.setup_admin_intro,
+            s.setup_admin_intro_strong,
+            s.setup_email_label,
+            s.setup_password_label,
+            s.setup_min_password_before,
+            s.setup_min_password_chars,
+            s.setup_min_password_chars_one,
+            s.setup_min_password_after,
+            s.setup_min_password_tail,
+            s.setup_claim,
         ];
 
         // The check that keeps this honest: if a field was added to the struct
@@ -585,17 +980,25 @@ mod tests {
         //
         // The exceptions are strings that are *correctly* identical, and each is
         // named with its reason rather than skipped in bulk.
-        const SAME_ON_PURPOSE: [&str; 4] = [
+        const SAME_ON_PURPOSE: [&str; 6] = [
             // A product name, not a word.
             "brand",
             // "Machines" is the same word in French.
             "nav_admin_daemons",
+            // The page that menu entry opens. Same word, same reason — and
+            // named separately rather than folded into the one above, so a
+            // language where they legitimately diverge is not silently excused
+            // in both places at once.
+            "daemons_heading",
             // "you@example.com" -> "vous@exemple.com" differs; but a language
             // that shares the address form legitimately matches.
             "signin_email_placeholder",
             // Digits and a unit; French shortens "hr" to "h" but a language
             // using "min" unchanged is not untranslated.
             "ago_minutes",
+            // "Note" is the same word in French, and is the right one — the
+            // alternatives ("Remarque", "Commentaire") are longer and say less.
+            "review_note_heading",
         ];
 
         let english = fields(Locale::En.strings());

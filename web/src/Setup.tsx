@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, setup, type SetupState } from "./api";
+import { useStrings } from "./strings";
 
 /// Claiming the server.
 ///
@@ -16,6 +17,7 @@ import { ApiError, setup, type SetupState } from "./api";
 /// The address used to be asked for here, which is what forced the ordering. It
 /// is an environment variable now, so it is settled before anybody arrives.
 export function Setup({ onClaimed }: { onClaimed: () => void }) {
+  const s = useStrings();
   const [state, setState] = useState<SetupState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -34,12 +36,8 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
   if (state.step === "code") {
     return (
       <>
-        <h1>Set up this server</h1>
-        <p>
-          This server has not been claimed. Whoever claims it administers it, so
-          the code below is printed in the container&apos;s log — being able to
-          read that log is the proof.
-        </p>
+        <h1>{s.setup_code_heading}</h1>
+        <p>{s.setup_code_intro}</p>
         {error && <p className="note">{error}</p>}
         <form
           onSubmit={(e) => {
@@ -54,7 +52,10 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
               .finally(() => setBusy(false));
           }}
         >
-          <label htmlFor="code">The claim code from the log</label>
+          <label htmlFor="code">{s.setup_code_label}</label>
+          {/* The placeholder is the *shape* of a claim code, not a word — three
+              letters, a dash, four digits. Translating it would make it stop
+              describing what the operator is about to paste. */}
           <input
             id="code"
             name="code"
@@ -66,14 +67,18 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
           {/* **The address is not asked for.** It is an environment variable and
               the server refuses to start without a valid one, so by the time
               anybody reaches this it is settled — and there is no typo left that
-              could burn the one claim code the operator has. */}
+              could burn the one claim code the operator has.
+
+              Split around the URL rather than formatted with it: the catalogue
+              carries no placeholders, and the URL is never translated. */}
           <p className="meta">
-            This server answers at <code>{state.base_url}</code>, which is set
-            where the container is configured.
+            {s.setup_base_url_before}
+            <code>{state.base_url}</code>
+            {s.setup_base_url_after}
           </p>
 
           <button type="submit" disabled={busy}>
-            Continue
+            {s.setup_continue}
           </button>
         </form>
       </>
@@ -82,11 +87,10 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
 
   return (
     <>
-      <h1>Who administers this?</h1>
+      <h1>{s.setup_admin_heading}</h1>
       <p>
-        Choose an email address and a password. This account administers this
-        server: it reviews requests, decides what the public site collects, and
-        holds the keys. <strong>There is no second one.</strong>
+        {s.setup_admin_intro}
+        <strong>{s.setup_admin_intro_strong}</strong>
       </p>
       {error && <p className="note">{error}</p>}
       <form
@@ -105,7 +109,7 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
             .finally(() => setBusy(false));
         }}
       >
-        <label htmlFor="login">Email</label>
+        <label htmlFor="login">{s.setup_email_label}</label>
         <input
           id="login"
           name="login"
@@ -117,7 +121,7 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
           autoComplete="username"
         />
 
-        <label htmlFor="password">Password</label>
+        <label htmlFor="password">{s.setup_password_label}</label>
         <input
           id="password"
           name="password"
@@ -126,14 +130,29 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
           minLength={state.min_password}
           autoComplete="new-password"
         />
+        {/* **Two interpolations and a plural, in one sentence.** The catalogue
+            holds no placeholders, so the sentence arrives as four pieces and the
+            renderer puts the minimum and the filename between them.
+
+            The plural is not decoration: French "caractère" agrees in number
+            with the count, and `min_password` is configured on the server, so a
+            deployment can legitimately set it to 1. English happens not to care
+            about the difference at this position, which is exactly why picking
+            the wrong field would have shipped unnoticed until somebody set it to
+            one. `admin.json` is a filename and stays as it is. */}
         <p className="meta">
-          At least {state.min_password} characters. It is stored hashed and
-          cannot be recovered — if you lose it, delete <code>admin.json</code>{" "}
-          from the volume and claim the server again.
+          {s.setup_min_password_before}
+          {state.min_password}
+          {state.min_password === 1
+            ? s.setup_min_password_chars_one
+            : s.setup_min_password_chars}
+          {s.setup_min_password_after}
+          <code>admin.json</code>
+          {s.setup_min_password_tail}
         </p>
 
         <button type="submit" disabled={busy}>
-          Claim it
+          {s.setup_claim}
         </button>
       </form>
     </>

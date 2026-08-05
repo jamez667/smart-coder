@@ -228,6 +228,13 @@ pub struct Req {
     pub cookie_lang: Option<String>,
     /// The `Accept-Language` header, as sent.
     pub accept_language: Option<String>,
+    /// The `If-None-Match` header — the ETag a client already holds.
+    ///
+    /// Read by exactly one route, the string catalogue. It is here rather than
+    /// in a header bag for the reason the field above states: [`Req`] holds only
+    /// what the routes actually use, and a bag invites reading whatever happens
+    /// to be in it.
+    pub if_none_match: Option<String>,
     /// The `Origin` header, when the browser sent one.
     ///
     /// **Only the JSON API reads this.** The HTML surface is defended by
@@ -256,6 +263,7 @@ impl Req {
             cookie_setup: None,
             cookie_lang: None,
             accept_language: None,
+            if_none_match: None,
             origin: None,
             content_type: None,
             body: String::new(),
@@ -271,6 +279,7 @@ impl Req {
             cookie_setup: None,
             cookie_lang: None,
             accept_language: None,
+            if_none_match: None,
             origin: None,
             content_type: None,
             body: body.into(),
@@ -340,6 +349,15 @@ pub struct Res {
     pub binary: Option<&'static [u8]>,
     /// A `Set-Cookie` value, used exactly once: at enrolment.
     pub set_cookie: Option<String>,
+    /// An `ETag` for this body, when the handler has a cheap one.
+    ///
+    /// **Set on exactly one route** — the string catalogue — and deliberately
+    /// not a general mechanism. Everything else this server answers is either a
+    /// store read whose freshness matters or a compiled-in asset the client
+    /// never re-fetches, and an ETag on a response carrying somebody's request
+    /// text would be a validator for content `Cache-Control: no-store` exists to
+    /// keep out of caches. See [`api_ui_strings`].
+    pub etag: Option<String>,
     /// Set when the handler wants the caller to hold the connection open — the
     /// long-poll. The HTTP layer waits, then calls back.
     pub hold_for_work: bool,
@@ -357,6 +375,7 @@ impl Res {
             body: body.into(),
             binary: None,
             set_cookie: None,
+            etag: None,
             hold_for_work: false,
             policy: Policy::Strict,
         }
@@ -369,6 +388,7 @@ impl Res {
             body: body.into(),
             binary: None,
             set_cookie: None,
+            etag: None,
             hold_for_work: false,
             policy: Policy::Strict,
         }
@@ -936,7 +956,19 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         }
         // Asking for a link costs an email either way it is asked for, so the
         // JSON endpoint shares the form's bucket rather than the API's.
-        None if path == api_path("signin") || path == api_path("signout") => Bucket::PublicWrite,
+        //
+        // Choosing a language joins them: it is a POST, so it cannot be
+        // `PublicRead`, but it costs one cookie and no store read — and left in
+        // `AnonPrivate` a stranger switching language would spend a *fifth* of a
+        // 20/min budget doing the one thing that makes the page readable to
+        // them. It sits with the form route it twins, which is already here by
+        // way of `is_public_path`.
+        None if path == api_path("signin")
+            || path == api_path("signout")
+            || path == api_path("language") =>
+        {
+            Bucket::PublicWrite
+        }
         // **`/me` is what a stranger's browser asks first.** The landing page is
         // public and the client cannot render it without knowing whether anybody
         // is signed in, so this is a page read in every sense that matters to a
@@ -947,7 +979,18 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
         // under the prefix stays in the tight bucket below: an anonymous request
         // for somebody's *data* is either a mistake or a probe, and neither
         // deserves a public allowance.
-        None if path == ME_PATH => Bucket::PublicRead,
+        // **The catalogue rides with `me`, and for the identical reason.** It is
+        // the second thing a stranger's browser asks and the landing page cannot
+        // be drawn without it, so it is a page read in every sense a rate
+        // limiter cares about. Left in `AnonPrivate` it would spend a *second*
+        // slot of a 20/min budget on every load — turning a reader who reloads a
+        // few times into a 429 on their own language, which renders as an
+        // interface with no words in it.
+        //
+        // It is also the cheapest response this server has: no store read, no
+        // allocation beyond one serialisation of a compiled-in constant, and a
+        // 304 for anybody who has loaded the site before.
+        None if path == ME_PATH || path == STRINGS_PATH => Bucket::PublicRead,
         // **`PublicRead`, like the fonts** — 600/min rather than the 20 an
         // anonymous private request gets. These are two immutable, compiled-in
         // responses with no store read behind them, and they are fetched on
@@ -1018,6 +1061,10 @@ use crate::api::{AccountView, FiledRequest, ReviewRequest, SettingsView};
 
 const ME_PATH: &str = "/api/v1/ui/me";
 
+/// `/api/v1/ui/strings`, spelled out. Same reasoning as [`ME_PATH`]: the rate
+/// limiter and the route matcher must not be able to disagree about it.
+pub const STRINGS_PATH: &str = "/api/v1/ui/strings";
+
 fn api_route(
     ctx: &mut Ctx<'_>,
     req: &Req,
@@ -1043,6 +1090,12 @@ fn api_route(
                 Err(e) => error(500, &e.to_string()),
             }
         }
+
+        // The words this interface draws itself out of, in the language this
+        // request negotiated. Reachable by anybody, for the same reason `me` is:
+        // a stranger sees the landing page and the sign-in dialog, and neither
+        // can be drawn without them.
+        ("GET", "strings") => api_ui_strings(req),
 
         // **The wizard, which is reachable with no credential at all** — it is
         // how the first one is obtained. Guarded by the single-use claim code
@@ -1180,6 +1233,23 @@ fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) 
         "signin" => return api_request_link(ctx, req),
         "signin/password" => return api_sign_in_with_password(ctx, req),
         "signout" => return api_sign_out(ctx, req),
+        // **Choosing a language, above the administrator gate and deliberately.**
+        // Somebody who cannot read the page is exactly who needs this control,
+        // and requiring an account first would mean signing in through a page
+        // they cannot read. It reads no store, writes no store and names nobody
+        // — the whole effect is one preference cookie.
+        //
+        // Reached from here rather than beside the read arms so it passes the
+        // same-origin check with every other mutating call: it sets a cookie,
+        // and a route that sets a cookie belongs behind that gate even when the
+        // cookie is only a preference.
+        //
+        // **The JSON twin of `POST /public/language`**, and a twin rather than a
+        // replacement — that route is a form target and answers a document,
+        // because a form POST is a navigation. Both write the cookie through
+        // `language_cookie`, so they cannot come to disagree about what a
+        // language selection means.
+        "language" => return api_set_language(ctx, req),
         // **Filing needs an account, not an administrator**, so it is above the
         // gate below and checks for itself. The account is the credential: it
         // costs a confirmed mailbox, which is what stops this being a
@@ -1614,6 +1684,97 @@ fn charge_a_draft(ctx: &Ctx<'_>, id: &str) -> std::result::Result<(), Res> {
         Ok(Some(r)) => drafting_budget(ctx, &r.repo),
         _ => Ok(()),
     }
+}
+
+/// The interface's words, in the language this request negotiated.
+///
+/// **Reachable by anybody, and that is not a relaxation.** A stranger sees the
+/// landing page and the sign-in dialog before they have any credential at all,
+/// and neither can be drawn without these — so this endpoint is exactly as
+/// public as `me`, and for the same reason. It reads nothing from the store and
+/// names nobody: the response depends on the `Accept-Language` header and the
+/// language cookie, and on nothing else about the caller.
+///
+/// The locale comes from [`Req::locale`], which is cookie-then-header — the same
+/// negotiation the magic-link landing uses. There is no `?lang=` parameter and
+/// there must not be one: a second way to select a language is a second thing
+/// that can disagree with the cookie the switcher writes, and the reader would
+/// see the switcher appear not to work.
+///
+/// ## Why this is worth an ETag when nothing else here is
+///
+/// The catalogue is `&'static str` compiled into the binary. **It cannot change
+/// while the process runs** — the only way to alter a string is to rebuild the
+/// image and redeploy, which replaces the process. That is a stronger guarantee
+/// than most cacheable resources have, and it is what makes the client's
+/// `localStorage` copy safe to render from before any request has come back.
+///
+/// It is also what makes the ETag necessary rather than merely nice. A cache
+/// that only a deploy invalidates is a cache with no natural expiry, so without
+/// a validator a reader who has ever loaded this site keeps the strings they
+/// first saw until they clear their browser — including after a deploy that
+/// fixed a mistranslation. The tag is a hash of the exact bytes being sent, so
+/// it changes when and only when the catalogue does, and a stale cache cannot
+/// outlive the deploy that made it stale.
+///
+/// The tag covers the **body**, which includes the locale code — so `en` and
+/// `fr` have different tags, and a reader switching language cannot be answered
+/// 304 against the catalogue they were holding a moment ago.
+///
+/// `Cache-Control: no-store` still rides on this response with every other. That
+/// is not a contradiction: `no-store` addresses caches this server does not
+/// control, and the client here is not caching *as* an HTTP cache — it stores
+/// the body itself and echoes the validator back by hand. The one thing that
+/// would be wrong is a shared proxy holding this, and `no-store` is what stops
+/// that.
+fn api_ui_strings(req: &Req) -> Res {
+    // **`?lang=` overrides the negotiation, and it has to.** Choosing a language
+    // is `POST /api/v1/ui/language`, which sets the cookie — but every mutating
+    // call passes `same_origin`, and a server with no configured address has
+    // nothing to compare an `Origin` against and refuses all of them. On a fresh
+    // deployment that left the switcher moving and nothing happening.
+    //
+    // Reading a catalogue in a named language changes nothing and reveals
+    // nothing: the strings are compiled into the binary and identical for every
+    // caller. So the read carries the choice, the cookie is set when it can be,
+    // and the interface is translatable before the server is configured rather
+    // than after.
+    let asked = req
+        .path
+        .split_once('?')
+        .and_then(|(_, q)| {
+            q.split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .find(|(k, _)| *k == "lang")
+                .map(|(_, v)| v)
+        })
+        .and_then(crate::i18n::Locale::parse);
+    let locale = asked.unwrap_or_else(|| req.locale());
+    let body = match serde_json::to_string(&crate::api::UiStrings::of(locale)) {
+        Ok(body) => body,
+        Err(e) => return error(500, &e.to_string()),
+    };
+
+    // Hashed with the same function credentials go through, for no reason other
+    // than that it is the one hash this crate has — there is nothing secret
+    // here, and an ETag is a fingerprint rather than a secret. Quoted because
+    // the grammar requires it, and a bare tag is silently ignored by some
+    // proxies rather than rejected.
+    let etag = format!("\"{}\"", auth::hash(&body));
+
+    // A 304 carries **no body**, which is the entire saving: the client already
+    // holds the catalogue and this says so in a few dozen bytes rather than a
+    // few kilobytes. Compared verbatim — this server mints one tag per
+    // catalogue, so a client either echoes it or does not.
+    if req.if_none_match.as_deref() == Some(etag.as_str()) {
+        let mut res = Res::json(304, String::new());
+        res.etag = Some(etag);
+        return res;
+    }
+
+    let mut res = Res::json(200, body);
+    res.etag = Some(etag);
+    res
 }
 
 /// Where the wizard has got to.
@@ -2886,9 +3047,64 @@ fn font(bytes: &'static [u8]) -> Res {
         body: String::new(),
         binary: Some(bytes),
         set_cookie: None,
+        etag: None,
         hold_for_work: false,
         policy: Policy::PublicScript,
     }
+}
+
+/// The cookie that remembers a language choice.
+///
+/// **One builder for both routes that set it.** The form target and the JSON
+/// endpoint write the same cookie with the same attributes, and a second copy of
+/// this format string is how the two would eventually come to mean different
+/// things — one `Lax`, one `Strict`, and a switcher that works on one surface.
+///
+/// Not `HttpOnly`: this is a preference, not a credential, and the interface may
+/// read it. `SameSite=Lax` rather than `Strict` so that arriving from an
+/// external link — which is how somebody reaches a filing page — still shows the
+/// language they chose.
+fn language_cookie(ctx: &Ctx<'_>, locale: Locale) -> String {
+    format!(
+        "{LANG_COOKIE}={}; Path=/; SameSite=Lax{}; Max-Age=31536000",
+        locale.code(),
+        secure_attr(ctx)
+    )
+}
+
+/// Remember the reader's language, and answer the catalogue they chose.
+///
+/// **The endpoint the interface's switcher posts to.** Takes no session and
+/// touches no store, exactly like the form route below it — this is safe to
+/// leave reachable signed out because somebody who cannot read the current page
+/// is precisely who needs it, and requiring an account first would mean signing
+/// in through a page they cannot read.
+///
+/// It answers the **new catalogue**, not an acknowledgement. The client needs
+/// the strings to redraw, and returning them here saves a second round trip on
+/// the one interaction whose whole point is that the reader is waiting to
+/// understand the page. The ETag comes with it, so the client stores the new
+/// catalogue under its own key with a validator already attached.
+fn api_set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
+    // An unknown code selects the default rather than erroring, matching the
+    // form route: the value is matched against the catalogues this server
+    // actually has, so nothing a caller writes reaches a page except by
+    // selecting among them.
+    let locale = serde_json::from_str::<serde_json::Value>(&req.body)
+        .ok()
+        .and_then(|v| v.get("lang")?.as_str().and_then(Locale::parse))
+        .unwrap_or_default();
+
+    // Built from the *chosen* locale rather than from `req.locale()`, which
+    // still reads the old cookie — this request carries the one being replaced.
+    let body = match serde_json::to_string(&crate::api::UiStrings::of(locale)) {
+        Ok(body) => body,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let mut res = Res::json(200, body);
+    res.etag = Some(format!("\"{}\"", auth::hash(&res.body)));
+    res.set_cookie = Some(language_cookie(ctx, locale));
+    res
 }
 
 /// Remember the reader's language.
@@ -2902,9 +3118,11 @@ fn font(bytes: &'static [u8]) -> Res {
 /// found, and this surface is small enough that landing back on the application
 /// is no real loss.
 ///
-/// The **only reader of the cookie this writes** is the magic-link landing, which
-/// is the only page left rendered from the catalogue. Without this route that
-/// reader would have `Accept-Language` and no way to override it.
+/// **Kept beside the JSON endpoint above rather than replaced by it.** This is a
+/// `<form>` target: it answers a document, because a form POST is a navigation
+/// and the browser must be handed something to display. It is what a reader with
+/// no script has, and it is the writer the magic-link landing depends on — that
+/// page is server-rendered from the catalogue and has no client to ask.
 fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
     let fields = form_fields(&req.body);
     // An unknown code selects the default rather than erroring. The value is
@@ -2915,18 +3133,10 @@ fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
         .and_then(|v| Locale::parse(v))
         .unwrap_or_default();
 
-    let secure = secure_attr(ctx);
     // The application, for the reason `complete_sign_in` gives: a form POST is a
     // navigation, so the answer has to be something a browser can display.
     let mut res = Res::html(200, crate::api::ui::INDEX).with_policy(Policy::PublicScript);
-    // Not `HttpOnly`: this is a preference, not a credential, and the interface
-    // may read it. `SameSite=Lax` rather than `Strict` so that arriving from an
-    // external link — which is how somebody reaches a filing page — still shows
-    // the language they chose.
-    res.set_cookie = Some(format!(
-        "{LANG_COOKIE}={}; Path=/; SameSite=Lax{secure}; Max-Age=31536000",
-        locale.code()
-    ));
+    res.set_cookie = Some(language_cookie(ctx, locale));
     res
 }
 
@@ -4109,6 +4319,42 @@ mod tests {
             !wants_document("/public/signin/sometoken"),
             "the magic-link landing is server-rendered"
         );
+    }
+
+    #[test]
+    fn a_language_can_be_read_before_the_server_has_an_address() {
+        // **The switcher has to work on a server nobody has configured yet.**
+        // Choosing a language is a mutating call, and `same_origin` refuses all
+        // of those when there is no configured address to compare an `Origin`
+        // against — so on a fresh deployment the POST always fails and the
+        // picker moved with nothing happening.
+        //
+        // Reading the catalogue in a named language is the way out: it changes
+        // nothing and reveals nothing, because the strings are compiled in and
+        // identical for every caller.
+        let mut f = Fixture::new("lang-before-address");
+
+        // The POST really is refused here — if this ever starts passing, the
+        // fallback below is no longer needed and this test should say so rather
+        // than quietly testing a path nobody takes.
+        let mut choose = api_post("/api/v1/ui/language", r#"{"lang":"fr"}"#);
+        choose.origin = Some("http://somewhere.example".into());
+        let chosen = f.go(&choose);
+        assert_eq!(chosen.status, 403, "{}", chosen.body);
+
+        // But the read is answered, in the language asked for.
+        let read = f.go(&Req::get("/api/v1/ui/strings?lang=fr"));
+        assert_eq!(read.status, 200, "{}", read.body);
+        let body: serde_json::Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(body["locale"], "fr");
+
+        // And an unknown language falls back to negotiation rather than
+        // failing: a client asking for something this server has no catalogue
+        // for should get a page, not an error.
+        let unknown = f.go(&Req::get("/api/v1/ui/strings?lang=de"));
+        assert_eq!(unknown.status, 200, "{}", unknown.body);
+        let body: serde_json::Value = serde_json::from_str(&unknown.body).unwrap();
+        assert_eq!(body["locale"], "en");
     }
 
     #[test]
@@ -6057,6 +6303,169 @@ mod tests {
             Bucket::AnonPrivate,
             "an anonymous request for somebody's data is a probe, not browsing"
         );
+    }
+
+    // -- the string catalogue the client draws itself from ------------------
+
+    #[test]
+    fn a_stranger_can_read_the_catalogue_in_the_language_they_asked_for() {
+        // **Reachable holding nothing**, because the landing page and the
+        // sign-in dialog are the first things a stranger sees and neither can be
+        // drawn without these. Exactly as public as `/me`, and for that reason.
+        let mut f = Fixture::new("strings-anon").with_public(false);
+
+        let en = f.go(&Req::get(STRINGS_PATH));
+        assert_eq!(en.status, 200, "{}", en.body);
+        let body: serde_json::Value = serde_json::from_str(&en.body).unwrap();
+        // The locale travels *beside* the strings: the client cannot derive the
+        // code from the text, and it needs one for `<html lang>`.
+        assert_eq!(body["locale"], "en");
+        assert_eq!(
+            body["strings"]["landing_point_2_title"],
+            "A spec, not a ticket"
+        );
+
+        // And the negotiation is the one `Req::locale` already does — cookie,
+        // then header. No `?lang=`, which would be a second thing able to
+        // disagree with the cookie the switcher writes.
+        let fr = f.go(&Req::get(STRINGS_PATH).with_lang(None, Some("fr,en;q=0.8")));
+        let body: serde_json::Value = serde_json::from_str(&fr.body).unwrap();
+        assert_eq!(body["locale"], "fr");
+        assert_eq!(
+            body["strings"]["landing_point_2_title"],
+            "Une spécification, pas un ticket"
+        );
+
+        // A cookie beats the header, so the switcher is not silently overridden
+        // by whatever the browser was installed with.
+        let cookie_wins = f.go(&Req::get(STRINGS_PATH).with_lang(Some("fr"), Some("en")));
+        let body: serde_json::Value = serde_json::from_str(&cookie_wins.body).unwrap();
+        assert_eq!(body["locale"], "fr");
+    }
+
+    #[test]
+    fn a_held_catalogue_is_revalidated_rather_than_resent() {
+        // The whole point of the ETag. The catalogue is compiled in and cannot
+        // change while the process runs, so a client that has it should be told
+        // "still yours" in a few dozen bytes rather than handed it again.
+        let mut f = Fixture::new("strings-etag").with_public(false);
+
+        let first = f.go(&Req::get(STRINGS_PATH));
+        let tag = first
+            .etag
+            .clone()
+            .expect("the catalogue carries a validator");
+        assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
+
+        let again = f.go(&Req::get(STRINGS_PATH));
+        assert_eq!(
+            again.etag.as_deref(),
+            Some(tag.as_str()),
+            "stable per build"
+        );
+
+        let mut held = Req::get(STRINGS_PATH);
+        held.if_none_match = Some(tag.clone());
+        let third = f.go(&held);
+        assert_eq!(third.status, 304);
+        assert!(
+            third.body.is_empty(),
+            "a 304 carries no body: {}",
+            third.body
+        );
+        assert_eq!(third.etag.as_deref(), Some(tag.as_str()));
+    }
+
+    #[test]
+    fn switching_language_cannot_be_answered_from_the_previous_catalogue() {
+        // **The tag covers the body, and the body carries the locale code.** A
+        // reader who switches to French while holding the English tag must not
+        // be told "nothing changed" — that is the one 304 that would leave the
+        // interface in a language the reader just rejected.
+        let mut f = Fixture::new("strings-etag-lang").with_public(false);
+
+        let english = f.go(&Req::get(STRINGS_PATH));
+        let en_tag = english.etag.expect("a validator");
+
+        let mut held = Req::get(STRINGS_PATH).with_lang(Some("fr"), None);
+        held.if_none_match = Some(en_tag.clone());
+        let french = f.go(&held);
+        assert_eq!(
+            french.status, 200,
+            "a different language is a different body"
+        );
+        assert_ne!(french.etag.as_deref(), Some(en_tag.as_str()));
+        assert!(french.body.contains("\"locale\":\"fr\""), "{}", french.body);
+    }
+
+    #[test]
+    fn reading_the_catalogue_is_not_rate_limited_like_a_probe() {
+        // It rides with `/me` for the identical reason: it is the second thing a
+        // stranger's browser asks, and the landing page cannot be drawn without
+        // it. In `AnonPrivate` a reader who reloads a few times would get a 429
+        // on their own language — an interface with no words in it.
+        assert_eq!(bucket_for(&None, STRINGS_PATH), Bucket::PublicRead);
+        // Choosing one is a POST, so it cannot be `PublicRead` — but it costs a
+        // cookie and no store read, and it is the one action that makes the page
+        // legible to the reader asking for it.
+        assert_eq!(
+            bucket_for(&None, &api_path("language")),
+            Bucket::PublicWrite
+        );
+    }
+
+    #[test]
+    fn choosing_a_language_over_json_sets_the_cookie_and_answers_the_new_words() {
+        // One round trip: the cookie the server negotiates on, and the strings
+        // to redraw with. Posting and then re-fetching would draw the page twice
+        // in the language the reader just rejected.
+        let mut f = Fixture::new("strings-set-lang").with_public(false);
+
+        let res = f.go(&Req::post_json(&api_path("language"), "{\"lang\":\"fr\"}"));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let cookie = res.set_cookie.clone().expect("a language cookie is set");
+        assert!(cookie.starts_with(&format!("{LANG_COOKIE}=fr")), "{cookie}");
+        // The same attributes the form route writes, because both build it with
+        // `language_cookie` — a preference rather than a credential.
+        assert!(!cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+
+        let body: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        assert_eq!(body["locale"], "fr");
+        assert_eq!(body["strings"]["nav_signin"], "Se connecter");
+        // And it carries a validator, so the client stores the new catalogue
+        // with one already attached rather than fetching again to get one.
+        assert!(res.etag.is_some());
+
+        // An unknown code selects the default rather than erroring, matching the
+        // form route: a stale cookie is not an attack.
+        let odd = f.go(&Req::post_json(
+            &api_path("language"),
+            "{\"lang\":\"../etc\"}",
+        ));
+        let body: serde_json::Value = serde_json::from_str(&odd.body).unwrap();
+        assert_eq!(body["locale"], "en");
+    }
+
+    #[test]
+    fn the_catalogue_reaches_the_client_as_a_flat_object_of_every_field() {
+        // The wire shape is the struct definition, derived rather than
+        // hand-listed — so a field added to `Strings` arrives at the client with
+        // nothing else edited. This pins that: the payload has as many keys as
+        // the catalogue has fields, and one of the newest is among them.
+        let mut f = Fixture::new("strings-shape").with_public(false);
+        let res = f.go(&Req::get(STRINGS_PATH));
+        let body: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        let strings = body["strings"].as_object().expect("a flat object");
+
+        // Every value is a string; nothing nested, so the client can index it
+        // without a shape to reason about.
+        assert!(strings.values().all(|v| v.is_string()), "{strings:?}");
+        // A sample from each half — one the server has always rendered, one the
+        // client added — so this fails if either group stops being sent.
+        assert!(strings.contains_key("state_received"));
+        assert!(strings.contains_key("setup_min_password_chars_one"));
+        assert!(strings.contains_key("review_state_quarantined"));
     }
 
     #[test]

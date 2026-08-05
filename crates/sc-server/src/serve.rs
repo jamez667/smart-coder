@@ -555,6 +555,12 @@ fn route_label(path: &str) -> &'static str {
         public_route::SIGNOUT => "/public/signout",
         public_route::LANGUAGE => "/public/language",
         crate::api::ui::FONT_BODY_PATH | crate::api::ui::FONT_DISPLAY_PATH => "/ui/font",
+        // Its own label rather than falling into `other`. It is fetched on every
+        // cold load and answers 304 on most of the rest, so it is the one route
+        // whose hit *rate* says something — a sudden run of 200s where 304s were
+        // expected is a deploy that changed the catalogue, or a cache that
+        // stopped working.
+        crate::routes::STRINGS_PATH => "/api/v1/ui/strings",
         private_route::REVIEW => "/review",
         private_route::SETUP => "/setup",
         private_route::SETUP_ADMIN => "/setup/admin",
@@ -706,6 +712,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
     let mut cookie_setup = None;
     let mut cookie_lang = None;
     let mut accept_language = None;
+    let mut if_none_match = None;
     let mut origin = None;
     let mut content_type = None;
     for h in request.headers() {
@@ -727,6 +734,11 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             // looks like. Anything unrecognised there falls back to the default,
             // so no validation is owed here.
             "accept-language" => accept_language = Some(value.to_string()),
+            // Taken as sent and compared verbatim by the one route that reads
+            // it. No parsing of the `W/` weak prefix or of a comma list: this
+            // server mints exactly one ETag per catalogue and a client either
+            // echoes it or does not.
+            "if-none-match" => if_none_match = Some(value.to_string()),
             // **Both exist for the JSON API's CSRF check**, and neither is
             // trusted for anything else. A browser sets `Origin` itself and a
             // page cannot forge it; `Content-Type` is checked because a form
@@ -749,6 +761,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
             cookie_setup,
             cookie_lang,
             accept_language,
+            if_none_match,
             origin,
             content_type,
             body: String::new(),
@@ -772,6 +785,7 @@ fn read(request: &mut tiny_http::Request) -> Result<Req> {
         cookie_setup,
         cookie_lang,
         accept_language,
+        if_none_match,
         origin,
         content_type,
         body,
@@ -807,6 +821,17 @@ fn write(request: tiny_http::Request, res: Res) -> Result<()> {
             headers.push(h);
         }
     }
+    // Sent alongside `Cache-Control: no-store`, which is not the contradiction
+    // it looks like. `no-store` stops a *shared* cache and the browser's own
+    // holding this, which is right — every other response on this server carries
+    // somebody's text. The validator is for the one client that stores the body
+    // deliberately, in `localStorage`, and echoes the tag back itself. See
+    // `api_ui_strings`.
+    if let Some(etag) = &res.etag {
+        if let Ok(h) = format!("ETag: {etag}").parse() {
+            headers.push(h);
+        }
+    }
 
     // A binary body wins where one is set — a font cannot travel as a `String`,
     // and `from_data` is the same writer with a byte slice rather than UTF-8.
@@ -835,13 +860,14 @@ mod tests {
     use super::*;
 
     /// Every label `route_label` is allowed to produce.
-    const LABELS: [&str; 13] = [
+    const LABELS: [&str; 14] = [
         "/",
         "/public",
         "/public/signin",
         "/public/signout",
         "/public/language",
         "/public/font",
+        "/api/v1/ui/strings",
         "/public/signin/:token",
         "/public/request/:id",
         "/api/v1/work",

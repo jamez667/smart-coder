@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { useStrings } from "./strings";
 
 /// The way in, and the only one.
 ///
@@ -19,6 +20,7 @@ import { api } from "./api";
 /// where a navigation threw the reader out of whatever they were doing to land
 /// on a fresh document.
 export function SignInDialog({ onClose }: { onClose: () => void }) {
+  const s = useStrings();
   const ref = useRef<HTMLDialogElement>(null);
   const [sent, setSent] = useState(false);
   const [problem, setProblem] = useState("");
@@ -51,16 +53,16 @@ export function SignInDialog({ onClose }: { onClose: () => void }) {
       <button
         className="close"
         type="button"
-        aria-label="Close"
+        aria-label={s.dialog_close}
         onClick={() => ref.current?.close()}
       >
+        {/* Decorative, and the reason the button carries an `aria-label`: the
+            glyph is a multiplication sign, not a word, and a screen reader
+            reading it aloud says nothing useful. */}
         ×
       </button>
-      <h2>Sign in</h2>
-      <p>
-        Filing a request needs an email address — it is how you find your way
-        back to what you filed, and it keeps this form from being a free-for-all.
-      </p>
+      <h2>{s.signin_title}</h2>
+      <p>{s.signin_intro}</p>
       {problem && (
         <p className="problem" role="alert">
           {problem}
@@ -71,10 +73,7 @@ export function SignInDialog({ onClose }: { onClose: () => void }) {
            answers identically on purpose, so that somebody probing addresses
            learns nothing; saying "check your email" only when there was one to
            send to would give it all back. */
-        <p role="status">
-          If that address can sign in here, a link is on its way. It works once,
-          for fifteen minutes.
-        </p>
+        <p role="status">{s.signin_sent}</p>
       ) : (
         <>
           <form
@@ -90,7 +89,7 @@ export function SignInDialog({ onClose }: { onClose: () => void }) {
                 .finally(() => setBusy(false));
             }}
           >
-            <label htmlFor="dlg-email">Email</label>
+            <label htmlFor="dlg-email">{s.signin_email_label}</label>
             <input
               id="dlg-email"
               name="email"
@@ -99,20 +98,17 @@ export function SignInDialog({ onClose }: { onClose: () => void }) {
               autoCapitalize="off"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="you@example.com"
+              placeholder={s.signin_email_placeholder}
             />
             <button type="submit" disabled={busy}>
-              Email me a link
+              {s.signin_submit}
             </button>
           </form>
-          <p className="meta">
-            No password. We send a link that works once, for fifteen minutes.
-            Filing for the first time creates the account.
-          </p>
+          <p className="meta">{s.signin_no_password_note}</p>
         </>
       )}
       <details className="pw">
-        <summary>Admin login</summary>
+        <summary>{s.signin_password_heading}</summary>
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -129,7 +125,7 @@ export function SignInDialog({ onClose }: { onClose: () => void }) {
               .finally(() => setBusy(false));
           }}
         >
-          <label htmlFor="dlg-login">Email</label>
+          <label htmlFor="dlg-login">{s.signin_email_label}</label>
           <input
             id="dlg-login"
             name="login"
@@ -138,12 +134,12 @@ export function SignInDialog({ onClose }: { onClose: () => void }) {
             autoCapitalize="off"
             autoCorrect="off"
             spellCheck={false}
-            placeholder="you@example.com"
+            placeholder={s.signin_email_placeholder}
           />
-          <label htmlFor="dlg-password">Password</label>
+          <label htmlFor="dlg-password">{s.signin_password_label}</label>
           <input id="dlg-password" name="password" type="password" required />
           <button type="submit" disabled={busy}>
-            Sign in
+            {s.signin_password_submit}
           </button>
         </form>
       </details>

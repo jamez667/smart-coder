@@ -1200,18 +1200,72 @@ list, and no markup or format placeholder anywhere in a catalogue. Strings that
 need a value in the middle are split into two fields — a translator reordering
 `{0}` and `{1}` is a runtime panic, and it is a mistake translation invites.
 
-**Only the public half is translated.** The private review pages have exactly one
-reader, and a catalogue for them is weight paid for nobody. The intake *kinds*
-are untranslated too, and deliberately: the slug is what the form submits and
-what the developer reads on the review page, so translating the visible text
-would have a filer and a reviewer naming the same kind differently. Only the
-field's label translates.
+**Everything is translated, and that reverses what this section used to say.**
+It read "only the public half": the private review pages had one reader, and a
+catalogue for them was weight paid for nobody. The landing page, the sign-in
+dialog, the review pages, the administrative lists and the setup wizard are all
+translated now.
+
+The argument that overturned it was already in the catalogue, on the
+administrative *menu* entries — those were translated because the one
+administrator per server may not read English, and the masthead around them
+already was. That argument was never about the menu. A French menu whose every
+entry opens an English page is worse than an English menu: it promises a
+translated surface and withdraws it one click later, and the reader who needed
+the translation is the one who finds out. The wizard is included for a sharper
+reason still — it is the first screen on a fresh server, before any cookie or
+account exists, so `Accept-Language` is the only signal there will ever be, and
+it is the one screen where the wrong language means the server cannot be claimed
+at all.
+
+What stays untranslated is narrow and mechanical: repository names, email
+addresses, machine labels, minted keys, the `SC` monogram, decorative glyphs,
+URLs and filenames. The intake *kinds* stay untranslated as **wire values** —
+the slug is what the form submits and what the server matches on, so translating
+it would have a filer and a reviewer naming the same kind differently. Only the
+field's label translates, and `kind_feature`/`kind_bug` are where that label
+lives.
+
+**The client fetches the catalogue; the server sends it**
+<!--@ sc_server::routes::api_ui_strings -->. `GET /api/v1/ui/strings` answers the
+negotiated catalogue as a flat object of field to text, with the locale code
+beside it so the client can set `<html lang>` — a served document is one static
+file for every language, so the attribute can only be corrected once the
+negotiation is known. It is reachable by anybody and rate-limited like `/me`
+rather than like a probe: a stranger sees the landing page before holding any
+credential, and neither it nor the sign-in dialog can be drawn without these.
+
+The catalogue is `&'static str` compiled into the binary, so it **cannot change
+while the process runs** — only a redeploy alters a string, and a redeploy
+replaces the process. That makes a client-side copy in `localStorage` safe to
+render from before any request lands, which removes the blank first paint. It
+also makes a validator necessary rather than merely nice: a cache only a deploy
+can invalidate has no natural expiry, so without one a reader keeps the strings
+they first saw for ever, including past the deploy that fixed a mistranslation.
+The response carries an `ETag` over its exact bytes and honours `If-None-Match`
+with a 304; the client stores the tag beside the strings and revalidates on
+every load. A TTL was considered and rejected — any value is either too short
+(re-fetching something that changes on deploys) or too long (a fix still on the
+reader's screen until it lapses). The tag covers the locale code as well, so
+switching language cannot be answered from the catalogue just switched away
+from.
 
 `POST /public/language` is reachable **signed out**, since somebody who cannot
 read the sign-in page is precisely who needs it. It carries no `next=` parameter
 and performs no redirect — a "return to where you were" field on a route anyone
 can reach is an open redirect waiting to be found, and this surface is small
 enough that landing on the sign-in page in the chosen language costs nothing.
+
+The interface has its own switcher in the masthead now, on every page and
+reachable signed out for the same reason. It posts to `POST /api/v1/ui/language`
+— **a twin of the form route, not a replacement.** That one is a `<form>` target
+and must answer a document, because a form POST is a navigation; this one answers
+the catalogue it has just switched to, so the interface redraws in one round trip
+rather than posting and then re-fetching and drawing the page twice in the
+language the reader has just rejected. Both write the cookie through one builder,
+so they cannot come to disagree about what a language selection means. The
+options are listed by endonym — "Français", never "French" — because naming them
+in a language the reader cannot read defeats the control.
 
 The `sc_lang` cookie is **not** `HttpOnly` and is `SameSite=Lax`, both departing
 from the session cookie: it holds a preference rather than a credential, nothing

@@ -191,6 +191,36 @@ impl Me {
     }
 }
 
+/// The negotiated catalogue, as the client fetches it.
+///
+/// **The whole catalogue in one response, not a string at a time.** It is a few
+/// kilobytes of `&'static str` already compiled into the binary; a per-key
+/// endpoint would be two hundred round trips to draw one page, and a per-screen
+/// one would mean the server knowing which screens the client has.
+///
+/// `locale` travels beside the strings rather than being inferred from them,
+/// because the client has to put it in `<html lang>` — and a page whose text is
+/// French while its `lang` says English is read aloud in the wrong accent by a
+/// screen reader and offered to the wrong translation prompt by the browser.
+/// The client cannot derive the code from the strings, and should not try.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiStrings {
+    /// The language actually negotiated — **not** what the caller asked for. A
+    /// browser sending `Accept-Language: de` gets `en` here, and the client
+    /// stamps `en`, which is the truth about the page it is holding.
+    pub locale: &'static str,
+    pub strings: &'static crate::i18n::Strings,
+}
+
+impl UiStrings {
+    pub fn of(locale: crate::i18n::Locale) -> Self {
+        UiStrings {
+            locale: locale.code(),
+            strings: locale.strings(),
+        }
+    }
+}
+
 /// A request as its **own filer** may see it.
 ///
 /// **The narrow view, and narrow by construction rather than by filtering.**

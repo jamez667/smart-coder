@@ -11,6 +11,7 @@ import { SignInDialog } from "./SignInDialog";
 import { ReviewDetail, ReviewList } from "./Review";
 import { Accounts, Daemons, Owners, Repos, Settings } from "./Admin";
 import { Setup } from "./Setup";
+import { useStrings } from "./strings";
 
 /// The whole interface.
 ///
@@ -32,6 +33,7 @@ const ANONYMOUS: Me = {
 };
 
 export function App() {
+  const s = useStrings();
   const [me, setMe] = useState<Me | null>(null);
   const [mine, setMine] = useState<FiledRequest[]>([]);
   const [review, setReview] = useState<ReviewRequest[]>([]);
@@ -205,7 +207,16 @@ export function App() {
       </main>
       <footer className="bar footer">
         <div className="bar-inner">
-          <p>Smart Coder — ask for a change, get a spec back.</p>
+          {/* **The brand and the tagline, joined here.** This used to be one
+              hardcoded sentence, which put the product name back inside a
+              translatable string after the catalogue had deliberately split it
+              out — so the footer and the masthead could come to call the same
+              site two different things. The catalogue holds a name and a
+              phrase; putting them together is the renderer's job. */}
+          <p>
+            {s.brand}
+            {s.footer_tagline_app}
+          </p>
         </div>
       </footer>
       {signingIn && <SignInDialog onClose={() => setSigningIn(false)} />}
@@ -215,34 +226,22 @@ export function App() {
 
 /// What a stranger sees.
 function Landing() {
+  const s = useStrings();
   return (
     <>
-      <h1>Ask for a change — get a spec back.</h1>
-      <p>
-        Describe what needs doing in your own words. It comes back as a written
-        specification for the developer to read, approve, or send back for
-        another pass.
-      </p>
+      <h1>{s.landing_headline}</h1>
+      <p>{s.landing_sub}</p>
       <section className="point">
-        <h2>Say it plainly</h2>
-        <p>
-          No issue templates and no jargon. A sentence or two about what is wrong
-          or what you want is enough to start.
-        </p>
+        <h2>{s.landing_point_1_title}</h2>
+        <p>{s.landing_point_1_body}</p>
       </section>
       <section className="point">
-        <h2>A spec, not a ticket</h2>
-        <p>
-          What comes back is a written specification grounded in the actual code,
-          not a restatement of what you asked for.
-        </p>
+        <h2>{s.landing_point_2_title}</h2>
+        <p>{s.landing_point_2_body}</p>
       </section>
       <section className="point">
-        <h2>Somebody reads it</h2>
-        <p>
-          Nothing is built until a person approves the spec. The gate is a human
-          one, and it stays that way.
-        </p>
+        <h2>{s.landing_point_3_title}</h2>
+        <p>{s.landing_point_3_body}</p>
       </section>
     </>
   );
@@ -254,12 +253,13 @@ function Landing() {
 /// a stale link should not be able to tell which of the two answered — the
 /// distinction is about who routed, and that is not their problem.
 function NotFound() {
+  const s = useStrings();
   return (
     <>
-      <h1>Not found</h1>
-      <p>There is nothing at this address.</p>
+      <h1>{s.app_not_found_title}</h1>
+      <p>{s.app_not_found_body}</p>
       <p className="meta">
-        <a href="/">Back to the start</a>
+        <a href="/">{s.app_not_found_link}</a>
       </p>
     </>
   );
@@ -279,6 +279,7 @@ function Filing({
   me: Me;
   onFiled: () => void;
 }) {
+  const s = useStrings();
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [filed, setFiled] = useState(false);
@@ -289,28 +290,21 @@ function Filing({
     // whose every submission would be refused.
     return (
       <>
-        <h1>Nothing to file against</h1>
-        <p className="meta">
-          This server is not offering any repository for requests right now.
-        </p>
+        <h1>{s.filing_none_title}</h1>
+        <p className="meta">{s.filing_none_body}</p>
       </>
     );
   }
 
   return (
     <>
-      <h1>What needs doing?</h1>
+      <h1>{s.filing_heading}</h1>
       {problem && (
         <p className="problem" role="alert">
           {problem}
         </p>
       )}
-      {filed && (
-        <p role="status">
-          Filed. Somebody writes it up, and it appears below when there is a
-          spec to read.
-        </p>
-      )}
+      {filed && <p role="status">{s.filing_done}</p>}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -337,24 +331,30 @@ function Filing({
             .finally(() => setBusy(false));
         }}
       >
-        <label htmlFor="file-text">What do you need?</label>
+        <label htmlFor="file-text">{s.filing_text_label}</label>
         <textarea
           id="file-text"
           name="text"
           required
           rows={6}
-          placeholder="Describe the change in your own words."
+          placeholder={s.filing_text_placeholder}
         />
 
-        <label htmlFor="file-kind">Is it broken, or missing?</label>
+        <label htmlFor="file-kind">{s.filing_kind_label}</label>
+        {/* **The labels translate; the values do not.** `feature` and `bug` are
+            what the server matches on and what the developer reads on the review
+            page, so a translated value would have a filer and a reviewer naming
+            the same kind differently. */}
         <select id="file-kind" name="kind" defaultValue="feature">
-          <option value="feature">Something is missing</option>
-          <option value="bug">Something is broken</option>
+          <option value="feature">{s.kind_feature}</option>
+          <option value="bug">{s.kind_bug}</option>
         </select>
 
         {repos.length > 1 && (
           <>
-            <label htmlFor="file-repo">Which project?</label>
+            <label htmlFor="file-repo">{s.filing_repo_label}</label>
+            {/* The repository names themselves are never translated — they are
+                identifiers the server refuses if they do not match. */}
             <select id="file-repo" name="repo" required defaultValue={repos[0]}>
               {repos.map((r) => (
                 <option key={r} value={r}>
@@ -366,15 +366,21 @@ function Filing({
         )}
 
         <button type="submit" disabled={busy}>
-          File it
+          {s.filing_submit}
         </button>
       </form>
 
       {mine.length > 0 && (
         <>
-          <h2>What you have filed</h2>
+          <h2>{s.file_mine_heading}</h2>
           {mine.map((r) => (
             <a className="item" key={r.id} href={`/public/request/${r.id}`}>
+              {/* **Already translated by the server**, and deliberately not
+                  re-translated here. `FiledRequest.state` is the coarse label a
+                  filer is allowed to see, chosen server-side in the negotiated
+                  locale — passing it through `stateLabel` would look it up as a
+                  wire value, miss, and render the French text unchanged while
+                  suggesting the client had a say in it. */}
               <span className="tag">{r.state}</span> {r.summary}
             </a>
           ))}

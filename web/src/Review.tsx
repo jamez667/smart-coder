@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, type Me, type ReviewRequest } from "./api";
+import { kindLabel, stateLabel, useStrings } from "./strings";
 
 /// The review list — every request a reviewer may act on.
 ///
@@ -14,17 +15,18 @@ export function ReviewList({
   requests: ReviewRequest[];
   onOpen: (id: string) => void;
 }) {
+  const s = useStrings();
   if (requests.length === 0) {
     return (
       <>
-        <h1>Nothing to review</h1>
-        <p>When something is filed and drafted, it appears here.</p>
+        <h1>{s.review_empty_title}</h1>
+        <p>{s.review_empty_body}</p>
       </>
     );
   }
   return (
     <>
-      <h1>Requests</h1>
+      <h1>{s.review_heading}</h1>
       {requests.map((r) => (
         <a
           className="item"
@@ -35,7 +37,13 @@ export function ReviewList({
             onOpen(r.id);
           }}
         >
-          <span className="tag">{r.state}</span> {r.summary}
+          {/* **A raw wire value, given a face here.** Unlike a filer's coarse
+              state, which the server translates, `ReviewRequest.state` arrives
+              as the enum name lowercased — so this rendered "awaitingreview"
+              into the page, in English, whatever language it was in. The
+              repository name beside it stays as it is: an identifier, not
+              prose. */}
+          <span className="tag">{stateLabel(s, r.state)}</span> {r.summary}
           <span className="meta"> · {r.repo}</span>
         </a>
       ))}
@@ -59,6 +67,7 @@ export function ReviewDetail({
   me: Me;
   onDone: (r: ReviewRequest) => void;
 }) {
+  const s = useStrings();
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -75,8 +84,10 @@ export function ReviewDetail({
     <>
       <h1>{request.summary}</h1>
       <p className="meta">
-        <span className="tag">{request.state}</span> {request.kind} ·{" "}
-        {request.repo}
+        {/* Both wire values, both given faces. The repository is an identifier
+            and stays as it is. */}
+        <span className="tag">{stateLabel(s, request.state)}</span>{" "}
+        {kindLabel(s, request.kind)} · {request.repo}
       </p>
 
       {/* **Why nothing has happened yet**, shown only while it is still waiting
@@ -87,8 +98,8 @@ export function ReviewDetail({
       {request.state === "queued" && request.coverage !== "served" && (
         <p className="meta" role="status">
           {request.coverage === "no-daemon-seen"
-            ? "Nothing has polled this server recently, so nothing will pick this up. Start a daemon."
-            : "Daemons are polling, but none offers this repository. Check the name matches what `queue add-repo` was given."}
+            ? s.review_no_daemon
+            : s.review_unserved}
         </p>
       )}
 
@@ -96,10 +107,10 @@ export function ReviewDetail({
           it — it only lets the system believe nobody used one. Replaces
           `the_skip_link_is_visible_rather_than_hidden`. */}
       <a className="skip" href="#decide">
-        Skip to the decision
+        {s.review_skip_to_decision}
       </a>
 
-      <h2>What was asked for</h2>
+      <h2>{s.review_asked_heading}</h2>
       {/* A child, so React renders it as a text node. This is text somebody
           typed on the internet; the server used to escape it and the ban on
           innerHTML is what replaces that. */}
@@ -107,7 +118,7 @@ export function ReviewDetail({
 
       {request.spec && (
         <>
-          <h2>The drafted spec</h2>
+          <h2>{s.review_spec_heading}</h2>
           {/* Model-authored. Same rule, and this is the field it exists for. */}
           <pre>{request.spec}</pre>
         </>
@@ -115,13 +126,21 @@ export function ReviewDetail({
 
       {request.note && (
         <>
-          <h2>Note</h2>
+          <h2>{s.review_note_heading}</h2>
           <pre>{request.note}</pre>
         </>
       )}
 
+      {/* **Split around the value rather than formatted with it.** The
+          catalogue holds no `{}` placeholders — a translator reordering or
+          dropping one is a runtime fault — so the sentence is a prefix and the
+          renderer puts the path after it. The path is on the administrator's own
+          machine and is never translated. */}
       {request.artifact_dir && (
-        <p className="meta">It landed in {request.artifact_dir}</p>
+        <p className="meta">
+          {s.review_landed_before}
+          {request.artifact_dir}
+        </p>
       )}
 
       {problem && <p className="note">{problem}</p>}
@@ -152,6 +171,7 @@ function Decision({
   busy: boolean;
   act: (run: () => Promise<ReviewRequest>) => void;
 }) {
+  const s = useStrings();
   const [note, setNote] = useState("");
 
   // A held request is a different decision: release it or discard it. The
@@ -160,7 +180,7 @@ function Decision({
   if (request.state === "quarantined") {
     return (
       <div className="decide" id="decide">
-        <h2>Your call</h2>
+        <h2>{s.review_decide_heading}</h2>
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -168,7 +188,7 @@ function Decision({
           }}
         >
           <button type="submit" disabled={busy}>
-            Release it — this is not spam
+            {s.owner_release}
           </button>
         </form>
         <form
@@ -178,24 +198,24 @@ function Decision({
           }}
         >
           <button type="submit" disabled={busy}>
-            Discard
+            {s.review_discard}
           </button>
         </form>
-        <p className="meta">Leaving it here decides nothing.</p>
+        <p className="meta">{s.review_quarantine_leaving}</p>
       </div>
     );
   }
 
   return (
     <div className="decide" id="decide">
-      <h2>Your call</h2>
+      <h2>{s.review_decide_heading}</h2>
       <form
         onSubmit={(e) => {
           e.preventDefault();
           act(() => api.sendBack(request.id, note));
         }}
       >
-        <label htmlFor="notes">Send it back — what should change?</label>
+        <label htmlFor="notes">{s.review_send_back_label}</label>
         {/* `required` in the markup, not a check in JavaScript. A send-back with
             no reason produces a redraft that repeats itself, and the browser
             refusing an empty field is one fewer thing to remember. */}
@@ -205,10 +225,10 @@ function Decision({
           required
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="The redraft grounds on this, so be specific."
+          placeholder={s.review_send_back_placeholder}
         />
         <button type="submit" disabled={busy}>
-          Send back
+          {s.review_send_back_submit}
         </button>
       </form>
 
@@ -227,7 +247,7 @@ function Decision({
           }}
         >
           <button type="submit" disabled={busy}>
-            Approve this spec
+            {s.review_accept}
           </button>
         </form>
       )}
@@ -239,12 +259,10 @@ function Decision({
         }}
       >
         <button type="submit" disabled={busy}>
-          Discard
+          {s.review_discard}
         </button>
       </form>
-      <p className="meta">
-        Leaving this page decides nothing — it will still be here.
-      </p>
+      <p className="meta">{s.review_leaving_decides_nothing}</p>
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
   type RepoRecord,
   type SettingsView,
 } from "./api";
+import { useStrings } from "./strings";
 
 /// The administrative pages.
 ///
@@ -44,6 +45,10 @@ function useList<T>(
 /// its value — there is no read path for one anywhere — so these fields are
 /// always blank and submitting them blank keeps what is there.
 export function Settings() {
+  // `t` for the catalogue, because `s` is already the settings on this page. The
+  // other components use `s` for the strings; here the collision would be worse
+  // than the inconsistency.
+  const t = useStrings();
   const [s, setS, problem] = useList(() => admin.settings());
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +60,7 @@ export function Settings() {
       .saveSettings(patch)
       .then((next) => {
         setS(next);
-        setNote("Saved.");
+        setNote(t.admin_saved);
       })
       .catch((e: ApiError) => setError(e.message));
   };
@@ -65,15 +70,16 @@ export function Settings() {
 
   return (
     <>
-      <h1>Settings</h1>
+      <h1>{t.settings_heading}</h1>
       {note && <p className="note">{note}</p>}
+      {/* **Already translated by the server**, like every `ApiError.message`.
+          The API answers a refusal in the negotiated locale, so re-translating
+          it here would mean the client keeping a second copy of every refusal
+          the server can produce. */}
       {error && <p className="note">{error}</p>}
 
-      <h2>The public site</h2>
-      <p className="meta">
-        Whether strangers can file requests here at all. A freshly claimed server
-        starts with this off.
-      </p>
+      <h2>{t.settings_public_heading}</h2>
+      <p className="meta">{t.settings_public_note}</p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -81,11 +87,11 @@ export function Settings() {
         }}
       >
         <button type="submit">
-          {s.public ? "Turn the public site off" : "Turn the public site on"}
+          {s.public ? t.settings_public_off : t.settings_public_on}
         </button>
       </form>
 
-      <h2>What filers see</h2>
+      <h2>{t.settings_filers_heading}</h2>
       <SettingsForm
         fields={[]}
         extra={
@@ -95,34 +101,24 @@ export function Settings() {
               defaultChecked={s.show_spec ?? true}
               onChange={(e) => save({ show_spec: e.target.checked })}
             />{" "}
-            Let a filer read the spec drafted from their own request
+            {t.settings_show_spec}
           </label>
         }
         onSave={save}
       />
 
-      <h2>Set in the stack, not here</h2>
-      <p className="meta">
-        The address, the site name, the mail settings and the spam screener are
-        environment variables. Change them where the container is configured,
-        then redeploy.
-        They used to be editable here and seeded from the stack, which meant a
-        variable could be set, correct, and silently ignored.
-      </p>
+      <h2>{t.settings_stack_heading}</h2>
+      <p className="meta">{t.settings_stack_note}</p>
 
-
-      <h2>Ceilings</h2>
-      <p className="meta">
-        What this server will spend in a day. Blank means the built-in default,
-        which is not the same as zero.
-      </p>
+      <h2>{t.settings_ceilings_heading}</h2>
+      <p className="meta">{t.settings_ceilings_note}</p>
       <SettingsForm
         numeric
         fields={[
-          { name: "max_daily_filings", label: "Filings a day", value: String(s.max_daily_filings ?? "") },
-          { name: "max_daily_drafts", label: "Drafts a day", value: String(s.max_daily_drafts ?? "") },
-          { name: "max_accounts", label: "Accounts", value: String(s.max_accounts ?? "") },
-          { name: "max_outstanding_links", label: "Outstanding sign-in links", value: String(s.max_outstanding_links ?? "") },
+          { name: "max_daily_filings", label: t.settings_max_filings, value: String(s.max_daily_filings ?? "") },
+          { name: "max_daily_drafts", label: t.settings_max_drafts, value: String(s.max_daily_drafts ?? "") },
+          { name: "max_accounts", label: t.settings_max_accounts, value: String(s.max_accounts ?? "") },
+          { name: "max_outstanding_links", label: t.settings_max_links, value: String(s.max_outstanding_links ?? "") },
         ]}
         onSave={save}
       />
@@ -143,6 +139,7 @@ function SettingsForm({
   numeric?: boolean;
   extra?: React.ReactNode;
 }) {
+  const t = useStrings();
   return (
     <form
       onSubmit={(e) => {
@@ -172,31 +169,31 @@ function SettingsForm({
         </div>
       ))}
       {extra}
-      <button type="submit">Save</button>
+      <button type="submit">{t.admin_save}</button>
     </form>
   );
 }
 
 /// Who may review, and for what.
 export function Owners() {
+  const t = useStrings();
   const [list, setList, problem] = useList(() => admin.owners());
   const [error, setError] = useState<string | null>(null);
   if (problem) return <p className="note">{problem}</p>;
   if (!list) return null;
   return (
     <>
-      <h1>Owners</h1>
-      <p className="meta">
-        An owner signs in with a username and password, and reviews requests for
-        the repositories you name here. They can send work back, release it and
-        discard it — they cannot accept it.
-      </p>
+      <h1>{t.owners_heading}</h1>
+      <p className="meta">{t.owners_note}</p>
       {error && <p className="note">{error}</p>}
       {list.map((o) => (
+        // The login is an email address and the repositories are names. Neither
+        // is translated: they are what the operator typed and what the server
+        // matches on.
         <div className="item" key={o.login}>
           {o.login} <span className="meta">{o.repos.join(", ")}</span>
           {o.revoked ? (
-            <span className="tag">revoked</span>
+            <span className="tag">{t.admin_revoked_tag}</span>
           ) : (
             <form
               onSubmit={(e) => {
@@ -204,12 +201,12 @@ export function Owners() {
                 admin.revoke<OwnerRecord[]>("owners", o.login).then(setList).catch((x: ApiError) => setError(x.message));
               }}
             >
-              <button type="submit">Revoke</button>
+              <button type="submit">{t.admin_revoke}</button>
             </form>
           )}
         </div>
       ))}
-      <h2>Add an owner</h2>
+      <h2>{t.owners_add_heading}</h2>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -226,11 +223,11 @@ export function Owners() {
             .catch((x: ApiError) => setError(x.message));
         }}
       >
-        <label htmlFor="login">Email</label>
+        <label htmlFor="login">{t.owners_email_label}</label>
         <input id="login" name="login" type="email" required autoComplete="off" />
-        <label htmlFor="repos">Repositories, separated by commas</label>
+        <label htmlFor="repos">{t.owners_repos_label}</label>
         <input id="repos" name="repos" required autoComplete="off" />
-        <button type="submit">Add</button>
+        <button type="submit">{t.admin_add}</button>
       </form>
     </>
   );
@@ -238,6 +235,7 @@ export function Owners() {
 
 /// What the public site collects for.
 export function Repos() {
+  const t = useStrings();
   const [list, setList, problem] = useList(() => admin.repos());
   const [error, setError] = useState<string | null>(null);
   const [unserved, setUnserved] = useState<string | null>(null);
@@ -262,23 +260,29 @@ export function Repos() {
   if (!list) return null;
   return (
     <>
-      <h1>Repositories</h1>
+      <h1>{t.repos_heading}</h1>
       {error && <p className="note">{error}</p>}
+      {/* Split around the repository name rather than formatted with it: the
+          catalogue carries no placeholders, and the name is an identifier the
+          operator typed. */}
       {unserved && (
         <p className="note">
-          No machine has offered {unserved}. Enabling it anyway means requests
-          filed against it will wait until one does.{" "}
+          {t.repos_unserved_before}
+          {unserved}
+          {t.repos_unserved_after}{" "}
           <button type="button" onClick={() => add(unserved, true)}>
-            Enable it anyway
+            {t.repos_enable_anyway}
           </button>
         </p>
       )}
       {list.map((r) => (
         <div className="item" key={r.name}>
-          {r.name}{" "}
-          <span className="meta">{r.served_by ?? "no machine has offered it"}</span>
+          {/* The repository name and the machine's label are both identifiers.
+              Only the *absence* of a machine is a phrase, so only that
+              translates. */}
+          {r.name} <span className="meta">{r.served_by ?? t.repos_no_machine}</span>
           {r.disabled ? (
-            <span className="tag">off</span>
+            <span className="tag">{t.repos_off_tag}</span>
           ) : (
             <form
               onSubmit={(e) => {
@@ -286,12 +290,12 @@ export function Repos() {
                 admin.revoke<RepoRecord[]>("repos", r.name).then(setList).catch((x: ApiError) => setError(x.message));
               }}
             >
-              <button type="submit">Turn it off</button>
+              <button type="submit">{t.repos_turn_off}</button>
             </form>
           )}
         </div>
       ))}
-      <h2>Enable a repository</h2>
+      <h2>{t.repos_add_heading}</h2>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -299,9 +303,9 @@ export function Repos() {
           add(String(data.get("name") ?? ""), false);
         }}
       >
-        <label htmlFor="name">Repository name</label>
+        <label htmlFor="name">{t.repos_name_label}</label>
         <input id="name" name="name" required autoComplete="off" />
-        <button type="submit">Enable</button>
+        <button type="submit">{t.repos_enable}</button>
       </form>
     </>
   );
@@ -309,6 +313,7 @@ export function Repos() {
 
 /// The machines that draft specs.
 export function Daemons() {
+  const t = useStrings();
   const [list, setList, problem] = useList(() => admin.daemons());
   const [minted, setMinted] = useState<{ label: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -316,15 +321,19 @@ export function Daemons() {
   if (!list) return null;
   return (
     <>
-      <h1>Machines</h1>
+      <h1>{t.daemons_heading}</h1>
       {error && <p className="note">{error}</p>}
       {minted && (
         <div className="note">
+          {/* The label leads the sentence, so the catalogue holds only what
+              follows it — the same split-not-format rule, with nothing before
+              the value to hold. The label is the operator's own word. */}
           <p>
-            <strong>{minted.label}</strong> — this key is shown once and cannot be
-            recovered. Put it in that machine&apos;s configuration now.
+            <strong>{minted.label}</strong>
+            {t.daemons_minted_after}
           </p>
-          {/* A text node, and the only copy: the volume holds a hash. */}
+          {/* A text node, and the only copy: the volume holds a hash. Never
+              translated for the obvious reason — it is a secret, not prose. */}
           <pre>{minted.key}</pre>
         </div>
       )}
@@ -332,7 +341,7 @@ export function Daemons() {
         <div className="item" key={d.label}>
           {d.label}
           {d.revoked ? (
-            <span className="tag">revoked</span>
+            <span className="tag">{t.admin_revoked_tag}</span>
           ) : (
             <form
               onSubmit={(e) => {
@@ -340,12 +349,12 @@ export function Daemons() {
                 admin.revoke<DaemonRecord[]>("daemons", d.label).then(setList).catch((x: ApiError) => setError(x.message));
               }}
             >
-              <button type="submit">Revoke</button>
+              <button type="submit">{t.admin_revoke}</button>
             </form>
           )}
         </div>
       ))}
-      <h2>Add a machine</h2>
+      <h2>{t.daemons_add_heading}</h2>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -360,9 +369,9 @@ export function Daemons() {
             .catch((x: ApiError) => setError(x.message));
         }}
       >
-        <label htmlFor="label">A name for it</label>
+        <label htmlFor="label">{t.daemons_label_label}</label>
         <input id="label" name="label" required autoComplete="off" />
-        <button type="submit">Mint a key</button>
+        <button type="submit">{t.daemons_mint}</button>
       </form>
     </>
   );
@@ -370,24 +379,23 @@ export function Daemons() {
 
 /// Who can file, and the switch that stops them.
 export function Accounts() {
+  const t = useStrings();
   const [list, setList, problem] = useList(() => admin.accounts());
   const [error, setError] = useState<string | null>(null);
   if (problem) return <p className="note">{problem}</p>;
   if (!list) return null;
   return (
     <>
-      <h1>Who can file</h1>
-      <p className="meta">
-        Revoked accounts stay listed. A list that silently shrinks cannot answer
-        &quot;did I already deal with that?&quot;.
-      </p>
+      <h1>{t.accounts_heading}</h1>
+      <p className="meta">{t.accounts_note}</p>
       {error && <p className="note">{error}</p>}
       {list.map((a) => (
         <div className="item" key={a.id}>
+          {/* A masked address — `j***@example.com`. Data, not prose. */}
           {a.email_hint}
-          {a.has_password && <span className="tag">password</span>}
+          {a.has_password && <span className="tag">{t.accounts_password_tag}</span>}
           {a.revoked ? (
-            <span className="tag">revoked</span>
+            <span className="tag">{t.admin_revoked_tag}</span>
           ) : (
             <form
               onSubmit={(e) => {
@@ -395,7 +403,7 @@ export function Accounts() {
                 admin.revoke<AccountView[]>("accounts", a.id).then(setList).catch((x: ApiError) => setError(x.message));
               }}
             >
-              <button type="submit">Revoke</button>
+              <button type="submit">{t.admin_revoke}</button>
             </form>
           )}
         </div>
