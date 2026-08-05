@@ -85,11 +85,9 @@ export function Settings() {
         </button>
       </form>
 
-      <h2>What this site is called</h2>
+      <h2>What filers see</h2>
       <SettingsForm
-        fields={[
-          { name: "site_name", label: "Site name", value: s.site_name },
-        ]}
+        fields={[]}
         extra={
           <label>
             <input
@@ -103,34 +101,25 @@ export function Settings() {
         onSave={save}
       />
 
-      <h2>Sending mail</h2>
+      <h2>Set in the stack, not here</h2>
       <p className="meta">
-        Sign-in links are sent through this. Without it, nobody but the
-        administrator and the owners can sign in.
+        The address, the site name and the mail settings are environment
+        variables. Change them where the container is configured, then redeploy.
+        They used to be editable here and seeded from the stack, which meant a
+        variable could be set, correct, and silently ignored.
       </p>
-      <SettingsForm
-        fields={[
-          { name: "mail_provider", label: "Provider", value: s.mail_provider },
-          { name: "mail_from", label: "From address", value: s.mail_from },
-          { name: "mail_from_name", label: "From name", value: s.mail_from_name },
-        ]}
-        onSave={save}
-      />
 
-      <h2>Secrets</h2>
+      <h2>Screening key</h2>
       <p className="meta">
-        {s.mail_key_set ? "A mail key is set." : "No mail key is set."}{" "}
-        {s.screen_key_set ? "A screening key is set." : "No screening key is set."}{" "}
-        Values are never shown — leaving a field blank keeps what is there.
-        Changing one needs a sign-in from the last five minutes.
+        {s.screen_key_set
+          ? "A screening key is set."
+          : "No screening key is set, so filings are not screened."}{" "}
+        The value is never shown — leaving the field blank keeps what is there.
+        Changing it needs a sign-in from the last five minutes.
       </p>
       <SettingsForm
         secret
-        fields={[
-          { name: "mail_key", label: "Mail key", value: "" },
-          { name: "screen_key", label: "Screening key", value: "" },
-          { name: "base_url", label: "This server's address", value: s.base_url },
-        ]}
+        fields={[{ name: "screen_key", label: "Screening key", value: "" }]}
         onSave={save}
       />
 

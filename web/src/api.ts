@@ -133,14 +133,11 @@ export const api = {
 /// secret anywhere in this server, and the API does not add one — so the key
 /// fields here are booleans, and the forms that write them are always blank.
 export interface SettingsView {
+  // The address, the site name and the mail settings are environment variables
+  // and are not on this surface at all — there is nothing here to read or
+  // write. See `crates/sc-server/src/settings.rs` for why they moved.
   public: boolean;
-  site_name: string;
-  base_url: string;
   show_spec: boolean | null;
-  mail_provider: string;
-  mail_from: string;
-  mail_from_name: string;
-  mail_key_set: boolean;
   screen_url: string;
   screen_model: string;
   screen_key_set: boolean;
@@ -236,10 +233,9 @@ export const setup = {
   /// existing rather than refusing, so a stranger cannot tell a claimed server
   /// from one that never had it.
   state: () => get<SetupState>("setup"),
-  /// Step one. The address is validated before the code is spent, so a typo
-  /// does not burn the one code the operator has.
-  spendCode: (code: string, base_url: string) =>
-    post<{ step: string }>("setup/code", { code, base_url }),
+  /// Step one. The address is an environment variable, so there is nothing to
+  /// mistype here and nothing that could burn the one code the operator has.
+  spendCode: (code: string) => post<{ step: string }>("setup/code", { code }),
   /// Step two, bound to the browser that spent the code by a cookie the server
   /// set. Without that binding, whoever arrived next could set their own
   /// password and own the server.

@@ -43,9 +43,14 @@ test.beforeAll(() => {
     "-e",
     "SC_SERVER_DAEMON_KEYS=harness:0123456789abcdef0123456789abcdef",
     "-e",
+    `SC_SERVER_PUBLIC_BASE_URL=http://127.0.0.1:${PORT}`,
+    "-e",
+    "SC_SERVER_PUBLIC_REPOS=intake",
+    "-e",
     "SC_SERVER_UI=1",
-    // **No public surface and no base URL.** This is a fresh volume, which is
-    // the state the wizard exists for.
+    // **Unclaimed, but configured.** The address is an environment variable
+    // now, so a fresh volume has one before anybody reaches the wizard — what
+    // the wizard establishes is who owns the server, and nothing else.
     process.env.SC_IMAGE ?? "sc-server:local",
   );
 });
@@ -74,10 +79,10 @@ test("a fresh volume is claimed through the interface", async ({ page }) => {
     "Set up this server",
   );
 
-  // **A typo in the address must not burn the code.** The operator has one, and
-  // getting another means restarting the container.
-  await page.locator("#code").fill(code!);
-  await page.locator("#base_url").fill("not-an-address");
+  // **A wrong code is refused and does not advance.** There is no address to
+  // mistype any more — it comes from the stack, and the server refuses to start
+  // without a valid one.
+  await page.locator("#code").fill("XYZ-9999");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator(".note")).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
@@ -85,10 +90,8 @@ test("a fresh volume is claimed through the interface", async ({ page }) => {
     { timeout: 5000 },
   );
 
-  // Now properly. `127.0.0.1` is allowed without https, which is what makes a
-  // local trial possible at all.
+  // The real one.
   await page.locator("#code").fill(code!);
-  await page.locator("#base_url").fill(base);
   await page.getByRole("button", { name: "Continue" }).click();
 
   // Step two: the credential that will own this.

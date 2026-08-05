@@ -110,11 +110,14 @@ test("the settings page never shows a stored secret", async ({ page }) => {
   // field it would be typed into is empty.
   await page.goto("/settings");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Settings");
-  await expect(page.locator("#mail_key")).toHaveValue("");
   await expect(page.locator("#screen_key")).toHaveValue("");
   // And it is a password field, so a screenshot or a shoulder does not read it
   // back either.
-  await expect(page.locator("#mail_key")).toHaveAttribute("type", "password");
+  await expect(page.locator("#screen_key")).toHaveAttribute("type", "password");
+  // **The mail key is not on this page at all**, because it is an environment
+  // variable now — there is no field to leave empty.
+  await expect(page.locator("#mail_key")).toHaveCount(0);
+  await expect(page.locator("#base_url")).toHaveCount(0);
 });
 
 test("a minted machine key is shown once, in the response and nowhere else", async ({

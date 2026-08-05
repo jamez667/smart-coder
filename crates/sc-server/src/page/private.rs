@@ -588,6 +588,9 @@ pub fn repos_page(
 /// being told before.
 pub fn settings_page(
     s: &crate::settings::Settings,
+    // Where this server answers, from the environment. The settings no longer
+    // hold it, so the page is told rather than reading it.
+    host: &str,
     fresh: bool,
     saved: Option<&str>,
     error: Option<&str>,
@@ -646,32 +649,21 @@ pub fn settings_page(
              <form method=\"post\" action=\"/settings/public\">\
              <button type=\"submit\">{toggle}</button></form>\
              <form method=\"post\" action=\"/settings/site\">\
-             <label for=\"site_name\">What the masthead calls it</label>\
-             <input id=\"site_name\" name=\"site_name\" value=\"{site}\" \
-             placeholder=\"{host}\">\
              <label class=\"check\"><input type=\"checkbox\" name=\"show_spec\" \
              value=\"yes\"{spec}> Let a filer read the spec drafted from their \
              own request</label>\
              <button type=\"submit\">Save</button></form>\
-             <h2>Address and secrets</h2>\
-             <p class=\"meta\">Sign-in links are built from the address. Changing \
-             it <strong>signs everybody out</strong>, including you: the cookies \
-             belong to the old one.</p>{gate}\
+             <h2>Set in the stack, not here</h2>\
+             <p class=\"meta\">This server answers at <strong>{host}</strong>. \
+             The address, the site name and the mail settings are environment \
+             variables — change them where the container is configured and \
+             redeploy. They used to be editable here and seeded from the stack, \
+             which meant a variable could be set, correct, and silently \
+             ignored.</p>\
+             <h2>Secrets</h2>{gate}\
              <form method=\"post\" action=\"/settings/secret\">\
-             <label for=\"base_url\">This address</label>\
-             <input id=\"base_url\" name=\"base_url\" value=\"{base}\"{disabled}>\
-             {mail_key}{screen_key}\
+             {screen_key}\
              <button type=\"submit\"{disabled}>Save</button></form>\
-             <h2>Sending email</h2>\
-             <form method=\"post\" action=\"/settings/mail\">\
-             <label for=\"mail_provider\">Provider</label>\
-             <input id=\"mail_provider\" name=\"mail_provider\" value=\"{provider}\" \
-             placeholder=\"brevo, resend or postmark\">\
-             <label for=\"mail_from\">From address</label>\
-             <input id=\"mail_from\" name=\"mail_from\" value=\"{from}\">\
-             <label for=\"mail_from_name\">From name</label>\
-             <input id=\"mail_from_name\" name=\"mail_from_name\" value=\"{from_name}\">\
-             <button type=\"submit\">Save</button></form>\
              <h2>Screening</h2>\
              <p class=\"meta\">{screening_state}</p>\
              <form method=\"post\" action=\"/settings/screen\">\
@@ -706,21 +698,15 @@ pub fn settings_page(
             } else {
                 "Turn it on"
             },
-            site = esc(&s.site_name),
-            host = esc(&crate::config::host_label(&s.base_url)),
+            host = esc(host),
             spec = if s.show_spec.unwrap_or(true) {
                 " checked"
             } else {
                 ""
             },
-            base = esc(&s.base_url),
             disabled = disabled,
             gate = gate,
-            mail_key = secret("Mail API key", "mail_key", &s.mail_key),
             screen_key = secret("Screening API key", "screen_key", &s.screen_key),
-            provider = esc(&s.mail_provider),
-            from = esc(&s.mail_from),
-            from_name = esc(&s.mail_from_name),
             screening_state = if s.has_screening() {
                 "Filings are screened before a daemon may claim them."
             } else {

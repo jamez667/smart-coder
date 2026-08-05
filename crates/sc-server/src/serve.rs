@@ -51,6 +51,20 @@ struct Shared {
     /// Read once at startup because it decides which of two surfaces this
     /// process is, which is not a thing to change under a running server.
     ui: bool,
+    /// The address, the site name and the mail settings, as the environment
+    /// gave them.
+    ///
+    /// **These five are configured in the stack and nowhere else.** They used to
+    /// seed the settings file and then be ignored, which meant editing them did
+    /// nothing on a volume that had already been claimed — the variable was
+    /// present, correct, and silently overridden. Now the environment is the only
+    /// source, so what the stack says is what the server does.
+    ///
+    /// The trade, stated plainly: a mail key in the environment is readable by
+    /// `docker inspect` and anything that can see the process, which is what
+    /// sealing it in the settings file avoided. Changing it also means a
+    /// redeploy. Both were accepted for one source of truth.
+    env_public: Option<crate::config::PublicConfig>,
     seal_key: Option<crate::seal::SealKey>,
 }
 
@@ -133,11 +147,8 @@ fn seed_settings(store: &Store, cfg: &Config) -> Result<()> {
     let p = cfg.public.as_ref();
 
     let seed = crate::settings::Seed {
-        base_url: p.map(|p| p.base_url.as_str()),
-        site_name: p.map(|p| p.site_name.as_str()),
         public: p.is_some(),
         show_spec: p.map(|p| p.show_spec),
-        mail: p.and_then(|p| p.mail.as_ref()),
         screen: p.and_then(|p| p.screen.as_ref()),
         max_daily_filings: p.map(|p| p.max_daily_filings),
         max_daily_drafts: p.map(|p| p.max_daily_drafts),
@@ -191,11 +202,12 @@ pub fn run(cfg: &Config) -> Result<()> {
     // sealed value unreadable, and without this the server would boot happily
     // and report nothing configured — indistinguishable from a fresh install,
     // and the operator would re-enter secrets that were never lost.
-    // Checked against the mail key, which is now the first sealed value a
-    // server acquires. **Whichever value this points at has to be one that
-    // actually gets set** — pointing it at a field nothing writes turns the
-    // check into a no-op that still looks present.
-    crate::seal::usable(cfg.seal_key.as_ref(), Some(&store.settings()?.mail_key))
+    // Checked against the screening key, which is the only sealed value left —
+    // the mail key moved to the environment, where nothing seals it.
+    // **Whichever value this points at has to be one that actually gets set**:
+    // pointing it at a field nothing writes turns the check into a no-op that
+    // still looks present.
+    crate::seal::usable(cfg.seal_key.as_ref(), Some(&store.settings()?.screen_key))
         .map_err(DcError::Eval)?;
 
     seed_roster(&store, cfg)?;
@@ -212,6 +224,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         accounts: Mutex::new(crate::account::AccountsCache::default()),
         seal_key: cfg.seal_key.clone(),
         ui: cfg.ui,
+        env_public: cfg.public.clone(),
     });
 
     let server = tiny_http::Server::http(cfg.addr())
@@ -603,22 +616,27 @@ fn public_now(shared: &Shared) -> Option<crate::config::PublicConfig> {
     };
 
     let key = shared.seal_key.as_ref();
+    // **The address, the name and the mail settings come from the environment.**
+    // Everything else on this struct is read from the settings file, which is
+    // where an edit through the interface lands. The split is deliberate: these
+    // five are stack configuration, and a stack edit is a redeploy either way.
+    let env = shared.env_public.as_ref();
+    let base_url = env.map(|e| e.base_url.clone()).unwrap_or_default();
     Some(crate::config::PublicConfig {
         repos: crate::config::Repos::from(repos),
         // Falls back to the address rather than being required: a masthead is a
         // label, and refusing to serve over one is a worse failure than an ugly
         // heading.
-        site_name: if settings.site_name.is_empty() {
-            crate::config::host_label(&settings.base_url)
-        } else {
-            settings.site_name.clone()
+        site_name: match env.map(|e| e.site_name.clone()) {
+            Some(n) if !n.is_empty() => n,
+            _ => crate::config::host_label(&base_url),
         },
-        base_url: settings.base_url.clone(),
         // **Derived, never stored.** Whether cookies carry `Secure` follows from
         // the address, so the two cannot drift apart into a surface that thinks
         // it is private while serving over the internet.
-        secure_cookies: crate::config::secure_for(&settings.base_url),
-        mail: settings.mail(key),
+        secure_cookies: crate::config::secure_for(&base_url),
+        base_url,
+        mail: env.and_then(|e| e.mail.clone()),
         screen: settings.screen(key),
         show_spec: settings.show_spec.unwrap_or(true),
         max_daily_filings: settings

@@ -16,12 +16,28 @@
 //! failure "it takes effect on the next request" exists to prevent, arriving by
 //! the back door of a restart.
 //!
+//! ## What is *not* here, and why
+//!
+//! The address, the site name and the mail settings are **environment variables
+//! and nothing else**. They were here, seeded once from the environment, and
+//! that combination was the worst of both: the variable was present in the stack
+//! and correct, and editing it did nothing on a volume that had already been
+//! claimed. Silent override reads as a broken feature.
+//!
+//! So they moved out entirely. The stack is their only source, and a redeploy is
+//! how they change — which is the price of a stack edit either way.
+//!
+//! The cost, recorded rather than glossed: a mail key in the environment is
+//! readable by `docker inspect`, by `/proc/<pid>/environ`, and by anything that
+//! can see the process. Sealing it here avoided that. One source of truth was
+//! judged worth more than that isolation.
+//!
 //! ## Secrets are sealed, and never given back
 //!
-//! Two values here have to be *replayed* rather than compared — a mail key goes
-//! to Brevo, a screening key goes to its provider — so they cannot be hashed the
-//! way [`crate::auth`] hashes everything else. They are sealed instead; see
-//! [`crate::seal`] for why that keeps the volume safe to copy.
+//! The screening key has to be *replayed* rather than compared — it goes to its
+//! provider — so it cannot be hashed the way [`crate::auth`] hashes everything
+//! else. It is sealed instead; see [`crate::seal`] for why that keeps the volume
+//! safe to copy.
 //!
 //! **Nothing reads a secret back to a page.** The settings surface renders
 //! presence and a date, never a value, which removes the class of leak rather
@@ -34,13 +50,6 @@ use crate::seal::{SealKey, Sealed};
 /// Everything this server decides for itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
-    /// The absolute address people reach this server at.
-    ///
-    /// Sign-in links are built from it and it decides whether cookies carry
-    /// `Secure`, so it is validated by the same function the environment was —
-    /// see [`crate::config::check_base_url`].
-    #[serde(default)]
-    pub base_url: String,
     /// Whether the public surface exists at all.
     ///
     /// **This used to be an environment variable on purpose**: a server that
@@ -51,9 +60,6 @@ pub struct Settings {
     /// switch moved, and a freshly claimed server starts with it **off**.
     #[serde(default)]
     pub public: bool,
-    /// What the masthead calls this site. A label, not a routing key.
-    #[serde(default)]
-    pub site_name: String,
     /// May a filer read the spec drafted from their own request?
     ///
     /// `Option` so "never set" is distinguishable from "set to false", which is
@@ -61,16 +67,6 @@ pub struct Settings {
     /// deliberate no on every read.
     #[serde(default)]
     pub show_spec: Option<bool>,
-
-    /// How sign-in links are sent. Empty provider means no mail is configured.
-    #[serde(default)]
-    pub mail_provider: String,
-    #[serde(default)]
-    pub mail_key: Sealed,
-    #[serde(default)]
-    pub mail_from: String,
-    #[serde(default)]
-    pub mail_from_name: String,
 
     /// The spam screener. Empty key means filings are not screened.
     #[serde(default)]
@@ -97,11 +93,6 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Is mail configured well enough to send a sign-in link?
-    pub fn has_mail(&self) -> bool {
-        !self.mail_provider.is_empty() && self.mail_key.is_set() && !self.mail_from.is_empty()
-    }
-
     /// Is screening configured?
     ///
     /// A key alone is enough — the URL and model have defaults, and demanding
@@ -109,24 +100,6 @@ impl Settings {
     /// one.
     pub fn has_screening(&self) -> bool {
         self.screen_key.is_set()
-    }
-
-    /// The mail settings, if they are complete and readable.
-    pub fn mail(&self, key: Option<&SealKey>) -> Option<crate::config::MailConfig> {
-        if !self.has_mail() {
-            return None;
-        }
-        let provider = crate::mail::Provider::parse(&self.mail_provider)?;
-        Some(crate::config::MailConfig {
-            provider,
-            api_key: crate::seal::open(key?, &self.mail_key)?,
-            from: self.mail_from.clone(),
-            from_name: if self.mail_from_name.is_empty() {
-                crate::config::DEFAULT_MAIL_FROM_NAME.to_string()
-            } else {
-                self.mail_from_name.clone()
-            },
-        })
     }
 
     /// The screening settings, if they are complete and readable.
@@ -160,22 +133,12 @@ impl Settings {
         if self.seeded {
             return false;
         }
-        if let Some(base) = from.base_url {
-            self.base_url = base.trim().to_string();
-        }
-
+        // The address, the site name and the mail settings are not seeded, and
+        // are not here at all — they are environment variables, read on every
+        // boot rather than copied once. See the module doc.
         self.public = from.public;
-        if let Some(name) = from.site_name {
-            self.site_name = name.trim().to_string();
-        }
         self.show_spec = from.show_spec;
 
-        if let (Some(mail), Some(key)) = (from.mail, key) {
-            self.mail_provider = mail.provider.slug().to_string();
-            self.mail_key = crate::seal::seal(key, &mail.api_key, now_ms);
-            self.mail_from = mail.from.clone();
-            self.mail_from_name = mail.from_name.clone();
-        }
         if let (Some(screen), Some(key)) = (from.screen, key) {
             self.screen_key = crate::seal::seal(key, &screen.api_key, now_ms);
             self.screen_url = screen.url.clone();
@@ -198,12 +161,9 @@ impl Settings {
 /// field rather than a change every caller has to be re-checked against.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Seed<'a> {
-    pub base_url: Option<&'a str>,
-    pub site_name: Option<&'a str>,
     /// Whether the environment described a public surface at all.
     pub public: bool,
     pub show_spec: Option<bool>,
-    pub mail: Option<&'a crate::config::MailConfig>,
     pub screen: Option<&'a crate::config::ScreenConfig>,
     pub max_daily_filings: Option<usize>,
     pub max_daily_drafts: Option<usize>,
@@ -262,20 +222,23 @@ mod tests {
         // Without the flag a redeploy silently reverts every change made through
         // the UI — the restart back door.
         let key = a_key();
+        // **`show_spec` rather than the address**, which is an environment
+        // variable now and is not seeded at all. The property under test is the
+        // flag, not the field it happens to be demonstrated with.
         let seed = Seed {
-            base_url: Some("https://one.example"),
+            show_spec: Some(false),
             ..Seed::default()
         };
 
         let mut s = Settings::default();
         assert!(s.seed(seed, Some(&key), 1));
-        assert_eq!(s.base_url, "https://one.example");
+        assert_eq!(s.show_spec, Some(false));
 
         // The administrator changes it through the UI, then the container
         // restarts with the old environment still in place.
-        s.base_url = "https://two.example".into();
+        s.show_spec = Some(true);
         assert!(!s.seed(seed, Some(&key), 2), "a later boot does not");
-        assert_eq!(s.base_url, "https://two.example", "the edit survived");
+        assert_eq!(s.show_spec, Some(true), "the edit survived");
     }
 
     #[test]
@@ -285,13 +248,13 @@ mod tests {
         assert!(s.seeded);
         assert!(!s.seed(
             Seed {
-                base_url: Some("https://late.example"),
+                show_spec: Some(false),
                 ..Seed::default()
             },
             None,
             2
         ));
-        assert!(s.base_url.is_empty());
+        assert_eq!(s.show_spec, None);
     }
 
     #[test]
@@ -305,18 +268,18 @@ mod tests {
         let path = dir.join("settings.json");
 
         let mut s = Settings {
-            base_url: "https://one.example".into(),
+            screen_url: "https://one.example".into(),
             ..Settings::default()
         };
         std::fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
 
         let mut cache = SettingsCache::default();
-        assert_eq!(cache.current(&path).base_url, "https://one.example");
+        assert_eq!(cache.current(&path).screen_url, "https://one.example");
 
-        s.base_url = "https://two.example".into();
+        s.screen_url = "https://two.example".into();
         std::fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
         cache.invalidate();
-        assert_eq!(cache.current(&path).base_url, "https://two.example");
+        assert_eq!(cache.current(&path).screen_url, "https://two.example");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -325,15 +288,17 @@ mod tests {
     fn a_missing_file_is_an_unconfigured_server_and_not_an_error() {
         let mut cache = SettingsCache::default();
         let nowhere = std::env::temp_dir().join("sc-settings-does-not-exist.json");
-        assert!(cache.current(&nowhere).base_url.is_empty());
+        assert!(cache.current(&nowhere).screen_url.is_empty());
     }
 
     #[test]
     fn a_file_written_before_a_field_existed_still_loads() {
         // The data volume outlives any one image tag.
-        let old = r#"{"base_url":"https://one.example","seeded":true}"#;
+        // Written when the address still lived here — it is an environment
+        // variable now, and an unknown field must not stop the file loading.
+        let old = r#"{"base_url":"https://one.example","screen_url":"https://two.example","seeded":true}"#;
         let s: Settings = serde_json::from_str(old).unwrap();
-        assert_eq!(s.base_url, "https://one.example");
+        assert_eq!(s.screen_url, "https://two.example");
         assert!(s.seeded);
     }
 }

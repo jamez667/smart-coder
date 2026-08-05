@@ -1400,9 +1400,22 @@ Both deployment files are checked against the config's environment module in
 both directions <!--@ crates/sc-server/src/config.rs -->, so a setting cannot be added to one
 and forgotten in the other — which would leave an operator on the Swarm stack
 with no box for a cap that exists.
-- **Four environment variables, and the rest is administered from the server's
+- **Nine environment variables, and the rest is administered from the server's
   own pages** <!--@ crates/sc-server/src/settings.rs -->. Where to listen, which
-  volume, and the key the rest is sealed with. Nothing else.
+  volume, the key the rest is sealed with — and the address, the site name and
+  the three mail settings.
+
+  **Those last five moved back**, and the reason is worth recording because it
+  was not the argument below being wrong. They were *both*: seeded from the
+  environment on a first boot and editable from the settings page afterwards.
+  On any volume that had been claimed, the variable in the stack was present,
+  correct, and ignored. That reads as a broken feature, and it is a worse
+  failure than either source alone would be.
+
+  So they have one home. Changing them is a stack edit and a redeploy, which is
+  the price of a stack edit either way. The cost, stated rather than glossed: a
+  mail key in the environment is readable by `docker inspect` and by anything
+  that can see the process, which sealing it in the settings file avoided.
 
   **This spec used to argue the opposite**, and the reversal is worth recording
   rather than quietly overwriting. It said configuration belonged in the stack

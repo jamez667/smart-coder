@@ -8,10 +8,13 @@ import { ApiError, setup, type SetupState } from "./api";
 /// a fresh volume is unclaimable and the recovery is deleting `admin.json` from
 /// the disk. Everything else here can be fixed by signing in again.
 ///
-/// Two steps, and the order is forced rather than chosen: the address decides
-/// whether session cookies carry `Secure`, so it has to be settled before a
-/// password is typed, or the first credential this server ever sees might travel
-/// without it.
+/// Two steps: spend the code, then choose the credential. They are separate so
+/// the second is bound to the browser that spent the first — without that,
+/// everything past step one is guarded only by the server being unclaimed, and
+/// whoever arrives next sets their own password and owns it.
+///
+/// The address used to be asked for here, which is what forced the ordering. It
+/// is an environment variable now, so it is settled before anybody arrives.
 export function Setup({ onClaimed }: { onClaimed: () => void }) {
   const [state, setState] = useState<SetupState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,10 +48,7 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
             setBusy(true);
             setError(null);
             setup
-              .spendCode(
-                String(data.get("code") ?? ""),
-                String(data.get("base_url") ?? ""),
-              )
+              .spendCode(String(data.get("code") ?? ""))
               .then(() => setup.state().then(setState))
               .catch((x: ApiError) => setError(x.message))
               .finally(() => setBusy(false));
@@ -63,23 +63,13 @@ export function Setup({ onClaimed }: { onClaimed: () => void }) {
             placeholder="ABC-1234"
           />
 
-          <label htmlFor="base_url">The address people reach this at</label>
-          <input
-            id="base_url"
-            name="base_url"
-            required
-            autoComplete="off"
-            defaultValue={state.base_url}
-            placeholder="https://specs.example.com"
-          />
-          {/* **Says what it decided rather than asking.** Whether cookies carry
-              `Secure` is derived from the address — "is this a private network"
-              is a question people answer wrong, and answering it wrong drops
-              `Secure` from every session cookie without a word. */}
+          {/* **The address is not asked for.** It is an environment variable and
+              the server refuses to start without a valid one, so by the time
+              anybody reaches this it is settled — and there is no typo left that
+              could burn the one claim code the operator has. */}
           <p className="meta">
-            It must start <code>https://</code>, because a sign-in link is a
-            credential in a URL. A private address is allowed for trying it
-            locally, and cookies will not be marked <code>Secure</code> there.
+            This server answers at <code>{state.base_url}</code>, which is set
+            where the container is configured.
           </p>
 
           <button type="submit" disabled={busy}>

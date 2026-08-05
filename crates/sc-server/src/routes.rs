@@ -59,6 +59,19 @@ fn secure_attr(ctx: &Ctx<'_>) -> &'static str {
     }
 }
 
+/// Where this server answers, as the environment configured it.
+///
+/// **One place to ask.** The address used to live in the settings *and* the
+/// environment, seeded from one to the other, and code read whichever was
+/// nearer — which is how a variable could be set, correct, and ignored. It is an
+/// environment variable now, and this is how everything reaches it.
+///
+/// Empty only on a server with no public surface configured at all, which cannot
+/// serve anything and cannot be claimed.
+fn configured_base(ctx: &Ctx<'_>) -> String {
+    ctx.public.map(|p| p.base_url.clone()).unwrap_or_default()
+}
+
 /// The same question, during setup, where the answer above is wrong.
 ///
 /// **A server being claimed has no public surface yet**, so [`secure_attr`]
@@ -1077,17 +1090,11 @@ fn same_origin(ctx: &Ctx<'_>, req: &Req, path: &str) -> std::result::Result<(), 
     // refused *everything*, including the wizard that is the only way to give
     // the server an address in the first place. The setup flow could not
     // complete on a fresh volume, which is the one flow with no fallback.
-    // **Either source, because they hold it at different times.** The public
-    // config carries it once a surface is configured; the settings hold it from
-    // the moment step one of the wizard stores it, which is before any surface
-    // exists. Reading only the first refused the wizard on a fresh volume;
-    // reading only the second misses a server configured from the environment.
-    let ours = ctx
-        .public
-        .map(|p| p.base_url.clone())
-        .filter(|b| !b.is_empty())
-        .or_else(|| ctx.store.settings().ok().map(|s| s.base_url))
-        .unwrap_or_default();
+    // **One source now.** This read from the settings as well, because the
+    // wizard used to store the address there before any surface existed. The
+    // address is an environment variable and nothing else, so there is one place
+    // to look and the fallback is gone with the field.
+    let ours = ctx.public.map(|p| p.base_url.clone()).unwrap_or_default();
     if !ours.is_empty() && origin.trim_end_matches('/') == ours.trim_end_matches('/') {
         return Ok(());
     }
@@ -1197,9 +1204,9 @@ fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
     // not the same as zero — the settings page has always said so.
     let cap = |k: &str| body.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
 
-    let touches_secret = body.get("base_url").is_some()
-        || body.get("mail_key").is_some()
-        || body.get("screen_key").is_some();
+    // Only the screening key is a secret this surface still writes; the mail key
+    // and the address moved to the environment.
+    let touches_secret = body.get("screen_key").is_some();
     // **The same rule as the page, a different refusal.** `require_fresh`
     // answers by re-rendering the settings page with a note on it, which is
     // right for a form post and unreadable to a `fetch`. The condition is the
@@ -1221,27 +1228,27 @@ fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
     if let Some(v) = flag("public") {
         s.public = v;
     }
-    if body.get("site_name").is_some() {
-        s.site_name = text("site_name");
-    }
     if let Some(v) = flag("show_spec") {
         s.show_spec = Some(v);
     }
-    if body.get("base_url").is_some() {
-        let url = text("base_url");
-        if let Err(e) = crate::config::check_base_url(&url) {
-            return error(400, &e);
+    // **The address, the site name and the mail settings are not writable.**
+    // They are environment variables now, so a request naming one is asking for
+    // something this surface does not do — said plainly rather than accepted and
+    // silently dropped, which is the failure the move was meant to end.
+    for gone in [
+        "base_url",
+        "site_name",
+        "mail_provider",
+        "mail_from",
+        "mail_from_name",
+        "mail_key",
+    ] {
+        if body.get(gone).is_some() {
+            return error(
+                400,
+                &format!("{gone} is set in the environment - change it in the stack and redeploy"),
+            );
         }
-        s.base_url = url;
-    }
-    if body.get("mail_provider").is_some() {
-        s.mail_provider = text("mail_provider");
-    }
-    if body.get("mail_from").is_some() {
-        s.mail_from = text("mail_from");
-    }
-    if body.get("mail_from_name").is_some() {
-        s.mail_from_name = text("mail_from_name");
     }
     if body.get("screen_url").is_some() {
         s.screen_url = text("screen_url");
@@ -1259,16 +1266,11 @@ fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
             .map(str::trim)
             .filter(|v| !v.is_empty())
     };
-    if sealed("mail_key").is_some() || sealed("screen_key").is_some() {
+    if let Some(raw) = sealed("screen_key") {
         let Some(key) = ctx.seal_key else {
             return error(400, "this server has no sealing key");
         };
-        if let Some(raw) = sealed("mail_key") {
-            s.mail_key = crate::seal::seal(key, raw, ctx.now_ms);
-        }
-        if let Some(raw) = sealed("screen_key") {
-            s.screen_key = crate::seal::seal(key, raw, ctx.now_ms);
-        }
+        s.screen_key = crate::seal::seal(key, raw, ctx.now_ms);
     }
 
     for (name, field) in [
@@ -1550,19 +1552,16 @@ fn api_setup_state(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     if admin.claimed() {
         return error(404, "no such endpoint");
     }
-    let settings = match ctx.store.settings() {
-        Ok(s) => s,
-        Err(e) => return error(500, &e.to_string()),
-    };
     let mine = admin.setting_up(req.cookie_setup.as_deref(), ctx.now_ms);
     let body = serde_json::json!({
         // `code` or `admin` — which step this browser may take.
         //
-        // **Not simply "is there an address".** Seeding fills that in on a
-        // migrated volume, which made "step one is done" true for everybody
-        // from the first boot — so the token has to be part of the answer.
-        "step": if mine && !settings.base_url.is_empty() { "admin" } else { "code" },
-        "base_url": settings.base_url,
+        // **The token is the whole answer now.** It also depended on an address
+        // being set, because the wizard asked for one; the address is an
+        // environment variable, so the only question left is whether this
+        // browser spent the code.
+        "step": if mine { "admin" } else { "code" },
+        "base_url": configured_base(ctx),
         "min_password": crate::auth::MIN_PASSWORD,
     });
     match serde_json::to_string(&body) {
@@ -1582,18 +1581,10 @@ fn api_spend_code(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .trim();
-    let base_url = body
-        .get("base_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim();
-
-    // **The address is checked before the code is spent.** A typo in the address
-    // must not burn the one code the operator has, leaving them to restart the
-    // container to get another.
-    if let Err(e) = crate::config::check_base_url(base_url) {
-        return error(400, &e);
-    }
+    // **The address is no longer asked for here.** It is an environment variable
+    // and the server refuses to start without a valid one, so by the time
+    // anybody reaches this step it is already settled — and there is no typo
+    // left that could burn the one claim code the operator has.
 
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut admin = match ctx.store.admin() {
@@ -1612,21 +1603,17 @@ fn api_spend_code(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         return error(500, &e.to_string());
     }
 
-    let mut settings = match ctx.store.settings() {
-        Ok(s) => s,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    settings.base_url = base_url.to_string();
-    if let Err(e) = ctx.store.put_settings(&settings) {
-        return error(500, &e.to_string());
-    }
-    invalidate_settings(ctx);
     drop(_guard);
 
     // The token binding the rest of the wizard to this browser. `Lax` rather
     // than `Strict` matches the cookie the pages set, and it is not a session:
     // it grants nothing once the server is claimed.
-    let secure = secure_attr_for(base_url);
+    //
+    // **From the configured address**, because an unclaimed server has no public
+    // surface and the usual answer is then `Secure` — which over plain HTTP
+    // means the browser discards this token and the wizard loops back to step
+    // one. The address is in the environment, so it is known here regardless.
+    let secure = secure_attr_for(&configured_base(ctx));
     let mut res = Res::json(200, "{\"step\":\"admin\"}");
     res.set_cookie = Some(format!(
         "{SETUP_COOKIE}={setup_token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
@@ -1720,7 +1707,7 @@ fn api_claim(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // public surface yet, so the usual answer is `Secure` — and over plain HTTP
     // the browser discards the session, so the claim succeeds and the reader is
     // immediately signed out. The address decided this at step one.
-    let secure = secure_attr_for(&settings.base_url);
+    let secure = secure_attr_for(&configured_base(ctx));
     let mut res = Res::json(200, "{\"claimed\":true}");
     res.set_cookie = Some(format!(
         "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
@@ -3205,10 +3192,6 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
     if admin.claimed() {
         return gone();
     }
-    let settings = match ctx.store.settings() {
-        Ok(s) => s,
-        Err(e) => return error(500, &e.to_string()),
-    };
 
     // **Everything past step one belongs to the browser that spent the code.**
     //
@@ -3227,8 +3210,11 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             // Step two only for the browser that reached it. Anybody else is
             // sent back to the code box — which they cannot pass without
             // reading the container's log.
-            if mine && !settings.base_url.is_empty() {
-                return Res::html(200, crate::page::setup_admin_page(&settings.base_url, None));
+            if mine {
+                return Res::html(
+                    200,
+                    crate::page::setup_admin_page(&configured_base(ctx), None),
+                );
             }
             Res::html(200, crate::page::setup_page("", None))
         }
@@ -3271,7 +3257,8 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
                 Ok(s) => s,
                 Err(e) => return error(500, &e.to_string()),
             };
-            settings.base_url = base_url.to_string();
+            // The address is an environment variable and is not stored here.
+            //
             // This volume has now been administered, so the environment must not
             // seed over it on the next boot.
             settings.seeded = true;
@@ -3310,9 +3297,8 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
                     ),
                 );
             }
-            if settings.base_url.is_empty() {
-                return Res::html(400, crate::page::setup_page("", None));
-            }
+            // The address is configured before the server starts, so there is
+            // nothing to check for here any more.
 
             let form = form_fields(&req.body);
             let login = form.get("login").map(|v| v.trim()).unwrap_or_default();
@@ -3321,7 +3307,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             if let Err(e) = check_login(login) {
                 return Res::html(
                     400,
-                    crate::page::setup_admin_page(&settings.base_url, Some(&e)),
+                    crate::page::setup_admin_page(&configured_base(ctx), Some(&e)),
                 );
             }
 
@@ -3350,7 +3336,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
                 Err(e) => {
                     return Res::html(
                         400,
-                        crate::page::setup_admin_page(&settings.base_url, Some(&e)),
+                        crate::page::setup_admin_page(&configured_base(ctx), Some(&e)),
                     )
                 }
             };
@@ -3394,7 +3380,7 @@ fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
             // `secure_attr_for` gives: a server being claimed has no public
             // surface, and `Secure` over plain HTTP means the reader is signed
             // out the instant they claim it.
-            let secure = secure_attr_for(&settings.base_url);
+            let secure = secure_attr_for(&configured_base(ctx));
             let mut res = Res::html(200, crate::page::claimed_page(login));
             res.set_cookie = Some(format!(
                 "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
@@ -3514,7 +3500,13 @@ fn show_settings(ctx: &Ctx<'_>, saved: Option<&str>, problem: Option<&str>) -> R
     match ctx.store.settings() {
         Ok(s) => Res::html(
             if problem.is_some() { 400 } else { 200 },
-            crate::page::settings_page(&s, ctx.fresh_auth, saved, problem),
+            crate::page::settings_page(
+                &s,
+                &crate::config::host_label(&configured_base(ctx)),
+                ctx.fresh_auth,
+                saved,
+                problem,
+            ),
         ),
         Err(e) => error(500, &e.to_string()),
     }
@@ -3566,23 +3558,21 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
             }
         }
         private_route::SETTINGS_SITE => {
-            s.site_name = field("site_name").unwrap_or_default();
+            // The site *name* is an environment variable now; this form carries
+            // only the spec switch.
             s.show_spec = Some(field("show_spec").is_some());
             "The site"
         }
+        // **Mail is configured in the stack.** The route stays so an old form
+        // does not 404 into a rendered page, and says where to go instead.
         private_route::SETTINGS_MAIL => {
-            let provider = field("mail_provider").unwrap_or_default();
-            if !provider.is_empty() && crate::mail::Provider::parse(&provider).is_none() {
-                return show_settings(
-                    ctx,
-                    None,
-                    Some("That is not a provider this server can send with. One of: brevo, resend, postmark."),
-                );
-            }
-            s.mail_provider = provider;
-            s.mail_from = field("mail_from").unwrap_or_default();
-            s.mail_from_name = field("mail_from_name").unwrap_or_default();
-            "Email"
+            return show_settings(
+                ctx,
+                None,
+                Some(
+                    "Mail is set in the environment now — change it where the container is configured, then redeploy.",
+                ),
+            );
         }
         private_route::SETTINGS_SCREEN => {
             s.screen_url = field("screen_url").unwrap_or_default();
@@ -3605,12 +3595,7 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
             "The ceilings"
         }
         private_route::SETTINGS_SECRET => {
-            if let Some(base) = field("base_url") {
-                if let Err(e) = crate::config::check_base_url(&base) {
-                    return show_settings(ctx, None, Some(&format!("That address {e}")));
-                }
-                s.base_url = base;
-            }
+            // The address is an environment variable and is not written here.
             let Some(key) = ctx.seal_key else {
                 return show_settings(
                     ctx,
@@ -3623,13 +3608,12 @@ fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
             };
             // **Blank means keep.** A form that cleared a key every time it was
             // submitted for another reason would be a trap.
-            for (name, slot) in [
-                ("mail_key", &mut s.mail_key),
-                ("screen_key", &mut s.screen_key),
-            ] {
-                if let Some(v) = form.get(name).map(|v| v.trim()).filter(|v| !v.is_empty()) {
-                    *slot = crate::seal::seal(key, v, ctx.now_ms);
-                }
+            if let Some(v) = form
+                .get("screen_key")
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                s.screen_key = crate::seal::seal(key, v, ctx.now_ms);
             }
             "The address and secrets"
         }
@@ -4916,7 +4900,7 @@ mod tests {
 
         let res = f.go(&Req::post(
             private_route::SETTINGS_SECRET,
-            "base_url=https%3A%2F%2Fspecs.example.test&mail_key=xkeysib-very-secret",
+            "base_url=https%3A%2F%2Fspecs.example.test&screen_key=xkeysib-very-secret",
         )
         .with_cookie(&admin));
         assert_eq!(res.status, 200, "{}", res.body);
@@ -4928,9 +4912,9 @@ mod tests {
         assert!(!raw.contains("xkeysib-very-secret"), "{raw}");
 
         let settings = f.store.settings().unwrap();
-        assert!(settings.mail_key.is_set());
+        assert!(settings.screen_key.is_set());
         assert_eq!(
-            crate::seal::open(f.seal_key.as_ref().unwrap(), &settings.mail_key).as_deref(),
+            crate::seal::open(f.seal_key.as_ref().unwrap(), &settings.screen_key).as_deref(),
             Some("xkeysib-very-secret"),
             "and it can still be read back by the server"
         );
@@ -4943,17 +4927,19 @@ mod tests {
         let mut f = Fixture::new("settings-blank").with_public(false);
         let admin = f.as_admin();
 
-        f.go(&Req::post(private_route::SETTINGS_SECRET, "mail_key=first-key").with_cookie(&admin));
-        let before = f.store.settings().unwrap().mail_key.clone();
+        f.go(
+            &Req::post(private_route::SETTINGS_SECRET, "screen_key=first-key").with_cookie(&admin),
+        );
+        let before = f.store.settings().unwrap().screen_key.clone();
         assert!(before.is_set(), "the first write landed");
 
         f.go(&Req::post(
             private_route::SETTINGS_SECRET,
-            "base_url=https%3A%2F%2Fspecs.example.test&mail_key=",
+            "base_url=https%3A%2F%2Fspecs.example.test&screen_key=",
         )
         .with_cookie(&admin));
         assert_eq!(
-            f.store.settings().unwrap().mail_key,
+            f.store.settings().unwrap().screen_key,
             before,
             "a blank field cleared a key"
         );
@@ -4971,34 +4957,18 @@ mod tests {
         f.now_ms += crate::account::FRESH_AUTH_MS * 4;
 
         for path in SENSITIVE_VERBS {
-            let res = f.go(&Req::post(path, "mail_key=sneaky").with_cookie(&admin));
+            let res = f.go(&Req::post(path, "screen_key=sneaky").with_cookie(&admin));
             assert_eq!(res.status, 400, "{path} took a stale session: {}", res.body);
             assert!(res.body.contains("fresh sign-in"), "{}", res.body);
         }
         assert!(
-            !f.store.settings().unwrap().mail_key.is_set(),
+            !f.store.settings().unwrap().screen_key.is_set(),
             "a stale session wrote a secret"
         );
 
         // The non-sensitive forms still work: only secrets need the hop.
         let res = f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
         assert_eq!(res.status, 200, "{}", res.body);
-    }
-
-    #[test]
-    fn a_bad_address_is_refused_by_the_same_rule_the_environment_used() {
-        // One function, two callers — so the rule cannot hold at boot and not
-        // here. Plain http on a public address puts a sign-in link in the clear.
-        let mut f = Fixture::new("settings-bad-url").with_public(false);
-        let admin = f.as_admin();
-
-        let res = f.go(&Req::post(
-            private_route::SETTINGS_SECRET,
-            "base_url=http%3A%2F%2Fspecs.example.test",
-        )
-        .with_cookie(&admin));
-        assert_eq!(res.status, 400, "{}", res.body);
-        assert!(f.store.settings().unwrap().base_url.is_empty());
     }
 
     #[test]
@@ -5027,25 +4997,6 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_this_server_cannot_send_with_is_refused() {
-        // Caught here rather than at the next sign-in, where the failure would
-        // be somebody else's link never arriving.
-        let mut f = Fixture::new("settings-provider").with_public(false);
-        let admin = f.as_admin();
-
-        let res = f.go(
-            &Req::post(private_route::SETTINGS_MAIL, "mail_provider=sendgrid").with_cookie(&admin),
-        );
-        assert_eq!(res.status, 400, "{}", res.body);
-        assert!(
-            res.body.contains("brevo"),
-            "and it says what does work: {}",
-            res.body
-        );
-        assert!(f.store.settings().unwrap().mail_provider.is_empty());
-    }
-
-    #[test]
     fn an_owner_cannot_reach_the_settings_page() {
         // The same structural argument as the roster: past the gate, so no
         // value of `Caller::Owner` gets here.
@@ -5059,7 +5010,7 @@ mod tests {
             private_route::SETTINGS_PUBLIC,
             private_route::SETTINGS_SECRET,
         ] {
-            let res = f.go(&Req::post(path, "mail_key=x").with_cookie(&session));
+            let res = f.go(&Req::post(path, "screen_key=x").with_cookie(&session));
             assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
         }
     }
@@ -5865,10 +5816,8 @@ mod tests {
             "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
         ));
         assert_eq!(res.status, 200, "{}", res.body);
-        assert_eq!(
-            f.store.settings().unwrap().base_url,
-            "https://specs.example.test"
-        );
+        // The address is an environment variable; the wizard no longer stores
+        // one, so what step one produces is the token and nothing else.
         // The rest of the wizard is bound to this browser from here on.
         let setup = res
             .set_cookie
@@ -6403,9 +6352,14 @@ mod tests {
             res.body
         );
         let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
-        assert!(v.get("mail_key").is_none(), "not even the ciphertext");
-        assert!(v.get("screen_key").is_none());
-        assert!(v["mail_key_set"].is_boolean(), "only whether one is there");
+        assert!(v.get("screen_key").is_none(), "not even the ciphertext");
+        assert!(
+            v["screen_key_set"].is_boolean(),
+            "only whether one is there"
+        );
+        // The address and the mail settings are not on this surface at all.
+        assert!(v.get("base_url").is_none());
+        assert!(v.get("mail_key").is_none());
     }
 
     #[test]
@@ -6700,11 +6654,11 @@ mod tests {
         let mut f = Fixture::new("api-fresh").with_public(false);
         let admin = f.as_admin();
 
-        // **Asserted on the base URL, not the mail key.** A key needs a sealing
-        // key to store, and without one the write fails 400 whatever the
-        // freshness — so a test using it passes with the gate removed, which is
-        // what the first version of this did. The base URL needs nothing.
-        let body = "{\"base_url\":\"https://specs.example.test\"}";
+        // **The screening key is the only secret this surface still writes.**
+        // The address and the mail key are environment variables now. The
+        // fixture has a sealing key, so the write succeeds when fresh and the
+        // gate is what makes the difference.
+        let body = "{\"screen_key\":\"sk-live-000\"}";
 
         // Fresh: it goes through.
         let fresh = f.go(&api_post("/api/v1/ui/settings", body).with_cookie(&admin));
@@ -6721,8 +6675,8 @@ mod tests {
 
         // And an ordinary setting is unaffected — the gate is on the secrets,
         // not on the page.
-        let ordinary = f
-            .go(&api_post("/api/v1/ui/settings", "{\"site_name\":\"intake\"}").with_cookie(&admin));
+        let ordinary =
+            f.go(&api_post("/api/v1/ui/settings", "{\"show_spec\":true}").with_cookie(&admin));
         assert_eq!(ordinary.status, 200, "{}", ordinary.body);
     }
 
@@ -6734,11 +6688,12 @@ mod tests {
         // the site name.
         let mut f = Fixture::new("api-blank-secret").with_public(false);
         let admin = f.as_admin();
-        let before = f.store.settings().unwrap().mail_key.clone();
+        let before = f.store.settings().unwrap().screen_key.clone();
 
-        let res = f.go(&api_post("/api/v1/ui/settings", "{\"mail_key\":\"\"}").with_cookie(&admin));
+        let res =
+            f.go(&api_post("/api/v1/ui/settings", "{\"screen_key\":\"\"}").with_cookie(&admin));
         assert_eq!(res.status, 200, "{}", res.body);
-        assert_eq!(f.store.settings().unwrap().mail_key, before);
+        assert_eq!(f.store.settings().unwrap().screen_key, before);
     }
 
     #[test]
@@ -6905,27 +6860,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_address_through_the_api_does_not_burn_the_code() {
-        // The operator has one code and getting another means restarting the
-        // container. A typo in the address must not cost them that.
-        let mut f = Fixture::new("api-setup-typo").with_public(false);
-        armed(&mut f, "ABC-123");
-
-        let refused = f.go(&api_post(
-            "/api/v1/ui/setup/code",
-            "{\"code\":\"ABC-123\",\"base_url\":\"not-an-address\"}",
-        ));
-        assert_eq!(refused.status, 400, "{}", refused.body);
-
-        // The code still works.
-        let spent = f.go(&api_post(
-            "/api/v1/ui/setup/code",
-            "{\"code\":\"ABC-123\",\"base_url\":\"https://specs.example.test\"}",
-        ));
-        assert_eq!(spent.status, 200, "{}", spent.body);
-    }
-
-    #[test]
     fn every_wrong_code_through_the_api_gets_the_same_answer() {
         // Wrong, expired and already spent are three different facts, and
         // telling them apart tells a guesser which half they got right.
@@ -7011,14 +6945,18 @@ mod tests {
         assert_eq!(secure_attr_for("https://specs.example.test"), "; Secure");
 
         // End to end: the cookie a local trial actually receives.
+        // **`with_public` gives the fixture an address**, which is where the
+        // answer comes from now — the settings no longer hold one. Its base URL
+        // is `https://…`, so this asserts that case; the plain-HTTP one is the
+        // three direct calls above.
         let mut f = Fixture::new("setup-secure").with_public(false);
         armed(&mut f, "ABC-123");
-        let spent = f.go(&api_post(
-            "/api/v1/ui/setup/code",
-            "{\"code\":\"ABC-123\",\"base_url\":\"http://127.0.0.1:8420\"}",
-        ));
+        let spent = f.go(&api_post("/api/v1/ui/setup/code", "{\"code\":\"ABC-123\"}"));
         let cookie = spent.set_cookie.as_deref().expect("a setup token");
-        assert!(!cookie.contains("Secure"), "{cookie}");
+        assert!(
+            cookie.contains("Secure"),
+            "an https address gets it: {cookie}"
+        );
     }
 
     #[test]
@@ -7207,7 +7145,6 @@ mod tests {
         armed(&mut f, "ABC-123");
 
         let mut settings = f.store.settings().unwrap();
-        settings.base_url = "https://specs.example.test".into();
         settings.seeded = true;
         f.store.put_settings(&settings).unwrap();
 

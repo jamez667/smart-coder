@@ -302,6 +302,16 @@ services:
       # it would send the filer to whatever host the request claimed to be.
       SC_SERVER_PUBLIC_BASE_URL: ${SC_SERVER_PUBLIC_BASE_URL:-}
 
+      # **These five live HERE and nowhere else**: the address, the site name and
+      # the three mail settings. They were also editable from the settings page,
+      # seeded from this file on the first boot and ignored afterwards — so a
+      # variable could be set, correct, and silently overridden by whatever the
+      # volume already held. Changing them is a stack edit and a redeploy.
+      #
+      # The trade: a mail key in the environment is readable by `docker inspect`
+      # and by anything that can see the process. Sealed in the settings file it
+      # was not. One source of truth was judged worth more.
+
       # brevo | resend | postmark
       SC_SERVER_MAIL_PROVIDER: ${SC_SERVER_MAIL_PROVIDER:-}
       SC_SERVER_MAIL_KEY: ${SC_SERVER_MAIL_KEY:-}

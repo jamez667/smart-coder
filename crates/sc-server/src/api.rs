@@ -287,17 +287,14 @@ impl ReviewRequest {
 /// set and when it was last changed, and this does the same. Making the API
 /// return the ciphertext, or worse the plaintext, would create the read path the
 /// whole sealing design exists to avoid.
+///
+/// The address, the site name and the mail settings are **not here at all**:
+/// they are environment variables now, so there is nothing on this surface to
+/// read or write. See [`crate::settings`] for why they moved and what it cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingsView {
     pub public: bool,
-    pub site_name: String,
-    pub base_url: String,
     pub show_spec: Option<bool>,
-    pub mail_provider: String,
-    pub mail_from: String,
-    pub mail_from_name: String,
-    /// Is a mail key stored? **Not the key.**
-    pub mail_key_set: bool,
     pub screen_url: String,
     pub screen_model: String,
     /// Is a screening key stored? **Not the key.**
@@ -312,13 +309,7 @@ impl SettingsView {
     pub fn of(s: &crate::settings::Settings) -> Self {
         SettingsView {
             public: s.public,
-            site_name: s.site_name.clone(),
-            base_url: s.base_url.clone(),
             show_spec: s.show_spec,
-            mail_provider: s.mail_provider.clone(),
-            mail_from: s.mail_from.clone(),
-            mail_from_name: s.mail_from_name.clone(),
-            mail_key_set: s.mail_key.is_set(),
             screen_url: s.screen_url.clone(),
             screen_model: s.screen_model.clone(),
             screen_key_set: s.screen_key.is_set(),
