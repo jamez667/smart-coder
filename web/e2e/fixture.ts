@@ -241,7 +241,30 @@ async function waitFor(base: string): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error(`the server never came up at ${base}`);
+  // **Say why, rather than only that.** "It never came up" is true of a
+  // container that crashed, one on an unreachable network, and one still
+  // compiling — three different fixes, and the message distinguishes none of
+  // them. This has cost several CI round trips already.
+  let detail = "";
+  try {
+    const state = docker("inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", NAME).trim();
+    const nets = docker(
+      "inspect",
+      "-f",
+      "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+      NAME,
+    ).trim();
+    const logs = docker("logs", "--tail", "20", NAME);
+    detail = `
+  container: ${state}
+  networks: ${nets}
+  logs:
+${logs}`;
+  } catch (e) {
+    detail = `
+  (could not inspect the container: ${String(e).slice(0, 200)})`;
+  }
+  throw new Error(`the server never came up at ${base}${detail}`);
 }
 
 const DAEMON_KEY = "0123456789abcdef0123456789abcdef";
