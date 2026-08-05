@@ -360,7 +360,7 @@ pub fn public_file_page(
              <div class=\"meta\"><span class=\"tag\">{state}</span> {kind}</div></a>",
             id = esc(&r.id),
             summary = esc(r.summary()),
-            state = esc(public_state_label(r.state, locale)),
+            state = esc(crate::api::public_state_label(r.state, locale)),
             kind = esc(r.kind.slug()),
         ));
     }
@@ -425,26 +425,6 @@ pub fn public_file_page(
     )
 }
 
-/// What a filer is told about a state.
-///
-/// Deliberately coarser than [`RequestState::label`]. A filer does not need to
-/// know that their request is being screened for spam — saying so invites
-/// gaming, and "queued" is true in the sense they care about. `Quarantined`
-/// likewise reads as waiting rather than as an accusation, since a human may yet
-/// release it.
-pub(crate) fn public_state_label(state: RequestState, locale: Locale) -> &'static str {
-    let s = locale.strings();
-    match state {
-        RequestState::Screening | RequestState::Quarantined | RequestState::Queued => {
-            s.state_received
-        }
-        RequestState::Claimed => s.state_writing,
-        RequestState::AwaitingReview => s.state_reviewing,
-        RequestState::Accepted => s.state_accepted,
-        RequestState::Discarded | RequestState::Failed => s.state_closed,
-    }
-}
-
 /// One of a filer's own requests.
 ///
 /// Renders **only** what is theirs to see: their own text, a coarse state, and —
@@ -458,7 +438,7 @@ pub fn public_detail(r: &Request, show_spec: bool, locale: Locale) -> String {
          <p class=\"meta\"><span class=\"tag\">{state}</span> {kind} · {filed}{when}</p>\
          <h2>{asked}</h2><pre>{text}</pre>",
         summary = esc(r.summary()),
-        state = esc(public_state_label(r.state, locale)),
+        state = esc(crate::api::public_state_label(r.state, locale)),
         kind = esc(r.kind.slug()),
         filed = esc(s.detail_filed_prefix),
         when = esc(&relative_time(r.filed_ms, crate::store::now_ms(), locale)),

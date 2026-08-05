@@ -272,13 +272,42 @@ pub struct ReviewRequest {
     pub spec_digest: Option<String>,
 }
 
+/// What a filer is told about a state.
+///
+/// **Deliberately coarser than [`RequestState::label`]**, and the blurring is
+/// the point rather than a simplification. A filer does not need to know their
+/// request is being screened for spam — saying so invites gaming, and
+/// "received" is true in the sense they care about. `Quarantined` likewise reads
+/// as waiting rather than as an accusation, since a human may yet release it.
+///
+/// Lives here beside [`FiledRequest`], the only type that may show it, rather
+/// than in the page layer where it was written. It was never about rendering: it
+/// decides what a filer is allowed to learn, which is the same decision
+/// `FiledRequest`'s absent fields make.
+pub fn public_state_label(
+    state: crate::store::RequestState,
+    locale: crate::i18n::Locale,
+) -> &'static str {
+    use crate::store::RequestState;
+    let s = locale.strings();
+    match state {
+        RequestState::Screening | RequestState::Quarantined | RequestState::Queued => {
+            s.state_received
+        }
+        RequestState::Claimed => s.state_writing,
+        RequestState::AwaitingReview => s.state_reviewing,
+        RequestState::Accepted => s.state_accepted,
+        RequestState::Discarded | RequestState::Failed => s.state_closed,
+    }
+}
+
 impl FiledRequest {
     /// Narrow a record to what its filer may see.
     pub fn of(r: &crate::store::Request, show_spec: bool, locale: crate::i18n::Locale) -> Self {
         FiledRequest {
             id: r.id.clone(),
             summary: r.summary().to_string(),
-            state: crate::page::public::public_state_label(r.state, locale).to_string(),
+            state: public_state_label(r.state, locale).to_string(),
             kind: r.kind.slug().to_string(),
             filed_ms: r.filed_ms,
             text: Some(r.text.clone()),
