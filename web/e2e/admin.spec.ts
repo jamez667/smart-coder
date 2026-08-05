@@ -97,10 +97,12 @@ test("the settings page never shows a stored secret", async ({ page }) => {
   const seen = await page.evaluate(() => ({
     path: window.location.pathname,
     h1: document.querySelector("h1")?.textContent,
+    routedOn: document.documentElement.dataset.scPath,
+    role: document.documentElement.dataset.scRole,
   }));
   expect(
     seen.h1,
-    `at ${seen.path} the interface drew "${seen.h1}"`,
+    `at ${seen.path} the interface routed on "${seen.routedOn}" as "${seen.role}" and drew "${seen.h1}"`,
   ).toBe("Settings");
 
   // **There is no read path for a stored secret anywhere in this server**, and

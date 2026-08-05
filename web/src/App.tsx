@@ -95,6 +95,17 @@ export function App() {
       }[path]
     : undefined;
 
+  // **What the interface decided, readable from a test.** The admin pages
+  // failed in CI drawing the review list, and nothing on the page could say
+  // whether that was the path, the capability, or the order they were evaluated
+  // in. Three CI round trips went on guessing between them.
+  //
+  // Cheap enough to leave: two strings on the document element.
+  if (typeof document !== "undefined") {
+    document.documentElement.dataset.scPath = path;
+    document.documentElement.dataset.scRole = me?.role ?? "loading";
+  }
+
   if (!me) {
     // Deliberately blank rather than a spinner: on the connection this surface
     // was designed for, a spinner that resolves in 40ms is a flash of noise.
