@@ -142,10 +142,10 @@ export async function server(): Promise<Server> {
 
   // Step one: spend the code. The response sets the cookie binding the rest of
   // the wizard to this client.
-  const step1 = await fetch(`${base}/setup`, {
+  const step1 = await fetch(`${base}/api/v1/ui/setup/code`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `code=${code}&base_url=${encodeURIComponent(base)}`,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
     redirect: "manual",
   });
   const setup = /sc_setup=([a-f0-9]+)/.exec(
@@ -154,13 +154,13 @@ export async function server(): Promise<Server> {
   if (!setup) throw new Error(`no setup cookie (${step1.status})`);
 
   // Step two: choose the credential that owns this server.
-  const step2 = await fetch(`${base}/setup/admin`, {
+  const step2 = await fetch(`${base}/api/v1/ui/setup/admin`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Type": "application/json",
       Cookie: `sc_setup=${setup}`,
     },
-    body: `login=${encodeURIComponent(login)}&password=${encodeURIComponent(password)}`,
+    body: JSON.stringify({ login, password }),
     redirect: "manual",
   });
   if (!step2.ok) throw new Error(`the claim failed: ${step2.status}`);
@@ -175,20 +175,27 @@ export async function server(): Promise<Server> {
       // the real path grows a rule, and the review gate is exactly where a
       // fixture must not diverge from what a request actually looks like.
       //
+      // Through the JSON API rather than the HTML form. The form route is
+      // being deleted with the page layer, and a harness that outlives it is
+      // one less thing standing in the way.
+      //
       // Filed by the administrator rather than by a magic-link filer: the mail
       // provider here is not real and the console mailer was removed, so there
       // is no way to receive a link. A request filed from the private surface
       // reaches the review gate identically.
       const admin = await signInWithPassword(base, login, password);
-      await fetch(`${base}/file`, {
+      const filed = await fetch(`${base}/api/v1/ui/file`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Type": "application/json",
           Cookie: `sc_device=${admin}`,
         },
-        body: `text=${encodeURIComponent(text)}&kind=bug&repo=intake`,
+        body: JSON.stringify({ text, kind: "bug", repo: "intake" }),
         redirect: "manual",
       });
+      if (!filed.ok) {
+        throw new Error(`the harness could not file: ${filed.status}`);
+      }
 
       // Now be the daemon: claim the work and post a drafted spec back.
       const poll = await fetch(`${base}/api/v1/work?repo=intake`, {
@@ -317,10 +324,13 @@ export async function signInWithPassword(
   login: string,
   password: string,
 ): Promise<string> {
-  const res = await fetch(`${base}/public/signin/password`, {
+  // Through the JSON API rather than the form, for the reason `fileAndDraft`
+  // gives: the form route goes with the page layer, and a harness that depends
+  // on it is one more thing to fix on the way out.
+  const res = await fetch(`${base}/api/v1/ui/signin/password`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `login=${encodeURIComponent(login)}&password=${encodeURIComponent(password)}`,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login, password }),
     redirect: "manual",
   });
   const session = /sc_device=([a-f0-9]+)/.exec(

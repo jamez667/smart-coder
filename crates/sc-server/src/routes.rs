@@ -1850,19 +1850,19 @@ fn api_sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
 
 /// File a request, from the interface.
 ///
-/// **Only a signed-in filer may file**, which is the same rule the form route
-/// enforces — an account costs a confirmed mailbox, and that is the thing
-/// standing between this and an open pipe to somebody's model budget.
+/// **Two callers, two sets of rules**, mirroring the split the form routes
+/// already had between `POST /file` and `POST /public`.
 ///
-/// An administrator or owner reaching here is answered 404 rather than filed
-/// for: they have no account id to file against, and inventing one would put
-/// work in the queue attributed to nobody.
+/// A signed-in filer goes through [`file_now`]: the configured repositories, the
+/// daily cap, the screener. An account costs a confirmed mailbox, and that is
+/// the thing standing between this and an open pipe to somebody's model budget.
+///
+/// The administrator files against any repository with no cap, because the caps
+/// bound what strangers can spend on somebody else's hardware and they own it.
+///
+/// An owner is answered 404: they have no account id to file against, and
+/// inventing one would put work in the queue attributed to nobody.
 fn api_file(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>) -> Res {
-    let Some(Caller::Account { id }) = caller else {
-        return error(404, "no such endpoint");
-    };
-    let account_id = id.clone();
-
     let body: serde_json::Value =
         serde_json::from_str(&req.body).unwrap_or(serde_json::Value::Null);
     let text = body
@@ -1875,6 +1875,39 @@ fn api_file(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>) -> Res {
         .and_then(|v| v.as_str())
         .and_then(IntakeKind::parse)
         .unwrap_or_default();
+
+    // **The administrator files on their own machine, and the rules are not the
+    // filer's.** No daily cap, no screening, and any repository rather than the
+    // configured public set: the caps exist to bound what strangers can spend on
+    // somebody else's hardware, and the person who owns the hardware is not a
+    // stranger to it. This is the same split `POST /file` and `POST /public`
+    // already had — two capabilities that happen to both produce a request.
+    if let Some(Caller::Admin { .. }) = caller {
+        let text = text.trim();
+        if text.is_empty() {
+            return error(400, "a request needs some text");
+        }
+        let Some(repo) = repo.map(str::trim).filter(|r| !r.is_empty()) else {
+            return error(400, "choose which repository this is about");
+        };
+        if let Err(msg) = check_length(text) {
+            return error(400, &msg);
+        }
+
+        let request = Request::new(new_id(), text, repo, kind);
+        return match ctx.store.put(&request) {
+            Ok(()) => match serde_json::to_string(&ReviewRequest::of(&request, true)) {
+                Ok(b) => Res::json(200, b),
+                Err(e) => error(500, &e.to_string()),
+            },
+            Err(e) => error(500, &e.to_string()),
+        };
+    }
+
+    let Some(Caller::Account { id }) = caller else {
+        return error(404, "no such endpoint");
+    };
+    let account_id = id.clone();
 
     match file_now(ctx, &account_id, repo, text, kind) {
         // The filer's own narrow view of what they just filed — the same type
@@ -4848,6 +4881,44 @@ mod tests {
         .with_cookie(&session));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.all().unwrap().is_empty(), "nothing was written");
+    }
+
+    #[test]
+    fn the_administrator_files_over_json_without_the_filers_limits() {
+        // **Two capabilities that both produce a request**, which is the split
+        // `POST /file` and `POST /public` already had. The caps bound what
+        // strangers can spend on somebody else's hardware; the person who owns
+        // the hardware is not a stranger to it.
+        //
+        // The tight cap here is the point: a filer would be refused on the
+        // fourth, and the administrator is not.
+        let mut f = Fixture::new("json-file-admin")
+            .with_public(false)
+            .with_caps(1, 20);
+        let admin = f.as_admin();
+
+        for n in 0..3 {
+            let res = f.go(&Req::post_json(
+                "/api/v1/ui/file",
+                &format!(r#"{{"text":"admin request {n}","repo":"anything-at-all","kind":"bug"}}"#),
+            )
+            .with_cookie(&admin));
+            assert_eq!(res.status, 200, "filing {n}: {}", res.body);
+        }
+        assert_eq!(f.store.all().unwrap().len(), 3, "the cap did not apply");
+
+        // Any repository, not the configured public set — an administrator
+        // files against their own machine's checkouts.
+        assert_eq!(f.store.all().unwrap()[0].repo, "anything-at-all");
+
+        // But a repository is still required: there is no single default to
+        // fall back on, and guessing would put work somewhere nobody chose.
+        let no_repo = f.go(&Req::post_json(
+            "/api/v1/ui/file",
+            r#"{"text":"where does this go","kind":"bug"}"#,
+        )
+        .with_cookie(&admin));
+        assert_eq!(no_repo.status, 400, "{}", no_repo.body);
     }
 
     #[test]
