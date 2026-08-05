@@ -44,8 +44,10 @@ export default defineConfig({
   fullyParallel: false,
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    // The surface exists for a phone on a train; the layout properties are
-    // asserted where they actually matter.
-    { name: "mobile", use: { ...devices["Pixel 7"] }, testIgnore: ["**/api.spec.ts", "**/admin.spec.ts", "**/setup.spec.ts"] },
+    // The surface exists for a phone on a train, so the smoke test runs there
+    // too. The `testIgnore` that used to sit here named the API and admin specs,
+    // which had no layout to check — they are gone, and the one test left is
+    // exactly the kind worth running on both.
+    { name: "mobile", use: { ...devices["Pixel 7"] } },
   ],
 });

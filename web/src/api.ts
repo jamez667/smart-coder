@@ -131,6 +131,15 @@ export const api = {
   /// the cookie here — a token this browser forgot but the server still honours
   /// is not signed out.
   signOut: () => post<{ signed_out: boolean }>("signout", {}),
+
+  /// File a request. Returns it as its own filer may see it.
+  ///
+  /// `repo` may be omitted when the surface serves exactly one — the server
+  /// takes the only one. With several it is required, because **the server
+  /// never falls back to a default**: filing against a repository nobody chose
+  /// would land the work somewhere else with nothing saying so.
+  file: (text: string, kind: string, repo?: string) =>
+    post<FiledRequest>("file", { text, kind, repo }),
   requests: <T = FiledRequest[] | ReviewRequest[]>() => get<T>("requests"),
   request: <T = FiledRequest | ReviewRequest>(id: string) =>
     get<T>(`requests/${encodeURIComponent(id)}`),

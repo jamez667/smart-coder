@@ -115,6 +115,23 @@ impl Me {
     /// `None` — no cookie, or one matching nothing — is a stranger rather than
     /// an error. The sign-in surface is reachable signed out, so "who am I"
     /// always has an answer.
+    /// The same, told which repositories this surface offers.
+    ///
+    /// **A filer's list comes from here or from nowhere.** They own no
+    /// repositories, so `repos` is otherwise empty for them — and a client
+    /// cannot invent the set, because filing against a name the server does not
+    /// serve is refused. Only the configured surface knows it.
+    ///
+    /// An owner keeps their own list, which is already narrower: what they own,
+    /// intersected with what this surface serves.
+    pub fn of_with_repos(caller: Option<&Caller>, offered: &[String]) -> Me {
+        let mut me = Me::of(caller);
+        if me.repos.is_empty() {
+            me.repos = offered.to_vec();
+        }
+        me
+    }
+
     pub fn of(caller: Option<&Caller>) -> Me {
         match caller {
             Some(Caller::Admin { login }) => Me {

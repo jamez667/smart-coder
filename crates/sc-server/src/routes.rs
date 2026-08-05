@@ -1043,10 +1043,19 @@ fn api_route(
         // Who am I, and what may I do? The one endpoint reachable by anybody,
         // because signing in is reachable by anybody and the client has to be
         // able to ask before it has an answer.
-        ("GET", "me") => match serde_json::to_string(&crate::api::Me::of(caller.as_ref())) {
-            Ok(body) => Res::json(200, body),
-            Err(e) => error(500, &e.to_string()),
-        },
+        ("GET", "me") => {
+            // The repositories this surface offers, so a filer's form has
+            // something to render. Empty when nothing is configured, which is
+            // the honest answer: there is nothing to file against.
+            let offered = ctx
+                .public
+                .map(|p| p.repos.names().to_vec())
+                .unwrap_or_default();
+            match serde_json::to_string(&crate::api::Me::of_with_repos(caller.as_ref(), &offered)) {
+                Ok(body) => Res::json(200, body),
+                Err(e) => error(500, &e.to_string()),
+            }
+        }
 
         // **The wizard, which is reachable with no credential at all** — it is
         // how the first one is obtained. Guarded by the single-use claim code
@@ -1184,6 +1193,11 @@ fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) 
         "signin" => return api_request_link(ctx, req),
         "signin/password" => return api_sign_in_with_password(ctx, req),
         "signout" => return api_sign_out(ctx, req),
+        // **Filing needs an account, not an administrator**, so it is above the
+        // gate below and checks for itself. The account is the credential: it
+        // costs a confirmed mailbox, which is what stops this being a
+        // free-for-all.
+        "file" => return api_file(ctx, req, caller),
         _ => {}
     }
 
@@ -1832,6 +1846,49 @@ fn api_sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0"
     ));
     res
+}
+
+/// File a request, from the interface.
+///
+/// **Only a signed-in filer may file**, which is the same rule the form route
+/// enforces — an account costs a confirmed mailbox, and that is the thing
+/// standing between this and an open pipe to somebody's model budget.
+///
+/// An administrator or owner reaching here is answered 404 rather than filed
+/// for: they have no account id to file against, and inventing one would put
+/// work in the queue attributed to nobody.
+fn api_file(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>) -> Res {
+    let Some(Caller::Account { id }) = caller else {
+        return error(404, "no such endpoint");
+    };
+    let account_id = id.clone();
+
+    let body: serde_json::Value =
+        serde_json::from_str(&req.body).unwrap_or(serde_json::Value::Null);
+    let text = body
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let repo = body.get("repo").and_then(|v| v.as_str());
+    let kind = body
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .and_then(IntakeKind::parse)
+        .unwrap_or_default();
+
+    match file_now(ctx, &account_id, repo, text, kind) {
+        // The filer's own narrow view of what they just filed — the same type
+        // `GET requests` gives them, so the client has one shape to render and
+        // no field here that a filer may not see.
+        Ok(request) => {
+            let show_spec = ctx.public.is_some_and(|p| p.show_spec);
+            match serde_json::to_string(&FiledRequest::of(&request, show_spec, req.locale())) {
+                Ok(b) => Res::json(200, b),
+                Err(e) => error(500, &e.to_string()),
+            }
+        }
+        Err(refusal) => error(refusal.status(), &refusal.message(req.locale())),
+    }
 }
 
 /// The request list, answered according to who is asking.
@@ -3790,14 +3847,75 @@ fn refuse_repo(locale: Locale) -> Res {
 /// only ever *matched* against the configured set: it selects, it does not
 /// introduce. One that matches nothing is refused rather than defaulted, for
 /// the reason set out at the check itself.
-fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
-    let locale = req.locale();
+/// Why a filing was refused, kept apart from how the refusal is rendered.
+///
+/// **The form and the JSON endpoint must refuse for the same reasons.** Each
+/// variant carries its status, so neither caller decides one for itself — a
+/// refusal that is 400 on one surface and 200 on the other is the kind of drift
+/// that lets a client believe something was filed when it was not.
+#[derive(Debug)]
+enum FilingRefused {
+    /// No public surface is configured. 404 rather than 403: it does not exist.
+    NoSurface,
+    /// The repository was absent where a choice was required, or not one of the
+    /// configured set. Never falls back to a default — see [`file_now`].
+    Repo,
+    /// Empty. Rendered from the caller's locale rather than carrying a message,
+    /// so this refusal is translated on both surfaces.
+    Empty,
+    /// Past the word ceiling. Carries the message, which names the limit.
+    Text(String),
+    /// Over the daily cap. Carries how many, because the message says so.
+    TooMany(usize),
+    /// The volume refused the write.
+    Store(String),
+}
+
+impl FilingRefused {
+    fn status(&self) -> u16 {
+        match self {
+            FilingRefused::NoSurface => 404,
+            FilingRefused::Repo | FilingRefused::Empty | FilingRefused::Text(_) => 400,
+            FilingRefused::TooMany(_) => 429,
+            FilingRefused::Store(_) => 500,
+        }
+    }
+
+    fn message(&self, locale: Locale) -> String {
+        match self {
+            FilingRefused::NoSurface => "no such page".to_string(),
+            FilingRefused::Repo => locale.strings().file_repo_unknown.to_string(),
+            FilingRefused::Empty => locale.strings().error_empty.to_string(),
+            FilingRefused::Text(m) => m.clone(),
+            FilingRefused::TooMany(n) => format!(
+                "That is {n} requests in a day, which is the limit. Each one is \
+                 written up by hand on someone's machine, so the cap is there to \
+                 keep that manageable — try again tomorrow, or say the rest in a \
+                 request you have already filed."
+            ),
+            FilingRefused::Store(e) => e.clone(),
+        }
+    }
+}
+
+/// File a request, or say why not. **Renders nothing.**
+///
+/// Split out so the form route and the JSON endpoint cannot drift. Everything
+/// that decides whether a request is accepted lives here exactly once — the
+/// repository check, the length ceiling, the daily cap and the lock the cap is
+/// counted under — and the two callers differ only in what they render from the
+/// answer.
+fn file_now(
+    ctx: &mut Ctx<'_>,
+    account_id: &str,
+    repo_field: Option<&str>,
+    text: &str,
+    kind: IntakeKind,
+) -> std::result::Result<Request, FilingRefused> {
     let Some(public) = ctx.public else {
-        return Res::html(404, crate::page::public_not_found(locale));
+        return Err(FilingRefused::NoSurface);
     };
     let screened = public.screen.is_some();
-
-    let form = form_fields(&req.body);
 
     // **Checked against the configured set, never trusted.** The picker renders
     // from that same set, so an honest filer always sends one of these; anything
@@ -3805,40 +3923,28 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
     // back on a default.
     //
     // Falling back would file the request against a repository the filer did not
-    // choose, and nothing on the page would say so — the work would simply land
-    // somewhere else. A refusal is the honest failure, and it keeps this the one
-    // place a repository name is decided.
+    // choose, and nothing would say so — the work would simply land somewhere
+    // else. A refusal is the honest failure.
     //
     // A surface serving one repository renders no field, so an absent name is
     // normal there and takes the only one. With several, absent means the form
-    // was not the thing that sent this.
-    //
-    // With **none** enabled, `first()` is `None` and this falls through to the
-    // refusal below — which is right: there is nothing to file against, and the
-    // page a filer arrived on already says so.
-    let repo = match form.get("repo").map(|r| r.trim()) {
+    // was not the thing that sent this. With **none**, `first()` is `None` and
+    // this refuses, which is right: there is nothing to file against.
+    let repo = match repo_field.map(str::trim) {
         None | Some("") if public.repos.is_single() => match public.repos.first() {
             Some(only) => only.to_string(),
-            None => return refuse_repo(locale),
+            None => return Err(FilingRefused::Repo),
         },
         Some(named) if public.repos.accepts(named) => named.to_string(),
-        _ => return refuse_repo(locale),
+        _ => return Err(FilingRefused::Repo),
     };
-    let text = form.get("text").cloned().unwrap_or_default();
-    let text = text.trim();
-    let kind = form
-        .get("kind")
-        .and_then(|k| IntakeKind::parse(k))
-        .unwrap_or_default();
 
+    let text = text.trim();
     if text.is_empty() {
-        return Res::html(
-            400,
-            crate::page::public_message(locale.strings().error_empty, locale),
-        );
+        return Err(FilingRefused::Empty);
     }
     if let Err(msg) = check_length(text) {
-        return Res::html(400, crate::page::public_message(&msg, locale));
+        return Err(FilingRefused::Text(msg));
     }
 
     // The ceiling on model spend. Every filing that clears the screener costs a
@@ -3857,22 +3963,9 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
 
     let since = ctx.now_ms.saturating_sub(crate::config::FILING_WINDOW_MS);
     match ctx.store.filed_since(account_id, since) {
-        Ok(n) if n >= public.max_daily_filings => {
-            return Res::html(
-                429,
-                crate::page::public_message(
-                    &format!(
-                        "That is {n} requests in a day, which is the limit. Each one is \
-                     written up by hand on someone's machine, so the cap is there to \
-                     keep that manageable — try again tomorrow, or say the rest in a \
-                     request you have already filed."
-                    ),
-                    locale,
-                ),
-            );
-        }
+        Ok(n) if n >= public.max_daily_filings => return Err(FilingRefused::TooMany(n)),
         Ok(_) => {}
-        Err(e) => return error(500, &e.to_string()),
+        Err(e) => return Err(FilingRefused::Store(e.to_string())),
     }
 
     // Stamped from the handler's clock, which is the one the cap above measures
@@ -3888,8 +3981,34 @@ fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
         ctx.now_ms,
     );
     match ctx.store.put(&request) {
-        Ok(()) => Res::html(200, crate::page::public_filed(&request, locale)),
-        Err(e) => error(500, &e.to_string()),
+        Ok(()) => Ok(request),
+        Err(e) => Err(FilingRefused::Store(e.to_string())),
+    }
+}
+
+fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
+    let locale = req.locale();
+    let form = form_fields(&req.body);
+    let kind = form
+        .get("kind")
+        .and_then(|k| IntakeKind::parse(k))
+        .unwrap_or_default();
+
+    match file_now(
+        ctx,
+        account_id,
+        form.get("repo").map(String::as_str),
+        form.get("text").map(String::as_str).unwrap_or_default(),
+        kind,
+    ) {
+        Ok(request) => Res::html(200, crate::page::public_filed(&request, locale)),
+        Err(FilingRefused::NoSurface) => Res::html(404, crate::page::public_not_found(locale)),
+        Err(FilingRefused::Repo) => refuse_repo(locale),
+        Err(FilingRefused::Store(e)) => error(500, &e),
+        Err(other) => Res::html(
+            other.status(),
+            crate::page::public_message(&other.message(locale), locale),
+        ),
     }
 }
 
@@ -4683,6 +4802,100 @@ mod tests {
         assert_eq!(
             known.body, unknown.body,
             "whether an address has an account must not be readable from here"
+        );
+    }
+
+    #[test]
+    fn a_filer_can_file_through_the_json_api() {
+        // The interface had no way to file at all: `POST /public` took a form
+        // and the client rendered none, so the public surface was a read-only
+        // page that invited people to say what they needed. This is that gap.
+        let mut f = Fixture::new("json-file").with_public(false);
+        let session = f.signed_in("filer@example.test");
+
+        let res = f.go(&Req::post_json(
+            "/api/v1/ui/file",
+            r#"{"text":"the export button does nothing","kind":"bug"}"#,
+        )
+        .with_cookie(&session));
+        assert_eq!(res.status, 200, "{}", res.body);
+
+        // It really landed, rather than merely answering 200.
+        let stored = f.store.all().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "the export button does nothing");
+
+        // **The filer gets their own narrow view back.** Not the reviewer's:
+        // no repository, no artifact directory, no daemon note — the same type
+        // `GET requests` gives them, so there is nothing here to leak.
+        assert!(!res.body.contains("artifact_dir"), "{}", res.body);
+        assert!(!res.body.contains("\"repo\""), "{}", res.body);
+    }
+
+    #[test]
+    fn filing_over_json_refuses_a_repository_this_surface_does_not_serve() {
+        // **Never falls back to a default.** Filing against a repository nobody
+        // chose would land the work somewhere else with nothing saying so, so
+        // the honest answer is a refusal — and the JSON endpoint must give the
+        // same one the form does, since it shares `file_now`.
+        let mut f = Fixture::new("json-file-repo").with_public(false);
+        let session = f.signed_in("filer@example.test");
+
+        let res = f.go(&Req::post_json(
+            "/api/v1/ui/file",
+            r#"{"text":"something","kind":"bug","repo":"not-served"}"#,
+        )
+        .with_cookie(&session));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(f.store.all().unwrap().is_empty(), "nothing was written");
+    }
+
+    #[test]
+    fn filing_over_json_needs_an_account() {
+        // An account costs a confirmed mailbox, and that is the thing standing
+        // between this endpoint and an open pipe to somebody's model budget.
+        // **404, not 401**: the endpoint does not exist for a stranger.
+        let mut f = Fixture::new("json-file-anon").with_public(false);
+
+        let res = f.go(&Req::post_json(
+            "/api/v1/ui/file",
+            r#"{"text":"something","kind":"bug"}"#,
+        ));
+        assert_eq!(res.status, 404, "{}", res.body);
+        assert!(f.store.all().unwrap().is_empty(), "nothing was written");
+    }
+
+    #[test]
+    fn filing_over_json_is_capped_the_same_as_the_form() {
+        // Every filing that clears the screener costs a full drafting run, so
+        // the daily cap is the real ceiling rather than the rate limiter. It
+        // lives in `file_now`, which is why a second filing route cannot slip
+        // past it — this is the test that would fail if one ever did.
+        let mut f = Fixture::new("json-file-cap")
+            .with_public(false)
+            .with_caps(3, 20);
+        let session = f.signed_in("filer@example.test");
+
+        let cap = 3;
+        for n in 0..cap {
+            let res = f.go(&Req::post_json(
+                "/api/v1/ui/file",
+                &format!(r#"{{"text":"request number {n}","kind":"bug"}}"#),
+            )
+            .with_cookie(&session));
+            assert_eq!(res.status, 200, "filing {n} of {cap}: {}", res.body);
+        }
+
+        let over = f.go(&Req::post_json(
+            "/api/v1/ui/file",
+            r#"{"text":"one too many","kind":"bug"}"#,
+        )
+        .with_cookie(&session));
+        assert_eq!(over.status, 429, "{}", over.body);
+        assert_eq!(
+            f.store.all().unwrap().len(),
+            cap,
+            "the one over the cap was not written"
         );
     }
 

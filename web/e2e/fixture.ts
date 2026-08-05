@@ -66,12 +66,6 @@ export async function server(): Promise<Server> {
   // and rebuilding a changed one is the entire point.
   execFileSync("docker", ["build", "-t", IMAGE, ".."], { stdio: "inherit" });
 
-  const key = Array.from({ length: 32 }, () =>
-    Math.floor(Math.random() * 256)
-      .toString(16)
-      .padStart(2, "0"),
-  ).join("");
-
   const sibling = inContainer();
   // **Join the server to the network this container is already on**, rather than
   // guessing what it is called. Woodpecker names it after the workflow, so it
@@ -122,7 +116,7 @@ export async function server(): Promise<Server> {
   // starts of something that boots in milliseconds, against either weakening the
   // check or pre-allocating a subnet Woodpecker did not create.
   const base = network
-    ? `http://${startOnNetwork(network, env(key, "http://127.0.0.1:8420"))}:8420`
+    ? `http://${startOnNetwork(network, env("http://127.0.0.1:8420"))}:8420`
     : "http://127.0.0.1:8799";
 
   docker(
@@ -131,7 +125,7 @@ export async function server(): Promise<Server> {
     "--name",
     NAME,
     ...(network ? ["--network", network] : ["-p", "8799:8420"]),
-    ...env(key, base),
+    ...env(base),
     IMAGE,
   );
 
@@ -254,9 +248,8 @@ function startOnNetwork(network: string, envArgs: string[]): string {
 
 /// The server's environment, all of it in one place so the two starts cannot
 /// drift apart.
-function env(key: string, base: string): string[] {
+function env(base: string): string[] {
   return [
-    "-e", `SC_SERVER_SECRET_KEY=${key}`,
     "-e", `SC_SERVER_DAEMON_KEYS=harness:${DAEMON_KEY}`,
     "-e", `SC_SERVER_PUBLIC_BASE_URL=${base}`,
     "-e", "SC_SERVER_PUBLIC_REPOS=intake",

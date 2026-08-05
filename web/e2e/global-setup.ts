@@ -20,8 +20,9 @@ export default async function globalSetup() {
   process.env.SC_BASE_URL = running.base;
   process.env.SC_ADMIN_LOGIN = running.login;
   process.env.SC_ADMIN_PASSWORD = running.password;
-  process.env.SC_REQUEST_ID = await running.fileAndDraft(
-    "The search is broken on a phone and should not be.",
-  );
+  // Nothing seeds a request any more. The smoke test does not read one, and
+  // `fileAndDraft` costs a daemon poll and a drafting round trip on every run —
+  // `fixture.ts` keeps it because the next test that needs a request will want
+  // it, and rebuilding it from scratch is the expensive part.
   return () => running?.stop();
 }

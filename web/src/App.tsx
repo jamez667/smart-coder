@@ -163,7 +163,7 @@ export function App() {
         ) : me.can.review ? (
           <ReviewList requests={review} onOpen={openRequest} />
         ) : me.can.file ? (
-          <Filing mine={mine} />
+          <Filing mine={mine} me={me} onFiled={() => load().catch(() => undefined)} />
         ) : (
           <Landing />
         )}
@@ -213,11 +213,111 @@ function Landing() {
   );
 }
 
-/// A filer's own surface: what they have filed.
-function Filing({ mine }: { mine: FiledRequest[] }) {
+/// A filer's own surface: somewhere to say what they need, and what they said.
+///
+/// **The repository list comes from `/me`.** A client cannot invent it — the
+/// server refuses a name it does not serve — and with exactly one configured
+/// there is no field at all, because a choice of one is not a choice.
+function Filing({
+  mine,
+  me,
+  onFiled,
+}: {
+  mine: FiledRequest[];
+  me: Me;
+  onFiled: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState("");
+  const [filed, setFiled] = useState(false);
+  const repos = me.repos ?? [];
+
+  if (repos.length === 0) {
+    // Not a failure — a surface with nothing enabled. Saying so beats a form
+    // whose every submission would be refused.
+    return (
+      <>
+        <h1>Nothing to file against</h1>
+        <p className="meta">
+          This server is not offering any repository for requests right now.
+        </p>
+      </>
+    );
+  }
+
   return (
     <>
       <h1>What needs doing?</h1>
+      {problem && (
+        <p className="problem" role="alert">
+          {problem}
+        </p>
+      )}
+      {filed && (
+        <p role="status">
+          Filed. Somebody writes it up, and it appears below when there is a
+          spec to read.
+        </p>
+      )}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          const form = e.currentTarget;
+          const data = new FormData(form);
+          setBusy(true);
+          setProblem("");
+          setFiled(false);
+          api
+            .file(
+              String(data.get("text") ?? ""),
+              String(data.get("kind") ?? "feature"),
+              // Omitted when there is only one, which is what the server
+              // expects: it takes the only one rather than demanding a name
+              // nobody was asked for.
+              repos.length > 1 ? String(data.get("repo") ?? "") : undefined,
+            )
+            .then(() => {
+              setFiled(true);
+              form.reset();
+              onFiled();
+            })
+            .catch((err: Error) => setProblem(err.message))
+            .finally(() => setBusy(false));
+        }}
+      >
+        <label htmlFor="file-text">What do you need?</label>
+        <textarea
+          id="file-text"
+          name="text"
+          required
+          rows={6}
+          placeholder="Describe the change in your own words."
+        />
+
+        <label htmlFor="file-kind">Is it broken, or missing?</label>
+        <select id="file-kind" name="kind" defaultValue="feature">
+          <option value="feature">Something is missing</option>
+          <option value="bug">Something is broken</option>
+        </select>
+
+        {repos.length > 1 && (
+          <>
+            <label htmlFor="file-repo">Which project?</label>
+            <select id="file-repo" name="repo" required defaultValue={repos[0]}>
+              {repos.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+
+        <button type="submit" disabled={busy}>
+          File it
+        </button>
+      </form>
+
       {mine.length > 0 && (
         <>
           <h2>What you have filed</h2>
