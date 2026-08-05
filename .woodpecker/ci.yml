@@ -6,6 +6,9 @@
 # the next. Installing deps and running the gates in a single step keeps it
 # correct and lets them share one `target/` build.
 #
+# The browser tests in `web/e2e/` are not among them — see the note below the
+# gates for why.
+#
 # **Node is installed here because the server does not compile without it.** The
 # browser interface is built by Vite and embedded with `include_str!`, so its
 # output is a compile-time input rather than a packaging step — see spec 18 for
@@ -66,37 +69,27 @@ steps:
       # interpreter, no network.
       - cargo test --workspace
 
-  # The browser harness, in its own step because it needs a browser and a
-  # running server — the two things `scripts/check.sh` deliberately does not.
+  # **The browser harness is not run here, deliberately.** `web/e2e/` holds 28
+  # Playwright tests, and they are a development tool rather than a gate.
   #
-  # **It carries the tests the move to a client-rendered surface would otherwise
-  # lose**: that the two review decisions are styled identically, that the
-  # controls sit below the artifact they decide on, that the bypass is visible,
-  # and that a signed-out stranger is shown no administrative route. Those were
+  # The tests themselves take about six seconds. Standing up something for them
+  # to drive takes twenty-seven minutes, because the harness builds the release
+  # image and that build has no warm cache in CI — the same workspace `check`
+  # compiles in three minutes above, done a second time from cold. Nothing about
+  # that is Playwright's fault and nothing about it is worth paying on every
+  # push.
+  #
+  # What they cover is real and worth keeping: the review gate's properties —
+  # that the two decisions are styled identically, that the controls sit below
+  # the artifact they decide on, that the bypass is visible — plus the leak check
+  # that a signed-out stranger is shown no administrative route. Those were
   # asserted against rendered HTML in Rust and cannot be asserted against JSON.
   #
-  # It builds the image and drives it, so what is tested is what ships.
-  - name: browser
-    # **This tag and the `@playwright/test` version must match exactly.** The
-    # image ships the browsers; the package expects a specific build of them, and
-    # a mismatch fails with "Executable doesn't exist" rather than anything about
-    # versions. The dependency is pinned without a caret for the same reason —
-    # a range lets npm float the package while the image stays put.
-    image: mcr.microsoft.com/playwright:v1.62.1-jammy
-    # **Needs the repository's `volumes` trust flag.** The harness stands up the
-    # real image and drives it, so what is tested is what ships — the same
-    # binary, the same embedded bundle, the same CSP. Without the flag Woodpecker
-    # rejects this pipeline before any step runs, and the failure has no step
-    # logs to read, so if this ever reports `error` rather than `failure` the
-    # flag is the first thing to check.
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    commands:
-      # **The socket is mounted; the client is not.** Mounting
-      # `/var/run/docker.sock` grants access to the daemon and provides no
-      # `docker` binary to talk to it with — the image is Playwright's, and it
-      # has no reason to ship one. `spawnSync docker ENOENT` is what that looks
-      # like, and it reads like a missing mount rather than a missing client.
-      - apt-get update && apt-get install -y --no-install-recommends docker.io
-      - cd web && npm ci
-      - npx playwright test
+  # Run them by hand before anything that matters:
+  #
+  #     cd web && npx playwright test
+  #
+  # They need Docker and a browser, which is why they were never going to live
+  # in `scripts/check.sh` either — that gate is offline and deterministic, and
+  # `scripts/layout-check.js` already records the reason: "a gate that cannot run
+  # everywhere is a gate somebody disables."
