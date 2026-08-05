@@ -126,3 +126,93 @@ export const api = {
   accept: (id: string, digest: string) =>
     post<ReviewRequest>(`requests/${encodeURIComponent(id)}/accept`, { digest }),
 };
+
+/// The settings, as the interface may see them.
+///
+/// **Presence and a date, never a value.** There is no read path for a stored
+/// secret anywhere in this server, and the API does not add one — so the key
+/// fields here are booleans, and the forms that write them are always blank.
+export interface SettingsView {
+  public: boolean;
+  site_name: string;
+  base_url: string;
+  show_spec: boolean | null;
+  mail_provider: string;
+  mail_from: string;
+  mail_from_name: string;
+  mail_key_set: boolean;
+  screen_url: string;
+  screen_model: string;
+  screen_key_set: boolean;
+  max_daily_filings: number | null;
+  max_daily_drafts: number | null;
+  max_accounts: number | null;
+  max_outstanding_links: number | null;
+}
+
+export interface OwnerRecord {
+  login: string;
+  repos: string[];
+  added_ms: number;
+  revoked: boolean;
+}
+
+export interface RepoRecord {
+  name: string;
+  served_by: string | null;
+  added_ms: number;
+  disabled: boolean;
+}
+
+export interface DaemonRecord {
+  label: string;
+  added_ms: number;
+  revoked: boolean;
+}
+
+export interface AccountView {
+  id: string;
+  email_hint: string;
+  created_ms: number;
+  revoked: boolean;
+  has_password: boolean;
+}
+
+/// The administrative half.
+///
+/// Every one of these is `Caller::Admin` at the server and answers **404** to
+/// anybody else — not 401, because the administrative surface does not exist for
+/// them. A client that hid these would be a courtesy; the server refusing them
+/// is the gate.
+export const admin = {
+  settings: () => get<SettingsView>("settings"),
+  /// A partial update: only the fields present are written.
+  ///
+  /// **A blank secret must be omitted, not sent empty.** The page never shows a
+  /// stored key, so an empty field means "unchanged" — sending it would clear
+  /// the mail key every time somebody renamed the site.
+  saveSettings: (patch: Record<string, unknown>) =>
+    post<SettingsView>("settings", patch),
+
+  owners: () => get<OwnerRecord[]>("owners"),
+  addOwner: (login: string, repos: string[]) =>
+    post<OwnerRecord[]>("owners", { login, repos }),
+
+  repos: () => get<RepoRecord[]>("repos"),
+  /// `anyway` forces a repository no machine has offered. The server answers
+  /// **409** without it, which is a refusal to be overridden rather than an
+  /// error — the daemon may simply not have polled yet.
+  addRepo: (name: string, anyway: boolean) =>
+    post<RepoRecord[]>("repos", { name, anyway }),
+
+  daemons: () => get<DaemonRecord[]>("daemons"),
+  /// **The response is the only copy of the key.** The volume holds a hash.
+  mintDaemon: (label: string) =>
+    post<{ label: string; key: string }>("daemons", { label }),
+
+  accounts: () => get<AccountView[]>("accounts"),
+
+  /// Revoke a record. Kept and marked, never deleted.
+  revoke: <T>(list: "owners" | "repos" | "daemons" | "accounts", id: string) =>
+    post<T>(`${list}/${encodeURIComponent(id)}/revoke`, {}),
+};

@@ -35,6 +35,6 @@ export default defineConfig({
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     // The surface exists for a phone on a train; the layout properties are
     // asserted where they actually matter.
-    { name: "mobile", use: { ...devices["Pixel 7"] }, testIgnore: "**/api.spec.ts" },
+    { name: "mobile", use: { ...devices["Pixel 7"] }, testIgnore: ["**/api.spec.ts", "**/admin.spec.ts"] },
   ],
 });

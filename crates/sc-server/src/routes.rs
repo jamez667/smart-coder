@@ -1057,7 +1057,332 @@ fn api_write(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, rest: &str) 
         };
         return api_verb(ctx, req, caller, id, verb);
     }
-    error(404, "no such endpoint")
+
+    // Everything below administers the server. **The same gate the private
+    // surface uses, and the same answer**: 404, not 401 — the administrative
+    // surface does not exist for anybody else.
+    let Some(Caller::Admin { .. }) = caller else {
+        return error(404, "no such endpoint");
+    };
+
+    let body: serde_json::Value = if req.body.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_str(&req.body) {
+            Ok(v) => v,
+            Err(e) => return error(400, &format!("that body is not JSON: {e}")),
+        }
+    };
+    let text = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    match rest {
+        "settings" => api_settings(ctx, &body),
+        "owners" => api_add_owner(ctx, &text("login"), &body),
+        "repos" => api_add_repo(
+            ctx,
+            &text("name"),
+            body.get("anyway")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        ),
+        "daemons" => api_mint_daemon(ctx, &text("label")),
+        _ => {
+            // `{list}/{id}/revoke` — the four revoke verbs, which share a shape.
+            let Some((list, tail)) = rest.split_once('/') else {
+                return error(404, "no such endpoint");
+            };
+            let Some((id, verb)) = tail.split_once('/') else {
+                return error(404, "no such endpoint");
+            };
+            if verb != "revoke" && verb != "disable" {
+                return error(404, "no such verb");
+            }
+            api_revoke(ctx, list, id)
+        }
+    }
+}
+
+/// Write one group of settings.
+///
+/// **The freshness gate is here, before anything is read**, and it applies to
+/// exactly the fields that are secrets. Somebody holding a stolen cookie must
+/// not be able to rotate the mail key and redirect every sign-in link, so those
+/// ask for the password *at that moment* rather than at some point in the past.
+fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
+    let text = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let flag = |k: &str| body.get(k).and_then(|v| v.as_bool());
+    // A number that is absent or null means "use the built-in default", which is
+    // not the same as zero — the settings page has always said so.
+    let cap = |k: &str| body.get(k).and_then(|v| v.as_u64()).map(|n| n as usize);
+
+    let touches_secret = body.get("base_url").is_some()
+        || body.get("mail_key").is_some()
+        || body.get("screen_key").is_some();
+    // **The same rule as the page, a different refusal.** `require_fresh`
+    // answers by re-rendering the settings page with a note on it, which is
+    // right for a form post and unreadable to a `fetch`. The condition is the
+    // one thing that must not diverge, so it is read from the same field rather
+    // than re-derived.
+    if touches_secret && !ctx.fresh_auth {
+        return error(
+            401,
+            "changing a secret needs a fresh sign-in - it has been more than five              minutes since this browser last proved itself",
+        );
+    }
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut s = match ctx.store.settings() {
+        Ok(s) => s,
+        Err(e) => return error(500, &e.to_string()),
+    };
+
+    if let Some(v) = flag("public") {
+        s.public = v;
+    }
+    if body.get("site_name").is_some() {
+        s.site_name = text("site_name");
+    }
+    if let Some(v) = flag("show_spec") {
+        s.show_spec = Some(v);
+    }
+    if body.get("base_url").is_some() {
+        let url = text("base_url");
+        if let Err(e) = crate::config::check_base_url(&url) {
+            return error(400, &e);
+        }
+        s.base_url = url;
+    }
+    if body.get("mail_provider").is_some() {
+        s.mail_provider = text("mail_provider");
+    }
+    if body.get("mail_from").is_some() {
+        s.mail_from = text("mail_from");
+    }
+    if body.get("mail_from_name").is_some() {
+        s.mail_from_name = text("mail_from_name");
+    }
+    if body.get("screen_url").is_some() {
+        s.screen_url = text("screen_url");
+    }
+    if body.get("screen_model").is_some() {
+        s.screen_model = text("screen_model");
+    }
+    // **A blank secret keeps the one that is there.** Clearing a key has to be
+    // deliberate, and an empty field is what a browser sends for a value the
+    // page never showed — see the settings page, which renders presence and
+    // never a value.
+    let sealed = |name: &str| -> Option<&str> {
+        body.get(name)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    if sealed("mail_key").is_some() || sealed("screen_key").is_some() {
+        let Some(key) = ctx.seal_key else {
+            return error(400, "this server has no sealing key");
+        };
+        if let Some(raw) = sealed("mail_key") {
+            s.mail_key = crate::seal::seal(key, raw, ctx.now_ms);
+        }
+        if let Some(raw) = sealed("screen_key") {
+            s.screen_key = crate::seal::seal(key, raw, ctx.now_ms);
+        }
+    }
+
+    for (name, field) in [
+        ("max_daily_filings", &mut s.max_daily_filings),
+        ("max_daily_drafts", &mut s.max_daily_drafts),
+        ("max_accounts", &mut s.max_accounts),
+        ("max_outstanding_links", &mut s.max_outstanding_links),
+    ] {
+        if body.get(name).is_some() {
+            *field = cap(name);
+        }
+    }
+
+    if let Err(e) = ctx.store.put_settings(&s) {
+        return error(500, &e.to_string());
+    }
+    invalidate_settings(ctx);
+    drop(_guard);
+    match serde_json::to_string(&SettingsView::of(&s)) {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Name somebody an owner of some repositories.
+fn api_add_owner(ctx: &mut Ctx<'_>, login: &str, body: &serde_json::Value) -> Res {
+    if let Err(e) = check_login(login) {
+        return error(400, &e);
+    }
+    let repos: Vec<String> = body
+        .get("repos")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    roster.set_owner(login, &repos, ctx.now_ms);
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    drop(_guard);
+    match serde_json::to_string(&roster.owners) {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Enable a repository for public filing.
+fn api_add_repo(ctx: &mut Ctx<'_>, name: &str, anyway: bool) -> Res {
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    // **A repository no daemon has offered is refused unless forced.** Naming
+    // one nothing serves produces a queue that never drains, and the operator
+    // finds out when somebody files into it.
+    let offered = ctx
+        .seen
+        .lock()
+        .map(|s| s.offered(ctx.now_ms))
+        .unwrap_or_default();
+    let served_by = offered.iter().find(|r| *r == name).map(|_| {
+        ctx.seen
+            .lock()
+            .ok()
+            .and_then(|s| s.declared_by(name, ctx.now_ms))
+            .unwrap_or_default()
+    });
+    if !anyway && served_by.is_none() {
+        return error(
+            409,
+            "no machine has offered that repository - send anyway: true to enable it regardless",
+        );
+    }
+    roster.enable(name, served_by, ctx.now_ms);
+    roster.seeded = true;
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    drop(_guard);
+    match serde_json::to_string(&roster.repos) {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Mint a key for a machine. **Shown once and never again.**
+fn api_mint_daemon(ctx: &mut Ctx<'_>, label: &str) -> Res {
+    if label.is_empty() || label.len() > 64 {
+        return error(400, "a machine needs a name");
+    }
+    // The label lands in a URL for revocation and in every log line about this
+    // machine, so it is kept to what reads back unambiguously.
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return error(400, "letters, numbers, dashes and underscores");
+    }
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let key = auth::mint_secret();
+    roster.set_daemon(label, &auth::hash(&key), ctx.now_ms);
+    roster.seeded = true;
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    drop(_guard);
+    // **The response is the only copy.** The volume holds a hash, so nothing can
+    // read it back — `Cache-Control: no-store` on every response is what stops
+    // it being written down along the way.
+    match serde_json::to_string(&serde_json::json!({ "label": label, "key": key })) {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
+}
+
+/// Revoke an account, an owner, a machine, or disable a repository.
+///
+/// **Revoked records are kept, not deleted** — a list that silently shrinks
+/// cannot answer "did I already deal with that?", so the developer revokes twice
+/// or worries they never did.
+fn api_revoke(ctx: &mut Ctx<'_>, list: &str, id: &str) -> Res {
+    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+    if list == "accounts" {
+        let mut accounts = match ctx.store.accounts() {
+            Ok(a) => a,
+            Err(e) => return error(500, &e.to_string()),
+        };
+        if !accounts.revoke(id) {
+            return error(404, "no such account");
+        }
+        if let Err(e) = ctx.store.put_accounts(&accounts) {
+            return error(500, &e.to_string());
+        }
+        invalidate_accounts(ctx);
+        drop(_guard);
+        let view: Vec<_> = accounts.accounts.iter().map(AccountView::of).collect();
+        return match serde_json::to_string(&view) {
+            Ok(b) => Res::json(200, b),
+            Err(e) => error(500, &e.to_string()),
+        };
+    }
+
+    let mut roster = match ctx.store.roster() {
+        Ok(r) => r,
+        Err(e) => return error(500, &e.to_string()),
+    };
+    let ok = match list {
+        "owners" => roster.revoke(id),
+        "daemons" => roster.revoke_daemon(id),
+        "repos" => roster.disable(id),
+        _ => return error(404, "no such endpoint"),
+    };
+    if !ok {
+        return error(404, "no such record");
+    }
+    if let Err(e) = ctx.store.put_roster(&roster) {
+        return error(500, &e.to_string());
+    }
+    invalidate_roster(ctx);
+    drop(_guard);
+    let body = match list {
+        "owners" => serde_json::to_string(&roster.owners),
+        "daemons" => serde_json::to_string(&roster.daemons),
+        _ => serde_json::to_string(&roster.repos),
+    };
+    match body {
+        Ok(b) => Res::json(200, b),
+        Err(e) => error(500, &e.to_string()),
+    }
 }
 
 /// Act on a request: send back, discard, release, accept.
@@ -6086,6 +6411,156 @@ mod tests {
         for path in [crate::api::ui::SCRIPT_PATH, crate::api::ui::STYLE_PATH] {
             assert_eq!(bucket_for(&None, path), Bucket::PublicRead, "{path}");
         }
+    }
+
+    #[test]
+    fn changing_a_secret_needs_a_freshly_proved_session() {
+        // **The one gate that is about time rather than identity.** A stolen
+        // cookie carries the administrator's authority for as long as it lives;
+        // rotating the mail key would redirect every sign-in link on the server,
+        // so that asks for the password *at that moment*.
+        //
+        // The API must not be the way around it.
+        let mut f = Fixture::new("api-fresh").with_public(false);
+        let admin = f.as_admin();
+
+        // **Asserted on the base URL, not the mail key.** A key needs a sealing
+        // key to store, and without one the write fails 400 whatever the
+        // freshness — so a test using it passes with the gate removed, which is
+        // what the first version of this did. The base URL needs nothing.
+        let body = "{\"base_url\":\"https://specs.example.test\"}";
+
+        // Fresh: it goes through.
+        let fresh = f.go(&api_post("/api/v1/ui/settings", body).with_cookie(&admin));
+        assert_eq!(fresh.status, 200, "{}", fresh.body);
+
+        // Stale: the session was opened long enough ago that it no longer counts.
+        f.now_ms += crate::account::FRESH_AUTH_MS + 1;
+        let stale = f.go(&api_post("/api/v1/ui/settings", body).with_cookie(&admin));
+        assert_eq!(
+            stale.status, 401,
+            "a stale session rotated a secret: {}",
+            stale.body
+        );
+
+        // And an ordinary setting is unaffected — the gate is on the secrets,
+        // not on the page.
+        let ordinary = f
+            .go(&api_post("/api/v1/ui/settings", "{\"site_name\":\"intake\"}").with_cookie(&admin));
+        assert_eq!(ordinary.status, 200, "{}", ordinary.body);
+    }
+
+    #[test]
+    fn a_blank_secret_through_the_api_keeps_the_one_that_is_there() {
+        // The page renders presence and never a value, so a browser submitting
+        // the form sends an empty field for a key it was never shown. Treating
+        // that as "clear it" would wipe the mail key every time somebody changed
+        // the site name.
+        let mut f = Fixture::new("api-blank-secret").with_public(false);
+        let admin = f.as_admin();
+        let before = f.store.settings().unwrap().mail_key.clone();
+
+        let res = f.go(&api_post("/api/v1/ui/settings", "{\"mail_key\":\"\"}").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(f.store.settings().unwrap().mail_key, before);
+    }
+
+    #[test]
+    fn a_minted_daemon_key_is_returned_once_and_never_stored() {
+        // **The response is the only copy.** The volume holds a hash, so nothing
+        // can read it back — which is what makes `Cache-Control: no-store` on
+        // every response load-bearing rather than tidy.
+        let mut f = Fixture::new("api-mint").with_public(false);
+        let admin = f.as_admin();
+
+        let res =
+            f.go(&api_post("/api/v1/ui/daemons", "{\"label\":\"laptop\"}").with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        let key = v["key"].as_str().expect("a key came back");
+        assert!(key.len() >= 32, "and it is a real one: {key}");
+
+        // Never on the volume in the clear.
+        let raw = std::fs::read_to_string(f.store.roster_path()).unwrap();
+        assert!(!raw.contains(key), "the key was written down: {raw}");
+
+        // And listing the machines afterwards does not include it.
+        let list = f.go(&Req::get("/api/v1/ui/daemons").with_cookie(&admin));
+        assert!(!list.body.contains(key), "{}", list.body);
+    }
+
+    #[test]
+    fn a_repository_nothing_serves_is_refused_unless_forced() {
+        // Naming one no daemon offers produces a queue that never drains, and
+        // the operator finds out when somebody files into it. Refused with a
+        // conflict rather than silently accepted — and overridable, because the
+        // daemon may simply not have polled yet.
+        let mut f = Fixture::new("api-repo-unserved").with_public(false);
+        let admin = f.as_admin();
+
+        let refused =
+            f.go(&api_post("/api/v1/ui/repos", "{\"name\":\"nothing\"}").with_cookie(&admin));
+        assert_eq!(refused.status, 409, "{}", refused.body);
+
+        let forced = f.go(
+            &api_post("/api/v1/ui/repos", "{\"name\":\"nothing\",\"anyway\":true}")
+                .with_cookie(&admin),
+        );
+        assert_eq!(forced.status, 200, "{}", forced.body);
+    }
+
+    #[test]
+    fn the_administrative_writes_do_not_exist_for_anybody_else() {
+        // 404, never 401 — the same answer the read endpoints give.
+        let mut f = Fixture::new("api-write-gate").with_public(false);
+        let filer = f.signed_in("jo@x.com");
+
+        for (path, body) in [
+            ("/api/v1/ui/settings", "{\"site_name\":\"x\"}"),
+            ("/api/v1/ui/owners", "{\"login\":\"jo@x.com\"}"),
+            ("/api/v1/ui/repos", "{\"name\":\"x\"}"),
+            ("/api/v1/ui/daemons", "{\"label\":\"x\"}"),
+            ("/api/v1/ui/accounts/a-1/revoke", "{}"),
+        ] {
+            assert_eq!(
+                f.go(&api_post(path, body)).status,
+                404,
+                "signed out: {path}"
+            );
+            assert_eq!(
+                f.go(&api_post(path, body).with_cookie(&filer)).status,
+                404,
+                "a filer: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_owner_can_be_named_and_revoked_through_the_api() {
+        let mut f = Fixture::new("api-owners")
+            .with_public(false)
+            .with_repos(&["intake"]);
+        let admin = f.as_admin();
+
+        let added = f.go(&api_post(
+            "/api/v1/ui/owners",
+            "{\"login\":\"jo@x.com\",\"repos\":[\"intake\"]}",
+        )
+        .with_cookie(&admin));
+        assert_eq!(added.status, 200, "{}", added.body);
+        assert!(added.body.contains("jo@x.com"), "{}", added.body);
+
+        let revoked =
+            f.go(&api_post("/api/v1/ui/owners/jo@x.com/revoke", "{}").with_cookie(&admin));
+        assert_eq!(revoked.status, 200, "{}", revoked.body);
+        // **Kept, not deleted.** A list that silently shrinks cannot answer "did
+        // I already deal with that?".
+        assert!(revoked.body.contains("jo@x.com"), "{}", revoked.body);
+        assert!(
+            revoked.body.contains("\"revoked\":true"),
+            "{}",
+            revoked.body
+        );
     }
 
     /// Every page an administrator is expected to find.

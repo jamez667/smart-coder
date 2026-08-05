@@ -9,6 +9,7 @@ import {
 import { Masthead } from "./Masthead";
 import { SignInDialog } from "./SignInDialog";
 import { ReviewDetail, ReviewList } from "./Review";
+import { Accounts, Daemons, Owners, Repos, Settings } from "./Admin";
 
 /// The whole interface.
 ///
@@ -81,6 +82,19 @@ export function App() {
     if (!m && open) setOpen(null);
   }, [path, open]);
 
+  // The administrative pages, chosen by path. **Gated on the capability the
+  // server sent**, not on the path alone: a filer who types `/settings` gets the
+  // landing page, and the endpoints behind it would 404 for them anyway.
+  const admin = me?.can.administer
+    ? {
+        "/settings": <Settings />,
+        "/owners": <Owners />,
+        "/repos": <Repos />,
+        "/daemons": <Daemons />,
+        "/accounts": <Accounts />,
+      }[path]
+    : undefined;
+
   if (!me) {
     // Deliberately blank rather than a spinner: on the connection this surface
     // was designed for, a spinner that resolves in 40ms is a flash of noise.
@@ -92,7 +106,9 @@ export function App() {
       <Masthead me={me} onSignIn={() => setSigningIn(true)} onGo={go} />
       <main>
         {problem && <p className="note">{problem}</p>}
-        {open ? (
+        {admin ? (
+          admin
+        ) : open ? (
           <ReviewDetail
             request={open}
             me={me}
