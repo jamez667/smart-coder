@@ -56,14 +56,15 @@ export async function server(): Promise<Server> {
   } catch {
     // Not running. Fine.
   }
-  // **Build the image if it is not there.** Locally it usually is, from the last
-  // `docker build`; in CI it never is, and a harness that assumed otherwise
-  // would fail with "no such image" rather than testing anything.
-  try {
-    docker("image", "inspect", IMAGE);
-  } catch {
-    execFileSync("docker", ["build", "-t", IMAGE, ".."], { stdio: "inherit" });
-  }
+  // **Always built, never reused.** This was "build it if it is missing", which
+  // is wrong on a host that keeps images between runs: the tag survives, so
+  // every run after the first tested whatever was built the first time. Six CI
+  // pipelines ran against a stale bundle while the source said otherwise, and
+  // the symptom was a routing bug that did not exist.
+  //
+  // The layers are cached by Docker, so rebuilding an unchanged tree is cheap
+  // and rebuilding a changed one is the entire point.
+  execFileSync("docker", ["build", "-t", IMAGE, ".."], { stdio: "inherit" });
 
   const key = Array.from({ length: 32 }, () =>
     Math.floor(Math.random() * 256)
