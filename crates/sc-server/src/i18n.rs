@@ -1,8 +1,26 @@
 //! The public surface's words, in the languages it has them in.
 //!
-//! Only the **public** half is translated. The private review pages have exactly
-//! one reader — the developer running the server — and translating them would be
-//! catalogue weight paid for nobody.
+//! Only the **public** half is translated. The private review pages had exactly
+//! one reader — the developer running the server — and translating them would
+//! have been catalogue weight paid for nobody.
+//!
+//! ## Most of this currently has no reader, and is kept deliberately
+//!
+//! The server-rendered pages this was written for are gone. What still reads a
+//! catalogue is the magic-link landing — the one document left, reached from an
+//! email by somebody who may not read English — plus the coarse state labels and
+//! the filing refusals the JSON API sends already translated. That is around a
+//! fifth of the fields below.
+//!
+//! The rest are **not deleted**, and the reasoning is worth stating because the
+//! dead-code check will never make this decision for anyone: every field is read
+//! by `fields()` in the tests, so nothing warns. The interface is English-only
+//! today, and deleting the other four fifths would throw away a finished French
+//! translation to save a few kilobytes of `&'static str` in a binary that already
+//! carries two fonts. Whoever gives the client a language control wants these;
+//! whoever decides this product ships in one language should delete the `Fr`
+//! variant and this whole module together, rather than thinning it a field at a
+//! time until the two catalogues quietly disagree about what exists.
 //!
 //! ## A missing translation does not compile
 //!

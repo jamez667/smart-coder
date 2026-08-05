@@ -25,6 +25,15 @@
 //!
 //! Accepting marks a spec `Accepted` and **starts nothing**: the developer picks it
 //! up in their IDE when they choose to.
+//!
+//! ## The browser surface is a client, not a page layer
+//!
+//! There was a `page` module here that rendered every document this server
+//! served. It is gone: [`api`] answers JSON under `/api/v1/ui/`, the built
+//! interface ships in [`api::ui`], and [`routes`] hands the same application
+//! shell to every browser path. Two documents survive because they are arrived at
+//! from *outside* the application — [`api::NOT_FOUND`] and the magic-link landing
+//! — and both are self-contained constants rather than a rendering layer.
 
 pub mod account;
 pub mod admin;
@@ -35,7 +44,6 @@ pub mod daemons;
 pub mod i18n;
 pub mod log;
 pub mod mail;
-pub mod page;
 pub mod query;
 pub mod ratelimit;
 pub mod roster;

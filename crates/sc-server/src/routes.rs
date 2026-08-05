@@ -27,7 +27,12 @@ use crate::config::PublicConfig;
 use crate::i18n::Locale;
 use crate::mail::Mailer;
 use crate::ratelimit::{Bucket, RateLimiter};
-use crate::store::{new_id, Request, RequestState, Serves, Store};
+use crate::store::{new_id, Request, Serves, Store};
+// `RequestState` is used only by this file's tests now: the routes settle a
+// request through `Store`, which returns the record rather than being told a
+// state, so nothing outside the test module names one.
+#[cfg(test)]
+use crate::store::RequestState;
 
 /// The cookie a browser carries once enrolled.
 pub const COOKIE: &str = "sc_device";
@@ -134,13 +139,12 @@ pub mod public_route {
     /// **signed out**, since somebody who cannot read the sign-in page is
     /// precisely who needs it.
     pub const LANGUAGE: &str = "/public/language";
-    /// The surface's own script. A served file rather than an inline block,
-    /// because the policy is `script-src 'self'` and never `'unsafe-inline'`.
-    pub const SCRIPT: &str = "/public/app.js";
-    /// The body face, served from this origin.
-    pub const FONT_BODY: &str = "/public/dm-sans.woff2";
-    /// The display face, served from this origin.
-    pub const FONT_DISPLAY: &str = "/public/fraunces.woff2";
+    // **There is no `/public/app.js`.** This surface had a script of its own —
+    // progressive enhancement for the sign-in dialog and the language picker —
+    // served as a file rather than inlined, because the policy is
+    // `script-src 'self'` and never `'unsafe-inline'`. The interface's own bundle
+    // is at `crate::api::ui::SCRIPT_PATH` now and is served under the same rule,
+    // which is the part of that reasoning worth keeping.
     /// The landing page — what `/` is, and the first thing a stranger sees.
     pub const LANDING: &str = "/";
 }
@@ -191,13 +195,15 @@ pub mod private_route {
 /// Named once so the test proving an account cannot reach any of them iterates
 /// this list rather than a hand-written copy that goes stale the moment a verb
 /// is added.
-pub const REVIEW_VERBS: [&str; 5] = [
-    "accept",
-    "accept/confirm",
-    "send-back",
-    "discard",
-    "release",
-];
+///
+/// **`accept/confirm` was here and is gone with the two-step page.** The rendered
+/// surface asked at `accept` and settled at `accept/confirm`, because a page had
+/// to carry the digest of what was read from one request to the next; the client
+/// already holds the spec it rendered, so `accept` takes the digest in the one
+/// post. A constant naming an address the server does not serve is worse than
+/// useless — the tests that iterate this list would have been asserting a refusal
+/// from a route that 404s for everybody, which passes without proving anything.
+pub const REVIEW_VERBS: [&str; 4] = ["accept", "send-back", "discard", "release"];
 
 /// A request, reduced to what the routes actually use.
 #[derive(Debug, Clone)]
@@ -564,18 +570,21 @@ pub struct Ctx<'a> {
 }
 
 /// Route one request.
+///
+/// **A thin call through, and deliberately still a function.** It used to set a
+/// thread-local holding [`PublicConfig::site_name`](crate::config::PublicConfig)
+/// for the masthead every rendered page carried, and clear it on the way out so a
+/// thread serving the next request could not show that one the previous request's
+/// name. The client draws its own masthead now, so there is no renderer to feed
+/// and no thread-local left to leak.
+///
+/// **The name itself is currently rendered nowhere.** It is still configured and
+/// still read into `PublicConfig`; nothing on the JSON surface carries it, so a
+/// client cannot show it. Giving it a home means a field on [`crate::api::Me`] —
+/// which is where the client already reads what it may draw — rather than
+/// reviving a per-request global.
 pub fn handle(ctx: &mut Ctx<'_>, req: &Req) -> Res {
-    // The masthead names the repository this surface collects for. Set here,
-    // once, rather than passed through ten renderers that have no other reason
-    // to know it — and **cleared on the way out**, because a thread serves many
-    // requests and a name left behind would appear on the next one.
-    match ctx.public {
-        Some(p) => crate::page::site::set(&p.site_name),
-        None => crate::page::site::clear(),
-    }
-    let res = handle_inner(ctx, req);
-    crate::page::site::clear();
-    res
+    handle_inner(ctx, req)
 }
 
 fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
@@ -682,16 +691,33 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         res.content_type = "text/css; charset=utf-8";
         return res.with_policy(Policy::PublicScript);
     }
-
-    // Setup is the one route reachable without a credential — it is how the
-    // first one is obtained. Guarded by the single-use claim code instead.
+    // The two faces, compiled into the binary. Same-origin by construction:
+    // there is no path from a request to a file on disk here, so no request can
+    // name one.
     //
-    // **It stops existing the moment the server is claimed.** Not "exists and
-    // refuses" — a 404 means a stranger cannot tell a claimed server from one
-    // that never had setup, and there is no page for them to keep trying.
-    if path == private_route::SETUP || path == private_route::SETUP_ADMIN {
-        return setup_route(ctx, req, method, &path);
+    // **Here rather than on the public surface**, which is where they used to
+    // live — a server with public intake off answered 404 for its own
+    // stylesheet's fonts, and rendered in fallback faces with every status code
+    // correct. They belong with the bundle that asks for them.
+    if method == "GET" && path == crate::api::ui::FONT_BODY_PATH {
+        return font(crate::api::ui::FONT_BODY);
     }
+    if method == "GET" && path == crate::api::ui::FONT_DISPLAY_PATH {
+        return font(crate::api::ui::FONT_DISPLAY);
+    }
+
+    // **The wizard's forms are gone; its endpoints are not.** Setup is still the
+    // one thing reachable without a credential — it is how the first one comes to
+    // exist — and it is still guarded by the single-use claim code and by the
+    // token binding the rest of it to the browser that spent it. Those live at
+    // `POST /api/v1/ui/setup/code` and `setup/admin`, dispatched above with every
+    // other mutating call so they pass the same same-origin check.
+    //
+    // Both still **stop existing the moment the server is claimed** rather than
+    // existing and refusing: a 404 means a stranger cannot tell a claimed server
+    // from one that never had a wizard. `GET /setup` answers the application
+    // shell like every other browser path, which grants nothing — the endpoints
+    // behind it are what decide.
 
     // The public surface, matched **before** the device gate below — that gate is
     // what makes everything past it private, so anything reachable without a
@@ -712,20 +738,20 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
     // path and show every filer's spec for a repository, which is the second kind
     // and was being served as the first.
     if is_public_path(&path) {
-        // **The password form is not part of the public surface**, even though
-        // it lives at a public address. The administrator is a private-surface
-        // role, and a freshly claimed server starts with the public surface
-        // *off* — so gating this on `ctx.public` locks the one person who can
-        // turn it on out of the server the moment their setup session lapses.
+        // **The magic-link landing is not part of the public surface**, even
+        // though it lives at a public address, and that is why it is matched
+        // before `ctx.public` is consulted at all.
         //
-        // That is the same shape of bug as a page nothing links to, and it was
-        // live: a claim would succeed, the cookie would expire, and the way back
-        // in would 404 with nothing to say why. Pinned by
+        // It is the one route reached by a navigation from *outside* this server
+        // — a link in an email — so the reader arrives holding nothing and with
+        // nowhere else to go. The administrator's own way back in used to be
+        // here too, for the same shape of reason: a freshly claimed server starts
+        // with the public surface off, and gating the way in on the surface being
+        // on locks out the only person who can turn it on. That case is now
+        // `POST /api/v1/ui/signin/password`, which is dispatched above this
+        // block and so never depended on the surface either. Pinned by
         // `the_administrator_can_sign_in_with_no_public_surface`.
-        let admin_way_in = matches!(
-            (method, path.as_str()),
-            ("GET", public_route::SIGNIN) | ("POST", public_route::SIGNIN_PASSWORD)
-        );
+        let link_landing = path.starts_with(public_route::SIGNIN_PREFIX);
         return match ctx.public {
             Some(_) => {
                 let policy = match &caller {
@@ -734,7 +760,7 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
                 };
                 public_route(ctx, req, method, &path, &caller).with_policy(policy)
             }
-            None if admin_way_in => {
+            None if link_landing => {
                 public_route(ctx, req, method, &path, &caller).with_policy(Policy::PublicScript)
             }
             // No public surface configured: this 404 is not *on* that surface, so
@@ -743,59 +769,50 @@ fn handle_inner(ctx: &mut Ctx<'_>, req: &Req) -> Res {
         };
     }
 
-    // Everything else is the developer's own surface.
+    // Everything else has no handler at all.
     //
-    // **This pattern is what makes the owner role safe.** An owner may decline
-    // work and may not accept it, and that is not enforced by a check inside
-    // the accept handler — it is enforced here, by `Caller::Owner` not being
-    // `Caller::Admin`. Every accepting verb lives past this line, so there is
-    // no value of that variant which reaches one. An owner's own surface is
-    // public-side, above.
+    // **The developer's own surface used to begin here**, behind a
+    // `let Some(Caller::Admin { .. }) = caller else { 404 }` — the pattern that
+    // made the owner role safe by *structure*: an owner may decline work and may
+    // not accept it, and that was enforced not by a check inside the accept
+    // handler but by every accepting verb living past that line, where no
+    // `Caller::Owner` could reach it.
     //
-    // Both variants arrive as an ordinary password session, so the whole burden
-    // of telling them apart sits in `identify` — one function, one branch,
-    // checked before the roster is consulted. That is the right place for it and
-    // the only place it happens.
-    let Some(Caller::Admin { .. }) = caller else {
-        // **Not found** rather than unauthorized: a 401 on `/review` tells a
-        // stranger the address is real. That now covers a signed-in owner and a
-        // signed-in filer too, which is the same answer for the same reason.
-        //
-        // The one accommodation is for somebody holding a cookie that used to
-        // work: a bare 404 is a confusing answer at an address that worked
-        // yesterday, so the page names the way back in.
-        //
-        // **Unconditional now.** It used to depend on a GitHub application
-        // existing; a claimed server always has a password, so there is always
-        // somewhere to point.
-        if method == "GET" {
-            return Res::html(404, crate::api::NOT_FOUND);
-        }
-        return error(401, "unauthorized");
-    };
-    browser_route(ctx, req, method, &path)
+    // That reasoning did not go away with the pages; it moved to
+    // [`api_write`], which states the same rule with the same `let ... else` and
+    // the same 404, and to `api_verb` for the per-verb split. Repeating the gate
+    // here would gate nothing — there is no handler behind it — and a gate
+    // guarding nothing is one somebody later trusts.
+    //
+    // The answers are the ones the private surface always gave. **404 rather
+    // than unauthorized** on a GET: a 401 on `/review` tells a stranger the
+    // address is real, and that is the fact being withheld from a signed-in
+    // owner and a signed-in filer alike. A write gets 401, because a caller
+    // sending one is not browsing and an honest client needs to know its
+    // credential is the problem.
+    if method == "GET" {
+        return Res::html(404, crate::api::NOT_FOUND);
+    }
+    error(401, "unauthorized")
 }
 
-/// Sign in with a username and password.
+/// Check a password and, if it holds, open or refresh the session for it.
 ///
 /// **The two named roles only.** Filers keep magic links: they are strangers,
 /// and a stranger should not be made to keep a credential for a site they may
 /// use once. The administrator and owners are people who come back, and asking
 /// them to hold a password is what removes a third party from the path.
 ///
-/// One page for every failure — no such account, wrong password, still backing
-/// off. Distinguishing them tells a guesser which half they got right, and the
-/// backoff is counted by [`Accounts::check_password`] whichever it was.
-/// Check a password and, if it holds, open or refresh the session for it.
-///
-/// **Split out so the form and the JSON endpoint cannot drift.** Everything that
-/// decides whether somebody gets in lives here exactly once — the backoff that
-/// records failures, the re-authentication onto the browser's existing session —
-/// and the two callers differ only in what they render from the answer. A second
-/// copy of this is a second place for the backoff to be forgotten.
+/// Everything that decides whether somebody gets in lives here exactly once —
+/// the backoff that records failures, the re-authentication onto the browser's
+/// existing session. It was split out so the form and the JSON endpoint could
+/// not drift; the form is gone and only [`api_sign_in_with_password`] calls it,
+/// and it stays a function because a second copy of this is a second place for
+/// the backoff to be forgotten.
 ///
 /// `Err(())` is deliberately uninformative: no caller may tell a wrong password
 /// from an unknown login from a backoff, because neither may the person asking.
+/// One answer for all three, or a guesser learns which half they got right.
 fn check_password_for_session(
     ctx: &mut Ctx<'_>,
     req: &Req,
@@ -867,38 +884,6 @@ fn check_password_for_session(
 fn session_cookie(ctx: &Ctx<'_>, session: &str) -> String {
     let secure = secure_attr(ctx);
     format!("{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000")
-}
-
-fn sign_in_with_password(ctx: &mut Ctx<'_>, req: &Req) -> Res {
-    let locale = req.locale();
-    let form = form_fields(&req.body);
-    let login = form.get("login").map(|l| l.trim()).unwrap_or_default();
-    let password = form.get("password").map(String::as_str).unwrap_or_default();
-
-    let refused = |ctx: &Ctx<'_>| {
-        Res::html(
-            401,
-            crate::page::signin_page_full(
-                locale,
-                true,
-                has_mail(ctx),
-                Some(locale.strings().signin_wrong),
-            ),
-        )
-        .with_policy(Policy::PublicScript)
-    };
-
-    let Ok(session) = check_password_for_session(ctx, req, login, password) else {
-        return refused(ctx);
-    };
-
-    let repos = ctx.public.map(|p| p.repos.clone()).unwrap_or_default();
-    let mut res = Res::html(
-        200,
-        crate::page::public_file_page(&[], &repos, false, locale),
-    );
-    res.set_cookie = Some(session_cookie(ctx, &session));
-    res
 }
 
 /// One of the interface's API paths, spelled from the prefix rather than by
@@ -996,16 +981,18 @@ fn bucket_for(caller: &Option<Caller>, path: &str) -> Bucket {
 /// `/`, so `/publicXYZ` cannot match — on the private surface a loose prefix
 /// fails *closed* (401), but here it fails **open**.
 fn is_public_path(path: &str) -> bool {
-    // The landing page is public: it is what a stranger arriving at the bare
-    // address sees, and it must render for somebody with no account at all.
+    // **Wider than what `public_route` still handles**, deliberately. Most of
+    // these are GETs the interface's shell answers before this is ever asked, so
+    // the only thing reaching here on one of them is a *method* the surface does
+    // not have — and this is what decides that the answer is the public 404
+    // rather than the private surface's 401. A path dropped from this list stops
+    // being public and starts being a door a stranger gets `unauthorized` at,
+    // which is the fact the 404 exists to withhold.
     path == public_route::LANDING
         || path == public_route::FILE
         || path == public_route::SIGNIN
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
-        || path == public_route::SCRIPT
-        || path == public_route::FONT_BODY
-        || path == public_route::FONT_DISPLAY
         || path.starts_with(public_route::SIGNIN_PREFIX)
         || path.starts_with(public_route::REQUEST_PREFIX)
 }
@@ -1319,19 +1306,35 @@ fn api_settings(ctx: &mut Ctx<'_>, body: &serde_json::Value) -> Res {
 }
 
 /// Name somebody an owner of some repositories.
+///
+/// **Repository names are matched against what this surface serves**, never
+/// taken on trust — the same rule as a public filing, for the same reason. A
+/// name that matches nothing would be a permission that looks applied and grants
+/// nothing, which is precisely what the configuration used to refuse to boot on
+/// and a record cannot.
 fn api_add_owner(ctx: &mut Ctx<'_>, login: &str, body: &serde_json::Value) -> Res {
     if let Err(e) = check_login(login) {
         return error(400, &e);
     }
-    let repos: Vec<String> = body
+    let asked: Vec<String> = body
         .get("repos")
         .and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
-                .filter_map(|r| r.as_str().map(str::to_string))
+                .filter_map(|r| r.as_str().map(|s| s.trim().to_string()))
                 .collect()
         })
         .unwrap_or_default();
+    let served = ctx.public.map(|p| &p.repos);
+    let repos: Vec<String> = asked
+        .into_iter()
+        .filter(|r| served.is_some_and(|s| s.accepts(r)))
+        .collect();
+    if repos.is_empty() {
+        // Not silently written as an owner of nothing: that reads as promoted
+        // and grants nothing at all.
+        return error(400, "pick at least one repository this server serves");
+    }
 
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     let mut roster = match ctx.store.roster() {
@@ -1339,6 +1342,10 @@ fn api_add_owner(ctx: &mut Ctx<'_>, login: &str, body: &serde_json::Value) -> Re
         Err(e) => return error(500, &e.to_string()),
     };
     roster.set_owner(login, &repos, ctx.now_ms);
+    // Seeding is a first-use thing, and this volume has now been administered.
+    // Without it a restart would re-apply the configured seed over a roster
+    // somebody built by hand.
+    roster.seeded = true;
     if let Err(e) = ctx.store.put_roster(&roster) {
         return error(500, &e.to_string());
     }
@@ -1431,6 +1438,14 @@ fn api_mint_daemon(ctx: &mut Ctx<'_>, label: &str) -> Res {
 /// **Revoked records are kept, not deleted** — a list that silently shrinks
 /// cannot answer "did I already deal with that?", so the developer revokes twice
 /// or worries they never did.
+///
+/// **Which is why a second revoke is not an error.** Every one of the four
+/// underlying calls answers `false` for "already in that state" and "no such
+/// record" alike, and neither is a failure worth telling the caller about: they
+/// asked for a state that now holds. The page handlers this replaced said so
+/// explicitly and answered 200; returning 404 here would make the button report a
+/// failure for doing exactly what it was pressed for — and would tell a caller
+/// which ids exist, which the write path has no business answering.
 fn api_revoke(ctx: &mut Ctx<'_>, list: &str, id: &str) -> Res {
     let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
     if list == "accounts" {
@@ -1438,13 +1453,14 @@ fn api_revoke(ctx: &mut Ctx<'_>, list: &str, id: &str) -> Res {
             Ok(a) => a,
             Err(e) => return error(500, &e.to_string()),
         };
-        if !accounts.revoke(id) {
-            return error(404, "no such account");
+        // Only written when something changed — an unchanged file is not worth a
+        // write, and the answer below is the same either way.
+        if accounts.revoke(id) {
+            if let Err(e) = ctx.store.put_accounts(&accounts) {
+                return error(500, &e.to_string());
+            }
+            invalidate_accounts(ctx);
         }
-        if let Err(e) = ctx.store.put_accounts(&accounts) {
-            return error(500, &e.to_string());
-        }
-        invalidate_accounts(ctx);
         drop(_guard);
         let view: Vec<_> = accounts.accounts.iter().map(AccountView::of).collect();
         return match serde_json::to_string(&view) {
@@ -1457,19 +1473,21 @@ fn api_revoke(ctx: &mut Ctx<'_>, list: &str, id: &str) -> Res {
         Ok(r) => r,
         Err(e) => return error(500, &e.to_string()),
     };
-    let ok = match list {
+    let changed = match list {
         "owners" => roster.revoke(id),
         "daemons" => roster.revoke_daemon(id),
         "repos" => roster.disable(id),
+        // **This one is still a 404**, and it is a different question: an
+        // unknown *list* is an address this API does not have, rather than a
+        // record already in the state that was asked for.
         _ => return error(404, "no such endpoint"),
     };
-    if !ok {
-        return error(404, "no such record");
+    if changed {
+        if let Err(e) = ctx.store.put_roster(&roster) {
+            return error(500, &e.to_string());
+        }
+        invalidate_roster(ctx);
     }
-    if let Err(e) = ctx.store.put_roster(&roster) {
-        return error(500, &e.to_string());
-    }
-    invalidate_roster(ctx);
     drop(_guard);
     let body = match list {
         "owners" => serde_json::to_string(&roster.owners),
@@ -1508,6 +1526,17 @@ fn api_verb(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, id: &str, ver
 
     match caller {
         Some(Caller::Admin { .. }) => {
+            // **The developer's own verbs are bounded too**, and this is the
+            // only place that is now true. It used to be checked in the rendered
+            // review page's POST handler; deleting that would have taken the
+            // whole cap with it, because nothing else counted a redraft. See
+            // [`drafting_budget`] for why it is the repository's spend and not
+            // the caller's, and why it is not a refusal of authority.
+            if matches!(verb, "send-back" | "release") {
+                if let Err(res) = charge_a_draft(ctx, id) {
+                    return res;
+                }
+            }
             let outcome = match verb {
                 "send-back" => ctx.store.send_back(id, note),
                 "discard" => ctx.store.discard(id),
@@ -1532,17 +1561,32 @@ fn api_verb(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, id: &str, ver
         Some(Caller::Owner { repos, .. }) => {
             // Their repository, or nothing — and *nothing* is 404, because a 403
             // would confirm the id is real.
-            let owns = match ctx.store.get(id) {
-                Ok(Some(r)) => repos.iter().any(|owned| owned == &r.repo),
-                Ok(None) => return error(404, "no such request"),
+            //
+            // The repository is carried out of this read rather than fetched
+            // again below: the ownership check and the drafting budget ask about
+            // the same record, and two reads could disagree.
+            let repo = match ctx.store.get(id) {
+                Ok(Some(r)) if repos.iter().any(|owned| owned == &r.repo) => r.repo,
+                Ok(_) => return error(404, "no such request"),
                 Err(e) => return error(500, &e.to_string()),
             };
-            if !owns {
-                return error(404, "no such request");
+            // `send-back` and `release` put the request back in the claimable
+            // queue, so each costs a drafting run on the developer's machine —
+            // bounded per repository, not per owner, which is what stops a
+            // second owner doubling the day's spend.
+            if matches!(verb, "send-back" | "release") {
+                if let Err(res) = drafting_budget(ctx, &repo) {
+                    return res;
+                }
             }
             let outcome = match verb {
                 "send-back" => ctx.store.send_back(id, note),
                 "discard" => ctx.store.discard(id),
+                // The one owner verb that admits work. Screening is a model
+                // judging a stranger's text, so it has false positives — and an
+                // owner who can see their repository's queue but not unblock it
+                // has to ask the developer about every one of them. Bounded by
+                // the budget taken above.
                 "release" => ctx.store.release(id),
                 // **An owner may not accept**, and this is where that is true.
                 // Not a 403: the verb does not exist for them.
@@ -1555,6 +1599,20 @@ fn api_verb(ctx: &mut Ctx<'_>, req: &Req, caller: &Option<Caller>, id: &str, ver
         }
         // A filer, a stranger, a daemon: the review surface is not theirs.
         _ => error(404, "no such request"),
+    }
+}
+
+/// Charge a re-admitting verb against its request's repository.
+///
+/// A wrapper over [`drafting_budget`] for the caller who has an id and not yet a
+/// repository. **A request that cannot be read is not charged**, which matches
+/// what the rendered surface did: the verb below re-reads it and fails properly,
+/// and refusing here would turn a transient read failure into what looks like a
+/// spend limit.
+fn charge_a_draft(ctx: &Ctx<'_>, id: &str) -> std::result::Result<(), Res> {
+    match ctx.store.get(id) {
+        Ok(Some(r)) => drafting_budget(ctx, &r.repo),
+        _ => Ok(()),
     }
 }
 
@@ -2346,166 +2404,16 @@ fn work_item(r: &Request) -> WorkItem {
 
 // ---------------------------------------------------------------------------
 // The browser side
+//
+// **There is no `browser_route` any more.** Every administrative page — the
+// review list, the accounts, owners, repositories and machines, the settings,
+// one request's detail — was a rendered document with a form beside it, and the
+// interface reaches all of them through `/api/v1/ui/` instead. The gate that
+// made them administrator-only survives unchanged above: it is the
+// `let Some(Caller::Admin { .. }) = caller else` in `handle_inner`, which is
+// what made "an owner cannot accept" structural rather than a check inside each
+// handler, and `api_write` states the same rule for the JSON side.
 // ---------------------------------------------------------------------------
-
-fn browser_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
-    match (method, path) {
-        // The review list. `/` used to be here and is now the landing page, so
-        // an enrolled device arriving there is sent on rather than left looking
-        // at a page meant for strangers.
-        ("GET", private_route::REVIEW) | ("GET", "/index.html") => match ctx.store.all() {
-            Ok(all) => Res::html(200, crate::page::index(&all)),
-            Err(e) => error(500, &e.to_string()),
-        },
-
-        ("POST", "/file") => {
-            let form = form_fields(&req.body);
-            let text = form.get("text").cloned().unwrap_or_default();
-            let repo = form.get("repo").cloned().unwrap_or_default();
-            // `IntakeKind::parse` is the one parser, shared with the CLI — a
-            // second one here would drift, and the short forms it accepts are
-            // exactly what someone types on a phone.
-            let kind = form
-                .get("kind")
-                .and_then(|k| IntakeKind::parse(k))
-                .unwrap_or_default();
-            file_request(ctx, &text, &repo, kind)
-        }
-
-        // Who can file, and the switch that stops them. Device-only by virtue of
-        // living past the gate.
-        ("GET", "/accounts") => match ctx.store.accounts() {
-            Ok(a) => Res::html(200, crate::page::accounts_page(&a)),
-            Err(e) => error(500, &e.to_string()),
-        },
-
-        ("POST", p) if p.starts_with("/accounts/") && p.ends_with("/revoke") => {
-            let id = p
-                .trim_start_matches("/accounts/")
-                .trim_end_matches("/revoke");
-            revoke_account(ctx, id)
-        }
-
-        // Who may review, and for what. **Device-only by virtue of living
-        // here**, past the gate — which is what makes "an owner cannot promote
-        // an owner" structural rather than a check somebody has to remember.
-        ("GET", private_route::OWNERS) => owners_page(ctx),
-
-        ("POST", private_route::OWNERS) => {
-            let form = form_fields(&req.body);
-            let login = form.get("login").map(|l| l.trim()).unwrap_or_default();
-            set_owner(ctx, login, &form_values(&req.body, "repos"))
-        }
-
-        ("POST", p) if p.starts_with("/owners/") && p.ends_with("/revoke") => {
-            let login = p.trim_start_matches("/owners/").trim_end_matches("/revoke");
-            revoke_owner(ctx, login)
-        }
-
-        // Which machines may claim work.
-        ("GET", private_route::DAEMONS) => daemons_page(ctx, None),
-
-        ("POST", private_route::DAEMONS) => {
-            let form = form_fields(&req.body);
-            mint_daemon_key(ctx, form.get("label").map(|l| l.trim()).unwrap_or_default())
-        }
-
-        ("POST", p) if p.starts_with("/daemons/") && p.ends_with("/revoke") => {
-            let label = p
-                .trim_start_matches("/daemons/")
-                .trim_end_matches("/revoke");
-            revoke_daemon(ctx, label)
-        }
-
-        // What this server does.
-        ("GET", private_route::SETTINGS) => show_settings(ctx, None, None),
-        ("POST", p) if p.starts_with("/settings") => settings_write(ctx, req, p),
-
-        // Which repositories collect publicly.
-        ("GET", private_route::REPOS) => repos_page(ctx, None),
-
-        ("POST", private_route::REPOS) => {
-            let form = form_fields(&req.body);
-            let name = form.get("name").map(|n| n.trim()).unwrap_or_default();
-            // The override the refusal page offers. A separate field rather
-            // than a second route, so the record of *which* case it was is
-            // written by the same handler that decided it.
-            let anyway = form.get("anyway").is_some_and(|v| v == "yes");
-            enable_repo(ctx, name, anyway)
-        }
-
-        ("POST", p) if p.starts_with("/repos/") && p.ends_with("/disable") => {
-            let name = p.trim_start_matches("/repos/").trim_end_matches("/disable");
-            disable_repo(ctx, name)
-        }
-
-        ("GET", p) if p.starts_with("/request/") => {
-            let id = p.trim_start_matches("/request/");
-            match ctx.store.get(id) {
-                Ok(Some(r)) => {
-                    let who = who_serves(ctx, &r.repo);
-                    Res::html(200, crate::page::detail(&r, &who))
-                }
-                Ok(None) => Res::html(404, crate::api::NOT_FOUND),
-                Err(e) => error(500, &e.to_string()),
-            }
-        }
-
-        ("POST", p) if p.starts_with("/request/") => {
-            let rest = p.trim_start_matches("/request/");
-            // `splitn(2, …)` leaves the remainder whole, so a two-segment verb
-            // like `approve/confirm` arrives intact.
-            let mut parts = rest.splitn(2, '/');
-            let id = parts.next().unwrap_or("");
-            let verb = parts.next().unwrap_or("");
-            let form = form_fields(&req.body);
-
-            // Asking is not deciding: this renders the confirmation and changes
-            // nothing. Handled apart from the others because it alone returns a
-            // page rather than a settled request.
-            if verb == "accept" {
-                return ask_to_accept(ctx, id);
-            }
-
-            // The two verbs that put a request back in the claimable queue cost
-            // a drafting run each. Checked before the store is touched, and
-            // against the request's own repository — which has to be read first,
-            // because the budget is the repository's rather than the caller's.
-            if matches!(verb, "send-back" | "release") {
-                if let Ok(Some(r)) = ctx.store.get(id) {
-                    if let Err(res) = drafting_budget(ctx, &r.repo) {
-                        return res;
-                    }
-                }
-            }
-
-            let outcome = match verb {
-                "accept/confirm" => {
-                    let digest = form.get("digest").cloned().unwrap_or_default();
-                    ctx.store.accept(id, &digest)
-                }
-                "send-back" => {
-                    let notes = form.get("notes").cloned().unwrap_or_default();
-                    ctx.store.send_back(id, &notes)
-                }
-                "discard" => ctx.store.discard(id),
-                // The developer overruling the screener. Device-only by virtue
-                // of living here, past the gate.
-                "release" => ctx.store.release(id),
-                _ => return error(404, "no such route"),
-            };
-            match outcome {
-                Ok(r) => {
-                    let who = who_serves(ctx, &r.repo);
-                    Res::html(200, crate::page::detail(&r, &who))
-                }
-                Err(e) => Res::html(400, crate::page::message(&e.to_string())),
-            }
-        }
-
-        _ => Res::html(404, crate::api::NOT_FOUND),
-    }
-}
 
 /// Whether anything currently offers to draft for `repo`, for the API.
 ///
@@ -2519,23 +2427,6 @@ fn coverage_of(ctx: &Ctx<'_>, repo: &str) -> crate::daemons::Coverage {
     }
 }
 
-/// What the register says about who could draft work for `repo`.
-///
-/// A poisoned lock means another thread panicked mid-poll. Recovered rather than
-/// propagated, for the same reason the rate limiter recovers its own: this is a
-/// hint shown on a page, and refusing to render the page because the hint is
-/// unavailable would be a worse answer than rendering it without one.
-fn who_serves(ctx: &Ctx<'_>, repo: &str) -> crate::page::Who {
-    let seen = match ctx.seen.lock() {
-        Ok(s) => s,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    crate::page::Who {
-        coverage: seen.coverage(repo, ctx.now_ms),
-        offered: seen.offered(ctx.now_ms),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The public surface
 //
@@ -2544,92 +2435,37 @@ fn who_serves(ctx: &Ctx<'_>, repo: &str) -> crate::page::Who {
 // rather than by a check somebody has to remember.
 // ---------------------------------------------------------------------------
 
+/// The public surface, reduced to the one thing on it that is not the client.
+///
+/// **Everything else here is gone.** The landing page, the filing form, a
+/// filer's own request, an owner's queue and the verbs on it — all of them were
+/// rendered documents with forms, and the interface reaches every one through
+/// `/api/v1/ui/`. What is left is the set of addresses a browser can arrive at
+/// holding nothing and *not* by way of the application: the magic-link landing,
+/// the two faces the stylesheet names, and the language cookie.
 fn public_route(
     ctx: &mut Ctx<'_>,
     req: &Req,
     method: &str,
     path: &str,
-    caller: &Option<Caller>,
+    _caller: &Option<Caller>,
 ) -> Res {
-    // A device is the developer, who has their own surface; an account is a
-    // filer. Anyone else is signed out.
-    let account_id = match caller {
-        Some(Caller::Account { id }) => Some(id.clone()),
-        _ => None,
-    };
-    // An owner reaches this surface too, and sees something different on it.
-    // Cloned because `ctx` is taken mutably below.
-    let owner = match caller {
-        Some(Caller::Owner { login, repos }) => Some((login.clone(), repos.clone())),
-        _ => None,
-    };
-
-    // Decided once here and passed down, rather than re-derived per page. Every
-    // response from this surface is in the same language as every other, which
-    // is not true if each renderer negotiates for itself.
+    // Decided once here rather than re-derived per response, so two answers to
+    // one request cannot disagree about which language they are in.
     let locale = req.locale();
 
-    // An owner's surface, before the filer routes below. Reached with the same
-    // cookie on the same paths — what differs is who the caller turned out to
-    // be, which is decided in `identify` from the configuration.
-    if let Some((login, repos)) = owner {
-        return owner_route(ctx, req, method, path, &login, &repos, locale);
-    }
-
     match (method, path) {
-        // The landing page. What the bare address is, and the only page here
-        // that says what any of this is for.
-        //
-        // A signed-in filer is sent to their own page instead: they have already
-        // read the pitch, and the thing they came back for is what they filed.
-        ("GET", public_route::LANDING) => match &account_id {
-            Some(id) => match mine(ctx, id) {
-                Ok(list) => match ctx.public {
-                    Some(p) => Res::html(
-                        200,
-                        crate::page::public_file_page(&list, &p.repos, p.show_spec, locale),
-                    ),
-                    // Unreachable past `is_public_path`, which only matches when
-                    // a surface exists — but the surface is what holds the set,
-                    // so this asks rather than unwrapping.
-                    None => Res::html(404, crate::api::NOT_FOUND),
-                },
-                Err(e) => error(500, &e.to_string()),
-            },
-            None => Res::html(200, crate::page::landing_page(locale)),
-        },
-
-        // Ask for a link. Reachable signed-out — it is how one signs in.
-        ("GET", public_route::SIGNIN) => Res::html(
-            200,
-            crate::page::signin_page_full(locale, true, has_mail(ctx), None),
-        ),
-
-        // **The two named roles sign in here.** Filers use the magic-link
-        // form above; this is the administrator and the owners.
-        ("POST", public_route::SIGNIN_PASSWORD) => sign_in_with_password(ctx, req),
-        ("POST", public_route::SIGNIN) => request_sign_in(ctx, req),
-
-        ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
-
         // Choosing a language. Signed out on purpose: somebody who cannot read
-        // the sign-in page is exactly who needs this, and requiring an account
-        // first would mean reading a page in a language they do not have.
+        // the page is exactly who needs this, and requiring an account first
+        // would mean reading a page in a language they do not have.
+        //
+        // **Kept even though nothing on the interface posts to it.** It is the
+        // only writer of the cookie `Req::locale` reads, and the magic-link
+        // landing below is the only page left that reads it — so deleting this
+        // would leave that reader with `Accept-Language` and no way to override
+        // it. The interface wants a language control of its own; when it has
+        // one, this is the endpoint it should reach for.
         ("POST", public_route::LANGUAGE) => set_language(ctx, req),
-
-        // The surface's script. Static, identical for everyone, and reachable
-        // signed out — the sign-in page carries the language switcher it
-        // enhances.
-        ("GET", public_route::SCRIPT) => Res {
-            content_type: "text/javascript; charset=utf-8",
-            ..Res::html(200, crate::page::PUBLIC_SCRIPT)
-        },
-
-        // The two faces, compiled into the binary. Same-origin by construction:
-        // there is no path from a request to a file on disk here, so no request
-        // can name one.
-        ("GET", public_route::FONT_BODY) => font(crate::page::FONT_BODY),
-        ("GET", public_route::FONT_DISPLAY) => font(crate::page::FONT_DISPLAY),
 
         // The landing page a link opens. **Changes nothing** — mail scanners
         // fetch every URL in a message, and a GET that spent the token would
@@ -2638,265 +2474,181 @@ fn public_route(
             let token = p.trim_start_matches(public_route::SIGNIN_PREFIX);
             // Rendered whether or not the token is real: a 404 on an invalid one
             // would be a free validity oracle, cheaper than the POST it guards.
-            Res::html(200, crate::page::signin_confirm_page(token, locale))
+            Res::html(200, signin_confirm_page(token, locale))
         }
-        // **This must stay below the password arm.** `SIGNIN_PASSWORD` lives
-        // under `SIGNIN_PREFIX`, so this guard matches it too — and reaching
-        // here first would feed a typed password to `complete_sign_in` as if it
-        // were a magic-link token. It would fail, which is the dangerous part:
-        // the sign-in page would simply stop working for the two roles that have
-        // no other way in, with nothing in the logs naming a cause. Pinned by
-        // `a_password_post_is_not_read_as_a_magic_link_token`.
+        // **This must stay below any arm matching a longer path under the same
+        // prefix.** `SIGNIN_PASSWORD` lived under `SIGNIN_PREFIX` and had to be
+        // matched first, or a typed password reached `complete_sign_in` as if it
+        // were a magic-link token — it would fail, and the sign-in the two named
+        // roles depend on would simply stop working, with nothing in the logs
+        // naming a cause. That form is gone to `/api/v1/ui/signin/password`,
+        // which is dispatched before this function is reached at all, so the
+        // collision no longer exists. The ordering rule is recorded because the
+        // prefix is still a prefix: anything added under it wants the same care.
+        // Pinned by `a_password_post_is_not_read_as_a_magic_link_token`.
         ("POST", p) if p.starts_with(public_route::SIGNIN_PREFIX) => {
             let token = p.trim_start_matches(public_route::SIGNIN_PREFIX);
             complete_sign_in(ctx, token, locale)
         }
 
-        // Everything below needs a signed-in filer.
-        _ => match account_id {
-            Some(id) => signed_in_route(ctx, req, method, path, &id, locale),
-            None => Res::html(
-                200,
-                crate::page::signin_page_full(locale, true, has_mail(ctx), None),
-            ),
-        },
-    }
-}
-
-fn signed_in_route(
-    ctx: &mut Ctx<'_>,
-    req: &Req,
-    method: &str,
-    path: &str,
-    account_id: &str,
-    locale: Locale,
-) -> Res {
-    let show_spec = ctx.public.map(|p| p.show_spec).unwrap_or(false);
-    // Cloned rather than borrowed: `ctx` is taken mutably by the handlers below,
-    // and a set of a few short names is cheaper than restructuring the match
-    // around a borrow that only one arm needs.
-    let repos = ctx.public.map(|p| p.repos.clone());
-
-    match (method, path) {
-        ("GET", public_route::FILE) => match (mine(ctx, account_id), repos) {
-            (Ok(list), Some(repos)) => Res::html(
-                200,
-                crate::page::public_file_page(&list, &repos, show_spec, locale),
-            ),
-            (Ok(_), None) => Res::html(404, crate::api::NOT_FOUND),
-            (Err(e), _) => error(500, &e.to_string()),
-        },
-        ("POST", public_route::FILE) => file_publicly(ctx, req, account_id),
-
-        ("GET", p) if p.starts_with(public_route::REQUEST_PREFIX) => {
-            let id = p.trim_start_matches(public_route::REQUEST_PREFIX);
-            match ctx.store.get(id) {
-                // `filed_by`, never the id alone: ids are time-ordered and
-                // enumerable in seconds, so keying on one would let any signed-in
-                // filer read every other filer's requests — and the developer's.
-                Ok(Some(r)) if r.filed_by(account_id) => {
-                    Res::html(200, crate::page::public_detail(&r, show_spec, locale))
-                }
-                // Somebody else's request is *not found*, not forbidden:
-                // "forbidden" would confirm the id exists.
-                Ok(_) => Res::html(404, crate::api::NOT_FOUND),
-                Err(e) => error(500, &e.to_string()),
-            }
-        }
-
+        // **404, not a redirect to the application.** Every browser *document*
+        // path is answered by the shell above this function; anything reaching
+        // here is a method or an address this surface does not have, and the
+        // honest answer is that there is nothing at it.
         _ => Res::html(404, crate::api::NOT_FOUND),
     }
 }
 
-/// Stop an account filing.
+/// The document a magic link lands on, and the two it can fail into.
 ///
-/// **The lever that makes self-serve signup acceptable.** Without a route it
-/// would mean editing `accounts.json` on the volume by hand, which is not a
-/// backstop anyone reaches for at the moment they need it.
+/// **The one place this server still renders HTML from a request.** Everything
+/// else a browser sees is the application shell plus JSON, which is the right
+/// shape for a surface reached from inside itself. This is reached from
+/// *outside* — a link in an email, in a mail client, possibly on a device that
+/// has never seen this site — so it must be a real document that works on
+/// arrival. Handing a `fetch`-shaped JSON body to that reader renders as text on
+/// a white page.
 ///
-/// Every session dies at once, because liveness is derived from the account
-/// rather than copied onto each session.
-fn revoke_account(ctx: &mut Ctx<'_>, id: &str) -> Res {
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut accounts = match ctx.store.accounts() {
-        Ok(a) => a,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    if !accounts.revoke(id) {
-        // Already revoked, or never existed. Not an error worth a page: the
-        // caller asked for a state that now holds.
-        return match ctx.store.accounts() {
-            Ok(a) => Res::html(200, crate::page::accounts_page(&a)),
-            Err(e) => error(500, &e.to_string()),
-        };
-    }
-    if let Err(e) = ctx.store.put_accounts(&accounts) {
-        return error(500, &e.to_string());
-    }
-    invalidate_accounts(ctx);
-    Res::html(200, crate::page::accounts_page(&accounts))
+/// Built from `concat!` of a doctype, an inline `<style>` and a body, following
+/// [`crate::api::NOT_FOUND`]: no subresource, so nothing here can fail to load
+/// and nothing depends on the interface bundle being reachable. `style-src`
+/// allows `'unsafe-inline'` on every policy, so the block needs no relaxation.
+mod link_page {
+    /// The document, in three constant pieces with the two variable ones
+    /// between them.
+    ///
+    /// Split in the *renderer* rather than formatted from a template held in the
+    /// catalogue, for the reason [`crate::i18n`] gives about placeholders — but
+    /// here the split costs nothing, because both values are this crate's own.
+    pub const HEAD: &str = "<!doctype html><html lang=\"";
+    pub const HEAD_2: &str = concat!(
+        "\"><head><meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        "<title>",
+    );
+    /// The stylesheet, inline. Deliberately the same handful of rules as the
+    /// 404's: this page is read once, on the way to somewhere else, and a copy
+    /// of the interface's design system would be a second stylesheet to keep in
+    /// step for no reader's benefit.
+    pub const STYLE: &str = concat!(
+        "</title><style>body{font:16px/1.6 system-ui,sans-serif;margin:0;",
+        "min-height:100vh;display:grid;place-items:center;text-align:center;",
+        "background:#fbfaf8;color:#1a1a1a}main{max-width:32rem;padding:1.5rem}",
+        "a{color:#3b5bdb}p{color:#555}",
+        "button{font:inherit;font-weight:600;cursor:pointer;padding:.7rem 1.2rem;",
+        "border:0;border-radius:.5rem;background:#3b5bdb;color:#fff}",
+        "@media(prefers-color-scheme:dark){body{background:#16161a;color:#e8e6e3}",
+        "a{color:#8da2fb}p{color:#a8a5a0}}</style></head><body><main>"
+    );
+    pub const TAIL: &str = "</main></body></html>";
 }
 
-/// Render the roster.
+/// Escape for HTML text content and attributes.
 ///
-/// **404 with no public surface**, like every other page that only means
-/// something when one exists: an owner reviews public filings, so a
-/// private-only server has nothing for this page to administer.
-fn owners_page(ctx: &Ctx<'_>) -> Res {
-    // **Serves with the public surface off**, where it used to 404. That
-    // guard made sense while the switch was an environment variable and this
-    // page could not turn it on; now it can, so 404ing here would hide the
-    // page exactly when somebody came to fix the thing it is about. An owner
-    // reviews public filings, so with no surface the list is simply empty and
-    // the page says why.
-    let served = ctx.public.map(|p| p.repos.clone()).unwrap_or_default();
-    match ctx.store.roster() {
-        Ok(r) => Res::html(200, crate::page::owners_page(&r, &served)),
-        Err(e) => error(500, &e.to_string()),
-    }
-}
-
-/// Promote somebody, or change what they own.
+/// Applied to **everything** that did not come from this crate. The only value
+/// reaching these pages from a request is the link token, which lands inside a
+/// `form action` — so this is the whole of what stands between a crafted URL and
+/// an attribute break.
 ///
-/// **Repository names are matched against what this surface serves**, never
-/// taken on trust — the same rule as a public filing, for the same reason. A
-/// name that matches nothing would be a permission that looks applied and
-/// grants nothing, which is precisely what the configuration used to refuse to
-/// boot on and a record cannot.
-fn set_owner(ctx: &mut Ctx<'_>, login: &str, repos: &[String]) -> Res {
-    let Some(public) = ctx.public else {
-        return Res::html(404, crate::api::NOT_FOUND);
-    };
-    if let Err(e) = check_login(login) {
-        return error(400, &e);
-    }
-    let known: Vec<String> = repos
-        .iter()
-        .map(|r| r.trim().to_string())
-        .filter(|r| public.repos.accepts(r))
-        .collect();
-    if known.is_empty() {
-        // Not silently written as an owner of nothing: that reads on the page
-        // as promoted and grants nothing at all.
-        return error(400, "pick at least one repository this server serves");
-    }
-
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut roster = match ctx.store.roster() {
-        Ok(r) => r,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    roster.set_owner(login, &known, ctx.now_ms);
-    // Seeding is a first-use thing, and this volume has now been administered.
-    // Without it a restart would re-apply the setting over a hand-made roster.
-    roster.seeded = true;
-    if let Err(e) = ctx.store.put_roster(&roster) {
-        return error(500, &e.to_string());
-    }
-    invalidate_roster(ctx);
-    Res::html(200, crate::page::owners_page(&roster, &public.repos))
-}
-
-/// Demote somebody.
-fn revoke_owner(ctx: &mut Ctx<'_>, login: &str) -> Res {
-    let Some(public) = ctx.public else {
-        return Res::html(404, crate::api::NOT_FOUND);
-    };
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut roster = match ctx.store.roster() {
-        Ok(r) => r,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    // Already revoked, or never there. Not an error worth a page: the caller
-    // asked for a state that now holds.
-    if roster.revoke(login) {
-        if let Err(e) = ctx.store.put_roster(&roster) {
-            return error(500, &e.to_string());
+/// The catalogue strings are escaped too rather than trusted. They are static
+/// and this crate owns them, but it is
+/// `no_catalogue_string_carries_markup_or_a_format_placeholder` that enforces
+/// that, and a renderer escaping only *some* of its inputs is one where the next
+/// string added is the exception.
+fn esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
         }
-        invalidate_roster(ctx);
     }
-    Res::html(200, crate::page::owners_page(&roster, &public.repos))
+    out
 }
 
-/// Which repositories collect publicly.
+/// Wrap a body in the document.
 ///
-/// `unconfirmed` carries the name a daemon could not be found for, so the page
-/// can offer the override instead of a bare error.
-fn repos_page(ctx: &Ctx<'_>, unconfirmed: Option<&str>) -> Res {
-    // Serves with the public surface off, for the reason `owners_page` gives:
-    // enabling a repository is part of turning one on.
-    let offered = match ctx.seen.lock() {
-        Ok(seen) => seen.offered(ctx.now_ms),
-        Err(p) => p.into_inner().offered(ctx.now_ms),
-    };
-    match ctx.store.roster() {
-        Ok(r) => Res::html(200, crate::page::repos_page(&r, &offered, unconfirmed)),
-        Err(e) => error(500, &e.to_string()),
-    }
+/// Carries the `lang` attribute, without which a screen reader pronounces French
+/// with English phonemes — the accessibility failure translating a page at all is
+/// meant to avoid rather than to cause.
+fn link_document(locale: Locale, title: &str, body: &str) -> String {
+    format!(
+        "{head}{lang}{head2}{title}{style}{body}{tail}",
+        head = link_page::HEAD,
+        lang = esc(locale.code()),
+        head2 = link_page::HEAD_2,
+        title = esc(title),
+        style = link_page::STYLE,
+        body = body,
+        tail = link_page::TAIL,
+    )
 }
 
-/// Collect publicly for a repository.
+/// Ask before spending the link.
 ///
-/// **The daemon check is a typo-catcher, not a security gate**, and is built as
-/// one. Enabling `smrt-coder` writes a name nothing will ever claim: filings
-/// pile up against a repository that does not exist, and the surface looks
-/// broken rather than misconfigured. Asking a machine that is polling right now
-/// catches that at the moment it is cheapest to fix.
+/// **A button, not an automatic POST**, for the reason the GET arm gives: mail
+/// scanners fetch every URL in a message, and a link spent by a scanner is one
+/// the human never gets to use.
 ///
-/// It cannot be a refusal, because a `None` is not proof of a typo:
-/// [`Seen`](crate::daemons::Seen) is empty for the first half-minute after a
-/// restart, and a daemon on an older build declares nothing at all. So an
-/// unconfirmed name is *questioned* — the page names the case, lists what is
-/// actually on offer, and offers to proceed. Taking the override records
-/// `served_by: None`, so a repository enabled without confirmation stays
-/// visibly distinguishable from one a machine vouched for.
-fn enable_repo(ctx: &mut Ctx<'_>, name: &str, anyway: bool) -> Res {
-    if name.is_empty() || name.len() > crate::config::MAX_REPO_NAME {
-        return error(400, "a repository name is required");
-    }
-
-    let served_by = match ctx.seen.lock() {
-        Ok(seen) => seen.declared_by(name, ctx.now_ms),
-        Err(p) => p.into_inner().declared_by(name, ctx.now_ms),
-    };
-    if served_by.is_none() && !anyway {
-        return repos_page(ctx, Some(name));
-    }
-
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut roster = match ctx.store.roster() {
-        Ok(r) => r,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    roster.enable(name, served_by, ctx.now_ms);
-    // This volume has now been administered; see `set_owner`.
-    roster.seeded = true;
-    if let Err(e) = ctx.store.put_roster(&roster) {
-        return error(500, &e.to_string());
-    }
-    invalidate_roster(ctx);
-    repos_page(ctx, None)
+/// **Translated, unlike the 404.** A filer is a stranger who may not read
+/// English, and this is the page standing between them and an account — so the
+/// catalogue is consulted here even though the surface around it is the client's.
+fn signin_confirm_page(token: &str, locale: Locale) -> String {
+    let s = locale.strings();
+    link_document(
+        locale,
+        s.confirm_title,
+        &format!(
+            "<h1>{title}</h1><p>{intro}</p>\
+             <form method=\"post\" action=\"{prefix}{token}\">\
+             <button type=\"submit\">{submit}</button></form>\
+             <p>{note}</p>",
+            title = esc(s.confirm_title),
+            intro = esc(s.confirm_intro),
+            prefix = public_route::SIGNIN_PREFIX,
+            token = esc(token),
+            submit = esc(s.confirm_submit),
+            note = esc(s.confirm_not_you),
+        ),
+    )
 }
 
-/// Stop collecting for a repository.
+/// A link that could not be spent.
 ///
-/// **Nothing already filed is touched.** Disabling closes the door; it does not
-/// discard what came through it, and the developer's own review surface still
-/// shows every request. Deleting them would make this button destructive in a
-/// way its name does not say.
-fn disable_repo(ctx: &mut Ctx<'_>, name: &str) -> Res {
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut roster = match ctx.store.roster() {
-        Ok(r) => r,
-        Err(e) => return error(500, &e.to_string()),
+/// "Invalid link" to somebody whose sign-in just worked reads as a bug, so a
+/// second click is told apart from a forgery. That leaks only that a token once
+/// existed — and it was theirs.
+///
+/// **200, not 400.** The status has never distinguished these: a failing status
+/// on an invalid token is a validity oracle for anything reading the response
+/// line, which is cheaper to script than reading the body.
+fn signin_failed_page(already_used: bool, locale: Locale) -> String {
+    let s = locale.strings();
+    let body = if already_used {
+        format!(
+            "<p>{lead}<a href=\"{file}\">{link}</a>.</p>",
+            lead = esc(s.link_already_used),
+            file = public_route::FILE,
+            link = esc(s.link_already_used_link),
+        )
+    } else {
+        format!("<p>{}</p>", esc(s.link_expired))
     };
-    if roster.disable(name) {
-        if let Err(e) = ctx.store.put_roster(&roster) {
-            return error(500, &e.to_string());
-        }
-        invalidate_roster(ctx);
-    }
-    repos_page(ctx, None)
+    link_document(
+        locale,
+        s.link_failed_title,
+        &format!(
+            "<h1>{title}</h1>{body}\
+             <p><a href=\"{signin}\">{again}</a></p>",
+            title = esc(s.link_failed_title),
+            signin = public_route::SIGNIN,
+            again = esc(s.link_ask_again),
+        ),
+    )
 }
 
 /// Make the next identification re-read the roster.
@@ -2909,16 +2661,6 @@ fn invalidate_roster(ctx: &Ctx<'_>) {
     if let Ok(mut cache) = ctx.roster.lock() {
         cache.invalidate();
     }
-}
-
-/// This filer's own requests, newest first.
-fn mine(ctx: &Ctx<'_>, account_id: &str) -> sc_proto::Result<Vec<Request>> {
-    Ok(ctx
-        .store
-        .all()?
-        .into_iter()
-        .filter(|r| r.filed_by(account_id))
-        .collect())
 }
 
 /// Refuse a verb that would buy another drafting run when the repository has
@@ -2995,184 +2737,6 @@ fn drafting_budget(ctx: &Ctx<'_>, repo: &str) -> std::result::Result<(), Res> {
 /// which is the safe direction for that omission to fall.
 pub const OWNER_VERBS: [&str; 3] = ["send-back", "discard", "release"];
 
-/// Everything filed against the repositories an owner owns.
-///
-/// **Every state**, not just what awaits a decision: an owner asking "why has
-/// nothing happened to this" needs to see it sitting queued or failed, and a
-/// page that showed only `AwaitingReview` could not answer them.
-///
-/// Filtered on the caller's own repository set — resolved once when they were
-/// identified — so the question asked here is "is this request's repository in
-/// their set", never "who are they, and what does the configuration say". A
-/// site that re-derived it could forget to.
-fn owned(ctx: &Ctx<'_>, repos: &[String]) -> sc_proto::Result<Vec<Request>> {
-    Ok(ctx
-        .store
-        .all()?
-        .into_iter()
-        .filter(|r| repos.contains(&r.repo))
-        .collect())
-}
-
-/// What an owner may do: read their repositories' work, decline it, and unblock
-/// it. Never accept it — see [`OWNER_VERBS`].
-///
-/// Every route here re-checks that the request's repository is one of theirs.
-/// The check is against the set carried on the caller, resolved once at
-/// identification — so a request for somebody else's repository is **not
-/// found**, not forbidden: a 403 would confirm the id is real to somebody with
-/// no business knowing it, which is the same reasoning that makes another
-/// filer's request 404 rather than 401.
-fn owner_route(
-    ctx: &mut Ctx<'_>,
-    req: &Req,
-    method: &str,
-    path: &str,
-    login: &str,
-    repos: &[String],
-    locale: Locale,
-) -> Res {
-    let not_found = || Res::html(404, crate::api::NOT_FOUND);
-
-    match (method, path) {
-        // Their list, wherever they land.
-        ("GET", public_route::LANDING) | ("GET", public_route::FILE) => match owned(ctx, repos) {
-            Ok(list) => Res::html(200, crate::page::owner_page(&list, login, repos, locale)),
-            Err(e) => error(500, &e.to_string()),
-        },
-
-        ("GET", p) if p.starts_with(public_route::REQUEST_PREFIX) => {
-            let id = p.trim_start_matches(public_route::REQUEST_PREFIX);
-            match ctx.store.get(id) {
-                Ok(Some(r)) if repos.contains(&r.repo) => {
-                    Res::html(200, crate::page::owner_detail(&r, locale))
-                }
-                // Theirs or not, the answer to a repository they do not own is
-                // the same as to one that does not exist.
-                Ok(_) => not_found(),
-                Err(e) => error(500, &e.to_string()),
-            }
-        }
-
-        ("POST", p) if p.starts_with(public_route::REQUEST_PREFIX) => {
-            let rest = p.trim_start_matches(public_route::REQUEST_PREFIX);
-            let mut parts = rest.splitn(2, '/');
-            let id = parts.next().unwrap_or("");
-            let verb = parts.next().unwrap_or("");
-
-            // **The allowlist, checked before anything is read.** An owner
-            // reaching `approve` here would be refused even if the private gate
-            // somehow let them through — belt and braces on the property that
-            // matters most in this file.
-            if !OWNER_VERBS.contains(&verb) {
-                return not_found();
-            }
-
-            // The repository is carried out of this read rather than fetched
-            // again: the ownership check and the drafting budget ask about the
-            // same record, and two reads could disagree.
-            let repo = match ctx.store.get(id) {
-                Ok(Some(r)) if repos.contains(&r.repo) => r.repo,
-                Ok(_) => return not_found(),
-                Err(e) => return error(500, &e.to_string()),
-            };
-
-            // `send-back` puts the request back in the claimable queue, so it
-            // costs a drafting run on the developer's machine — bounded per
-            // repository, not per owner.
-            if matches!(verb, "send-back" | "release") {
-                if let Err(res) = drafting_budget(ctx, &repo) {
-                    return res;
-                }
-            }
-
-            let form = form_fields(&req.body);
-            let outcome = match verb {
-                "send-back" => {
-                    let note = form.get("note").cloned().unwrap_or_default();
-                    ctx.store.send_back(id, note.trim())
-                }
-                "discard" => ctx.store.discard(id),
-                // The one owner verb that admits work. Screening is a model
-                // judging a stranger's text, so it has false positives — and an
-                // owner who can see their repository's queue but not unblock it
-                // has to ask the developer about every one of them. Bounded by
-                // the budget taken above.
-                "release" => ctx.store.release(id),
-                // Unreachable past the allowlist above; refused rather than
-                // unwrapped so a later edit to `OWNER_VERBS` cannot open a path
-                // through here by accident.
-                _ => return not_found(),
-            };
-            match outcome {
-                Ok(r) => {
-                    crate::log::info("owner decided")
-                        .with("owner", login.to_string())
-                        .with("verb", verb.to_string())
-                        .with("repo", r.repo.clone())
-                        .emit();
-                    Res::html(200, crate::page::owner_detail(&r, locale))
-                }
-                Err(e) => Res::html(400, crate::page::public_message(&e.to_string(), locale)),
-            }
-        }
-
-        // Signing out is the same act for everybody.
-        ("POST", public_route::SIGNOUT) => sign_out(ctx, req),
-        ("POST", public_route::LANGUAGE) => set_language(ctx, req),
-
-        _ => not_found(),
-    }
-}
-
-/// Send a sign-in link, or quietly do nothing.
-///
-/// **The response is identical in every case** — unknown address, existing
-/// account, revoked account, malformed input, over the outstanding cap. Only
-/// what gets *sent* differs, so this cannot be used to discover whether an
-/// address has an account.
-fn request_sign_in(ctx: &mut Ctx<'_>, req: &Req) -> Res {
-    // **Refused outright when nothing can send.** Every other failure here is
-    // deliberately indistinguishable — the page looks the same whether or not
-    // mail went out, so it cannot be used to test whether an address has an
-    // account. That argument does not reach this one: "this server has no mail
-    // provider" is not a fact about any person, and silently accepting an
-    // address nobody will ever act on is the worse answer.
-    //
-    // It is reachable because the masthead dialog is rendered by the shell,
-    // which does not know what is configured. Rather than thread that through
-    // fourteen callers, the honest refusal lives here, where the answer is
-    // known.
-    if !has_mail(ctx) {
-        return Res::html(
-            503,
-            crate::page::public_message(req.locale().strings().signin_no_mail, req.locale()),
-        )
-        .with_policy(Policy::PublicScript);
-    }
-
-    let form = form_fields(&req.body);
-    let raw = form.get("email").cloned().unwrap_or_default();
-    let sent = try_send_link(ctx, &raw);
-    if let Err(e) = sent {
-        // Logged for the operator, never shown: the page must look the same
-        // whether or not mail went out.
-        //
-        // `warn`, not `error`: the common cause is the outstanding-links cap,
-        // which is the design working.
-        //
-        // The error text is the only part that varies, and none of the paths
-        // that produce it put the address in: `try_send_link` refuses with a
-        // fixed string, `Unconfigured` with another, and `HttpMailer` formats
-        // only its provider slug and the transport error — deliberately, for
-        // this reason (see `mail.rs`).
-        crate::log::warn("sign-in link not sent")
-            .text("err", e)
-            .emit();
-    }
-    Res::html(200, crate::page::signin_sent_page(req.locale()))
-}
-
 /// Everything that might refuse, kept apart from the response so the response
 /// cannot accidentally depend on it.
 fn try_send_link(ctx: &mut Ctx<'_>, raw_email: &str) -> sc_proto::Result<()> {
@@ -3234,10 +2798,10 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     let (email_hash, email_hint) = match links.consume(token, ctx.now_ms) {
         Ok(v) => v,
         Err(account::LinkError::AlreadyUsed) => {
-            return Res::html(200, crate::page::signin_failed_page(true, locale))
+            return Res::html(200, signin_failed_page(true, locale))
         }
         Err(account::LinkError::Invalid) => {
-            return Res::html(200, crate::page::signin_failed_page(false, locale))
+            return Res::html(200, signin_failed_page(false, locale))
         }
     };
     if let Err(e) = ctx.store.put_links(&links) {
@@ -3253,7 +2817,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     // a retry loop.
     if let Some(existing) = accounts.any_by_email(&email_hash) {
         if existing.revoked {
-            return Res::html(200, crate::page::signin_failed_page(false, locale));
+            return Res::html(200, signin_failed_page(false, locale));
         }
     }
     let id = match accounts.by_email(&email_hash) {
@@ -3273,7 +2837,7 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
                     .with("accounts", accounts.accounts.len() as u64)
                     .with("cap", cap as u64)
                     .emit();
-                return Res::html(200, crate::page::signin_failed_page(false, locale));
+                return Res::html(200, signin_failed_page(false, locale));
             }
             accounts.create(&email_hash, &email_hint, ctx.now_ms).id
         }
@@ -3284,47 +2848,22 @@ fn complete_sign_in(ctx: &mut Ctx<'_>, token: &str, locale: Locale) -> Res {
     }
     invalidate_accounts(ctx);
     let secure = secure_attr(ctx);
-    let Some(repos) = ctx.public.map(|p| p.repos.clone()) else {
-        // Unreachable: signing in is a public route and only exists when a
-        // surface does.
-        return Res::html(404, crate::api::NOT_FOUND);
-    };
 
-    let mut res = Res::html(
-        200,
-        crate::page::public_file_page(&[], &repos, false, locale),
-    );
+    // **The application, with the cookie on it.** This POST is a form submit from
+    // the landing page, so the browser *navigates* — there is nothing here to
+    // hand a JSON body to, and the reader must arrive somewhere usable. The shell
+    // is what every other browser path answers, and the client asks `/me` on load
+    // and finds the session this response just opened.
+    //
+    // `PublicScript` because the shell is the script: served `Strict`, the
+    // browser would refuse the bundle the document it was just given asks for,
+    // and a reader who signed in successfully would land on a blank page. It is
+    // stamped here rather than inherited, because the dispatch above stamps the
+    // *public surface's* policy and this response is reached on a server that may
+    // have no public surface at all.
+    let mut res = Res::html(200, crate::api::ui::INDEX).with_policy(Policy::PublicScript);
     res.set_cookie = Some(format!(
         "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
-    ));
-    res
-}
-
-/// End this session.
-fn sign_out(ctx: &mut Ctx<'_>, req: &Req) -> Res {
-    if let Some(token) = &req.cookie_token {
-        let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-        if let Ok(mut accounts) = ctx.store.accounts() {
-            let hashed = auth::hash(token);
-            if let Some(s) = accounts
-                .sessions
-                .iter_mut()
-                .find(|s| s.token_hash == hashed)
-            {
-                s.revoked = true;
-                let _ = ctx.store.put_accounts(&accounts);
-                invalidate_accounts(ctx);
-            }
-        }
-    }
-    let secure = secure_attr(ctx);
-    let mut res = Res::html(
-        200,
-        crate::page::signin_page_full(req.locale(), true, has_mail(ctx), None),
-    );
-    // Max-Age=0 so the browser drops it rather than carrying a dead token.
-    res.set_cookie = Some(format!(
-        "{COOKIE}=; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=0"
     ));
     res
 }
@@ -3355,32 +2894,35 @@ fn font(bytes: &'static [u8]) -> Res {
 /// Remember the reader's language.
 ///
 /// Takes no session and touches no store: this sets a preference cookie and
-/// re-renders. It is the one public write that costs nothing to serve, which is
-/// why it is safe to leave reachable signed out.
+/// answers. It is the one public write that costs nothing to serve, which is why
+/// it is safe to leave reachable signed out.
 ///
 /// **There is no `next=` parameter and no redirect.** A "return to where you
 /// were" field on a route reachable by anyone is an open redirect waiting to be
-/// found, and this surface is small enough that landing on the sign-in page —
-/// now in the chosen language — is no real loss.
+/// found, and this surface is small enough that landing back on the application
+/// is no real loss.
+///
+/// The **only reader of the cookie this writes** is the magic-link landing, which
+/// is the only page left rendered from the catalogue. Without this route that
+/// reader would have `Accept-Language` and no way to override it.
 fn set_language(ctx: &Ctx<'_>, req: &Req) -> Res {
     let fields = form_fields(&req.body);
     // An unknown code selects the default rather than erroring. The value is
     // matched against the catalogues this server actually has, so nothing a
-    // caller writes here reaches a page except by choosing among them.
+    // caller writes here reaches a rendered page except by choosing among them.
     let locale = fields
         .get("lang")
         .and_then(|v| Locale::parse(v))
         .unwrap_or_default();
 
     let secure = secure_attr(ctx);
-    let mut res = Res::html(
-        200,
-        crate::page::signin_page_full(locale, true, has_mail(ctx), None),
-    );
-    // Not `HttpOnly`: this is a preference, not a credential, and the public
-    // surface's script may read it. `SameSite=Lax` rather than `Strict` so that
-    // arriving from an external link — which is how somebody reaches a filing
-    // page — still shows the language they chose.
+    // The application, for the reason `complete_sign_in` gives: a form POST is a
+    // navigation, so the answer has to be something a browser can display.
+    let mut res = Res::html(200, crate::api::ui::INDEX).with_policy(Policy::PublicScript);
+    // Not `HttpOnly`: this is a preference, not a credential, and the interface
+    // may read it. `SameSite=Lax` rather than `Strict` so that arriving from an
+    // external link — which is how somebody reaches a filing page — still shows
+    // the language they chose.
     res.set_cookie = Some(format!(
         "{LANG_COOKIE}={}; Path=/; SameSite=Lax{secure}; Max-Age=31536000",
         locale.code()
@@ -3396,293 +2938,6 @@ fn has_mail(ctx: &Ctx<'_>) -> bool {
     ctx.public.is_some_and(|p| p.mail.is_some())
 }
 
-/// Claim an unclaimed server.
-///
-/// **Every arm 404s once claimed**, so setup stops existing rather than existing
-/// and refusing — a stranger cannot tell a claimed server from one that never
-/// had this route, and there is nothing to keep trying.
-fn setup_route(ctx: &mut Ctx<'_>, req: &Req, method: &str, path: &str) -> Res {
-    let gone = || Res::html(404, crate::api::NOT_FOUND);
-
-    let admin = match ctx.store.admin() {
-        Ok(a) => a,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    if admin.claimed() {
-        return gone();
-    }
-
-    // **Everything past step one belongs to the browser that spent the code.**
-    //
-    // Without this the later steps are guarded only by the server being
-    // unclaimed, so a half-finished setup on a public hostname is open to
-    // whoever arrives next — and they would set their own password and own the
-    // server.
-    //
-    // It bit on a *migrated* volume rather than a fresh one: seeding fills in
-    // the address, so "step one is already done" was true for everybody from
-    // the first boot.
-    let mine = admin.setting_up(req.cookie_setup.as_deref(), ctx.now_ms);
-
-    match (method, path) {
-        ("GET", private_route::SETUP) => {
-            // Step two only for the browser that reached it. Anybody else is
-            // sent back to the code box — which they cannot pass without
-            // reading the container's log.
-            if mine {
-                return Res::html(
-                    200,
-                    crate::page::setup_admin_page(&configured_base(ctx), None),
-                );
-            }
-            Res::html(200, crate::page::setup_page("", None))
-        }
-
-        ("POST", private_route::SETUP) => {
-            let form = form_fields(&req.body);
-            let base_url = form.get("base_url").map(|b| b.trim()).unwrap_or_default();
-            let code = form.get("code").map(|c| c.trim()).unwrap_or_default();
-
-            // **The address is checked before the code is spent.** A typo in the
-            // address must not burn the one code the operator has, leaving them
-            // to restart the container to get another.
-            if let Err(e) = crate::config::check_base_url(base_url) {
-                return Res::html(400, crate::page::setup_page(base_url, Some(&e)));
-            }
-
-            let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-            let mut admin = match ctx.store.admin() {
-                Ok(a) => a,
-                Err(e) => return error(500, &e.to_string()),
-            };
-            let Some(setup_token) = admin.spend(code, ctx.now_ms) else {
-                // One message for every failure — wrong, expired, already spent.
-                // Distinguishing them tells a guesser which half they got right.
-                return Res::html(
-                    400,
-                    crate::page::setup_page(
-                        base_url,
-                        Some(
-                            "That code did not work. It is printed in the                              container's log at startup, is single-use, and                              expires after thirty minutes — restart the server                              for a fresh one.",
-                        ),
-                    ),
-                );
-            };
-            if let Err(e) = ctx.store.put_admin(&admin) {
-                return error(500, &e.to_string());
-            }
-
-            let mut settings = match ctx.store.settings() {
-                Ok(s) => s,
-                Err(e) => return error(500, &e.to_string()),
-            };
-            // The address is an environment variable and is not stored here.
-            //
-            // This volume has now been administered, so the environment must not
-            // seed over it on the next boot.
-            settings.seeded = true;
-            if let Err(e) = ctx.store.put_settings(&settings) {
-                return error(500, &e.to_string());
-            }
-            invalidate_settings(ctx);
-
-            // **The rest of the wizard belongs to this browser now.** Without
-            // it, every step after this one is guarded only by the server being
-            // unclaimed, and somebody arriving mid-way could supply their own
-            // password and take the server.
-            let secure = secure_attr_for(base_url);
-            let mut res = Res::html(200, crate::page::setup_admin_page(base_url, None));
-            res.set_cookie = Some(format!(
-                "{SETUP_COOKIE}={setup_token}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={}",
-                crate::admin::CLAIM_TTL_MS / 1000
-            ));
-            res
-        }
-
-        ("POST", private_route::SETUP_ADMIN) => {
-            // **The step that hands the server over.** Choosing the username and
-            // password decides who owns this, so it is the one an interloper
-            // wants — which is why the wizard is bound to the browser that spent
-            // the code.
-            if !mine {
-                return Res::html(
-                    400,
-                    crate::page::setup_page(
-                        "",
-                        Some(
-                            "Start again from the claim code. Setting this server \
-                             up has to be finished in the browser that started it.",
-                        ),
-                    ),
-                );
-            }
-            // The address is configured before the server starts, so there is
-            // nothing to check for here any more.
-
-            let form = form_fields(&req.body);
-            let login = form.get("login").map(|v| v.trim()).unwrap_or_default();
-            let password = form.get("password").map(String::as_str).unwrap_or_default();
-
-            if let Err(e) = check_login(login) {
-                return Res::html(
-                    400,
-                    crate::page::setup_admin_page(&configured_base(ctx), Some(&e)),
-                );
-            }
-
-            let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-
-            // Re-read under the lock: the claim is the thing two people could
-            // race for, and the first to finish has to win rather than the last.
-            let mut admin = match ctx.store.admin() {
-                Ok(a) => a,
-                Err(e) => return error(500, &e.to_string()),
-            };
-            if admin.claimed() {
-                return gone();
-            }
-
-            let mut accounts = match ctx.store.accounts() {
-                Ok(a) => a,
-                Err(e) => return error(500, &e.to_string()),
-            };
-            // `create_login` refuses a short password and a taken name, and its
-            // message says which — this is the one form where naming the reason
-            // helps rather than leaking, because nobody is guessing at anything
-            // yet.
-            let account = match accounts.create_login(login, password, ctx.now_ms) {
-                Ok(a) => a,
-                Err(e) => {
-                    return Res::html(
-                        400,
-                        crate::page::setup_admin_page(&configured_base(ctx), Some(&e)),
-                    )
-                }
-            };
-            let session = accounts.open_session(&account.id, ctx.now_ms);
-            if let Err(e) = ctx.store.put_accounts(&accounts) {
-                return error(500, &e.to_string());
-            }
-            invalidate_accounts(ctx);
-
-            // **The account is written before the claim.** A server that
-            // recorded the claim and then failed to store the account would be
-            // owned by a login nobody can sign in as — unrecoverable without
-            // deleting the volume. This ordering fails the other way: an
-            // unclaimed server with a spare account, which the next attempt
-            // simply names differently.
-            admin.claim(login, ctx.now_ms);
-            if let Err(e) = ctx.store.put_admin(&admin) {
-                return error(500, &e.to_string());
-            }
-
-            let mut settings = match ctx.store.settings() {
-                Ok(s) => s,
-                Err(e) => return error(500, &e.to_string()),
-            };
-            settings.seeded = true;
-            if let Err(e) = ctx.store.put_settings(&settings) {
-                return error(500, &e.to_string());
-            }
-            invalidate_settings(ctx);
-            drop(_guard);
-
-            crate::log::warn("server claimed")
-                .with("login", login.to_ascii_lowercase())
-                .with("note", "this account now administers this server")
-                .emit();
-
-            // Signed in already: they just proved themselves by choosing the
-            // credential, and asking them to type it again immediately would be
-            // ceremony rather than security.
-            // From the address rather than `ctx.public`, for the reason
-            // `secure_attr_for` gives: a server being claimed has no public
-            // surface, and `Secure` over plain HTTP means the reader is signed
-            // out the instant they claim it.
-            let secure = secure_attr_for(&configured_base(ctx));
-            let mut res = Res::html(200, crate::page::claimed_page(login));
-            res.set_cookie = Some(format!(
-                "{COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age=31536000"
-            ));
-            res
-        }
-
-        _ => gone(),
-    }
-}
-
-/// Which machines may claim work.
-fn daemons_page(ctx: &Ctx<'_>, minted: Option<(&str, &str)>) -> Res {
-    match ctx.store.roster() {
-        Ok(r) => Res::html(200, crate::page::daemons_page(&r, minted)),
-        Err(e) => error(500, &e.to_string()),
-    }
-}
-
-/// Mint a credential for a machine.
-///
-/// **The server generates it and shows it once.** That is strictly better than
-/// an environment variable, which sits in plaintext in a stack editor for as
-/// long as the deployment lives: this is unrecoverable rather than permanently
-/// readable, and only its hash reaches the volume.
-///
-/// Minting for a label that already has a key **replaces** it, which is how a
-/// key is rotated. That machine stops being able to claim until it is updated,
-/// and the page says so — true of a stack edit too, but a button does not look
-/// like a deploy.
-fn mint_daemon_key(ctx: &mut Ctx<'_>, label: &str) -> Res {
-    if label.is_empty() || label.len() > 64 {
-        return error(400, "a machine needs a name");
-    }
-    // The label lands in a URL for revocation and in every log line about this
-    // machine, so it is kept to what reads back unambiguously.
-    if !label
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return error(400, "letters, numbers, dashes and underscores");
-    }
-
-    let key = auth::mint_secret();
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut roster = match ctx.store.roster() {
-        Ok(r) => r,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    roster.set_daemon(label, &auth::hash(&key), ctx.now_ms);
-    roster.seeded = true;
-    if let Err(e) = ctx.store.put_roster(&roster) {
-        return error(500, &e.to_string());
-    }
-    invalidate_roster(ctx);
-    crate::log::info("daemon key minted")
-        .with("label", label.to_string())
-        .emit();
-    Res::html(200, crate::page::daemons_page(&roster, Some((label, &key))))
-}
-
-/// Stop trusting a machine.
-///
-/// Takes effect on that daemon's **next poll** rather than at the next restart,
-/// because the poll path reads the roster through its cache.
-fn revoke_daemon(ctx: &mut Ctx<'_>, label: &str) -> Res {
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut roster = match ctx.store.roster() {
-        Ok(r) => r,
-        Err(e) => return error(500, &e.to_string()),
-    };
-    if roster.revoke_daemon(label) {
-        if let Err(e) = ctx.store.put_roster(&roster) {
-            return error(500, &e.to_string());
-        }
-        invalidate_roster(ctx);
-        crate::log::warn("daemon key revoked")
-            .with("label", label.to_string())
-            .emit();
-    }
-    Res::html(200, crate::page::daemons_page(&roster, None))
-}
-
 /// The routes that change a secret, and therefore need a fresh sign-in.
 ///
 /// Named once so the test proving each one refuses a stale session iterates this
@@ -3690,147 +2945,6 @@ fn revoke_daemon(ctx: &mut Ctx<'_>, label: &str) -> Res {
 /// here without a `require_fresh` call fails that test, which is the safe
 /// direction for the omission to fall.
 pub const SENSITIVE_VERBS: [&str; 1] = [private_route::SETTINGS_SECRET];
-
-/// Refuse a change made on a session that has not proved itself recently.
-///
-/// **This is what a secret costs on top of a session.** An administrator's
-/// session already reaches accept, discard and owner promotion; that is the same
-/// blast radius the device cookie had. Secrets are where it stops being
-/// acceptable — somebody holding a stolen cookie must not be able to rotate the
-/// mail key and redirect every sign-in link — so this asks for the password *at
-/// that moment* rather than at some point in the past.
-fn require_fresh(ctx: &Ctx<'_>) -> std::result::Result<(), Res> {
-    if ctx.fresh_auth {
-        return Ok(());
-    }
-    Err(show_settings(
-        ctx,
-        None,
-        Some(
-            "Changing a secret needs a fresh sign-in, and it has been more than \
-             five minutes since this browser last proved itself. Sign in again, \
-             then change it.",
-        ),
-    ))
-}
-
-/// What this server does.
-fn show_settings(ctx: &Ctx<'_>, saved: Option<&str>, problem: Option<&str>) -> Res {
-    match ctx.store.settings() {
-        Ok(s) => Res::html(
-            if problem.is_some() { 400 } else { 200 },
-            crate::page::settings_page(
-                &s,
-                &crate::config::host_label(&configured_base(ctx)),
-                ctx.fresh_auth,
-                saved,
-                problem,
-            ),
-        ),
-        Err(e) => error(500, &e.to_string()),
-    }
-}
-
-/// Change something.
-///
-/// One handler for every settings form, because they share a shape: read under
-/// the lock, mutate, write, invalidate, re-render. Splitting them would be six
-/// copies of that sequence and six chances to forget the invalidate.
-fn settings_write(ctx: &mut Ctx<'_>, req: &Req, path: &str) -> Res {
-    // **The gate, before anything is read.** Only the secret form needs it, and
-    // it is checked here rather than inside that arm so the list above is the
-    // single place the requirement is stated.
-    if SENSITIVE_VERBS.contains(&path) {
-        if let Err(res) = require_fresh(ctx) {
-            return res;
-        }
-    }
-
-    let form = form_fields(&req.body);
-    let field = |name: &str| form.get(name).map(|v| v.trim().to_string());
-    // A blank number is "use the default", not zero — the page says so.
-    let cap = |name: &str| -> Option<Option<usize>> {
-        match field(name) {
-            None => Some(None),
-            Some(v) if v.is_empty() => Some(None),
-            Some(v) => v.parse::<usize>().ok().map(Some),
-        }
-    };
-
-    let _guard = ctx.write_lock.lock().unwrap_or_else(|p| p.into_inner());
-    let mut s = match ctx.store.settings() {
-        Ok(s) => s,
-        Err(e) => return error(500, &e.to_string()),
-    };
-
-    let saved = match path {
-        private_route::SETTINGS_PUBLIC => {
-            // A toggle rather than a checkbox: an unticked box submits nothing,
-            // so a form that could turn it *on* could never turn it off.
-            s.public = !s.public;
-            // Names the direction, so the confirmation is not the same sentence
-            // whichever way it went.
-            if s.public {
-                "The public site is now on, and that"
-            } else {
-                "The public site is now off, and that"
-            }
-        }
-        private_route::SETTINGS_SITE => {
-            // The site *name* is an environment variable now; this form carries
-            // only the spec switch.
-            s.show_spec = Some(field("show_spec").is_some());
-            "The site"
-        }
-        // **Mail is configured in the stack.** The route stays so an old form
-        // does not 404 into a rendered page, and says where to go instead.
-        private_route::SETTINGS_MAIL => {
-            return show_settings(
-                ctx,
-                None,
-                Some(
-                    "Mail is set in the environment now — change it where the container is configured, then redeploy.",
-                ),
-            );
-        }
-        private_route::SETTINGS_CAPS => {
-            let (Some(f), Some(d), Some(a), Some(l)) = (
-                cap("max_daily_filings"),
-                cap("max_daily_drafts"),
-                cap("max_accounts"),
-                cap("max_outstanding_links"),
-            ) else {
-                return show_settings(ctx, None, Some("Those have to be whole numbers, or blank."));
-            };
-            s.max_daily_filings = f;
-            s.max_daily_drafts = d;
-            s.max_accounts = a;
-            s.max_outstanding_links = l;
-            "The ceilings"
-        }
-        // **Nothing on this surface is a secret any more.** The route stays so
-        // an old form does not 404 into a rendered page, and says where to go.
-        private_route::SETTINGS_SECRET => {
-            return show_settings(
-                ctx,
-                None,
-                Some(
-                    "Secrets are set in the environment now - change them where the container is configured, then redeploy.",
-                ),
-            );
-        }
-        _ => return Res::html(404, crate::api::NOT_FOUND),
-    };
-
-    // Administered, so the environment must not seed over it on the next boot.
-    s.seeded = true;
-    if let Err(e) = ctx.store.put_settings(&s) {
-        return error(500, &e.to_string());
-    }
-    invalidate_settings(ctx);
-    drop(_guard);
-    show_settings(ctx, Some(saved), None)
-}
 
 /// Make the next request re-read the settings.
 fn invalidate_settings(ctx: &Ctx<'_>) {
@@ -3855,18 +2969,6 @@ fn check_login(login: &str) -> std::result::Result<(), String> {
         return Err("that is not an email address".to_string());
     }
     Ok(())
-}
-
-/// A filing that named no repository this surface collects for.
-///
-/// Deliberately says nothing about which ones it *does* — the picker already
-/// lists those to anyone who reached the form honestly.
-fn refuse_repo(locale: Locale) -> Res {
-    Res::html(
-        400,
-        crate::page::public_message(locale.strings().file_repo_unknown, locale),
-    )
-    .with_policy(Policy::PublicScript)
 }
 
 /// File a request from the public surface.
@@ -4019,63 +3121,6 @@ fn file_now(
     }
 }
 
-fn file_publicly(ctx: &mut Ctx<'_>, req: &Req, account_id: &str) -> Res {
-    let locale = req.locale();
-    let form = form_fields(&req.body);
-    let kind = form
-        .get("kind")
-        .and_then(|k| IntakeKind::parse(k))
-        .unwrap_or_default();
-
-    match file_now(
-        ctx,
-        account_id,
-        form.get("repo").map(String::as_str),
-        form.get("text").map(String::as_str).unwrap_or_default(),
-        kind,
-    ) {
-        Ok(request) => Res::html(200, crate::page::public_filed(&request, locale)),
-        Err(FilingRefused::NoSurface) => Res::html(404, crate::api::NOT_FOUND),
-        Err(FilingRefused::Repo) => refuse_repo(locale),
-        Err(FilingRefused::Store(e)) => error(500, &e),
-        Err(other) => Res::html(
-            other.status(),
-            crate::page::public_message(&other.message(locale), locale),
-        ),
-    }
-}
-
-/// Render the confirmation for an approval. **Changes nothing.**
-///
-/// The first of two deliberate steps (spec 20). It restates what is being
-/// approved and carries a digest of the exact text shown, which
-/// [`Store::approve`](crate::store::Store::approve) re-checks on submit — so the
-/// approval binds to bytes the reviewer saw rather than to whatever is on disk
-/// when the second POST lands.
-fn ask_to_accept(ctx: &mut Ctx<'_>, id: &str) -> Res {
-    let req = match ctx.store.get(id) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Res::html(404, crate::api::NOT_FOUND),
-        Err(e) => return error(500, &e.to_string()),
-    };
-    if req.state != RequestState::AwaitingReview {
-        return Res::html(
-            400,
-            crate::page::message(&format!(
-                "This request is {} — only one awaiting review can be approved.",
-                req.state.label()
-            )),
-        );
-    }
-    let (Some(spec), Some(digest)) = (req.spec.clone(), req.spec_digest()) else {
-        return Res::html(
-            400,
-            crate::page::message("There is no drafted spec to approve yet."),
-        );
-    };
-    Res::html(200, crate::page::confirm_accept(&req, &spec, &digest))
-}
-
 /// The longest a request may be.
 ///
 /// Words rather than bytes, because it is a limit a person can hold in their head
@@ -4118,34 +3163,6 @@ pub fn check_length(text: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// File a request.
-///
-/// The repository is a **name**, taken from a fixed list the page renders. There
-/// is no field here for a path, so traversal is unreachable rather than
-/// mitigated — the daemon resolves the name against its own configured set and
-/// refuses anything absent (spec 18).
-fn file_request(ctx: &mut Ctx<'_>, text: &str, repo: &str, kind: IntakeKind) -> Res {
-    let text = text.trim();
-    if text.is_empty() {
-        return Res::html(400, crate::page::message("A request needs some text."));
-    }
-    if repo.trim().is_empty() {
-        return Res::html(
-            400,
-            crate::page::message("Choose which repository this is about."),
-        );
-    }
-    if let Err(msg) = check_length(text) {
-        return Res::html(400, crate::page::message(&msg));
-    }
-
-    let req = Request::new(new_id(), text, repo.trim(), kind);
-    match ctx.store.put(&req) {
-        Ok(()) => Res::html(200, crate::page::filed(&req)),
-        Err(e) => error(500, &e.to_string()),
-    }
-}
-
 /// Parse `a=1&b=2` with percent-decoding.
 fn form_fields(body: &str) -> std::collections::HashMap<String, String> {
     body.split('&')
@@ -4156,25 +3173,6 @@ fn form_fields(body: &str) -> std::collections::HashMap<String, String> {
             let v = kv.next().unwrap_or("");
             Some((percent_decode(k), percent_decode(v)))
         })
-        .collect()
-}
-
-/// Every value submitted under one name, in order.
-///
-/// [`form_fields`] collects into a map and so keeps only the last of a repeated
-/// name. That is right for every field that is a single input and wrong for a
-/// checkbox group, where "repos=a&repos=b" is one answer with two parts —
-/// silently keeping `b` would grant an owner one repository of the two ticked.
-fn form_values(body: &str, name: &str) -> Vec<String> {
-    body.split('&')
-        .filter(|p| !p.is_empty())
-        .filter_map(|pair| {
-            let mut kv = pair.splitn(2, '=');
-            let k = kv.next()?;
-            let v = kv.next().unwrap_or("");
-            (percent_decode(k) == name).then(|| percent_decode(v))
-        })
-        .filter(|v| !v.trim().is_empty())
         .collect()
 }
 
@@ -4463,10 +3461,17 @@ mod tests {
             session
         }
 
+        /// Sign in the way a filer does: ask for a link, then spend it.
+        ///
+        /// **Two different surfaces, deliberately.** Asking is the interface's
+        /// endpoint, because that is where a filer types their address now. The
+        /// spend is still the form POST on `/public/signin/<token>`, because
+        /// that is the *one* rendered page left — it is reached from an email,
+        /// so it has to be a document with a button rather than a `fetch`.
         fn signed_in(&mut self, email: &str) -> String {
-            let asked = self.go(&Req::post(
-                public_route::SIGNIN,
-                &format!("email={}", email.replace('@', "%40")),
+            let asked = self.go(&Req::post_json(
+                &api_path("signin"),
+                &serde_json::json!({ "email": email }).to_string(),
             ));
             assert_eq!(asked.status, 200, "{}", asked.body);
 
@@ -4487,6 +3492,78 @@ mod tests {
             assert_eq!(res.status, 200, "{}", res.body);
             cookie_token(&res).expect("a session was opened")
         }
+    }
+
+    /// Act on a request through the endpoint the interface posts verbs to.
+    ///
+    /// **One address for every reviewer now, where there were two.** The rendered
+    /// surface had the developer's verbs on `/request/{id}/{verb}` and the
+    /// owner's on `/public/request/{id}/{verb}`, because owners live on the
+    /// public side and the private surface was gated on a variant they do not
+    /// have. `api_verb` matches on the caller's variant instead, so the split
+    /// that used to be two route trees is a `match` — and the *answers* are
+    /// unchanged, which is what the tests below still assert: an owner outside
+    /// their repositories gets 404, and `accept` does not exist for them.
+    fn verb_on(f: &mut Fixture, session: &str, id: &str, verb: &str, body: &str) -> Res {
+        f.go(
+            &Req::post_json(&api_path(&format!("requests/{id}/{verb}")), body).with_cookie(session),
+        )
+    }
+
+    /// Sign in with a password, through the endpoint the interface posts to.
+    ///
+    /// **The form at `/public/signin/password` is gone and the check behind it is
+    /// not.** `check_password_for_session` was split out so a form and a `fetch`
+    /// could not drift apart on the backoff or the cookie flags; only one caller
+    /// is left, and everything those tests assert about backoff, indistinguishable
+    /// refusals and session flags is asserted here against it.
+    fn sign_in_with_password(f: &mut Fixture, login: &str, password: &str) -> Res {
+        f.go(&Req::post_json(
+            &api_path("signin/password"),
+            &serde_json::json!({ "login": login, "password": password }).to_string(),
+        ))
+    }
+
+    /// Ask for a sign-in link and return the token out of the emailed body.
+    ///
+    /// **Asking moved to the interface's endpoint and spending did not.** The
+    /// link lands on `/public/signin/<token>`, which is still a rendered page —
+    /// it is reached by a navigation out of an email, so it has to be a document
+    /// with a button rather than a `fetch`. This is the seam between the two, and
+    /// it is written once because four tests cross it.
+    fn link_token_for(f: &mut Fixture, email: &str) -> String {
+        let asked = f.go(&Req::post_json(
+            &api_path("signin"),
+            &serde_json::json!({ "email": email }).to_string(),
+        ));
+        assert_eq!(asked.status, 200, "{}", asked.body);
+        let body = f.mailer.last_body().expect("a link was emailed");
+        body.split(public_route::SIGNIN_PREFIX)
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("the body carries a link")
+            .to_string()
+    }
+
+    /// Mint a machine key through the endpoint the machines page uses, and
+    /// return the key it hands back exactly once.
+    ///
+    /// **The key used to come out of `<pre>` in the rendered page.** It comes out
+    /// of a JSON field now, and pulling that apart at four call sites would put
+    /// four copies of "which field carries the secret" in the suite — a detail
+    /// that will move again before the shape of these tests does.
+    fn mint_daemon(f: &mut Fixture, admin: &str, label: &str) -> String {
+        let res = f.go(&Req::post_json(
+            &api_path("daemons"),
+            &serde_json::json!({ "label": label }).to_string(),
+        )
+        .with_cookie(admin));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let minted: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        minted["key"]
+            .as_str()
+            .expect("minting hands the key back")
+            .to_string()
     }
 
     /// Pull the session token out of a `Set-Cookie`.
@@ -4513,12 +3590,21 @@ mod tests {
             self.signed_in_with_login("jamez667@example.test")
         }
 
+        /// File as the administrator, through the endpoint the interface uses.
+        ///
+        /// **The text arrives percent-encoded**, because every caller of this
+        /// was written against `POST /file` and passes `add+a+health+check`.
+        /// Decoding here rather than editing sixty call sites keeps the change
+        /// mechanical — and what those tests are about is what happens *after* a
+        /// request exists, not how the plus signs got in.
         fn file(&mut self, token: &str, text: &str, repo: &str) -> String {
-            let res = self.go(&Req::post(
-                "/file",
-                &format!("text={text}&repo={repo}&kind=feature"),
-            )
-            .with_cookie(token));
+            let body = serde_json::json!({
+                "text": percent_decode(text),
+                "repo": repo,
+                "kind": "feature",
+            });
+            let res =
+                self.go(&Req::post_json(&api_path("file"), &body.to_string()).with_cookie(token));
             assert_eq!(res.status, 200, "{}", res.body);
             self.store.all().unwrap().last().unwrap().id.clone()
         }
@@ -5215,7 +4301,13 @@ mod tests {
             .expect("the filer")
             .id
             .clone();
-        let res = f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&admin));
+        // **Through the API's revoke**, because the form route is gone. The lever
+        // is the same one — `api_revoke` calls `invalidate_accounts` at the same
+        // point the page's handler did — so what this pins is unchanged: the
+        // write, and the cache being dropped with it.
+        let res = f.go(
+            &Req::post_json(&api_path(&format!("accounts/{id}/revoke")), "{}").with_cookie(&admin),
+        );
         assert_eq!(res.status, 200, "{}", res.body);
 
         let after = f.go(&Req::get(ME_PATH).with_cookie(&session));
@@ -5238,28 +4330,45 @@ mod tests {
         // pins the route's behaviour, not the invalidation. What makes the
         // invalidation non-negotiable is that its absence is a bug that appears
         // only on somebody else's disk.
+        // **Asked of `/me`, not of the filing address.** Every browser path
+        // answers the interface's document whether or not anybody is signed in,
+        // so a 200 there says nothing at all; whether the session resolves to a
+        // live account is a question only the API answers.
         let mut f = Fixture::new("signup-cached").with_public(false);
         let session = f.signed_in("new@x.com");
-        assert_eq!(
-            f.go(&Req::get(public_route::FILE).with_cookie(&session))
-                .status,
-            200,
-            "a session opened this instant did not work"
+        let me = f.go(&Req::get(ME_PATH).with_cookie(&session));
+        assert!(
+            me.body.contains("\"filer\""),
+            "a session opened this instant did not work: {}",
+            me.body
         );
     }
 
     #[test]
     fn a_minted_key_is_shown_once_and_then_only_its_hash_is_kept() {
-        // **The one place this server prints a secret.** Shown on the page that
-        // made it and never again, which is strictly better than an environment
-        // variable sitting in a stack editor for the life of the deployment.
+        // **The one place this server prints a secret.** Handed back by the call
+        // that made it and never again, which is strictly better than an
+        // environment variable sitting in a stack editor for the life of the
+        // deployment.
+        //
+        // **The warning moved and the property did not.** The page used to carry
+        // "this is the only time it is shown" beside the key; the client draws
+        // that line now, so there is no markup here to look for. What still has to
+        // be true — and is the whole reason the warning exists — is that the key
+        // is in the minting response and in *no* later read: the list endpoint
+        // behind the machines page returns records, and a record holds a hash.
         let mut f = Fixture::new("daemon-mint").with_public(false);
         let admin = f.as_admin();
 
-        let res = f.go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin));
+        let res = f
+            .go(&Req::post_json(&api_path("daemons"), r#"{"label":"laptop"}"#).with_cookie(&admin));
         assert_eq!(res.status, 200, "{}", res.body);
+        let minted: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        let key = minted["key"]
+            .as_str()
+            .expect("the key comes back")
+            .to_string();
 
-        // The key is in the page exactly once, and the page says so.
         let roster = f.store.roster().unwrap();
         let record = roster
             .daemons
@@ -5269,24 +4378,23 @@ mod tests {
         assert!(!record.revoked);
         assert!(
             !res.body.contains(&record.key_hash),
-            "the hash is not shown"
-        );
-        assert!(
-            res.body.contains("only time it is shown"),
-            "the page does not warn: {}",
-            res.body
+            "the hash is not handed out beside the key"
         );
 
-        // Reloading the page does not show it again.
-        let again = f.go(&Req::get(private_route::DAEMONS).with_cookie(&admin));
+        // Reading the list back does not show it again — which is the assertion
+        // the "only time it is shown" line was standing in for.
+        let again = f.go(&Req::get(&api_path("daemons")).with_cookie(&admin));
+        assert_eq!(again.status, 200, "{}", again.body);
         assert!(
-            !again.body.contains("only time it is shown"),
-            "the key was shown a second time"
+            !again.body.contains(&key),
+            "the key was readable a second time: {}",
+            again.body
         );
 
         // And nothing reversible reached the volume.
         let raw = std::fs::read_to_string(f.store.roster_path()).unwrap();
         assert!(raw.contains(&record.key_hash), "the hash is stored");
+        assert!(!raw.contains(&key), "the key itself never lands on disk");
     }
 
     #[test]
@@ -5299,14 +4407,7 @@ mod tests {
         // one can possibly be what answers.
         f.daemon_keys = Vec::new();
 
-        let res = f.go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin));
-        let key = res
-            .body
-            .split("<pre>")
-            .nth(1)
-            .and_then(|rest| rest.split("</pre>").next())
-            .expect("the page carries the key")
-            .to_string();
+        let key = mint_daemon(&mut f, &admin, "laptop");
 
         assert_eq!(
             f.go(&Req::get(wire::route::WORK).with_bearer(&key)).status,
@@ -5314,7 +4415,8 @@ mod tests {
             "a freshly minted key could not claim"
         );
 
-        let res = f.go(&Req::post("/daemons/laptop/revoke", "").with_cookie(&admin));
+        let res =
+            f.go(&Req::post_json(&api_path("daemons/laptop/revoke"), "{}").with_cookie(&admin));
         assert_eq!(res.status, 200, "{}", res.body);
 
         // **The next poll**, not the next restart.
@@ -5333,22 +4435,8 @@ mod tests {
         let admin = f.as_admin();
         f.daemon_keys = Vec::new();
 
-        let first = f
-            .go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin))
-            .body
-            .split("<pre>")
-            .nth(1)
-            .and_then(|r| r.split("</pre>").next())
-            .unwrap()
-            .to_string();
-        let second = f
-            .go(&Req::post(private_route::DAEMONS, "label=laptop").with_cookie(&admin))
-            .body
-            .split("<pre>")
-            .nth(1)
-            .and_then(|r| r.split("</pre>").next())
-            .unwrap()
-            .to_string();
+        let first = mint_daemon(&mut f, &admin, "laptop");
+        let second = mint_daemon(&mut f, &admin, "laptop");
         assert_ne!(first, second);
 
         let roster = f.store.roster().unwrap();
@@ -5376,17 +4464,23 @@ mod tests {
         // behind it, which is where the gate now lives.
         let (mut f, session, _mine, _theirs) = owner_fixture("daemon-owner");
         assert_eq!(
-            f.go(&Req::get("/api/v1/ui/daemons").with_cookie(&session))
+            f.go(&Req::get(&api_path("daemons")).with_cookie(&session))
                 .status,
             404
         );
-        for (path, body) in [
-            (private_route::DAEMONS, "label=theirs"),
-            ("/daemons/laptop/revoke", ""),
+        // The writes too, and **404 rather than 401**: minting does not exist
+        // for an owner, which is the same answer the list gives.
+        for (rest, body) in [
+            ("daemons", r#"{"label":"theirs"}"#),
+            ("daemons/laptop/revoke", "{}"),
         ] {
-            let res = f.go(&Req::post(path, body).with_cookie(&session));
-            assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
+            let res = f.go(&Req::post_json(&api_path(rest), body).with_cookie(&session));
+            assert_eq!(res.status, 404, "an owner reached {rest}: {}", res.body);
         }
+        assert!(
+            f.store.roster().unwrap().daemons.is_empty(),
+            "an owner minted a machine key"
+        );
     }
 
     #[test]
@@ -5396,10 +4490,11 @@ mod tests {
         let mut f = Fixture::new("daemon-label").with_public(false);
         let admin = f.as_admin();
         for bad in ["", "has spaces", "slash/es", "../..", &"x".repeat(65)] {
-            let res =
-                f.go(
-                    &Req::post(private_route::DAEMONS, &format!("label={bad}")).with_cookie(&admin)
-                );
+            let res = f.go(&Req::post_json(
+                &api_path("daemons"),
+                &serde_json::json!({ "label": bad }).to_string(),
+            )
+            .with_cookie(&admin));
             assert_eq!(res.status, 400, "accepted {bad:?}: {}", res.body);
         }
         assert!(f.store.roster().unwrap().daemons.is_empty());
@@ -5417,13 +4512,19 @@ mod tests {
         // like every other browser path, so there is no longer a rendered
         // "cannot send" line or an email form to look for in the markup — the
         // client draws both. What must not change is what happens when somebody
-        // submits an address anyway: refused outright, and no link minted.
+        // submits an address anyway: refused outright, and no link minted. That
+        // now happens at `POST /api/v1/ui/signin`, which is where the address a
+        // reader types arrives; `api_request_link` makes the check its first act
+        // for exactly this reason.
         let mut f = Fixture::new("no-mail").with_public(false);
         if let Some(p) = f.public.as_mut() {
             p.mail = None;
         }
 
-        let res = f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        let res = f.go(&Req::post_json(
+            &api_path("signin"),
+            r#"{"email":"jo@x.com"}"#,
+        ));
         assert_eq!(res.status, 503, "{}", res.body);
         assert!(
             f.store.links().unwrap().links.is_empty(),
@@ -5431,18 +4532,30 @@ mod tests {
         );
 
         // And with a provider configured the same POST is accepted, so the 503
-        // above is the missing provider rather than the route being shut.
+        // above is the missing provider rather than the endpoint being shut.
         let mut f = Fixture::new("with-mail").with_public(false);
-        let res = f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        let res = f.go(&Req::post_json(
+            &api_path("signin"),
+            r#"{"email":"jo@x.com"}"#,
+        ));
         assert_eq!(res.status, 200, "{}", res.body);
         assert_eq!(f.mailer.count(), 1, "and the link was actually sent");
     }
 
     #[test]
-    fn the_public_surface_is_turned_on_from_the_settings_page() {
+    fn the_public_surface_is_turned_on_from_the_settings_api() {
         // The switch that used to be an environment variable. A freshly claimed
         // server has it off, and turning it on is deliberate rather than a side
         // effect of naming a repository.
+        //
+        // **Renamed off "page", and the switch is now stated rather than
+        // toggled.** `POST /settings/public` flipped whatever was there, because
+        // an unticked checkbox submits nothing and a form had no way to say
+        // "off"; JSON does, so the endpoint takes the value the reader chose. The
+        // property is the same one either way — the setting is a deliberate write
+        // that lands on the volume, and it can be turned back off — and stating
+        // it is strictly the safer of the two, since a toggle applied twice by a
+        // retried request silently undoes itself.
         let mut f = Fixture::new("settings-public").with_public(false);
         let admin = f.as_admin();
 
@@ -5450,13 +4563,16 @@ mod tests {
         // now; the volume decides.
         assert!(!f.store.settings().unwrap().public);
 
-        let res = f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
+        let res =
+            f.go(&Req::post_json(&api_path("settings"), r#"{"public":true}"#).with_cookie(&admin));
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(f.store.settings().unwrap().public);
 
-        // And it is a toggle, so it can be turned off again. A checkbox could
-        // not: an unticked box submits nothing.
-        f.go(&Req::post(private_route::SETTINGS_PUBLIC, "").with_cookie(&admin));
+        // And it can be turned off again, which is the half a checkbox could not
+        // express.
+        let res =
+            f.go(&Req::post_json(&api_path("settings"), r#"{"public":false}"#).with_cookie(&admin));
+        assert_eq!(res.status, 200, "{}", res.body);
         assert!(!f.store.settings().unwrap().public);
     }
 
@@ -5468,44 +4584,68 @@ mod tests {
         let admin = f.as_admin();
 
         let res = f.go(
-            &Req::post(private_route::SETTINGS_CAPS, "max_daily_filings=7").with_cookie(&admin),
+            &Req::post_json(&api_path("settings"), r#"{"max_daily_filings":7}"#)
+                .with_cookie(&admin),
         );
         assert_eq!(res.status, 200, "{}", res.body);
         assert_eq!(f.store.settings().unwrap().max_daily_filings, Some(7));
 
-        // Blank is "the built-in default", not zero — which would be a surface
-        // that accepts nothing and reads as broken.
-        f.go(&Req::post(private_route::SETTINGS_CAPS, "max_daily_filings=").with_cookie(&admin));
+        // **Null is "the built-in default", not zero** — which would be a surface
+        // that accepts nothing and reads as broken. This was the empty string a
+        // form submits; JSON can say the absence outright, so it does.
+        let res = f.go(
+            &Req::post_json(&api_path("settings"), r#"{"max_daily_filings":null}"#)
+                .with_cookie(&admin),
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
         assert_eq!(f.store.settings().unwrap().max_daily_filings, None);
 
-        // And nonsense is refused rather than silently defaulted.
-        let res = f.go(
-            &Req::post(private_route::SETTINGS_CAPS, "max_daily_filings=lots").with_cookie(&admin),
+        // **And the setting a request does not name is left alone**, which is the
+        // property that replaced "nonsense is refused". A form posted the whole
+        // group at once, so an unparseable field had to be rejected or it would
+        // have been written as a default over a value somebody chose. JSON names
+        // only what it changes, so the failure mode is gone by construction —
+        // what has to hold instead is that naming one cap does not silently reset
+        // its neighbours.
+        f.go(
+            &Req::post_json(&api_path("settings"), r#"{"max_daily_filings":7}"#)
+                .with_cookie(&admin),
         );
-        assert_eq!(res.status, 400, "{}", res.body);
+        let res = f.go(
+            &Req::post_json(&api_path("settings"), r#"{"max_accounts":2}"#).with_cookie(&admin),
+        );
+        assert_eq!(res.status, 200, "{}", res.body);
+        let s = f.store.settings().unwrap();
+        assert_eq!(s.max_accounts, Some(2));
+        assert_eq!(
+            s.max_daily_filings,
+            Some(7),
+            "a cap nobody named was overwritten"
+        );
     }
 
     #[test]
-    fn an_owner_cannot_reach_the_settings_page() {
-        // The same structural argument as the roster: past the gate, so no
-        // value of `Caller::Owner` gets here.
+    fn an_owner_cannot_reach_the_settings() {
+        // The same structural argument as the roster: past the gate, so no value
+        // of `Caller::Owner` gets here.
         //
-        // **Asked of the API.** `/settings` serves the interface's document to
-        // anybody; the settings themselves are what an owner cannot read, and
-        // that is the assertion worth making.
+        // **Renamed off "page", and both halves asked of the API.** `/settings`
+        // serves the interface's document to anybody; reading the settings and
+        // writing them are what an owner cannot do, and both answer 404 — the
+        // administrative surface does not exist for them.
         let (mut f, session, _mine, _theirs) = owner_fixture("settings-owner");
         assert_eq!(
-            f.go(&Req::get("/api/v1/ui/settings").with_cookie(&session))
+            f.go(&Req::get(&api_path("settings")).with_cookie(&session))
                 .status,
             404
         );
-        for path in [
-            private_route::SETTINGS_PUBLIC,
-            private_route::SETTINGS_SECRET,
-        ] {
-            let res = f.go(&Req::post(path, "screen_key=x").with_cookie(&session));
-            assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
-        }
+        let res = f
+            .go(&Req::post_json(&api_path("settings"), r#"{"public":true}"#).with_cookie(&session));
+        assert_eq!(res.status, 404, "an owner wrote the settings: {}", res.body);
+        assert!(
+            !f.store.settings().unwrap().public,
+            "and the switch did not move"
+        );
     }
 
     #[test]
@@ -5680,18 +4820,28 @@ mod tests {
         let mut f = Fixture::new("file-bad");
         let token = f.as_admin();
 
-        let empty = f.go(&Req::post("/file", "text=+++&repo=alpha").with_cookie(&token));
+        // Through the endpoint the interface files with. `check_length` is the
+        // same call in both, so what is pinned here is that the administrator's
+        // filing path still makes it — a route that skipped it would let text the
+        // screener never sees reach a daemon.
+        let file = |f: &mut Fixture, text: &str| -> Res {
+            f.go(&Req::post_json(
+                &api_path("file"),
+                &serde_json::json!({ "text": text, "repo": "alpha" }).to_string(),
+            )
+            .with_cookie(&token))
+        };
+
+        let empty = file(&mut f, "   ");
         assert_eq!(empty.status, 400);
 
         // Too many words, each of them tiny.
-        let wordy = format!("text={}&repo=alpha", "word+".repeat(MAX_WORDS + 10));
-        let over = f.go(&Req::post("/file", &wordy).with_cookie(&token));
+        let over = file(&mut f, &"word ".repeat(MAX_WORDS + 10));
         assert_eq!(over.status, 400);
         assert!(over.body.contains("words"), "{}", over.body);
 
         // And one enormous token, which the word count alone would wave through.
-        let huge = format!("text={}&repo=alpha", "x".repeat(MAX_BYTES + 1));
-        let over = f.go(&Req::post("/file", &huge).with_cookie(&token));
+        let over = file(&mut f, &"x".repeat(MAX_BYTES + 1));
         assert_eq!(over.status, 400);
         assert!(over.body.contains("characters"), "{}", over.body);
     }
@@ -5721,33 +4871,69 @@ mod tests {
     fn every_intake_kind_is_accepted_and_an_unknown_one_defaults() {
         let mut f = Fixture::new("kinds");
         let token = f.as_admin();
-        for (form, expected) in [
+        // The slugs are the same on the wire as they were in the form's select,
+        // and an unrecognised one still falls back rather than being refused: a
+        // client sending a kind this server has not heard of is a version skew,
+        // and losing the request over a label would be the wrong trade.
+        for (slug, expected) in [
             ("bug", IntakeKind::Bug),
             ("feature", IntakeKind::Feature),
             ("improvement", IntakeKind::Improvement),
             ("feedback", IntakeKind::Feedback),
             ("nonsense", IntakeKind::Feature),
         ] {
-            let body = format!("text=a+thing&repo=alpha&kind={form}");
-            f.go(&Req::post("/file", &body).with_cookie(&token));
+            let body =
+                serde_json::json!({ "text": "a thing", "repo": "alpha", "kind": slug }).to_string();
+            let res = f.go(&Req::post_json(&api_path("file"), &body).with_cookie(&token));
+            assert_eq!(res.status, 200, "{slug}: {}", res.body);
             let last = f.store.all().unwrap().last().unwrap().clone();
-            assert_eq!(last.kind, expected, "{form}");
+            assert_eq!(last.kind, expected, "{slug}");
         }
     }
 
-    /// Pull the digest out of a confirmation page's hidden field.
-    fn digest_from(html: &str) -> String {
-        let at = html
-            .find("name=\"digest\" value=\"")
-            .expect("the confirmation carries a digest");
-        let rest = &html[at + "name=\"digest\" value=\"".len()..];
-        rest[..rest.find('"').unwrap()].to_string()
+    /// Read a request as its reviewer, and take the digest the server offers
+    /// for accepting it.
+    ///
+    /// **This is the read half of the accept handshake.** It stood in a hidden
+    /// field on the confirmation page and it is a field on `ReviewRequest` now;
+    /// either way the reviewer accepts the bytes they were handed, and this is
+    /// how a test comes to hold them.
+    fn digest_for(f: &mut Fixture, token: &str, id: &str) -> String {
+        let res = f.go(&Req::get(&api_path(&format!("requests/{id}"))).with_cookie(token));
+        assert_eq!(res.status, 200, "{}", res.body);
+        let v: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+        v["spec_digest"]
+            .as_str()
+            .expect("a drafted request carries the digest to accept it with")
+            .to_string()
+    }
+
+    /// Accept a request, carrying the digest given.
+    fn accept_with(f: &mut Fixture, token: &str, id: &str, digest: &str) -> Res {
+        f.go(&Req::post_json(
+            &api_path(&format!("requests/{id}/accept")),
+            &serde_json::json!({ "digest": digest }).to_string(),
+        )
+        .with_cookie(token))
     }
 
     #[test]
-    fn approving_takes_two_deliberate_posts_and_the_first_decides_nothing() {
+    fn accepting_binds_to_the_exact_bytes_the_reviewer_read() {
         // Spec 20: approve is a deliberate action taken below the full artifact.
-        // The first POST asks; only the second settles.
+        //
+        // **This used to be `approving_takes_two_deliberate_posts_and_the_first_
+        // decides_nothing`, and the name had stopped being true.** The rendered
+        // surface asked with `POST /request/{id}/accept`, drew the whole spec with
+        // a digest in a hidden field, and settled with a second POST to
+        // `/accept/confirm`; the two posts were how a page carried the digest from
+        // the read to the write. The API has no such problem — the client already
+        // holds the spec it rendered, so it sends the digest in the one post that
+        // accepts.
+        //
+        // The property the two posts existed to produce is what is asserted here,
+        // and it is unchanged: **an accept names the bytes it is consenting to.**
+        // Reading does not decide anything, and deciding is impossible without
+        // having read.
         let mut f = Fixture::new("accept");
         let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
@@ -5755,32 +4941,27 @@ mod tests {
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
 
-        let asked = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
-        assert_eq!(asked.status, 200, "{}", asked.body);
+        let digest = digest_for(&mut f, &token, &id);
         assert_eq!(
             f.store.require(&id).unwrap().state,
             RequestState::AwaitingReview,
-            "the first post asks, it does not decide"
+            "reading it decides nothing"
         );
-        assert!(asked.body.contains("/accept/confirm"), "{}", asked.body);
 
-        let digest = digest_from(&asked.body);
-        let settled = f.go(&Req::post(
-            &format!("/request/{id}/accept/confirm"),
-            &format!("digest={digest}"),
-        )
-        .with_cookie(&token));
+        let settled = accept_with(&mut f, &token, &id, &digest);
         assert_eq!(settled.status, 200, "{}", settled.body);
-        // `Ready` is not `Done`: nothing was built, and the developer picks it up
-        // in their IDE on their own schedule.
+        // `Accepted` is not `Done`: nothing was built, and the developer picks it
+        // up in their IDE on their own schedule.
         assert_eq!(f.store.require(&id).unwrap().state, RequestState::Accepted);
     }
 
     #[test]
     fn an_approval_of_text_that_changed_under_the_reviewer_is_refused() {
         // The reviewer opens v1 on a train; `queue serve` pushes a redraft while
-        // they read. Confirming must not settle v2 on the strength of having read
-        // v1 — consent attaches to bytes, not to an id.
+        // they read. Accepting must not settle v2 on the strength of having read
+        // v1 — consent attaches to bytes, not to an id. **The one post carrying a
+        // digest asserts this as squarely as the two-step page did**, because the
+        // digest the client holds is the one it was handed when it rendered.
         let mut f = Fixture::new("stale");
         let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
@@ -5788,22 +4969,21 @@ mod tests {
         let v1 = serde_json::to_string(&DraftedSpec::new(&id, "# Version one", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &v1).with_bearer(KEY));
 
-        let asked = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
-        let stale = digest_from(&asked.body);
+        let stale = digest_for(&mut f, &token, &id);
 
         // The daemon redrafts under them. Through the real path — sent back,
         // requeued, claimed again — because a daemon may now only report on a
         // claim it currently holds.
-        f.go(&Req::post(&format!("/request/{id}/send-back"), "notes=redo").with_cookie(&token));
+        f.go(&Req::post_json(
+            &api_path(&format!("requests/{id}/send-back")),
+            r#"{"note":"redo"}"#,
+        )
+        .with_cookie(&token));
         f.go(&Req::get(wire::route::WORK).with_bearer(KEY));
         let v2 = serde_json::to_string(&DraftedSpec::new(&id, "# Version two", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &v2).with_bearer(KEY));
 
-        let refused = f.go(&Req::post(
-            &format!("/request/{id}/accept/confirm"),
-            &format!("digest={stale}"),
-        )
-        .with_cookie(&token));
+        let refused = accept_with(&mut f, &token, &id, &stale);
         assert_eq!(refused.status, 400, "{}", refused.body);
         assert!(refused.body.contains("changed"), "{}", refused.body);
         assert_eq!(
@@ -5814,9 +4994,15 @@ mod tests {
     }
 
     #[test]
-    fn a_confirm_with_no_digest_at_all_is_refused() {
-        // The obvious bypass: skip the confirmation page and POST the committing
-        // route directly. It must not succeed by omission.
+    fn an_accept_with_no_digest_at_all_is_refused() {
+        // The obvious bypass: POST the committing route directly rather than
+        // reading first. It must not succeed by omission.
+        //
+        // **Renamed off "confirm", which no longer names anything.** There is one
+        // post now instead of an ask and a confirm, and the bypass it has to
+        // refuse is the same one: arriving at the write without having done the
+        // read. An empty digest and a wrong digest are both refused, so neither
+        // omitting the field nor guessing at it settles anything.
         let mut f = Fixture::new("no-digest");
         let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
@@ -5824,9 +5010,11 @@ mod tests {
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Spec", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
 
-        for body in ["", "digest=", "digest=nonsense"] {
-            let res = f
-                .go(&Req::post(&format!("/request/{id}/accept/confirm"), body).with_cookie(&token));
+        for body in ["{}", r#"{"digest":""}"#, r#"{"digest":"nonsense"}"#] {
+            let res = f.go(
+                &Req::post_json(&api_path(&format!("requests/{id}/accept")), body)
+                    .with_cookie(&token),
+            );
             assert_eq!(res.status, 400, "{body:?}: {}", res.body);
         }
         assert_eq!(
@@ -5843,10 +5031,27 @@ mod tests {
         let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
 
-        let res = f.go(&Req::post(&format!("/request/{id}/accept"), "").with_cookie(&token));
+        // **There is nothing to send.** A queued request carries no
+        // `spec_digest`, so a client following the handshake cannot even
+        // construct the accept — and one that invents a digest anyway is refused
+        // on the state before the digest is looked at.
+        let read = f.go(&Req::get(&api_path(&format!("requests/{id}"))).with_cookie(&token));
+        assert_eq!(read.status, 200, "{}", read.body);
+        let v: serde_json::Value = serde_json::from_str(&read.body).unwrap();
+        assert!(
+            v["spec_digest"].is_null(),
+            "a request with no draft offered something to accept: {}",
+            read.body
+        );
+
+        let res = accept_with(&mut f, &token, &id, "anything-at-all");
         assert_eq!(res.status, 400, "{}", res.body);
-        let missing = f.go(&Req::post("/request/nope/accept", "").with_cookie(&token));
-        assert_eq!(missing.status, 404);
+
+        // And an id that names nothing is **not found** rather than refused,
+        // which is the same answer its read gives — a 403 or a 400 here would
+        // confirm which ids are real.
+        let missing = f.go(&Req::get(&api_path("requests/nope")).with_cookie(&token));
+        assert_eq!(missing.status, 404, "{}", missing.body);
     }
 
     #[test]
@@ -5858,9 +5063,9 @@ mod tests {
         let payload = serde_json::to_string(&DraftedSpec::new(&id, "# Vague", "specs/x")).unwrap();
         f.go(&Req::post(&wire::route::drafted(&id), &payload).with_bearer(KEY));
 
-        let res = f.go(&Req::post(
-            &format!("/request/{id}/send-back"),
-            "notes=name+the+actual+roles",
+        let res = f.go(&Req::post_json(
+            &api_path(&format!("requests/{id}/send-back")),
+            r#"{"note":"name the actual roles"}"#,
         )
         .with_cookie(&token));
         assert_eq!(res.status, 200, "{}", res.body);
@@ -5885,20 +5090,30 @@ mod tests {
     fn the_browser_cannot_reach_a_route_that_builds_because_there_is_none() {
         // The surface's whole vocabulary is: file · watch · read · approve or send
         // back. Spec 19's "no writing code" anti-goal, satisfied structurally.
+        //
+        // **Asked of the API**, which is where the verbs are now. That is where
+        // the property has to hold: `api_verb` matches the four it knows and
+        // answers *no such verb* to everything else, so a verb naming
+        // implementation cannot exist without somebody writing it into that
+        // match. The administrator's cookie is deliberately present — this is not
+        // about authority, it is that the capability is absent for the person who
+        // has every other one.
         let mut f = Fixture::new("no-build");
         let token = f.as_admin();
         let id = f.file(&token, "a+thing", "alpha");
 
-        for path in [
-            format!("/request/{id}/build"),
-            format!("/request/{id}/run"),
-            format!("/request/{id}/implement"),
-            "/build".to_string(),
-            "/run".to_string(),
-        ] {
-            let res = f.go(&Req::post(&path, "").with_cookie(&token));
-            assert_eq!(res.status, 404, "{path} must not exist");
+        for verb in ["build", "run", "implement", "merge", "deploy"] {
+            let res = f.go(
+                &Req::post_json(&api_path(&format!("requests/{id}/{verb}")), "{}")
+                    .with_cookie(&token),
+            );
+            assert_eq!(res.status, 404, "{verb} must not exist: {}", res.body);
         }
+        assert_eq!(
+            f.store.require(&id).unwrap().state,
+            RequestState::Queued,
+            "a refused verb still moved the request"
+        );
     }
 
     // -- headers and limits -------------------------------------------------
@@ -6047,9 +5262,17 @@ mod tests {
         // behind them works. A server with no public surface still hands a
         // stranger the application shell; it just has nothing to give it.
         let mut f = Fixture::new("public-off");
-        // Spending a sign-in link is gone: it is the credential half of filer
-        // traffic and is not a document the client routes on.
-        assert_eq!(f.go(&Req::get("/public/signin/abc")).status, 404);
+        // **Filing does not exist**, which is the whole of the public surface —
+        // 404 rather than a refusal, for the same reason every other absent
+        // endpoint answers one.
+        assert_eq!(
+            f.go(&Req::post_json(
+                &api_path("file"),
+                r#"{"text":"a thing","kind":"bug"}"#
+            ))
+            .status,
+            404
+        );
         // And a stranger is told they may do nothing at all — no filing, which
         // is the whole of the public surface.
         let me = f.go(&Req::get(ME_PATH));
@@ -6060,24 +5283,45 @@ mod tests {
             404,
             "and there is nothing to read"
         );
-        // Asking for a *link* is still gone — that is filer traffic, and it
+        // Asking for a *link* still gets nowhere — that is filer traffic, and it
         // costs an email a server with no public surface should not be sending.
-        assert_eq!(
-            f.go(&Req::post(public_route::SIGNIN, "email=a%40x.com"))
-                .status,
-            404
-        );
+        // The endpoint answers 503 rather than 404 because a server with no
+        // public surface has no mail provider either, and "this server cannot
+        // send" is the honest first refusal; what matters here is that no address
+        // is taken and nothing goes out.
+        let asked = f.go(&Req::post_json(
+            &api_path("signin"),
+            r#"{"email":"a@x.com"}"#,
+        ));
+        assert_ne!(asked.status, 200, "an address was accepted: {}", asked.body);
         assert_eq!(f.mailer.count(), 0, "and nothing was emailed");
+        assert!(
+            f.store.links().unwrap().links.is_empty(),
+            "nor was a link minted"
+        );
     }
 
     #[test]
     fn asking_for_a_link_says_the_same_thing_whatever_happened() {
         // The response must not reveal whether an address has an account.
+        //
+        // **The endpoint the interface asks with**, which is the only one left —
+        // and the same three shapes of input, since a client is a far easier
+        // thing to probe with than a form was. `asking_for_a_link_over_json_cannot
+        // _be_used_to_find_accounts` covers the known-versus-unknown pair; this
+        // covers the malformed and empty ones, which is the other half of the
+        // same promise.
         let mut f = Fixture::new("signin-uniform").with_public(false);
 
-        let fresh = f.go(&Req::post(public_route::SIGNIN, "email=new%40x.com"));
-        let malformed = f.go(&Req::post(public_route::SIGNIN, "email=not-an-email"));
-        let empty = f.go(&Req::post(public_route::SIGNIN, "email="));
+        let ask = |f: &mut Fixture, email: &str| -> Res {
+            f.go(&Req::post_json(
+                &api_path("signin"),
+                &serde_json::json!({ "email": email }).to_string(),
+            ))
+        };
+        let fresh = ask(&mut f, "new@x.com");
+        let malformed = ask(&mut f, "not-an-email");
+        let empty = ask(&mut f, "");
 
         assert_eq!(fresh.status, 200);
         assert_eq!(fresh.body, malformed.body, "malformed looks identical");
@@ -6099,8 +5343,15 @@ mod tests {
         assert!(accounts.revoke(&id));
         f.store.put_accounts(&accounts).unwrap();
 
+        // **Through the endpoint, not the deleted form.** A POST to a route that
+        // no longer exists sends no mail either, so leaving this pointed at the
+        // old address would have kept passing while asserting nothing.
         let before = f.mailer.count();
-        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
+        let res = f.go(&Req::post_json(
+            &api_path("signin"),
+            r#"{"email":"jo@x.com"}"#,
+        ));
+        assert_eq!(res.status, 200, "and it is indistinguishable: {}", res.body);
         assert_eq!(f.mailer.count(), before, "silence, not a notification");
     }
 
@@ -6109,14 +5360,7 @@ mod tests {
         // Mail scanners fetch every URL in a message within seconds. A GET that
         // spent the token would burn it before the human opened their inbox.
         let mut f = Fixture::new("prefetch").with_public(false);
-        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
-        let body = f.mailer.last_body().unwrap();
-        let token = body
-            .split(public_route::SIGNIN_PREFIX)
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap()
-            .to_string();
+        let token = link_token_for(&mut f, "jo@x.com");
         let path = format!("{}{token}", public_route::SIGNIN_PREFIX);
 
         // Three scanner prefetches.
@@ -6135,14 +5379,7 @@ mod tests {
         // A 404 on an invalid token is a free validity oracle — cheaper than the
         // POST it would be guarding.
         let mut f = Fixture::new("oracle").with_public(false);
-        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
-        let body = f.mailer.last_body().unwrap();
-        let real = body
-            .split(public_route::SIGNIN_PREFIX)
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap()
-            .to_string();
+        let real = link_token_for(&mut f, "jo@x.com");
 
         // A forged token of the *same shape*, so any difference in the response
         // is about validity rather than about length.
@@ -6167,14 +5404,7 @@ mod tests {
     #[test]
     fn a_link_is_single_use() {
         let mut f = Fixture::new("single-use").with_public(false);
-        f.go(&Req::post(public_route::SIGNIN, "email=jo%40x.com"));
-        let body = f.mailer.last_body().unwrap();
-        let token = body
-            .split(public_route::SIGNIN_PREFIX)
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap()
-            .to_string();
+        let token = link_token_for(&mut f, "jo@x.com");
         let path = format!("{}{token}", public_route::SIGNIN_PREFIX);
 
         assert!(cookie_token(&f.go(&Req::post(&path, ""))).is_some());
@@ -6185,10 +5415,24 @@ mod tests {
 
     #[test]
     fn filing_publicly_requires_being_signed_in() {
+        // **404, and no longer a rendered invitation to sign in.** The page used
+        // to answer a stranger's filing with the sign-in surface, which is the
+        // client's job now; what the server owes is that the filing does not
+        // happen and that the endpoint does not exist for somebody holding
+        // nothing. The account is the credential — it costs a confirmed mailbox,
+        // and that is what stands between this and an open pipe to a model
+        // budget.
         let mut f = Fixture::new("public-anon").with_public(false);
-        let res = f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug"));
-        assert!(res.body.contains("Sign in"), "{}", res.body);
+        let res = f.go(&Req::post_json(
+            &api_path("file"),
+            r#"{"text":"a thing","kind":"bug"}"#,
+        ));
+        assert_eq!(res.status, 404, "{}", res.body);
         assert!(f.store.all().unwrap().is_empty(), "nothing was filed");
+
+        // And the interface is told as much before it draws a form at all.
+        let me = f.go(&Req::get(ME_PATH));
+        assert!(me.body.contains("\"file\":false"), "{}", me.body);
     }
 
     #[test]
@@ -6205,10 +5449,11 @@ mod tests {
         let mut f = Fixture::new("public-repo").with_public(false);
         let session = f.signed_in("jo@x.com");
 
-        let res = f.go(
-            &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=secret-repo")
-                .with_cookie(&session),
-        );
+        let res = f.go(&Req::post_json(
+            &api_path("file"),
+            r#"{"text":"a thing","kind":"bug","repo":"secret-repo"}"#,
+        )
+        .with_cookie(&session));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(
             f.store.all().unwrap().is_empty(),
@@ -6225,40 +5470,52 @@ mod tests {
             .with_repos(&["intake", "memosy"]);
         let session = f.signed_in("jo@x.com");
 
-        let res = f.go(
-            &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=memosy")
-                .with_cookie(&session),
-        );
-        assert_eq!(res.status, 200, "{}", res.body);
+        // **The set the filer picks from comes from `/me`.** They own no
+        // repositories, so it is that or nothing — the client cannot invent the
+        // list, and filing against a name this surface does not serve is refused.
+        let me = f.go(&Req::get(ME_PATH).with_cookie(&session));
+        let mine: serde_json::Value = serde_json::from_str(&me.body).unwrap();
+        let offered: Vec<&str> = mine["repos"]
+            .as_array()
+            .expect("a filer is told what they may file against")
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect();
+        assert_eq!(offered, ["intake", "memosy"], "{}", me.body);
+
+        file_publicly_as(&mut f, &session, "a thing", "memosy");
         assert_eq!(f.store.all().unwrap()[0].repo, "memosy");
     }
 
     #[test]
     fn a_filing_naming_nothing_is_refused_when_there_is_a_choice() {
-        // With a picker on the form, an absent name did not come from the form —
-        // and guessing which project somebody meant is exactly the fallback this
-        // refuses to make.
+        // With more than one repository on offer, an absent name is a client that
+        // did not ask — and guessing which project somebody meant is exactly the
+        // fallback this refuses to make.
         let mut f = Fixture::new("public-pick-none")
             .with_public(false)
             .with_repos(&["intake", "memosy"]);
         let session = f.signed_in("jo@x.com");
 
-        let res =
-            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        let res = f.go(
+            &Req::post_json(&api_path("file"), r#"{"text":"a thing","kind":"bug"}"#)
+                .with_cookie(&session),
+        );
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.all().unwrap().is_empty());
     }
 
     #[test]
     fn a_public_filing_takes_the_only_repository_when_there_is_one() {
-        // A one-repository surface renders no picker, so an absent name is
-        // normal there — and must still work exactly as it did before the set
-        // existed.
+        // A one-repository surface draws no picker, so an absent name is normal
+        // there — and must still work exactly as it did before the set existed.
         let mut f = Fixture::new("public-one-repo").with_public(false);
         let session = f.signed_in("jo@x.com");
 
-        let res =
-            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        let res = f.go(
+            &Req::post_json(&api_path("file"), r#"{"text":"a thing","kind":"bug"}"#)
+                .with_cookie(&session),
+        );
         assert_eq!(res.status, 200, "{}", res.body);
 
         let filed = f.store.all().unwrap();
@@ -6271,7 +5528,7 @@ mod tests {
         // The core guarantee: nothing unscreened reaches the developer's machine.
         let mut f = Fixture::new("public-screened").with_public(true);
         let session = f.signed_in("jo@x.com");
-        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        file_publicly_as(&mut f, &session, "a thing", "intake");
 
         let filed = f.store.all().unwrap();
         assert_eq!(filed[0].state, RequestState::Screening);
@@ -6290,7 +5547,7 @@ mod tests {
         // screens them would be worse than one that plainly does not screen.
         let mut f = Fixture::new("public-unscreened").with_public(false);
         let session = f.signed_in("jo@x.com");
-        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        file_publicly_as(&mut f, &session, "a thing", "intake");
 
         assert_eq!(f.store.all().unwrap()[0].state, RequestState::Queued);
         assert!(f
@@ -6307,7 +5564,7 @@ mod tests {
         let mut f = Fixture::new("public-isolation").with_public(false);
 
         let alice = f.signed_in("alice@x.com");
-        f.go(&Req::post(public_route::FILE, "text=alice+thing&kind=bug").with_cookie(&alice));
+        file_publicly_as(&mut f, &alice, "alice thing", "intake");
         let alice_id = f.store.all().unwrap()[0].id.clone();
 
         let bob = f.signed_in("bob@x.com");
@@ -6331,6 +5588,42 @@ mod tests {
         f.store.put_admin(&admin).unwrap();
     }
 
+    /// Spend a claim code, and return the setup token step one issues.
+    ///
+    /// **The address is not part of this any more.** Step one used to take the
+    /// code *and* the base URL together, which is why a typo could burn the one
+    /// code an operator has; the address is an environment variable now and the
+    /// server refuses to start without a valid one, so the step carries the code
+    /// alone.
+    fn spend_code(f: &mut Fixture, code: &str) -> Res {
+        f.go(&Req::post_json(
+            &api_path("setup/code"),
+            &serde_json::json!({ "code": code }).to_string(),
+        ))
+    }
+
+    /// The setup token out of step one's `Set-Cookie`.
+    fn setup_token(res: &Res) -> String {
+        res.set_cookie
+            .as_deref()
+            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
+            .and_then(|c| c.split(';').next())
+            .expect("a setup token was issued")
+            .to_string()
+    }
+
+    /// Step two, as a request: claim the server with a login and a password.
+    ///
+    /// Returns the [`Req`] rather than the answer, because every caller but one
+    /// attaches a setup cookie to it — and whether that cookie is there, wrong,
+    /// or absent is the thing those tests are about.
+    fn claim_as(login: &str, password: &str) -> Req {
+        Req::post_json(
+            &api_path("setup/admin"),
+            &serde_json::json!({ "login": login, "password": password }).to_string(),
+        )
+    }
+
     #[test]
     fn setting_up_claims_the_server_for_whoever_signs_in() {
         // **The whole first-run path**, end to end: the code proves you can read
@@ -6340,31 +5633,26 @@ mod tests {
         let mut f = Fixture::new("setup-claim").with_public(false);
         armed(&mut f, "ABC-123");
 
-        // Step one: the code and the address.
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
-        ));
+        // Step one: the code. **The address is not asked for any more** — it is
+        // an environment variable and the server refuses to start without a valid
+        // one, so by the time anybody is here it is already settled and there is
+        // no typo left that could burn the operator's one claim code.
+        let res = spend_code(&mut f, "ABC-123");
         assert_eq!(res.status, 200, "{}", res.body);
-        // The address is an environment variable; the wizard no longer stores
-        // one, so what step one produces is the token and nothing else.
-        // The rest of the wizard is bound to this browser from here on.
-        let setup = res
-            .set_cookie
-            .as_deref()
-            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
-            .and_then(|c| c.split(';').next())
-            .expect("a setup token was issued")
-            .to_string();
+        // So what step one produces is the token and nothing else. The rest of
+        // the wizard is bound to this browser from here on.
+        let setup = setup_token(&res);
         // Nobody owns it yet: spending the code is one proof, not the claim.
         assert!(!f.store.admin().unwrap().claimed());
 
+        // And the server now says which step this browser may take, which is the
+        // question the rendered wizard answered by drawing one form or the other.
+        let state = f.go(&Req::get(&api_path("setup")).with_setup(&setup));
+        assert!(state.body.contains("\"admin\""), "{}", state.body);
+
         // Step two: the credential that decides who owns this.
-        let res = f.go(&Req::post(
-            private_route::SETUP_ADMIN,
-            "login=JameZ667@example.test&password=correct-horse-battery",
-        )
-        .with_setup(&setup));
+        let res =
+            f.go(&claim_as("JameZ667@example.test", "correct-horse-battery").with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
         let admin = f.store.admin().unwrap();
         assert!(
@@ -6372,7 +5660,7 @@ mod tests {
             "lowercased on the way in"
         );
 
-        // The password is stored hashed and never rendered back.
+        // The password is stored hashed and never handed back.
         assert!(!res.body.contains("correct-horse-battery"), "{}", res.body);
         let raw = std::fs::read_to_string(f.store.accounts_path()).unwrap();
         assert!(!raw.contains("correct-horse-battery"), "{raw}");
@@ -6392,11 +5680,11 @@ mod tests {
         // And setup is gone — the endpoint, which is the thing that grants
         // anything. The address still serves the interface, as every address
         // does.
-        assert_eq!(f.go(&Req::get("/api/v1/ui/setup")).status, 404);
+        assert_eq!(f.go(&Req::get(&api_path("setup"))).status, 404);
         assert_eq!(
-            f.go(&Req::post(
-                private_route::SETUP,
-                "code=ABC-123&base_url=https%3A%2F%2Fx.test"
+            f.go(&Req::post_json(
+                &api_path("setup/code"),
+                r#"{"code":"ABC-123"}"#
             ))
             .status,
             404
@@ -6406,7 +5694,7 @@ mod tests {
     #[test]
     fn a_password_signs_the_administrator_in() {
         // The ordinary path, and the one that was unreachable for two days: a
-        // form on this server's own origin, no third party in it.
+        // credential on this server's own origin, no third party in it.
         let mut f = Fixture::new("password-signin").with_public(false);
         let mut admin = crate::admin::Admin::default();
         admin.claim("jamez667@example.test", f.now_ms);
@@ -6417,10 +5705,7 @@ mod tests {
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
-        let res = f.go(&Req::post(
-            public_route::SIGNIN_PASSWORD,
-            "login=JameZ667@example.test&password=correct-horse-battery",
-        ));
+        let res = sign_in_with_password(&mut f, "JameZ667@example.test", "correct-horse-battery");
         assert_eq!(res.status, 200, "{}", res.body);
 
         // **`Strict`**, which the GitHub return could not have. Nothing arrives
@@ -6429,10 +5714,13 @@ mod tests {
         assert!(set.contains("SameSite=Strict"), "{set}");
         assert!(set.contains("HttpOnly"), "{set}");
 
-        // And it is the administrator's session, not a filer's.
+        // And it is the administrator's session, not a filer's. **Asked of the
+        // administrative API**: `/settings` answers the interface's document to
+        // anybody, so the settings themselves are what being the administrator
+        // buys.
         let session = cookie_token(&res).expect("signed in");
         assert_eq!(
-            f.go(&Req::get(private_route::SETTINGS).with_cookie(&session))
+            f.go(&Req::get(&api_path("settings")).with_cookie(&session))
                 .status,
             200
         );
@@ -6450,13 +5738,9 @@ mod tests {
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
-        let wrong = "login=jamez667@example.test&password=not-the-password";
         for _ in 0..5 {
-            assert_eq!(
-                f.go(&Req::post(public_route::SIGNIN_PASSWORD, wrong))
-                    .status,
-                401
-            );
+            let res = sign_in_with_password(&mut f, "jamez667@example.test", "not-the-password");
+            assert_eq!(res.status, 401, "{}", res.body);
         }
         let waiting = f.store.accounts().unwrap();
         let account = waiting
@@ -6476,23 +5760,15 @@ mod tests {
         // **The right password during the wait is still refused**, and that is
         // the point: an attacker who guesses correctly on the fourth attempt
         // gains nothing until the delay has run.
-        assert_eq!(
-            f.go(&Req::post(
-                public_route::SIGNIN_PASSWORD,
-                "login=jamez667@example.test&password=correct-horse-battery",
-            ))
-            .status,
-            401
-        );
+        let during =
+            sign_in_with_password(&mut f, "jamez667@example.test", "correct-horse-battery");
+        assert_eq!(during.status, 401, "{}", during.body);
 
         // Past the wait, the right password works and the count goes back to
         // nothing — a person who mistyped it a few times is not penalised for
         // the rest of the day.
         f.now_ms = account.next_attempt_ms + 1;
-        let res = f.go(&Req::post(
-            public_route::SIGNIN_PASSWORD,
-            "login=jamez667@example.test&password=correct-horse-battery",
-        ));
+        let res = sign_in_with_password(&mut f, "jamez667@example.test", "correct-horse-battery");
         assert_eq!(res.status, 200, "{}", res.body);
         let after = f.store.accounts().unwrap();
         let account = after
@@ -6514,27 +5790,42 @@ mod tests {
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
-        let no_such = f.go(&Req::post(
-            public_route::SIGNIN_PASSWORD,
-            "login=nobody-at-all&password=correct-horse-battery",
-        ));
-        let wrong = f.go(&Req::post(
-            public_route::SIGNIN_PASSWORD,
-            "login=jamez667@example.test&password=not-the-password",
-        ));
+        let no_such = sign_in_with_password(&mut f, "nobody-at-all", "correct-horse-battery");
+        let wrong = sign_in_with_password(&mut f, "jamez667@example.test", "not-the-password");
         assert_eq!(no_such.status, 401);
         assert_eq!(wrong.status, 401);
         assert_eq!(no_such.body, wrong.body, "one answer, not two");
+
+        // **And the third fact, which is the one only this test reaches.** Guess
+        // until the account is backing off, then send the *right* password: that
+        // refusal must be the same one again. A distinguishable "you are locked
+        // out" would tell a guesser they had found the password, which is the
+        // whole thing the backoff is protecting.
+        for _ in 0..4 {
+            sign_in_with_password(&mut f, "jamez667@example.test", "not-the-password");
+        }
+        let backing_off =
+            sign_in_with_password(&mut f, "jamez667@example.test", "correct-horse-battery");
+        assert_eq!(backing_off.status, 401);
+        assert_eq!(
+            backing_off.body, wrong.body,
+            "a backoff is distinguishable from a wrong password"
+        );
     }
 
     #[test]
     fn a_password_post_is_not_read_as_a_magic_link_token() {
-        // **An ordering the match arms carry silently.** `SIGNIN_PASSWORD` sits
-        // under `SIGNIN_PREFIX`, so the magic-link arm's guard matches it too —
-        // and reaching that arm first would feed the typed password to
-        // `complete_sign_in` as a token. It would fail, which is the dangerous
-        // part: the two roles with no other way in would simply stop being able
-        // to sign in, with nothing naming a cause.
+        // **An ordering the match arms carry silently.** The password address
+        // sits under the magic-link *prefix* — `/public/signin/password` did, and
+        // `/api/v1/ui/signin/password` does under an API route matched by prefix
+        // too — so a dispatcher that reached the link arm first would feed the
+        // typed password to `complete_sign_in` as a token. It would fail, which
+        // is the dangerous part: the two roles with no other way in would simply
+        // stop being able to sign in, with nothing naming a cause.
+        //
+        // **The hazard survived the move**, which is why this test did. The
+        // password endpoint is dispatched inside `api_route`, above the public
+        // block that owns `SIGNIN_PREFIX`, and this is what pins that ordering.
         let mut f = Fixture::new("password-arm-order").with_public(false);
         let mut accounts = f.store.accounts().unwrap();
         accounts
@@ -6542,14 +5833,16 @@ mod tests {
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
-        let res = f.go(&Req::post(
-            public_route::SIGNIN_PASSWORD,
-            "login=jamez667@example.test&password=correct-horse-battery",
-        ));
+        let res = sign_in_with_password(&mut f, "jamez667@example.test", "correct-horse-battery");
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(
             cookie_token(&res).is_some(),
             "the password arm ran, not the token consumer"
+        );
+        // And nothing was spent as if it had been a link.
+        assert!(
+            f.store.links().unwrap().links.is_empty(),
+            "the password was treated as a token"
         );
     }
 
@@ -6569,11 +5862,10 @@ mod tests {
         assert!(!raw.contains("correct-horse-battery"), "{raw}");
         assert!(raw.contains("$argon2id$"), "and it is the slow hash");
 
-        for body in [
-            "login=jamez667@example.test&password=correct-horse-battery",
-            "login=jamez667@example.test&password=not-the-password",
-        ] {
-            let res = f.go(&Req::post(public_route::SIGNIN_PASSWORD, body));
+        // **Both outcomes**, because the tempting place to echo a credential is
+        // the refusal — a form redrawing itself with what was typed.
+        for password in ["correct-horse-battery", "not-the-password"] {
+            let res = sign_in_with_password(&mut f, "jamez667@example.test", password);
             assert!(
                 !res.body.contains("correct-horse-battery")
                     && !res.body.contains("not-the-password"),
@@ -6607,18 +5899,19 @@ mod tests {
             .unwrap();
         f.store.put_accounts(&accounts).unwrap();
 
-        // The form renders...
+        // The address that draws the sign-in surface still answers the
+        // interface...
         assert_eq!(f.go(&Req::get(public_route::SIGNIN)).status, 200);
 
-        // ...and posting to it works.
-        let res = f.go(&Req::post(
-            public_route::SIGNIN_PASSWORD,
-            "login=jamez667@example.test&password=correct-horse-battery",
-        ));
+        // ...and the endpoint behind it works. **That endpoint is under the API
+        // prefix, which is dispatched above the public block entirely** — so it
+        // never depended on `ctx.public` in the first place, which is exactly
+        // what makes this lockout closed rather than merely unlikely.
+        let res = sign_in_with_password(&mut f, "jamez667@example.test", "correct-horse-battery");
         assert_eq!(res.status, 200, "{}", res.body);
         let session = cookie_token(&res).expect("signed in");
         assert_eq!(
-            f.go(&Req::get("/api/v1/ui/settings").with_cookie(&session))
+            f.go(&Req::get(&api_path("settings")).with_cookie(&session))
                 .status,
             200,
             "and it reaches the switch that turns the public surface on"
@@ -7554,18 +6847,9 @@ mod tests {
         let mut f = Fixture::new("setup-hijack").with_public(false);
         armed(&mut f, "ABC-123");
 
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
-        ));
+        let res = spend_code(&mut f, "ABC-123");
         assert_eq!(res.status, 200, "{}", res.body);
-        let setup = res
-            .set_cookie
-            .as_deref()
-            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
-            .and_then(|c| c.split(';').next())
-            .expect("a setup token was issued")
-            .to_string();
+        let setup = setup_token(&res);
 
         // Somebody else, arriving with no cookie, is sent back to the code box
         // rather than shown the step that hands the server over.
@@ -7574,7 +6858,7 @@ mod tests {
         // serves the interface's document to anybody; which step a browser may
         // take is decided by whether it holds the token, and the server says so
         // explicitly rather than leaving the client to infer it from HTML.
-        let theirs = f.go(&Req::get("/api/v1/ui/setup"));
+        let theirs = f.go(&Req::get(&api_path("setup")));
         assert_eq!(theirs.status, 200, "{}", theirs.body);
         assert!(
             theirs.body.contains("\"step\":\"code\""),
@@ -7583,10 +6867,7 @@ mod tests {
         );
 
         // And cannot post to it.
-        let res = f.go(&Req::post(
-            private_route::SETUP_ADMIN,
-            "login=theirs&password=another-good-password",
-        ));
+        let res = f.go(&claim_as("theirs", "another-good-password"));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(
             !f.store.admin().unwrap().claimed(),
@@ -7594,20 +6875,12 @@ mod tests {
         );
 
         // A wrong token is no better than none.
-        let res = f.go(&Req::post(
-            private_route::SETUP_ADMIN,
-            "login=theirs&password=another-good-password",
-        )
-        .with_setup("not-the-token"));
+        let res = f.go(&claim_as("theirs", "another-good-password").with_setup("not-the-token"));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(!f.store.admin().unwrap().claimed());
 
         // The browser that spent the code still finishes normally.
-        let res = f.go(&Req::post(
-            private_route::SETUP_ADMIN,
-            "login=mine%40example.test&password=correct-horse-battery",
-        )
-        .with_setup(&setup));
+        let res = f.go(&claim_as("mine@example.test", "correct-horse-battery").with_setup(&setup));
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(f.store.admin().unwrap().claimed());
     }
@@ -7641,50 +6914,31 @@ mod tests {
         // leave the step that hands the server over reachable indefinitely.
         let mut f = Fixture::new("setup-abandoned").with_public(false);
         armed(&mut f, "ABC-123");
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
-        ));
-        let setup = res
-            .set_cookie
-            .as_deref()
-            .and_then(|c| c.strip_prefix(&format!("{SETUP_COOKIE}=")))
-            .and_then(|c| c.split(';').next())
-            .expect("a setup token")
-            .to_string();
+        let res = spend_code(&mut f, "ABC-123");
+        let setup = setup_token(&res);
 
         f.now_ms += crate::admin::CLAIM_TTL_MS;
-        let res = f.go(&Req::post(
-            private_route::SETUP_ADMIN,
-            "login=late&password=correct-horse-battery",
-        )
-        .with_setup(&setup));
+        let res = f.go(&claim_as("late", "correct-horse-battery").with_setup(&setup));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(!f.store.admin().unwrap().claimed());
     }
 
-    #[test]
-    fn a_bad_address_does_not_burn_the_claim_code() {
-        // **The code is the scarce thing.** Spending it on a typo would leave
-        // the operator restarting the container to get another, which is a
-        // needless indignity in the one flow that has to work first time.
-        let mut f = Fixture::new("setup-bad-url").with_public(false);
-        armed(&mut f, "ABC-123");
-
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=ABC-123&base_url=http%3A%2F%2Fspecs.example.test",
-        ));
-        assert_eq!(res.status, 400, "plain http on a public address");
-        assert!(res.body.contains("https"), "{}", res.body);
-
-        // Still armed, and the right address now works.
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
-        ));
-        assert_eq!(res.status, 200, "{}", res.body);
-    }
+    // **`a_bad_address_does_not_burn_the_claim_code` was here, and is deleted
+    // rather than retargeted.** It sent a valid code alongside a plain-HTTP
+    // address, asserted the step was refused for the address, and then proved the
+    // code was still spendable — the scarce thing surviving a typo in the thing
+    // beside it. **Step one no longer takes an address.** It is an environment
+    // variable and the server refuses to start without one that passes
+    // `check_base_url`, so there is no field left to typo and no second reason
+    // for step one to fail. The subject is gone, not merely relocated.
+    //
+    // The property underneath it — a refused step one leaves the code usable —
+    // is still asserted, by `a_wrong_code_says_one_thing_and_leaves_the_real_one_
+    // usable` immediately below: it spends a wrong code, then the right one, and
+    // requires the right one to work. That is now the only way step one can fail,
+    // so the coverage is complete rather than reduced. What the address itself
+    // must satisfy is checked at startup instead — `check_base_url` in
+    // `crate::config`, where its own tests live.
 
     #[test]
     fn a_wrong_code_says_one_thing_and_leaves_the_real_one_usable() {
@@ -7695,28 +6949,43 @@ mod tests {
         let mut f = Fixture::new("setup-wrong-code").with_public(false);
         armed(&mut f, "ABC-123");
 
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=WRONG-1&base_url=https%3A%2F%2Fspecs.example.test",
-        ));
+        let res = spend_code(&mut f, "WRONG-1");
         assert_eq!(res.status, 400);
+        let wrong = res.body.clone();
 
-        let res = f.go(&Req::post(
-            private_route::SETUP,
-            "code=ABC-123&base_url=https%3A%2F%2Fspecs.example.test",
-        ));
+        // Expired and already-spent give that same answer, which is what makes
+        // the wording carry no information: the code above never existed.
+        assert!(
+            wrong.contains("that code was not accepted"),
+            "one message for every failure: {wrong}"
+        );
+
+        let res = spend_code(&mut f, "ABC-123");
         assert_eq!(res.status, 200, "the real code still works: {}", res.body);
+
+        // And now that it *is* spent, trying it again gives the same answer a
+        // wrong one did.
+        let again = spend_code(&mut f, "ABC-123");
+        assert_eq!(again.status, 400);
+        assert_eq!(
+            again.body, wrong,
+            "an already-spent code is distinguishable from a wrong one"
+        );
     }
 
     #[test]
-    fn the_setup_page_says_what_it_decided_about_cookies() {
+    fn the_setup_step_decides_secure_from_the_address_rather_than_asking() {
         // Derived, not asked. "Is this a private network" is a question people
         // answer wrong, and answering it wrong drops `Secure` from every session
         // cookie without a word.
-        let public = crate::page::setup_page("https://specs.example.test", None);
-        assert!(public.contains("Secure"), "{public}");
-        let private = crate::page::setup_page("http://localhost:8420", None);
-        assert!(private.contains("not</strong> be marked"), "{private}");
+        //
+        // **Asserted on the decision, not on a sentence.** The wizard used to
+        // render a paragraph explaining which way it had gone, and this read that
+        // paragraph. The page is gone and the interface says it now; what has to
+        // stay true is the decision itself, which is one function and testable
+        // directly — a stronger subject than the prose that described it.
+        assert_eq!(secure_attr_for("https://specs.example.test"), "; Secure");
+        assert_eq!(secure_attr_for("http://localhost:8420"), "");
     }
 
     #[test]
@@ -7733,14 +7002,16 @@ mod tests {
         // stop existing once the server is claimed, and 404 rather than a
         // refusal is what keeps a claimed server indistinguishable from one
         // that never had a wizard.
-        assert_eq!(f.go(&Req::get("/api/v1/ui/setup")).status, 404);
+        assert_eq!(f.go(&Req::get(&api_path("setup"))).status, 404);
         assert_eq!(
-            f.go(&Req::post(
-                private_route::SETUP_ADMIN,
-                "login=a&password=correct-horse-battery"
-            ))
-            .status,
-            404
+            f.go(&claim_as("a", "correct-horse-battery")).status,
+            404,
+            "the step that hands the server over still existed"
+        );
+        assert_eq!(
+            spend_code(&mut f, "ABC-123").status,
+            404,
+            "and so did the one before it"
         );
     }
 
@@ -7755,13 +7026,31 @@ mod tests {
     fn filed_fixture(tag: &str) -> (Fixture, String, String) {
         let mut f = Fixture::new(tag).with_public(false).with_repos(&["intake"]);
         let filer = f.signed_in("jo@x.com");
-        f.go(&Req::post(
-            public_route::FILE,
-            "text=please+fix+the+thing&kind=bug&repo=intake",
-        )
-        .with_cookie(&filer));
+        file_publicly_as(&mut f, &filer, "please fix the thing", "intake");
         let id = f.store.all().unwrap()[0].id.clone();
         (f, filer, id)
+    }
+
+    /// File as a signed-in filer, through the endpoint the interface uses.
+    ///
+    /// **`assert`s the status here rather than at the call site.** These fixtures
+    /// exist so a test can start from "a request exists"; a filing that silently
+    /// did not happen turns every assertion afterwards into a confusing failure
+    /// about an empty store.
+    fn file_publicly_as(f: &mut Fixture, session: &str, text: &str, repo: &str) {
+        let body = serde_json::json!({ "text": text, "kind": "bug", "repo": repo });
+        let res = f.go(&Req::post_json(&api_path("file"), &body.to_string()).with_cookie(session));
+        assert_eq!(res.status, 200, "filing {repo}: {}", res.body);
+    }
+
+    /// File as a signed-in filer and hand back the answer, whatever it is.
+    ///
+    /// The sibling of [`file_publicly_as`] for the tests where **being refused
+    /// is the point** — every cap in this file reaches its ceiling and then
+    /// inspects the refusal, so those cannot use a helper that asserts success.
+    fn try_filing_as(f: &mut Fixture, session: &str, text: &str) -> Res {
+        let body = serde_json::json!({ "text": text, "kind": "bug" });
+        f.go(&Req::post_json(&api_path("file"), &body.to_string()).with_cookie(session))
     }
 
     /// The same, with the request held by the screener.
@@ -7792,14 +7081,8 @@ mod tests {
         let owner = f.signed_in_with_login("jamez667@example.test");
 
         let filer = f.signed_in("jo@x.com");
-        f.go(
-            &Req::post(public_route::FILE, "text=for+intake&kind=bug&repo=intake")
-                .with_cookie(&filer),
-        );
-        f.go(
-            &Req::post(public_route::FILE, "text=for+other&kind=bug&repo=other")
-                .with_cookie(&filer),
-        );
+        file_publicly_as(&mut f, &filer, "for intake", "intake");
+        file_publicly_as(&mut f, &filer, "for other", "other");
 
         let all = f.store.all().unwrap();
         let mine = all.iter().find(|r| r.repo == "intake").unwrap().id.clone();
@@ -7834,11 +7117,7 @@ mod tests {
                 serde_json::to_string(&DraftedSpec::new(&mine, "# Spec", "specs/x")).unwrap();
             f.go(&Req::post(&wire::route::drafted(&mine), &payload).with_bearer(KEY));
 
-            let res = f.go(&Req::post(
-                &format!("{}{mine}/send-back", public_route::REQUEST_PREFIX),
-                "note=again",
-            )
-            .with_cookie(&owner));
+            let res = verb_on(&mut f, &owner, &mine, "send-back", r#"{"note":"again"}"#);
             if res.status == 429 {
                 refused = true;
                 break;
@@ -7870,11 +7149,7 @@ mod tests {
         f.go(&Req::post(&wire::route::drafted(&mine), &payload).with_bearer(KEY));
 
         // And the owner finds it spent, without having spent any of it.
-        let res = f.go(&Req::post(
-            &format!("{}{mine}/send-back", public_route::REQUEST_PREFIX),
-            "note=again",
-        )
-        .with_cookie(&owner));
+        let res = verb_on(&mut f, &owner, &mine, "send-back", r#"{"note":"again"}"#);
         assert_eq!(res.status, 429, "{}", res.body);
     }
 
@@ -7921,12 +7196,15 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_can_decline_but_the_page_offers_no_approve() {
-        // Refused on the wire, and **not offered to the client either**. The
-        // page no longer carries the buttons — it is the interface's document,
-        // the same one everybody gets — so what decides whether an approve is
-        // drawn is the capability the server reports. `can.accept` is that
-        // decision, and for an owner it is false.
+    fn an_owner_can_decline_and_is_never_offered_approve() {
+        // Refused on the wire, and **not offered to the client either**.
+        //
+        // **Renamed off "the page", which is gone.** The rendered review page
+        // decided by construction which buttons an owner saw, because the server
+        // built the markup; the client builds it now, so the same decision has to
+        // be a fact the server states. `can.accept` is that fact, and for an
+        // owner it is false — a client drawing an approve anyway would be drawing
+        // one the server refuses, which is the next assertion down.
         let (mut f, owner, mine, _) = owner_fixture("owner-declines");
 
         // Get it to a state where a decision is possible.
@@ -7944,17 +7222,37 @@ mod tests {
         // And the request is theirs to read, which is what makes deciding on it
         // possible at all.
         assert_eq!(
-            f.go(&Req::get(&format!("/api/v1/ui/requests/{mine}")).with_cookie(&owner))
+            f.go(&Req::get(&api_path(&format!("requests/{mine}"))).with_cookie(&owner))
                 .status,
             200
         );
 
-        // And the verb works.
-        let res = f.go(&Req::post(
-            &format!("{}{mine}/send-back", public_route::REQUEST_PREFIX),
-            "note=too+vague",
-        )
-        .with_cookie(&owner));
+        // **And the server backs the flag up.** Accepting is not merely undrawn
+        // for an owner, it does not exist — 404 rather than a refusal, because
+        // `api_verb`'s owner arm has no `accept` case at all.
+        let digest = crate::auth::hash("# Spec");
+        let refused = verb_on(
+            &mut f,
+            &owner,
+            &mine,
+            "accept",
+            &serde_json::json!({ "digest": digest }).to_string(),
+        );
+        assert_eq!(refused.status, 404, "an owner accepted: {}", refused.body);
+        assert_eq!(
+            f.store.get(&mine).unwrap().unwrap().state,
+            crate::store::RequestState::AwaitingReview,
+            "and nothing was settled"
+        );
+
+        // And the verb they do have works.
+        let res = verb_on(
+            &mut f,
+            &owner,
+            &mine,
+            "send-back",
+            r#"{"note":"too vague"}"#,
+        );
         assert_eq!(res.status, 200, "{}", res.body);
         assert_eq!(
             f.store.get(&mine).unwrap().unwrap().state,
@@ -7983,7 +7281,7 @@ mod tests {
         // is told they review and is handed the request the verb acts on.
         let me = f.go(&Req::get(ME_PATH).with_cookie(&owner));
         assert!(me.body.contains("\"review\":true"), "{}", me.body);
-        let one = f.go(&Req::get(&format!("/api/v1/ui/requests/{mine}")).with_cookie(&owner));
+        let one = f.go(&Req::get(&api_path(&format!("requests/{mine}"))).with_cookie(&owner));
         assert_eq!(one.status, 200, "{}", one.body);
         assert!(
             one.body.contains("quarantined"),
@@ -7991,11 +7289,7 @@ mod tests {
             one.body
         );
 
-        let res = f.go(&Req::post(
-            &format!("{}{mine}/release", public_route::REQUEST_PREFIX),
-            "",
-        )
-        .with_cookie(&owner));
+        let res = verb_on(&mut f, &owner, &mine, "release", "{}");
         assert_eq!(res.status, 200, "{}", res.body);
         assert_eq!(
             f.store.get(&mine).unwrap().unwrap().state,
@@ -8005,11 +7299,7 @@ mod tests {
 
         // Somebody else's repository stays quarantined, and says not found
         // rather than forbidden.
-        let res = f.go(&Req::post(
-            &format!("{}{theirs}/release", public_route::REQUEST_PREFIX),
-            "",
-        )
-        .with_cookie(&owner));
+        let res = verb_on(&mut f, &owner, &theirs, "release", "{}");
         assert_eq!(res.status, 404);
         assert_eq!(
             f.store.get(&theirs).unwrap().unwrap().state,
@@ -8034,11 +7324,7 @@ mod tests {
         r.state = RequestState::Quarantined;
         f.store.put(&r).unwrap();
 
-        let res = f.go(&Req::post(
-            &format!("{}{mine}/release", public_route::REQUEST_PREFIX),
-            "",
-        )
-        .with_cookie(&owner));
+        let res = verb_on(&mut f, &owner, &mine, "release", "{}");
         assert_eq!(res.status, 429, "{}", res.body);
         assert_eq!(
             f.store.get(&mine).unwrap().unwrap().state,
@@ -8049,15 +7335,21 @@ mod tests {
 
     #[test]
     fn an_owner_cannot_decline_somebody_elses_repository() {
+        // **Pointed at the API, or it would assert nothing.** The owner verbs
+        // used to live under `/public/request/`, and every address under that
+        // prefix answers 404 now — so left where it was, this would pass on a
+        // server that had no ownership check at all. The check lives in
+        // `api_verb`'s owner arm, and that is what this asks.
         let (mut f, owner, _, theirs) = owner_fixture("owner-not-theirs");
         for verb in OWNER_VERBS {
-            let res = f.go(&Req::post(
-                &format!("{}{theirs}/{verb}", public_route::REQUEST_PREFIX),
-                "",
-            )
-            .with_cookie(&owner));
+            let res = verb_on(&mut f, &owner, &theirs, verb, "{}");
             assert_eq!(res.status, 404, "an owner reached {verb} on another repo");
         }
+        // Not found, not forbidden — and nothing moved.
+        assert_eq!(
+            f.store.get(&theirs).unwrap().unwrap().state,
+            RequestState::Queued
+        );
     }
 
     #[test]
@@ -8074,48 +7366,52 @@ mod tests {
         for verb in OWNER_VERBS {
             assert!(REVIEW_VERBS.contains(&verb), "{verb} is not a review verb");
         }
-        for settling in ["accept", "accept/confirm"] {
-            assert!(
-                !OWNER_VERBS.contains(&settling),
-                "{settling} settles a request and is not an owner's to reach"
-            );
-        }
+        assert!(
+            !OWNER_VERBS.contains(&"accept"),
+            "accept settles a request and is not an owner's to reach"
+        );
     }
 
     #[test]
-    fn an_owner_cannot_reach_the_private_surface_at_all() {
-        // **The property this role turns on**, and it is structural rather than
-        // a check somebody has to write: `Caller::Owner` does not match the
-        // `Caller::Device` pattern the private surface is gated on, so every
-        // route past that line is unreachable by type. There is no value of the
-        // variant that gets through.
+    fn an_owner_cannot_reach_a_repository_they_do_not_own() {
+        // **The property this role turns on**, and it is still structural rather
+        // than a check somebody has to write.
         //
-        // That is what makes it worth testing here rather than verb by verb.
-        // An owner *does* reach `send-back`, `discard` and `release` — on the
-        // PUBLIC side, through `owner_route`, each behind an ownership check
-        // and a drafting budget. None of that touches this: the private
-        // handlers stay closed to them whatever `OWNER_VERBS` grows to.
+        // **Renamed off "the private surface", which no longer exists.** The
+        // argument used to be about a route tree: `Caller::Owner` did not match
+        // the pattern the private surface was gated on, so every handler past
+        // that line was unreachable by type. The tree is gone and the reasoning
+        // moved intact into `api_verb`, which matches on the variant — the owner
+        // arm reaches a repository they own and nothing else, and has no `accept`
+        // case in it at all.
         //
-        // Iterates the shared constant, so a verb added later is covered
-        // without anyone remembering to extend this list.
+        // Iterates the shared constant, so a verb added later is covered without
+        // anyone remembering to extend this list. The repository here is one they
+        // were never named for, which is the case a bad gate lets through.
         let mut f = Fixture::new("owner-no-approve")
             .with_public(false)
-            .with_owner("jamez667@example.test", &["intake"]);
+            .with_repos(&["intake", "other"])
+            .with_owner("jamez667@example.test", &["other"]);
         let owner = f.signed_in_with_login("jamez667@example.test");
 
         let filer = f.signed_in("jo@x.com");
-        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&filer));
+        file_publicly_as(&mut f, &filer, "a thing", "intake");
         let id = f.store.all().unwrap()[0].id.clone();
 
         for verb in REVIEW_VERBS {
-            let res = f.go(&Req::post(&format!("/request/{id}/{verb}"), "").with_cookie(&owner));
-            assert_eq!(res.status, 401, "an owner reached {verb}: {}", res.body);
+            let res = verb_on(&mut f, &owner, &id, verb, "{}");
+            assert_eq!(res.status, 404, "an owner reached {verb}: {}", res.body);
         }
+        assert_eq!(
+            f.store.get(&id).unwrap().unwrap().state,
+            RequestState::Queued,
+            "and nothing moved"
+        );
         // And the developer's own administrative surface is not theirs either.
         // **Asked of the API**, which is where that refusal lives now that every
         // browser path answers the interface's document.
         assert_eq!(
-            f.go(&Req::get("/api/v1/ui/settings").with_cookie(&owner))
+            f.go(&Req::get(&api_path("settings")).with_cookie(&owner))
                 .status,
             404
         );
@@ -8129,12 +7425,6 @@ mod tests {
         let mut f = Fixture::new("owner-from-roster").with_public(false);
         let session = f.signed_in_with_login("jamez667@example.test");
 
-        // Not named: an ordinary filer, and the filing form is what they get.
-        assert_eq!(
-            f.go(&Req::get(public_route::FILE).with_cookie(&session))
-                .status,
-            200
-        );
         // **Asked of `/me`, which is the roster's answer made explicit.** The
         // browser paths all serve the interface's document, so what says whether
         // this session is an owner is the capability the server reports and the
@@ -8147,7 +7437,7 @@ mod tests {
             "a login alone granted review: {}",
             me.body
         );
-        let listed = f.go(&Req::get("/api/v1/ui/requests").with_cookie(&session));
+        let listed = f.go(&Req::get(&api_path("requests")).with_cookie(&session));
         assert_eq!(listed.body, "[]", "a login alone reviews nothing");
     }
 
@@ -8235,15 +7525,17 @@ mod tests {
         let (mut f, session, _mine, _theirs) = owner_fixture("owner-no-promote");
 
         for body in [
-            "login=jamez667@example.test&repos=intake&repos=other",
-            "login=accomplice&repos=intake",
+            r#"{"login":"jamez667@example.test","repos":["intake","other"]}"#,
+            r#"{"login":"accomplice","repos":["intake"]}"#,
         ] {
-            let res = f.go(&Req::post(private_route::OWNERS, body).with_cookie(&session));
-            // 401: they are somebody, and not a device. The gate refuses before
-            // `set_owner` is ever reached — which is the point. There is no
-            // check inside the handler that a later edit could drop.
+            let res = f.go(&Req::post_json(&api_path("owners"), body).with_cookie(&session));
+            // **404, not 401.** The gate refuses before `set_owner` is ever
+            // reached — which is the point; there is no check inside the handler
+            // that a later edit could drop — and the answer says the endpoint
+            // does not exist for them rather than that they are the wrong person
+            // at a real address.
             assert_eq!(
-                res.status, 401,
+                res.status, 404,
                 "an owner reached the roster with {body}: {}",
                 res.body
             );
@@ -8258,26 +7550,35 @@ mod tests {
     }
 
     #[test]
-    fn the_developer_promotes_and_revokes_from_the_owners_page() {
+    fn the_developer_promotes_and_revokes_owners() {
+        // **Renamed off "the owners page".** The page is the interface's document
+        // like every other address; promoting and revoking are two endpoints, and
+        // they are what this asserts.
         let mut f = Fixture::new("owners-admin")
             .with_public(false)
             .with_repos(&["intake", "other"]);
         let device = f.as_admin();
 
-        // Two repositories ticked arrive as a repeated field. A map keeps only
-        // the last, which would grant one of the two — hence `form_values`.
-        let res = f.go(&Req::post(
-            private_route::OWNERS,
-            "login=JameZ667@example.test&repos=intake&repos=other",
+        // **Two repositories in one call, which is the case that used to bite.**
+        // Ticked checkboxes arrived as a repeated form field and a map would have
+        // kept only the last, granting one of the two — hence `form_values`. A
+        // JSON array cannot lose an element that way, so the hazard is gone by
+        // construction; what still has to hold is that both are granted.
+        let res = f.go(&Req::post_json(
+            &api_path("owners"),
+            r#"{"login":"JameZ667@example.test","repos":["intake","other"]}"#,
         )
         .with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
         let roster = f.store.roster().unwrap();
         let owner = roster.owner_for("jamez667@example.test").expect("promoted");
-        assert_eq!(owner.repos, ["intake", "other"], "both ticked repositories");
+        assert_eq!(owner.repos, ["intake", "other"], "both repositories");
 
-        // And revoking from the same page.
-        let res = f.go(&Req::post("/owners/jamez667@example.test/revoke", "").with_cookie(&device));
+        // And revoking again.
+        let res = f.go(
+            &Req::post_json(&api_path("owners/jamez667@example.test/revoke"), "{}")
+                .with_cookie(&device),
+        );
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(f
             .store
@@ -8298,19 +7599,39 @@ mod tests {
         // A daemon is polling and says what it serves.
         f.go(&Req::get(&format!("{}?repo=smart-coder", wire::route::WORK)).with_bearer(KEY));
 
-        let res = f.go(&Req::post(private_route::REPOS, "name=smrt-coder").with_cookie(&device));
-        assert_eq!(res.status, 200, "questioned, not refused: {}", res.body);
+        let res = f.go(
+            &Req::post_json(&api_path("repos"), r#"{"name":"smrt-coder"}"#).with_cookie(&device),
+        );
+        // **409, where the page asked the question in HTML.** Still a question
+        // rather than a refusal — the answer names the way through — but a status
+        // a client can act on, which is what "here is a confirmation page" cannot
+        // be for a `fetch`.
+        assert_eq!(
+            res.status, 409,
+            "questioned, not silently accepted: {}",
+            res.body
+        );
         assert!(
             f.store.roster().unwrap().enabled().is_empty(),
             "a misspelling was written on the first ask"
         );
-        // The page says which case it is and what *is* on offer, rather than a
-        // bare error somebody would click past.
-        assert!(res.body.contains("smrt-coder"), "{}", res.body);
-        assert!(res.body.contains("smart-coder"), "{}", res.body);
+        // And it says how to go ahead anyway, rather than being a bare error
+        // somebody would click past.
+        assert!(res.body.contains("anyway"), "{}", res.body);
+
+        // **Worth knowing: the half that named the alternative is gone.** The
+        // rendered page listed what *is* on offer beside the name that was not —
+        // "you typed smrt-coder, a machine is offering smart-coder" — which is
+        // what makes a typo obvious rather than merely refused. Nothing on the
+        // API carries the offered set: `Seen::offered` is read inside
+        // `api_add_repo` to make this decision and never returned. If the
+        // machines endpoint ever grows the repositories each daemon declares,
+        // that assertion belongs here again.
 
         // Confirmed by a daemon: enabled outright, and recorded as confirmed.
-        let res = f.go(&Req::post(private_route::REPOS, "name=smart-coder").with_cookie(&device));
+        let res = f.go(
+            &Req::post_json(&api_path("repos"), r#"{"name":"smart-coder"}"#).with_cookie(&device),
+        );
         assert_eq!(res.status, 200, "{}", res.body);
         let roster = f.store.roster().unwrap();
         assert_eq!(roster.enabled(), ["smart-coder"]);
@@ -8326,10 +7647,11 @@ mod tests {
         let mut f = Fixture::new("repos-anyway").with_public(false);
         let device = f.as_admin();
 
-        let res = f.go(
-            &Req::post(private_route::REPOS, "name=not-yet-polling&anyway=yes")
-                .with_cookie(&device),
-        );
+        let res = f.go(&Req::post_json(
+            &api_path("repos"),
+            r#"{"name":"not-yet-polling","anyway":true}"#,
+        )
+        .with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
         let roster = f.store.roster().unwrap();
         assert_eq!(roster.enabled(), ["not-yet-polling"]);
@@ -8340,11 +7662,18 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_with_no_repositories_still_serves_and_says_why() {
+    fn a_surface_with_no_repositories_still_serves_and_says_so() {
         // Reachable the moment a developer disables the last one. Not a 404 —
-        // that teaches somebody at a working address nothing — and not a
-        // refusal to boot, which would put the page that fixes it out of reach
-        // exactly when it is needed.
+        // that teaches somebody at a working address nothing — and not a refusal
+        // to boot, which would put the surface that fixes it out of reach exactly
+        // when it is needed.
+        //
+        // **Renamed from "says why", because the sentence moved to the client.**
+        // The page used to draw an explanation instead of a `<textarea>`, and
+        // this read the markup for the absent form. The client draws both now, so
+        // the server's half is the empty offer: `/me` hands back no repositories,
+        // which is what a client needs to draw the explanation rather than a form
+        // that always refuses.
         let mut f = Fixture::new("repos-none").with_public(false);
         if let Some(p) = f.public.as_mut() {
             p.repos = crate::config::Repos::default();
@@ -8352,18 +7681,23 @@ mod tests {
         let session = f.signed_in("jo@x.com");
 
         let res = f.go(&Req::get(public_route::FILE).with_cookie(&session));
-        assert_eq!(res.status, 200, "the page still serves");
+        assert_eq!(res.status, 200, "the address still serves");
+
+        let me = f.go(&Req::get(ME_PATH).with_cookie(&session));
+        let mine: serde_json::Value = serde_json::from_str(&me.body).unwrap();
         assert!(
-            !res.body.contains("<textarea"),
-            "a form that always refuses is worse than none: {}",
-            res.body
+            mine["repos"].as_array().is_none_or(|r| r.is_empty()),
+            "a repository was offered on a surface that serves none: {}",
+            me.body
         );
 
         // And a filing submitted anyway is refused rather than landing
         // somewhere nobody chose.
-        let res =
-            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
-        assert_eq!(res.status, 400);
+        let res = f.go(
+            &Req::post_json(&api_path("file"), r#"{"text":"a thing","kind":"bug"}"#)
+                .with_cookie(&session),
+        );
+        assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.all().unwrap().is_empty());
     }
 
@@ -8377,12 +7711,11 @@ mod tests {
             .with_repos(&["intake"]);
         let device = f.as_admin();
         let filer = f.signed_in("jo@x.com");
-        f.go(
-            &Req::post(public_route::FILE, "text=a+thing&kind=bug&repo=intake").with_cookie(&filer),
-        );
+        file_publicly_as(&mut f, &filer, "a thing", "intake");
         assert_eq!(f.store.all().unwrap().len(), 1);
 
-        let res = f.go(&Req::post("/repos/intake/disable", "").with_cookie(&device));
+        let res =
+            f.go(&Req::post_json(&api_path("repos/intake/disable"), "{}").with_cookie(&device));
         assert_eq!(res.status, 200, "{}", res.body);
         assert!(f.store.roster().unwrap().enabled().is_empty());
         assert_eq!(f.store.all().unwrap().len(), 1, "the filing survived");
@@ -8395,12 +7728,17 @@ mod tests {
         // enable one they own and collect for it.
         let (mut f, session, _mine, _theirs) = owner_fixture("repos-owner");
 
-        for (path, body) in [
-            (private_route::REPOS, "name=whatever&anyway=yes"),
-            ("/repos/intake/disable", ""),
+        // **Asked of the API**, or it would assert nothing: the form routes are
+        // gone and everything answers 404 there, so this would pass on a server
+        // with no gate at all. The gate is the `let Some(Caller::Admin { .. })`
+        // in `api_write`, and 404 rather than 401 is what keeps the
+        // administrative surface from existing for anybody else.
+        for (rest, body) in [
+            ("repos", r#"{"name":"whatever","anyway":true}"#),
+            ("repos/intake/disable", "{}"),
         ] {
-            let res = f.go(&Req::post(path, body).with_cookie(&session));
-            assert_eq!(res.status, 401, "an owner reached {path}: {}", res.body);
+            let res = f.go(&Req::post_json(&api_path(rest), body).with_cookie(&session));
+            assert_eq!(res.status, 404, "an owner reached {rest}: {}", res.body);
         }
         assert_eq!(f.store.roster().unwrap().enabled(), ["intake", "other"]);
     }
@@ -8415,19 +7753,32 @@ mod tests {
             .with_repos(&["intake"]);
         let device = f.as_admin();
 
-        let res = f.go(&Req::post(
-            private_route::OWNERS,
-            "login=jamez667@example.test&repos=not-served",
+        let res = f.go(&Req::post_json(
+            &api_path("owners"),
+            r#"{"login":"jamez667@example.test","repos":["not-served"]}"#,
         )
         .with_cookie(&device));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.roster().unwrap().owners.is_empty());
 
-        // Nor an owner of nothing at all, which reads as promoted on the page
-        // and grants nothing.
-        let res = f.go(
-            &Req::post(private_route::OWNERS, "login=jamez667@example.test").with_cookie(&device),
-        );
+        // Nor an owner of nothing at all, which reads as promoted and grants
+        // nothing.
+        let res = f.go(&Req::post_json(
+            &api_path("owners"),
+            r#"{"login":"jamez667@example.test"}"#,
+        )
+        .with_cookie(&device));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(f.store.roster().unwrap().owners.is_empty());
+
+        // And an empty array is the same answer as no array at all — a client
+        // that sent the field and unticked everything has still asked for a
+        // permission that grants nothing.
+        let res = f.go(&Req::post_json(
+            &api_path("owners"),
+            r#"{"login":"jamez667@example.test","repos":[]}"#,
+        )
+        .with_cookie(&device));
         assert_eq!(res.status, 400, "{}", res.body);
         assert!(f.store.roster().unwrap().owners.is_empty());
     }
@@ -8438,13 +7789,23 @@ mod tests {
         // anyone remembering to extend this list.
         let mut f = Fixture::new("public-no-review").with_public(false);
         let session = f.signed_in("jo@x.com");
-        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
+        file_publicly_as(&mut f, &session, "a thing", "intake");
         let id = f.store.all().unwrap()[0].id.clone();
 
+        // **404, and against their own request.** A filer holds the id — they
+        // filed it — so this is the case a gate keyed on "can you name it" would
+        // let through. `api_verb`'s catch-all arm is what refuses, and it says
+        // *no such request* rather than *not allowed*, because a filer has no
+        // business learning that a review surface is there to be refused from.
         for verb in REVIEW_VERBS {
-            let res = f.go(&Req::post(&format!("/request/{id}/{verb}"), "").with_cookie(&session));
-            assert_eq!(res.status, 401, "an account reached {verb}: {}", res.body);
+            let res = verb_on(&mut f, &session, &id, verb, "{}");
+            assert_eq!(res.status, 404, "an account reached {verb}: {}", res.body);
         }
+        assert_eq!(
+            f.store.get(&id).unwrap().unwrap().state,
+            RequestState::Queued,
+            "and nothing moved"
+        );
         // And the review *data* is closed to them. **Asked of the API**: the
         // browser paths answer the interface's document to anybody, so the
         // refusal that matters is the one on what sits behind them.
@@ -8453,14 +7814,14 @@ mod tests {
         // through the narrow view. What they must never get is the reviewer's:
         // no repository, no artifact directory, no digest to accept against.
         // That is the line the two API types draw by construction.
-        let listed = f.go(&Req::get("/api/v1/ui/requests").with_cookie(&session));
+        let listed = f.go(&Req::get(&api_path("requests")).with_cookie(&session));
         assert_eq!(listed.status, 200);
         assert!(
             !listed.body.contains("artifact_dir") && !listed.body.contains("spec_digest"),
             "a filer was handed the reviewer's view: {}",
             listed.body
         );
-        let one = f.go(&Req::get(&format!("/api/v1/ui/requests/{id}")).with_cookie(&session));
+        let one = f.go(&Req::get(&api_path(&format!("requests/{id}"))).with_cookie(&session));
         assert_eq!(one.status, 200, "their own filing is theirs to read");
         assert!(
             !one.body.contains("artifact_dir") && !one.body.contains("spec_digest"),
@@ -8501,7 +7862,12 @@ mod tests {
         let before = f.go(&Req::get(ME_PATH).with_cookie(&session));
         assert!(before.body.contains("\"filer\""), "{}", before.body);
 
-        f.go(&Req::post(public_route::SIGNOUT, "").with_cookie(&session));
+        // **Through the endpoint the interface posts to.** The form route is
+        // gone, and a POST to a route that does not exist also leaves nobody
+        // signed in — so pointed at the old address this would have kept passing
+        // while asserting nothing at all.
+        let out = f.go(&Req::post_json(&api_path("signout"), "{}").with_cookie(&session));
+        assert_eq!(out.status, 200, "{}", out.body);
         let after = f.go(&Req::get(ME_PATH).with_cookie(&session));
         assert!(
             after.body.contains("\"anonymous\""),
@@ -8522,10 +7888,20 @@ mod tests {
         accounts.revoke(&id);
         f.store.put_accounts(&accounts).unwrap();
 
-        let res =
-            f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&session));
-        assert!(res.body.contains("Sign in"), "{}", res.body);
+        // **404 rather than a rendered invitation to sign in.** The cookie is
+        // still in the browser and still names a session; what it no longer names
+        // is a live account, so the caller resolves to a stranger and the filing
+        // endpoint does not exist for them.
+        let res = f.go(
+            &Req::post_json(&api_path("file"), r#"{"text":"a thing","kind":"bug"}"#)
+                .with_cookie(&session),
+        );
+        assert_eq!(res.status, 404, "{}", res.body);
         assert!(f.store.all().unwrap().is_empty(), "nothing was filed");
+
+        // And on the very next request, which is the part revocation is for.
+        let me = f.go(&Req::get(ME_PATH).with_cookie(&session));
+        assert!(me.body.contains("\"anonymous\""), "{}", me.body);
     }
 
     #[test]
@@ -8554,11 +7930,13 @@ mod tests {
         // The list comes from the API now — `/accounts` is the interface's
         // document, and the hint that identifies an account to revoke is in the
         // JSON behind it.
-        let listed = f.go(&Req::get("/api/v1/ui/accounts").with_cookie(&device));
+        let listed = f.go(&Req::get(&api_path("accounts")).with_cookie(&device));
         assert_eq!(listed.status, 200);
         assert!(listed.body.contains("jo***@x.com"), "{}", listed.body);
 
-        let res = f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&device));
+        let res = f.go(
+            &Req::post_json(&api_path(&format!("accounts/{id}/revoke")), "{}").with_cookie(&device),
+        );
         assert_eq!(res.status, 200, "{}", res.body);
         let accounts = f.store.accounts().unwrap();
         assert!(accounts.live().iter().all(|a| a.id != id), "still live");
@@ -8567,7 +7945,7 @@ mod tests {
         // hazard now that both are ordinary accounts. Asked of the API, which
         // is where being the administrator still means something.
         assert_eq!(
-            f.go(&Req::get("/api/v1/ui/settings").with_cookie(&device))
+            f.go(&Req::get(&api_path("settings")).with_cookie(&device))
                 .status,
             200,
             "revoking a filer locked out the administrator"
@@ -8591,14 +7969,19 @@ mod tests {
         let id = f.store.accounts().unwrap().live()[0].id.clone();
 
         assert_eq!(
-            f.go(&Req::get("/api/v1/ui/accounts").with_cookie(&session))
+            f.go(&Req::get(&api_path("accounts")).with_cookie(&session))
                 .status,
             404
         );
+        // The write too, and **404 rather than 401** for the same reason: the
+        // administrative surface does not exist for a filer.
         assert_eq!(
-            f.go(&Req::post(&format!("/accounts/{id}/revoke"), "").with_cookie(&session))
-                .status,
-            401
+            f.go(
+                &Req::post_json(&api_path(&format!("accounts/{id}/revoke")), "{}")
+                    .with_cookie(&session)
+            )
+            .status,
+            404
         );
         assert!(!f.store.accounts().unwrap().live().is_empty(), "still live");
     }
@@ -8606,19 +7989,46 @@ mod tests {
     #[test]
     fn revoking_twice_is_not_an_error() {
         // The caller asked for a state that now holds.
-        let mut f = Fixture::new("revoke-twice").with_public(false);
+        //
+        // **This is the test that caught a real regression in the move.** The
+        // page handler said so in as many words and answered 200; `api_revoke`
+        // was written to answer 404 when the underlying call reported "nothing
+        // changed" — which conflates "already revoked" with "no such record" and
+        // reports a failure for doing exactly what the button was pressed for. It
+        // would also have turned a write into an id oracle. Fixed there, asserted
+        // here, and asserted across all four lists rather than only accounts,
+        // because they share the shape and would have shared the mistake.
+        let mut f = Fixture::new("revoke-twice")
+            .with_public(false)
+            .with_repos(&["intake"])
+            .with_owner("jamez667@example.test", &["intake"]);
         f.signed_in("jo@x.com");
         let device = f.as_admin();
         let id = f.store.accounts().unwrap().live()[0].id.clone();
+        mint_daemon(&mut f, &device, "laptop");
 
-        let path = format!("/accounts/{id}/revoke");
-        assert_eq!(f.go(&Req::post(&path, "").with_cookie(&device)).status, 200);
-        assert_eq!(f.go(&Req::post(&path, "").with_cookie(&device)).status, 200);
-        assert_eq!(
-            f.go(&Req::post("/accounts/never-existed/revoke", "").with_cookie(&device))
-                .status,
-            200
-        );
+        let twice = |f: &mut Fixture, rest: &str| {
+            for pass in 1..=2 {
+                let res = f.go(&Req::post_json(&api_path(rest), "{}").with_cookie(&device));
+                assert_eq!(res.status, 200, "{rest} pass {pass}: {}", res.body);
+            }
+        };
+        twice(&mut f, &format!("accounts/{id}/revoke"));
+        twice(&mut f, "owners/jamez667@example.test/revoke");
+        twice(&mut f, "daemons/laptop/revoke");
+        twice(&mut f, "repos/intake/disable");
+
+        // And a record that never existed is the same answer, so the write is
+        // not a way to ask which ids are real.
+        for rest in [
+            "accounts/never-existed/revoke",
+            "owners/nobody/revoke",
+            "daemons/no-such-machine/revoke",
+            "repos/no-such-repo/disable",
+        ] {
+            let res = f.go(&Req::post_json(&api_path(rest), "{}").with_cookie(&device));
+            assert_eq!(res.status, 200, "{rest}: {}", res.body);
+        }
     }
 
     #[test]
@@ -8722,7 +8132,14 @@ mod tests {
     // -- language -----------------------------------------------------------
 
     #[test]
-    fn choosing_a_language_sets_a_cookie_and_renders_in_it() {
+    fn choosing_a_language_sets_a_cookie_and_the_server_answers_in_it() {
+        // **Renamed from "renders in it", because rendering moved.** The route
+        // answered a page in the chosen language; it answers the application
+        // shell now, which is one document in one markup whatever the cookie
+        // says — the client translates itself. What the server still owes is the
+        // cookie, and that the *next* request is answered in the language it
+        // names: the coarse state label on a filer's request is translated
+        // server-side, deliberately, and is the thing the choice has to reach.
         let mut f = Fixture::new("lang-set").with_public(false);
         let res = f.go(&Req::post(public_route::LANGUAGE, "lang=fr"));
 
@@ -8736,7 +8153,14 @@ mod tests {
         assert!(!cookie.contains("HttpOnly"), "{cookie}");
         assert!(cookie.contains("SameSite=Lax"), "{cookie}");
         assert!(cookie.contains("Secure"), "{cookie}");
-        assert!(res.body.contains("<html lang=\"fr\""), "{}", res.body);
+
+        // And the cookie it set is one the server reads back.
+        let session = f.signed_in("filer@example.test");
+        file_publicly_as(&mut f, &session, "a thing", "intake");
+        let filed = f.go(&Req::get(&api_path("requests"))
+            .with_cookie(&session)
+            .with_lang(Some("fr"), None));
+        assert!(filed.body.contains("reçue"), "{}", filed.body);
     }
 
     #[test]
@@ -8749,11 +8173,15 @@ mod tests {
         // Asserted on **every** cookie this server sets, not just the language
         // one, because the failure is identical for the session cookie and
         // rather more confusing.
+        // **Signing out is asked of the endpoint the interface posts to**, since
+        // the form route is gone — and a POST to a route that does not exist sets
+        // no cookie at all, so `expect` here would have caught the drift rather
+        // than the assertion doing it.
         let mut deployed = Fixture::new("secure-yes").with_public(false);
         let account = deployed.signed_in("filer@example.test");
         for res in [
             deployed.go(&Req::post(public_route::LANGUAGE, "lang=fr")),
-            deployed.go(&Req::post(public_route::SIGNOUT, "").with_cookie(&account)),
+            deployed.go(&Req::post_json(&api_path("signout"), "{}").with_cookie(&account)),
         ] {
             let c = res.set_cookie.expect("a cookie is set");
             assert!(c.contains("; Secure"), "{c}");
@@ -8763,7 +8191,7 @@ mod tests {
         let account = local.signed_in("filer@example.test");
         for res in [
             local.go(&Req::post(public_route::LANGUAGE, "lang=fr")),
-            local.go(&Req::post(public_route::SIGNOUT, "").with_cookie(&account)),
+            local.go(&Req::post_json(&api_path("signout"), "{}").with_cookie(&account)),
         ] {
             let c = res.set_cookie.expect("a cookie is set");
             assert!(!c.contains("Secure"), "{c}");
@@ -8779,21 +8207,37 @@ mod tests {
         // falls back to Georgia and nobody notices until they look closely —
         // and if they serve something that is not a font, the browser rejects
         // it just as quietly.
-        let mut f = Fixture::new("fonts").with_public(false);
-        for path in [public_route::FONT_BODY, public_route::FONT_DISPLAY] {
-            let res = f.go(&Req::get(path));
-            assert_eq!(res.status, 200, "{path}");
-            assert_eq!(res.content_type, "font/woff2", "{path}");
-            let bytes = res.binary.expect("a font is bytes, not a string");
-            // The woff2 signature. A truncated download or an error page would
-            // be served happily and render as no font at all.
-            assert_eq!(&bytes[..4], b"wOF2", "{path} is not a woff2");
-            assert!(bytes.len() > 10_000, "{path} is suspiciously small");
-        }
+        //
+        // **Both configurations, because only one of them used to work.** The
+        // fonts were served by an arm inside the public surface's routes, so a
+        // server with public intake switched off answered 404 for them while its
+        // own stylesheet went on asking — the interface rendered in fallback
+        // faces with every status code correct. This test existed and did not
+        // catch it: it ran with the surface on, which is the case that worked.
+        for public in [true, false] {
+            let mut f = Fixture::new(&format!("fonts-{public}"));
+            if public {
+                f = f.with_public(false);
+            }
+            for path in [
+                crate::api::ui::FONT_BODY_PATH,
+                crate::api::ui::FONT_DISPLAY_PATH,
+            ] {
+                let res = f.go(&Req::get(path));
+                assert_eq!(res.status, 200, "{path} with public={public}");
+                assert_eq!(res.content_type, "font/woff2", "{path}");
+                let bytes = res.binary.expect("a font is bytes, not a string");
+                // The woff2 signature. A truncated download or an error page
+                // would be served happily and render as no font at all.
+                assert_eq!(&bytes[..4], b"wOF2", "{path} is not a woff2");
+                assert!(bytes.len() > 10_000, "{path} is suspiciously small");
+            }
 
-        // Reachable **signed out**: the sign-in page is the first thing anyone
-        // sees, and it should not be the one page rendered in a fallback face.
-        assert_eq!(f.go(&Req::get(public_route::FONT_BODY)).status, 200);
+            // Reachable **signed out**: the sign-in page is the first thing
+            // anyone sees, and it should not be the one rendered in a fallback
+            // face.
+            assert_eq!(f.go(&Req::get(crate::api::ui::FONT_BODY_PATH)).status, 200);
+        }
     }
 
     #[test]
@@ -8801,12 +8245,28 @@ mod tests {
         // `font-src 'self'` permits these two and refuses everything else, so a
         // stylesheet that named a remote face would produce an invisible
         // failure: the CSP blocks it, the page falls back, and nothing errors.
-        let css = crate::page::PUBLIC_STYLE;
+        //
+        // **Retargeted from the rendered surface's stylesheet at the interface's
+        // own.** The property is about the CSP and the faces, not about which
+        // stylesheet holds them, and this is the one a browser now loads. It is
+        // also what pins the stylesheet to the exact addresses this server
+        // answers on: a bundle rebuilt with a Google URL fails here rather than
+        // in a browser nobody is watching.
+        //
+        // **Asserted against the constants, not a prefix.** The previous version
+        // looked for `url(/public/`, which is a shape rather than an address —
+        // it would have passed just as happily while the server served the fonts
+        // from somewhere else entirely, which is exactly what had happened.
+        let css = crate::api::ui::STYLE;
+        let served = [
+            crate::api::ui::FONT_BODY_PATH,
+            crate::api::ui::FONT_DISPLAY_PATH,
+        ];
         for face in css.split("@font-face").skip(1) {
             let block = face.split('}').next().unwrap_or("");
             assert!(
-                block.contains("url(/public/"),
-                "a face is not served from this origin: {block}"
+                served.iter().any(|p| block.contains(&format!("url({p})"))),
+                "a face names an address this server does not serve: {block}"
             );
         }
         assert!(!css.contains("fonts.googleapis"), "{css}");
@@ -8821,13 +8281,32 @@ mod tests {
         let mut f = Fixture::new("lang-anon").with_public(false);
         let res = f.go(&Req::post(public_route::LANGUAGE, "lang=fr"));
         assert_eq!(res.status, 200);
-        assert!(res.body.contains("<html lang=\"fr\""));
+        // The cookie is what the route produces — the answer is the application
+        // shell, which is the same document in every language.
+        assert!(
+            res.set_cookie
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with(&format!("{LANG_COOKIE}=fr")),
+            "{:?}",
+            res.set_cookie
+        );
     }
 
     #[test]
-    fn an_unknown_language_falls_back_rather_than_reaching_the_page() {
+    fn an_unknown_language_falls_back_rather_than_reaching_the_cookie() {
         // The value is matched against the catalogues that exist, so nothing a
-        // caller writes here reaches a page except by choosing among them.
+        // caller writes here reaches anything except by choosing among them.
+        //
+        // **Renamed from "reaching the page".** The answer is the application
+        // shell — a compiled-in constant with nothing interpolated into it, so
+        // "the hostile value did not reach the markup" is true by construction
+        // and no longer a claim about this route. Where the value *can* still go
+        // is the cookie, which is written from what the caller sent; that is what
+        // `Locale::parse` stands between, and it is what this now watches. The
+        // one-script assertion is kept on the shell beside it, because the shell
+        // is what a browser executes and a bundle that grew an inline block would
+        // be a real change.
         let mut f = Fixture::new("lang-unknown").with_public(false);
         for hostile in [
             "lang=de",
@@ -8838,31 +8317,56 @@ mod tests {
         ] {
             let res = f.go(&Req::post(public_route::LANGUAGE, hostile));
             assert_eq!(res.status, 200, "{hostile}");
-            assert!(res.body.contains("<html lang=\"en\""), "{hostile}");
-            // The page carries exactly one script — its own, from this origin —
-            // and the hostile value contributes nothing. Asserted as "only the
-            // expected tag" rather than "no script at all": the shell now has a
-            // legitimate one, and a blanket ban would have to be deleted here,
-            // taking the injection check with it.
-            assert_eq!(
-                res.body.matches("<script").count(),
-                1,
-                "{hostile}: {}",
-                res.body
-            );
-            assert!(
-                res.body
-                    .contains("<script src=\"/public/app.js\" defer></script>"),
-                "{hostile}: the only script is the surface's own"
-            );
-            assert!(!res.body.contains("alert(1)"), "{hostile}: {}", res.body);
-            assert!(!res.body.contains("passwd"), "{hostile}: {}", res.body);
-            let cookie = res.set_cookie.unwrap_or_default();
+            // **The cookie is the default, not the hostile value.** A cookie
+            // holding `<script>` is not itself an injection, but it is read back
+            // by `Req::locale` on every later request — the value must never be
+            // anything but a code this server has a catalogue for.
+            let cookie = res.set_cookie.clone().unwrap_or_default();
             assert!(
                 cookie.starts_with(&format!("{LANG_COOKIE}=en")),
                 "{hostile}: {cookie}"
             );
+            assert!(!cookie.contains("alert(1)"), "{hostile}: {cookie}");
+            assert!(!cookie.contains("passwd"), "{hostile}: {cookie}");
+            // And the document is the shell, unchanged by any of it.
+            assert!(res.body.contains("<html lang=\"en\""), "{hostile}");
+            assert!(!res.body.contains("alert(1)"), "{hostile}: {}", res.body);
+            assert!(!res.body.contains("passwd"), "{hostile}: {}", res.body);
         }
+
+        // Exactly one script, and it is a served file from this origin. Asserted
+        // as "only the expected tag" rather than "no script at all": the shell
+        // has a legitimate one, and a blanket ban would have to be deleted here,
+        // taking the injection check with it.
+        //
+        // **Comments are stripped first**, and that is not cosmetic. The shell's
+        // own comment explains why there is no inline block and spells `<script>`
+        // to do it — counting raw occurrences finds two and fails on the prose
+        // rather than on the markup. What matters is what a browser executes.
+        let shell = crate::api::ui::INDEX;
+        let markup: String = shell
+            .split("<!--")
+            .enumerate()
+            .map(|(i, part)| {
+                if i == 0 {
+                    part.to_string()
+                } else {
+                    part.split_once("-->")
+                        .map(|(_, r)| r)
+                        .unwrap_or("")
+                        .to_string()
+                }
+            })
+            .collect();
+        assert_eq!(markup.matches("<script").count(), 1, "{markup}");
+        assert!(
+            markup.contains(&format!("src=\"{}\"", crate::api::ui::SCRIPT_PATH)),
+            "the only script is the interface's own: {markup}"
+        );
+        assert!(
+            !markup.contains("'unsafe-inline'") && !markup.contains("<script>"),
+            "the shell grew an inline block: {markup}"
+        );
     }
 
     #[test]
@@ -8879,22 +8383,22 @@ mod tests {
         // watches.
         let mut f = Fixture::new("lang-through").with_public(false);
         let account = f.signed_in("filer@example.test");
-        f.go(&Req::post(public_route::FILE, "text=a+thing&kind=bug").with_cookie(&account));
+        file_publicly_as(&mut f, &account, "a thing", "intake");
 
-        let filed = f.go(&Req::get("/api/v1/ui/requests")
+        let filed = f.go(&Req::get(&api_path("requests"))
             .with_cookie(&account)
             .with_lang(Some("fr"), None));
         assert_eq!(filed.status, 200, "{}", filed.body);
         assert!(filed.body.contains("reçue"), "{}", filed.body);
 
         // And the browser's header is honoured when nothing was chosen.
-        let by_header = f.go(&Req::get("/api/v1/ui/requests")
+        let by_header = f.go(&Req::get(&api_path("requests"))
             .with_cookie(&account)
             .with_lang(None, Some("fr-CA,fr;q=0.9,en;q=0.5")));
         assert!(by_header.body.contains("reçue"), "{}", by_header.body);
 
-        // And English is not simply what every locale renders.
-        let english = f.go(&Req::get("/api/v1/ui/requests")
+        // And English is not simply what every locale answers.
+        let english = f.go(&Req::get(&api_path("requests"))
             .with_cookie(&account)
             .with_lang(Some("en"), None));
         assert!(english.body.contains("received"), "{}", english.body);
@@ -8920,13 +8424,17 @@ mod tests {
         // Worth pinning: it is rendered from inside the `is_public_path` branch,
         // one line from the stamp, and is the easiest thing to sweep into it.
         //
-        // **Asked of a spent-link address rather than `FILE`.** The filing
-        // address is one the interface routes on, so it answers the document
-        // before this branch is ever reached; `/public/signin/<token>` is not,
-        // so it still falls through to the 404 this test is about.
+        // **Finding a path this branch still reaches took two tries.** `FILE` is
+        // one the interface routes on, so it answers the document long before
+        // here. `/public/signin/<token>` looked like the answer and is not: the
+        // magic-link landing is deliberately exempt from the surface being
+        // configured — it is reached from an email by somebody holding nothing —
+        // so it is served rather than 404ed. `SIGNOUT` is neither: a public
+        // address, not a document, and with no surface behind it there is nothing
+        // there.
         let mut f = Fixture::new("policy-unconfigured");
-        let res = f.go(&Req::get("/public/signin/some-token"));
-        assert_eq!(res.status, 404);
+        let res = f.go(&Req::get(public_route::SIGNOUT));
+        assert_eq!(res.status, 404, "{}", res.body);
         assert_eq!(res.policy, Policy::Strict);
     }
 
@@ -8941,15 +8449,11 @@ mod tests {
         let session = f.signed_in("jo@x.com");
 
         for i in 0..3 {
-            let res = f.go(
-                &Req::post(public_route::FILE, &format!("text=thing+{i}&kind=bug"))
-                    .with_cookie(&session),
-            );
+            let res = try_filing_as(&mut f, &session, &format!("thing {i}"));
             assert_eq!(res.status, 200, "filing {i}: {}", res.body);
         }
 
-        let refused = f
-            .go(&Req::post(public_route::FILE, "text=one+too+many&kind=bug").with_cookie(&session));
+        let refused = try_filing_as(&mut f, &session, "one too many");
         assert_eq!(refused.status, 429, "{}", refused.body);
         assert!(refused.body.contains("limit"), "{}", refused.body);
         assert_eq!(f.store.all().unwrap().len(), 3, "nothing extra was written");
@@ -8964,13 +8468,12 @@ mod tests {
             .with_caps(2, 100);
         let session = f.signed_in("jo@x.com");
 
-        f.go(&Req::post(public_route::FILE, "text=first&kind=bug").with_cookie(&session));
+        file_publicly_as(&mut f, &session, "first", "intake");
         let id = f.store.all().unwrap()[0].id.clone();
         f.store.discard(&id).unwrap();
-        f.go(&Req::post(public_route::FILE, "text=second&kind=bug").with_cookie(&session));
+        file_publicly_as(&mut f, &session, "second", "intake");
 
-        let refused =
-            f.go(&Req::post(public_route::FILE, "text=third&kind=bug").with_cookie(&session));
+        let refused = try_filing_as(&mut f, &session, "third");
         assert_eq!(refused.status, 429, "a discard did not refund the budget");
     }
 
@@ -8983,14 +8486,24 @@ mod tests {
             .with_caps(1, 100);
         let session = f.signed_in("jo@x.com");
 
-        f.go(&Req::post(public_route::FILE, "text=spam&kind=bug").with_cookie(&session));
+        file_publicly_as(&mut f, &session, "spam", "intake");
         let id = f.store.all().unwrap()[0].id.clone();
         f.store
             .finish_screening(&id, Some("screened as spam"))
             .unwrap();
 
-        let refused =
-            f.go(&Req::post(public_route::FILE, "text=another&kind=bug").with_cookie(&session));
+        // **And the filer is never told which of the two it was.** The coarse
+        // label a filer reads says "received" for `Screening`, `Quarantined` and
+        // `Queued` alike — learning it was quarantined is learning that this
+        // server screens, which is exactly what a spammer tunes against.
+        let listed = f.go(&Req::get(&api_path("requests")).with_cookie(&session));
+        assert!(
+            !listed.body.contains("quarantined") && !listed.body.contains("screened as spam"),
+            "a filer was told the screener held it: {}",
+            listed.body
+        );
+
+        let refused = try_filing_as(&mut f, &session, "another");
         assert_eq!(refused.status, 429, "quarantine did not refund the budget");
     }
 
@@ -9005,10 +8518,14 @@ mod tests {
         let device = f.as_admin();
         for i in 0..3 {
             let res = f.go(
-                &Req::post("/file", &format!("text=thing+{i}&repo=alpha&kind=bug"))
-                    .with_cookie(&device),
+                &Req::post_json(
+                    &api_path("file"),
+                    &serde_json::json!({ "text": format!("thing {i}"), "repo": "alpha", "kind": "bug" })
+                        .to_string(),
+                )
+                .with_cookie(&device),
             );
-            assert_eq!(res.status, 200, "device filing {i}: {}", res.body);
+            assert_eq!(res.status, 200, "administrator filing {i}: {}", res.body);
         }
         assert_eq!(f.store.all().unwrap().len(), 3);
     }
@@ -9030,15 +8547,11 @@ mod tests {
         f.store.put_accounts(&accounts).unwrap();
         assert!(f.store.accounts().unwrap().live().is_empty());
 
-        // A different address, with the only account revoked.
-        f.go(&Req::post(public_route::SIGNIN, "email=second%40x.com"));
-        let body = f.mailer.last_body().unwrap();
-        let token = body
-            .split(public_route::SIGNIN_PREFIX)
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap()
-            .to_string();
+        // A different address, with the only account revoked. **Asked through the
+        // endpoint**: pointed at the deleted form this read back the link the
+        // *first* sign-in emailed, so it spent a token for the address that
+        // already had an account and proved nothing about the ceiling.
+        let token = link_token_for(&mut f, "second@x.com");
         let res = f.go(&Req::post(
             &format!("{}{token}", public_route::SIGNIN_PREFIX),
             "",
@@ -9057,17 +8570,12 @@ mod tests {
             .with_caps(1, 100);
 
         let alice = f.signed_in("alice@x.com");
-        f.go(&Req::post(public_route::FILE, "text=alice&kind=bug").with_cookie(&alice));
-        assert_eq!(
-            f.go(&Req::post(public_route::FILE, "text=more&kind=bug").with_cookie(&alice))
-                .status,
-            429
-        );
+        file_publicly_as(&mut f, &alice, "alice", "intake");
+        assert_eq!(try_filing_as(&mut f, &alice, "more").status, 429);
 
         let bob = f.signed_in("bob@x.com");
         assert_eq!(
-            f.go(&Req::post(public_route::FILE, "text=bob&kind=bug").with_cookie(&bob))
-                .status,
+            try_filing_as(&mut f, &bob, "bob").status,
             200,
             "another filer has their own budget"
         );
@@ -9080,20 +8588,13 @@ mod tests {
             .with_public(false)
             .with_caps(1, 100);
         let session = f.signed_in("jo@x.com");
-        f.go(&Req::post(public_route::FILE, "text=first&kind=bug").with_cookie(&session));
-        assert_eq!(
-            f.go(&Req::post(public_route::FILE, "text=second&kind=bug").with_cookie(&session))
-                .status,
-            429
-        );
+        file_publicly_as(&mut f, &session, "first", "intake");
+        assert_eq!(try_filing_as(&mut f, &session, "second").status, 429);
 
         // A day later.
         f.now_ms += crate::config::FILING_WINDOW_MS + 1;
-        assert_eq!(
-            f.go(&Req::post(public_route::FILE, "text=tomorrow&kind=bug").with_cookie(&session))
-                .status,
-            200
-        );
+        let res = try_filing_as(&mut f, &session, "tomorrow");
+        assert_eq!(res.status, 200, "{}", res.body);
     }
 
     #[test]
@@ -9109,14 +8610,7 @@ mod tests {
 
         // The link is still issued and spent — the refusal is at creation, so
         // nothing about it tells a stranger where the wall is.
-        f.go(&Req::post(public_route::SIGNIN, "email=second%40x.com"));
-        let body = f.mailer.last_body().unwrap();
-        let token = body
-            .split(public_route::SIGNIN_PREFIX)
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap()
-            .to_string();
+        let token = link_token_for(&mut f, "second@x.com");
         let res = f.go(&Req::post(
             &format!("{}{token}", public_route::SIGNIN_PREFIX),
             "",
@@ -9139,12 +8633,16 @@ mod tests {
             .with_caps(20, 1);
         f.signed_in("jo@x.com");
 
-        // Same address again, with the ceiling already reached.
+        // Same address again, with the ceiling already reached. **Asked of
+        // `/me`**: the filing address answers the interface's document to
+        // anybody, so it cannot say whether a session was opened — the identity
+        // the server reports for the cookie is what can.
         let session = f.signed_in("jo@x.com");
-        assert_eq!(
-            f.go(&Req::get(public_route::FILE).with_cookie(&session))
-                .status,
-            200
+        let me = f.go(&Req::get(ME_PATH).with_cookie(&session));
+        assert!(
+            me.body.contains("\"filer\""),
+            "an existing filer was locked out by the signup wall: {}",
+            me.body
         );
         assert_eq!(f.store.accounts().unwrap().accounts.len(), 1);
     }
@@ -9154,9 +8652,18 @@ mod tests {
         let mut f = Fixture::new("public-length").with_public(false);
         let session = f.signed_in("jo@x.com");
 
-        let wordy = format!("text={}&kind=bug", "word+".repeat(MAX_WORDS + 10));
-        let res = f.go(&Req::post(public_route::FILE, &wordy).with_cookie(&session));
-        assert_eq!(res.status, 400);
+        // The same `check_length` an administrator's filing goes through, which
+        // is the property: the screener's "sees the whole request" guarantee is
+        // only true if what it screens is what was accepted, so the two filing
+        // paths cannot drift to different ceilings.
+        let res = try_filing_as(&mut f, &session, &"word ".repeat(MAX_WORDS + 10));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(res.body.contains("words"), "{}", res.body);
+        assert!(f.store.all().unwrap().is_empty());
+
+        let res = try_filing_as(&mut f, &session, &"x".repeat(MAX_BYTES + 1));
+        assert_eq!(res.status, 400, "{}", res.body);
+        assert!(res.body.contains("characters"), "{}", res.body);
         assert!(f.store.all().unwrap().is_empty());
     }
 

@@ -13,9 +13,9 @@
    `display:swap` so text is readable in the fallback face while they load,
    rather than invisible: on the bad connection this surface is designed for,
    the alternative is a blank page holding real content. */
-@font-face{font-family:"DM Sans";src:url(/public/dm-sans.woff2)format("woff2");
+@font-face{font-family:"DM Sans";src:url(/ui/dm-sans.woff2)format("woff2");
 font-weight:100 1000;font-style:normal;font-display:swap}
-@font-face{font-family:"Fraunces";src:url(/public/fraunces.woff2)format("woff2");
+@font-face{font-family:"Fraunces";src:url(/ui/fraunces.woff2)format("woff2");
 font-weight:100 1000;font-style:normal;font-display:swap}
 /* Warm cream in light, plum-black with coral in dark. Taken from Memosy's own
    palette (web/src/app.css in that repository) so two properties by the same

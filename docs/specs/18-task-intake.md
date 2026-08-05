@@ -726,15 +726,20 @@ canonicalised-and-checked. That is the difference between a path-traversal bug
 being *mitigated* and being *unreachable* — there is no path-handling code on the
 request path at all, because a request carries no path.
 
-**The heading used to say "chosen, never typed", and the hosted architecture
-broke the first half of that.** The server held no copy of the repository set —
-that was the property that made it safe to expose — so it could not render a
-picker. The *device* form asks for a free-text **name**
-<!--@ crates/sc-server/src/page -->, and the closed set is enforced one hop
-later, when the daemon resolves it.
+**The heading said "chosen, never typed", the hosted architecture broke the
+first half of that, and the interface has since restored it.** The server held no
+copy of the repository set — that was the property that made it safe to expose —
+so it could not render a picker.
 
-The security claim survives intact, because it never rested on the picker: a name
-is not a path, whether it was chosen or typed.
+It can now, without holding anything new: `/me` carries the repositories this
+surface offers <!--@ crates/sc-server/src/api.rs -->, and the filing form renders
+a picker from that or no field at all when there is only one
+<!--@ web/src/App.tsx -->. A name the server does not serve is still refused
+rather than defaulted, and the closed set is still enforced one hop later, when
+the daemon resolves it.
+
+The security claim never rested on the picker, which is why it survived the
+period without one: a name is not a path, whether it was chosen or typed.
 
 **The picker is back**, and on the surface that lost it. ✅ **Built**: the public
 form offers exactly the enabled set and a submitted name is checked against the
@@ -779,14 +784,14 @@ replaces: naming a repository in a stack used to turn the surface on as a side
 effect.
 
 **Enabling asks whether a daemon is actually serving that name**
-<!--@ sc_server::routes::enable_repo -->, and this is a **typo-catcher, not a
+<!--@ sc_server::routes::api_add_repo -->, and this is a **typo-catcher, not a
 security gate** — built as one, because confusing the two makes it worse at
 both. Enabling `smrt-coder` writes a name nothing will ever claim: filings pile
 up against a repository that does not exist, and the surface looks broken rather
 than misconfigured. Asking a machine that is polling right now catches that when
 it is cheapest to fix.
 
-It needs a **narrower question than the one the review page asks**
+It needs a **narrower question than the one the review surface asks**
 <!--@ crates/sc-server/src/daemons.rs -->. A daemon that declared nothing is
 treated as covering everything, which is right for *"is this request stuck?"* —
 it is serving something and the server cannot say it is not this — and wrong
@@ -796,10 +801,19 @@ permanent record.
 And it **cannot be a refusal**, because nobody having said the name is not proof
 of a typo: the register is empty for the first half-minute after a restart, and
 a daemon on an older build declares nothing at all. So an unconfirmed name is
-*questioned* — the page names the case, lists what is actually on offer, and
-offers to proceed. Taking that override records that nobody confirmed it, so
-"a machine vouched for this" and "I asserted it" stay distinguishable. A page
+*questioned* — a 409 that names the case and the `anyway` override rather than a
+400 that just says no. Taking that override records that nobody confirmed it, so
+"a machine vouched for this" and "I asserted it" stay distinguishable. An answer
 that showed them alike could not explain why nothing is being drafted.
+
+**One diagnostic is currently missing here, and it was load-bearing.** The
+rendered page listed the repositories machines are *actually* offering beside
+the name that matched nothing — which is what turns "refused" into "you typed
+`smrt-coder` and the machine said `smart-coder`". `Seen::offered` is read to make
+the decision and never returned, and no endpoint carries it, so the interface
+cannot show it. The fix is a field on the machines endpoint rather than prose in
+the 409: the same list answers "why is nothing drafting?" and belongs where the
+machines already are.
 
 **Disabling closes the door and keeps what came through it.** Deleting the
 filings would make the button destructive in a way its name does not say, and
@@ -985,10 +999,10 @@ being run to produce container images. Recording this because a reason that does
 not survive measurement should not survive into a spec either.
 
 **What did.** Component reuse, a real design system, and interactions that a form
-round-trip cannot express. This surface shares its palette and type with a
-sibling product (see the `PUBLIC_STYLE` doc) by *copying* values, and the copy
-was accepted only because importing them meant a toolchain. Once the toolchain
-exists that trade changes.
+round-trip cannot express. The rendered surface shared its palette and type with
+a sibling product by *copying* values into a stylesheet compiled into the binary,
+and the copy was accepted only because importing them meant a toolchain. Once the
+toolchain exists that trade changes.
 
 **What it costs, itemised:**
 
@@ -1019,9 +1033,16 @@ describing itself as SSE; the SSE frame helper is dead relative to the pages tha
 ship. A phone on a train loses its connection constantly, and polling reconnects by
 asking again, which is the failure mode that needs no code.
 
-✅ **Built** <!--@ crates/sc-server/src/page -->, **with the transport
-deviating**: the page is server-rendered HTML with **no script and no polling at
-all** — forms and links, refreshed by the developer pulling down.
+✅ **Built** <!--@ crates/sc-server/src/api.rs -->, **and the transport
+deviation has reversed.** It was server-rendered HTML with no script and no
+polling at all — forms and links, refreshed by the developer pulling down. The
+surface is now a single-page interface over a JSON API
+<!--@ web/src/api.ts -->, so script is back and the argument that removed it is
+recorded where it was overturned rather than deleted.
+
+Still no polling. Pulling down to refresh remains the reconnect that needs no
+code, and nothing here has ever needed to learn about a change it did not ask
+for.
 
 That went further than this section asked, and the reason is the section above
 it. Forbidding remote subresources is only half the exfiltration defence; the
@@ -1145,7 +1166,7 @@ container.
 
 ### The public surface is designed, themed and translated
 
-<!--@ crates/sc-server/src/page/public.rs -->
+<!--@ crates/sc-server/assets/ui/app.css -->
 
 What the relaxed CSP was *for*. Three things the filer gets, and the reasoning
 that decided each:
@@ -1198,10 +1219,14 @@ authenticates on it, and arriving from an external link should still show the
 language the reader chose. Its value is parsed against the catalogues that exist,
 so nothing a caller writes there reaches a page except by selecting among them.
 
-Looking at any of this without standing up a mail provider is
-`cargo run -p sc-server --example render-public -- <dir>`
-<!--@ crates/sc-server/examples/render-public.rs -->, which writes every public
-page in every language through the real renderers.
+Looking at any of this without standing up a mail provider used to be
+`cargo run -p sc-server --example render-public -- <dir>`, which wrote every
+public page in every language through the real renderers. **That example is
+gone with the renderers.** There are no server-rendered pages left to dump: the
+interface is a client, and the way to look at it is to run it — the dev server
+against a local container, or the container alone
+<!--@ deploy/sc-server.stack.yml -->. The one document this server still renders
+is the magic-link landing, and it is covered by tests rather than by eye.
 
 #### Two concessions to running it locally, both derived rather than configured
 

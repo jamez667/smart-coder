@@ -4,18 +4,23 @@
 //! daemon's, it is versioned by [`sc_proto::wire`], and a client of one must
 //! never be able to reach the other by guessing a path.
 //!
-//! ## Why this exists beside the pages rather than instead of them
+//! ## This is the browser surface now
 //!
-//! Spec 18 records the reversal in full: this surface is becoming a single-page
-//! application, and the server-rendered HTML in [`crate::page`] is what it
-//! replaces. That replacement is staged, and **nothing here deletes anything**
-//! until the thing that supersedes it is proven. Both can answer at once; the
-//! pages remain the working surface until the last stage.
+//! Spec 18 records the reversal in full: this surface is a single-page
+//! application, and the server-rendered HTML it grew up beside is gone. The
+//! staging is over — the pages answered alongside this API until each thing that
+//! superseded them was proven, and were deleted once every one was.
+//!
+//! Two documents survive the deletion and are here rather than in a page layer:
+//! [`NOT_FOUND`], and the magic-link landing in [`crate::routes`]. Both are
+//! navigations *into* the server from outside it — a typed address, a link in an
+//! email — so both need a real HTML document rather than a JSON body a browser
+//! would render as text.
 //!
 //! ## What a JSON API makes tempting, and must not do
 //!
 //! The HTML surface got several things right by accident of being HTML, and each
-//! is easy to lose in translation. They are listed here because the failure mode
+//! was easy to lose in translation. They are listed here because the failure mode
 //! is a well-meaning "fix" rather than an oversight:
 //!
 //! - **404, never 403.** Another filer's request, an owner's non-owned
@@ -52,9 +57,9 @@ pub const PREFIX: &str = "/api/v1/ui/";
 /// the settings link is there at all — comes from here rather than from the
 /// client's own idea of who it is.
 ///
-/// This replaces what [`crate::page::shell`] and its account menu did by
+/// This replaces what the server-rendered shell and its account menu did by
 /// construction: a filer's menu never named a page they could not open, because
-/// the server built the menu. That property has to survive the move to a client
+/// the server built the menu. That property had to survive the move to a client
 /// that builds its own, and this is how.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Me {
@@ -191,8 +196,8 @@ impl Me {
 /// **The narrow view, and narrow by construction rather than by filtering.**
 /// There is no field here for the repository name, the artifact directory or the
 /// daemon's failure note, so no handler can leak one by forgetting to strip it —
-/// the same reason [`crate::page::public_detail`] built its HTML from a fixed
-/// list rather than from the record.
+/// the same reason the server-rendered filer's page built its HTML from a fixed
+/// list of fields rather than from the record.
 ///
 /// The state is the **coarse** label. `Screening`, `Quarantined` and `Queued`
 /// all read as "received": a filer learning their request was quarantined learns
@@ -468,7 +473,37 @@ pub mod ui {
 
     /// Where the built files are served from.
     pub const SCRIPT_PATH: &str = "/ui/app.js";
+    /// The body face's address, named by [`STYLE`]'s `@font-face` block.
+    ///
+    /// **Under `/ui/`, with the rest of the interface, and that is a fix.** These
+    /// were at `/public/dm-sans.woff2`, served by an arm inside the public
+    /// surface's routes — so a server with public intake switched off answered
+    /// 404 for them while its own stylesheet went on asking. The interface still
+    /// rendered, in fallback faces, and no status-code test could see it because
+    /// every status was correct.
+    pub const FONT_BODY_PATH: &str = "/ui/dm-sans.woff2";
+    /// The display face's address. See [`FONT_BODY_PATH`].
+    pub const FONT_DISPLAY_PATH: &str = "/ui/fraunces.woff2";
     pub const STYLE_PATH: &str = "/ui/app.css";
+
+    /// The body face — DM Sans, variable weight, Latin subset.
+    ///
+    /// Compiled in rather than read from disk, like [`STYLE`] beside it: it
+    /// travels with the binary, so the container has no asset directory to mount
+    /// and no file that can go missing. **SIL Open Font License 1.1**, whose text
+    /// ships beside it in `assets/` — the licence requires the notice to travel
+    /// with the font.
+    ///
+    /// Served at `/public/dm-sans.woff2`, which is the address [`STYLE`] names in
+    /// its `@font-face`. The path is historical — it was the server-rendered
+    /// surface's — and is kept because moving it would mean changing a stylesheet
+    /// and a route together for no gain. `the_stylesheet_asks_for_no_origin_but_this_one`
+    /// pins the two to each other.
+    pub const FONT_BODY: &[u8] = include_bytes!("../assets/dm-sans.woff2");
+
+    /// The display face — Fraunces, variable weight, Latin subset. Same licence,
+    /// same reasoning, served at `/public/fraunces.woff2`.
+    pub const FONT_DISPLAY: &[u8] = include_bytes!("../assets/fraunces.woff2");
 }
 
 #[cfg(test)]

@@ -554,8 +554,7 @@ fn route_label(path: &str) -> &'static str {
         public_route::SIGNIN => "/public/signin",
         public_route::SIGNOUT => "/public/signout",
         public_route::LANGUAGE => "/public/language",
-        public_route::SCRIPT => "/public/app.js",
-        public_route::FONT_BODY | public_route::FONT_DISPLAY => "/public/font",
+        crate::api::ui::FONT_BODY_PATH | crate::api::ui::FONT_DISPLAY_PATH => "/ui/font",
         private_route::REVIEW => "/review",
         private_route::SETUP => "/setup",
         private_route::SETUP_ADMIN => "/setup/admin",
@@ -836,13 +835,12 @@ mod tests {
     use super::*;
 
     /// Every label `route_label` is allowed to produce.
-    const LABELS: [&str; 14] = [
+    const LABELS: [&str; 13] = [
         "/",
         "/public",
         "/public/signin",
         "/public/signout",
         "/public/language",
-        "/public/app.js",
         "/public/font",
         "/public/signin/:token",
         "/public/request/:id",
@@ -898,9 +896,8 @@ mod tests {
         assert_eq!(route_label(public_route::SIGNIN), "/public/signin");
         assert_eq!(route_label(public_route::SIGNOUT), "/public/signout");
         assert_eq!(route_label(public_route::LANGUAGE), "/public/language");
-        assert_eq!(route_label(public_route::SCRIPT), "/public/app.js");
-        assert_eq!(route_label(public_route::FONT_BODY), "/public/font");
-        assert_eq!(route_label(public_route::FONT_DISPLAY), "/public/font");
+        assert_eq!(route_label(crate::api::ui::FONT_BODY_PATH), "/ui/font");
+        assert_eq!(route_label(crate::api::ui::FONT_DISPLAY_PATH), "/ui/font");
         assert_eq!(route_label(private_route::REVIEW), "/review");
         assert_eq!(route_label(private_route::SETUP), "/setup");
         assert_eq!(route_label(wire::route::WORK), "/api/v1/work");
