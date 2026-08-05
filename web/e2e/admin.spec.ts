@@ -91,6 +91,18 @@ test("every administrative page is reachable from the menu", async ({
 });
 
 test("the settings page never shows a stored secret", async ({ page }) => {
+  // If this is going to fail, say what the client believed rather than only
+  // which heading appeared.
+  await page.goto("/settings");
+  const seen = await page.evaluate(() => ({
+    path: window.location.pathname,
+    h1: document.querySelector("h1")?.textContent,
+  }));
+  expect(
+    seen.h1,
+    `at ${seen.path} the interface drew "${seen.h1}"`,
+  ).toBe("Settings");
+
   // **There is no read path for a stored secret anywhere in this server**, and
   // the interface must not invent one. The page says whether a key is set; the
   // field it would be typed into is empty.
