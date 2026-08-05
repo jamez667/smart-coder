@@ -33,6 +33,30 @@ test.beforeEach(async ({ context, page }) => {
     },
   ]);
   await page.goto("/");
+
+  // **Assert the premise before testing anything built on it.** Every one of
+  // these pages is gated on `me.can.administer`, so a session that is not the
+  // administrator renders the review list instead — and the failure reads as
+  // "the heading is wrong", which is a long way from "you are not signed in as
+  // who you think".
+  //
+  // This cost a CI round trip: four tests failed with `Received: "Requests"`
+  // and none of them said why.
+  const me = await page.evaluate(async () => {
+    const r = await fetch("/api/v1/ui/me", { credentials: "same-origin" });
+    return (await r.json()) as { role: string; can: { administer: boolean } };
+  });
+  if (!me.can.administer) {
+    // Name the two things that could have gone wrong, so one run answers it:
+    // either the sign-in did not return a session, or the browser declined to
+    // send it back (a `Secure` cookie over plain HTTP is the usual reason).
+    const cookies = await context.cookies();
+    const sent = cookies.map((c) => `${c.name}(secure=${c.secure})`).join(", ");
+    throw new Error(
+      `signed in as ${me.role}, not the administrator.` +
+        ` base=${base()} session=${session?.slice(0, 8)}… cookies=[${sent}]`,
+    );
+  }
 });
 
 test("every administrative page is reachable from the menu", async ({
