@@ -1,6 +1,7 @@
 //! App logic: line-replace, reverts, plan/build actions, tabs, git.
 
 use super::*;
+use sc_win::layout::EditorId;
 
 impl App {
     /// Apply a completed line-replace reply: splice the new block into the file, record the
@@ -107,7 +108,7 @@ impl App {
         sc_win::comments::save(&root, &self.comments);
 
         // Show the applied file + refresh highlights/tree.
-        self.selected_file = Some(c.file.clone());
+        self.panes.focused_mut().selected_file = Some(c.file.clone());
         self.follow_agent = false;
         self.select_file(c.file.clone());
         self.refresh_git_view();
@@ -169,7 +170,7 @@ impl App {
     /// line range with the committed version. `cur_start` identifies the hunk (its first current
     /// line). Recomputes the diff from the freshly-loaded file, so it's always ground-truth.
     pub(crate) fn revert_block(&mut self, cur_start: usize) {
-        let Some(rel) = self.selected_file.clone() else {
+        let Some(rel) = self.panes.focused().selected_file.clone() else {
             return;
         };
         let root = self.workspace_root();
@@ -319,7 +320,7 @@ impl App {
     /// nothing to apply — just point an iterate run at it. Same guards: needs an open project
     /// and no run in flight.
     pub(crate) fn execute_open_plan(&mut self) {
-        let Some(rel) = self.selected_file.clone() else {
+        let Some(rel) = self.panes.focused().selected_file.clone() else {
             return;
         };
         if !is_feature_plan(&rel) || self.session.is_some() {
@@ -344,7 +345,7 @@ impl App {
     /// green (`RunKind::StagedBuild`). Sibling of [`Self::execute_open_plan`] (which stops at the
     /// design breakdown); the file is already on disk, so nothing to apply. Same guards.
     pub(crate) fn build_open_plan(&mut self) {
-        let Some(rel) = self.selected_file.clone() else {
+        let Some(rel) = self.panes.focused().selected_file.clone() else {
             return;
         };
         if !is_feature_plan(&rel) || self.session.is_some() {
@@ -467,44 +468,77 @@ impl App {
     }
 
     /// Select `rel`, opening a tab with `origin` deciding the initial view.
+    ///
+    /// If the file is already open in ANOTHER pane, focus goes there rather than opening a
+    /// second copy — see [`Self::select_file_into`].
     pub(crate) fn select_file_from(&mut self, rel: String, origin: Origin) {
+        let into = self
+            .panes
+            .pane_holding(&rel)
+            .unwrap_or_else(|| self.panes.focused_id());
+        self.select_file_into(rel, origin, into);
+    }
+
+    /// Select `rel` in `into`, opening a tab there if it isn't one already.
+    ///
+    /// **A path lives in exactly one pane.** `Tab` owns its buffer, so the same file open twice
+    /// would be two independent buffers over one path — two dirty flags, two disk stamps, and a
+    /// single path-keyed save-conflict slot between them. Saving in one would then raise a
+    /// conflict in the other reporting a change *you* made seconds ago, whose only offered answer
+    /// destroys the first pane's edits. Sharing one buffer across panes needs a document model
+    /// the editor widget doesn't have, so until it does, asking for a file that's open elsewhere
+    /// takes you there.
+    pub(crate) fn select_file_into(&mut self, rel: String, origin: Origin, into: EditorId) {
+        // If some pane already holds it, that pane wins over the requested one.
+        let into = self.panes.pane_holding(&rel).unwrap_or(into);
+        self.panes.focus(into);
+
         let root = self.workspace_root();
-        let switching = self.selected_file.as_deref() != Some(rel.as_str());
+        let switching = self.panes.focused().selected_file.as_deref() != Some(rel.as_str());
         // Switching to a different file resets the scrollable to the top; keep our virtualization
         // offset in sync so the first frame renders the top window, not the old file's slice.
         if switching {
-            self.code_scroll_y = 0.0;
-            self.code_viewport = None;
+            self.panes.focused_mut().code_scroll_y = 0.0;
+            self.panes.focused_mut().code_viewport = None;
         }
         // The REVIEW view is rebuilt from disk on every selection — it is a rendering of the
         // file, not a buffer, so it must show current bytes.
-        self.code = Some(sc_win::codeview::load(&root, &rel));
+        self.panes.focused_mut().code = Some(sc_win::codeview::load(&root, &rel));
         // Re-selecting an ALREADY-OPEN tab must not re-open it: that would throw away its
         // buffer, and with it any unsaved edits. Just make it active.
-        if !self.tabs.iter().any(|t| t.path == rel) {
+        if !self.panes.focused().tabs.iter().any(|t| t.path == rel) {
             let abs = root.join(&rel);
-            self.tabs.push(Tab::open(rel.clone(), &abs, origin));
+            self.panes
+                .focused_mut()
+                .tabs
+                .push(Tab::open(rel.clone(), &abs, origin));
         }
-        self.selected_file = Some(rel);
+        self.panes.focused_mut().selected_file = Some(rel);
         self.refresh_changed_lines();
     }
 
     /// The active tab, if any.
     pub(crate) fn active_tab(&self) -> Option<&Tab> {
-        let sel = self.selected_file.as_deref()?;
-        self.tabs.iter().find(|t| t.path == sel)
+        let sel = self.panes.focused().selected_file.as_deref()?;
+        self.panes.focused().tabs.iter().find(|t| t.path == sel)
     }
 
     /// The active tab, mutably.
     pub(crate) fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        let sel = self.selected_file.clone()?;
-        self.tabs.iter_mut().find(|t| t.path == sel)
+        let sel = self.panes.focused().selected_file.clone()?;
+        self.panes
+            .focused_mut()
+            .tabs
+            .iter_mut()
+            .find(|t| t.path == sel)
     }
 
     /// Whether the tab for `rel` has unsaved edits. Used to guard every path that would
     /// overwrite or reload a file behind the editor's back.
     pub(crate) fn is_dirty(&self, rel: &str) -> bool {
-        self.tabs.iter().any(|t| t.path == rel && t.dirty)
+        // A question about the FILE, so it asks every pane — a path lives in exactly one of
+        // them, but which one is not this caller's business.
+        self.panes.is_dirty(rel)
     }
 
     /// Close the CODE-panel tab for `path` (no-op if it isn't open). If it was the active tab,
@@ -526,23 +560,32 @@ impl App {
     /// Close `path` without the dirty check — the "Discard" answer to the confirm prompt, and
     /// the path used when a file has been deleted out from under its tab.
     pub(crate) fn force_close_tab(&mut self, path: &str) {
-        if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
-            let was_active = self.selected_file.as_deref() == Some(path);
-            self.tabs.remove(i);
+        if let Some(i) = self
+            .panes
+            .focused()
+            .tabs
+            .iter()
+            .position(|t| t.path == path)
+        {
+            let was_active = self.panes.focused().selected_file.as_deref() == Some(path);
+            self.panes.focused_mut().tabs.remove(i);
             if self.confirm_close.as_deref() == Some(path) {
                 self.confirm_close = None;
             }
             // Only the active tab closing changes what's shown; closing a background tab leaves
             // the active file alone.
             if was_active {
-                match tab_after_close(i, self.tabs.len()) {
+                match tab_after_close(i, self.panes.focused().tabs.len()) {
                     Some(idx) => {
-                        let next = self.tabs[idx].path.clone();
+                        let next = self.panes.focused().tabs[idx].path.clone();
                         self.select_file(next);
                     }
                     None => {
-                        self.selected_file = None;
-                        self.code = None;
+                        self.panes.focused_mut().selected_file = None;
+                        self.panes.focused_mut().code = None;
+                        // A pane with no tabs left closes itself — otherwise it is a dead
+                        // rectangle with no tab to drag and no way to dismiss it.
+                        self.prune_empty_panes();
                     }
                 }
             }
@@ -552,9 +595,9 @@ impl App {
     /// Re-read the currently selected file from disk (after the agent edited it), so the
     /// code panel reflects the latest bytes — and refresh which lines differ from HEAD.
     pub(crate) fn reload_selected(&mut self) {
-        if let Some(rel) = self.selected_file.clone() {
+        if let Some(rel) = self.panes.focused().selected_file.clone() {
             let root = self.workspace_root();
-            self.code = Some(sc_win::codeview::load(&root, &rel));
+            self.panes.focused_mut().code = Some(sc_win::codeview::load(&root, &rel));
             // The review view above is derived from disk, so refreshing it is always safe. The
             // tab's BUFFER is not — `reload_tab_from_disk` refuses while it's dirty, so an
             // agent write can never erase what you were typing.
@@ -575,7 +618,7 @@ impl App {
         let due = self
             .last_reload
             .is_none_or(|t| t.elapsed() >= Duration::from_millis(750));
-        let Some(rel) = self.selected_file.clone() else {
+        let Some(rel) = self.panes.focused().selected_file.clone() else {
             return Task::none();
         };
         if !due {
@@ -633,19 +676,23 @@ impl App {
         }
     }
 
-    pub(crate) fn scroll_code_to_line(&self, line: usize) -> Task<Message> {
+    /// Scroll `pane`'s code view so `line` sits near the middle.
+    ///
+    /// Takes the pane explicitly rather than assuming the focused one: the height it centres
+    /// against and the scrollable it targets both belong to a specific pane, and a jump-to-line
+    /// triggered by a compile diagnostic may well be aimed somewhere other than where focus is.
+    pub(crate) fn scroll_code_to_line(&self, pane: EditorId, line: usize) -> Task<Message> {
         let center = line as f32 * CODE_LINE_PX;
-        // `code_view_h` is 0 until the view's first scroll event; fall back to a typical editor
-        // height so a jump on a freshly-opened file still lands the target near center, not glued
-        // to the very top.
-        let view_h = if self.code_view_h > 1.0 {
-            self.code_view_h
-        } else {
-            400.0
+        // `code_view_h` is a guess until that pane's first scroll event; fall back to a typical
+        // editor height so a jump on a freshly-opened file still lands near centre rather than
+        // glued to the very top.
+        let view_h = match self.panes.get(pane) {
+            Some(p) if p.code_view_h > 1.0 => p.code_view_h,
+            _ => 400.0,
         };
         let y = (center - view_h / 2.0).max(0.0);
         iced::widget::operation::scroll_to(
-            code_scroll_id(),
+            code_scroll_id(pane),
             iced::widget::scrollable::AbsoluteOffset { x: 0.0, y },
         )
     }
@@ -654,11 +701,17 @@ impl App {
     /// (red). Cheap `git diff -U0` on the one file (all-added for an untracked file); empty when
     /// nothing's selected. `changed_lines` is the green set, kept for the minimap + jump-to-change.
     pub(crate) fn refresh_changed_lines(&mut self) {
-        self.file_diff = match &self.selected_file {
-            Some(rel) => sc_win::gitdiff::file_diff(&self.workspace_root(), rel),
+        // Read the path and compute the diff BEFORE touching the pane mutably: `workspace_root`
+        // borrows `self`, so doing it inline would hold an immutable borrow across the write.
+        let root = self.workspace_root();
+        let rel = self.panes.focused().selected_file.clone();
+        let diff = match rel {
+            Some(rel) => sc_win::gitdiff::file_diff(&root, &rel),
             None => sc_win::gitdiff::FileDiff::default(),
         };
-        self.changed_lines = self.file_diff.added.clone();
+        let pane = self.panes.focused_mut();
+        pane.changed_lines = diff.added.clone();
+        pane.file_diff = diff;
     }
 
     /// Refresh the PR-view git state synchronously: the tree cache, per-file M/A/D statuses,

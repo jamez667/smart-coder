@@ -7,11 +7,11 @@ impl App {
     /// The inline comment box shown under the selected range (PR-style): a text input +
     /// Comment / Cancel. Submitting triages small (fix now) vs. big (plan first).
     pub(crate) fn view_comment_box(&self) -> Element<'_, Message> {
-        let placeholder = match self.comment_range {
+        let placeholder = match self.panes.focused().comment_range {
             Some((lo, hi)) if lo != hi => format!("comment on lines {lo}–{hi}…"),
             _ => "comment on this line…".to_string(),
         };
-        let input = text_input(&placeholder, &self.comment_draft)
+        let input = text_input(&placeholder, &self.panes.focused().comment_draft)
             .on_input(Message::CommentDraftChanged)
             .on_submit(Message::CommentSubmit)
             .padding(8)

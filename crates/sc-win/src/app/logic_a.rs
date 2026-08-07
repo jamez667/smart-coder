@@ -304,10 +304,12 @@ impl App {
         self.picked_workspace = Some(dir.clone());
         // A fresh project → drop any stale selection from the last one, and open the tree
         // compacted: every top-level folder starts collapsed.
-        self.selected_file = None;
-        self.code = None;
+        self.panes.focused_mut().selected_file = None;
+        self.panes.focused_mut().code = None;
         // Tabs held the old project's files — clear them so they don't linger into the new one.
-        self.tabs.clear();
+        // EVERY pane: the old project's tabs are meaningless, and so is an arrangement
+        // of panes holding them.
+        self.panes.clear();
         self.confirm_close = None;
         self.save_conflict = None;
         // Which toolchain the Compile button offers depends on what's open (spec 21).
@@ -438,7 +440,7 @@ impl App {
         // Snapshot the file open in the code view so the model answers against what the user is
         // looking at ("what does this do?", "add handling here"). Read from disk (not the capped
         // CodeView render) so the chat sees the real file; chat.rs head-clips it for the window.
-        let open_file = self.selected_file.as_ref().and_then(|rel| {
+        let open_file = self.panes.focused().selected_file.as_ref().and_then(|rel| {
             let path = self.workspace_root().join(rel);
             std::fs::read_to_string(&path)
                 .ok()
@@ -513,15 +515,18 @@ impl App {
     /// classification (fast `/no_think`), and close the comment box. Routing happens in
     /// [`Self::pump_triage`] when the verdict arrives.
     pub(crate) fn submit_line_comment(&mut self) {
-        let (Some((start, end)), Some(cv)) = (self.comment_range, self.code.as_ref()) else {
+        let (Some((start, end)), Some(cv)) = (
+            self.panes.focused().comment_range,
+            self.panes.focused().code.as_ref(),
+        ) else {
             return;
         };
-        let comment = self.comment_draft.trim().to_string();
+        let comment = self.panes.focused().comment_draft.trim().to_string();
         if comment.is_empty() {
             return;
         }
         let rel = cv.rel.clone();
-        // Scope from the CURRENT on-disk file, freshly numbered — NOT from `self.code`, which can
+        // Scope from the CURRENT on-disk file, freshly numbered — NOT from `self.panes.focused().code`, which can
         // be a stale streamed *preview* (renumbered/spliced) left by an earlier fix. Reading disk
         // here guarantees `start`/`end`/`selection` all refer to the same real bytes we'll splice,
         // so the fix lands on the lines you actually selected.
@@ -557,8 +562,8 @@ impl App {
         // What stops here is the auto-fix: no triage call, so nothing is classified or spliced
         // by a model. The user keeps a durable note on the line and nothing dials out.
         if self.cfg.craft() {
-            self.comment_range = None;
-            self.comment_draft.clear();
+            self.panes.focused_mut().comment_range = None;
+            self.panes.focused_mut().comment_draft.clear();
             return;
         }
         // Commit connection settings so the triage/edit use the current backend.
@@ -606,8 +611,8 @@ impl App {
             comment: lc,
             session,
         });
-        self.comment_range = None;
-        self.comment_draft.clear();
+        self.panes.focused_mut().comment_range = None;
+        self.panes.focused_mut().comment_draft.clear();
     }
 
     /// Drain the line-comment triage call. On a verdict: SMALL → run a scoped-but-coherent
@@ -702,7 +707,7 @@ impl App {
             match ev {
                 sc_win::chat_session::ChatEvent::Token(delta) => {
                     // Pull the fields we need out of the in-flight replace, ending the mutable
-                    // borrow before we touch `self` again (for workspace_root / self.code).
+                    // borrow before we touch `self` again (for workspace_root / self.panes.focused().code).
                     let preview_bits = self.replace.as_mut().map(|r| {
                         r.streamed.push_str(&delta);
                         (
@@ -725,9 +730,10 @@ impl App {
                             {
                                 let spliced =
                                     sc_win::linecomment::splice_lines(&cur, start, end, &preview);
-                                self.selected_file = Some(file.clone());
+                                self.panes.focused_mut().selected_file = Some(file.clone());
                                 self.follow_agent = false;
-                                self.code = Some(sc_win::codeview::from_text(&file, &spliced));
+                                self.panes.focused_mut().code =
+                                    Some(sc_win::codeview::from_text(&file, &spliced));
                             }
                         }
                     }

@@ -292,8 +292,9 @@ impl App {
                         // Show the PROPOSED content directly (not the on-disk file, which
                         // hasn't been written yet).
                         self.follow_agent = false;
-                        self.selected_file = Some(name.clone());
-                        self.code = Some(sc_win::codeview::from_text(&name, &content));
+                        self.panes.focused_mut().selected_file = Some(name.clone());
+                        self.panes.focused_mut().code =
+                            Some(sc_win::codeview::from_text(&name, &content));
                     }
                     self.chat_session = None;
                 }
@@ -611,13 +612,14 @@ impl App {
                                 let name = p
                                     .file
                                     .clone()
-                                    .or_else(|| self.selected_file.clone())
+                                    .or_else(|| self.panes.focused().selected_file.clone())
                                     .unwrap_or_else(|| "(writing…)".to_string());
                                 if p.file.is_some() {
-                                    self.selected_file = p.file.clone();
+                                    self.panes.focused_mut().selected_file = p.file.clone();
                                     self.follow_agent = false;
                                 }
-                                self.code = Some(sc_win::codeview::from_text(&name, &p.content));
+                                self.panes.focused_mut().code =
+                                    Some(sc_win::codeview::from_text(&name, &p.content));
                             }
                         }
                         continue; // a delta is preview-only; nothing else to fold

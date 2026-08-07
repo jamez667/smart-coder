@@ -106,7 +106,7 @@ impl App {
         self.select_file_for_review(file);
         // Deferred, like the git-tab jump: the scroll has to run against the newly laid-out
         // content, not the previous file's.
-        self.pending_scroll_line = Some(line);
+        self.panes.focused_mut().pending_scroll_line = Some(line);
         Task::done(Message::JumpToPendingLine)
     }
 }

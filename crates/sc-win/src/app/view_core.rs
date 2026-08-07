@@ -178,7 +178,8 @@ impl App {
         }
         for r in rows.iter().take(600) {
             let indent = 8.0 + (r.depth as f32) * 12.0;
-            let is_selected = !r.is_dir && self.selected_file.as_deref() == Some(r.rel.as_str());
+            let is_selected =
+                !r.is_dir && self.panes.focused().selected_file.as_deref() == Some(r.rel.as_str());
             let glyph = if r.is_dir {
                 // While filtering the tree is force-expanded, so every shown dir reads as open.
                 if !filtering && self.collapsed_dirs.contains(&r.rel) {
@@ -415,8 +416,8 @@ impl App {
         };
         // Highlight the row when it's the previewed file OR part of the multi-selection, so every
         // Ctrl/Shift-selected row reads as selected (not just the last-clicked previewed one).
-        let is_selected =
-            self.selected_file.as_deref() == Some(path) || self.git_selection.contains(path);
+        let is_selected = self.panes.focused().selected_file.as_deref() == Some(path)
+            || self.git_selection.contains(path);
         let name_color = if is_selected { ACCENT } else { color };
         let mut inner = row![
             text(status.badge().to_string())
@@ -577,10 +578,10 @@ impl App {
     /// The line range currently highlighted in the code view: the active drag (normalized so
     /// lo ≤ hi) if dragging, else the committed comment range. `None` when neither.
     pub(crate) fn selected_line_range(&self) -> Option<(usize, usize)> {
-        if let Some((a, b)) = self.drag {
+        if let Some((a, b)) = self.panes.focused().drag {
             Some(if a <= b { (a, b) } else { (b, a) })
         } else {
-            self.comment_range
+            self.panes.focused().comment_range
         }
     }
 }

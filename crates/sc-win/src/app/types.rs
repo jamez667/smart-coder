@@ -157,17 +157,13 @@ pub(crate) struct App {
     /// True while a background `compute_snapshot` is in flight, so the heartbeat doesn't stack up
     /// overlapping walks if one runs long.
     pub(crate) sync_pending: bool,
-    /// The file shown in the code panel (workspace-relative). `None` before any file
-    /// is chosen / touched.
-    pub(crate) selected_file: Option<String>,
-    /// The files open as tabs in the CODE panel, in the order they were opened (left→right).
-    /// `selected_file` is the ACTIVE tab's path; this is the full open set with each tab's
-    /// buffer. Opening a file adds it here if absent; closing a tab removes it.
+    /// The editor panes: their tabs, active file and viewport state, and which is focused.
     ///
-    /// `selected_file` stays a *path* rather than becoming an index into this: it is read at
-    /// dozens of call sites (git rows, minimap, `working`, `follow_agent`), and converting them
-    /// all would be a large refactor with no behaviour to show for it.
-    pub(crate) tabs: Vec<Tab>,
+    /// One pane's worth of this used to live directly on `App`. It moved because a second pane
+    /// would otherwise have shared the first's scroll, diff and comment draft — and painted one
+    /// pane's diff over the other's lines. See [`super::pane`] for the rule on what is per-pane
+    /// and what stays global.
+    pub(crate) panes: Panes,
     // --- Panel layout (spec 21) ---
     /// The panel arrangement currently on screen, for the current mode.
     pub(crate) layout: sc_win::layout::Layout,
@@ -203,10 +199,6 @@ pub(crate) struct App {
     pub(crate) compile_report: Option<sc_win::diagnostics::CompileReport>,
     /// A compile is in flight — the button reads "Compiling…" and offers cancel.
     pub(crate) compiling: bool,
-    /// A line to scroll to once the newly-opened file has been laid out. Deferred for the same
-    /// reason the git-tab jump is: a same-frame scroll misses, because the new content doesn't
-    /// exist in the layout yet.
-    pub(crate) pending_scroll_line: Option<usize>,
     /// The Unity editor path override (Settings ▸ General). Blank ⇒ search the Hub convention.
     pub(crate) unity_path_input: String,
     /// Set to cancel an in-flight compile. The worker checks it between reads and kills the
@@ -224,9 +216,6 @@ pub(crate) struct App {
     /// editing). Clicking a file in the tree pins it (sets this false); it re-arms when
     /// a new run starts. This is the "watch it work" behaviour, escapable on demand.
     pub(crate) follow_agent: bool,
-    /// The rendered contents of `selected_file`, recomputed when the selection changes
-    /// or the file is edited. Cached so `view()` doesn't hit the disk every frame.
-    pub(crate) code: Option<sc_win::CodeView>,
     /// Which top-bar menu is currently open (File / View), if any. `None` = all closed.
     pub(crate) open_menu: Option<Menu>,
 
@@ -275,15 +264,6 @@ pub(crate) struct App {
     pub(crate) term_container_started: bool,
 
     // --- Line comments (PR-style) ------------------------------------------------
-    /// The committed line range being commented on (1-based, inclusive `(start, end)`), if a
-    /// comment box is open. A single-line comment is `(n, n)`.
-    pub(crate) comment_range: Option<(usize, usize)>,
-    /// The comment text being typed for `comment_range`.
-    pub(crate) comment_draft: String,
-    /// Drag-select state: `Some((anchor, current))` while the mouse is pressed and dragging
-    /// across lines in the code view; `None` when not dragging. On release it becomes the
-    /// committed `comment_range`.
-    pub(crate) drag: Option<(usize, usize)>,
     /// A line-comment classification in flight (the small/big triage call), if any. Carries
     /// the comment so the result can be routed once the verdict arrives.
     pub(crate) triage: Option<TriageInFlight>,
@@ -302,27 +282,6 @@ pub(crate) struct App {
     /// Debug mode: when on, every prompt sent to the model is echoed into the chat as a
     /// (dimmed, collapsible) debug turn, so you can see exactly what the agent receives.
     pub(crate) debug: bool,
-    /// Lines of the currently-shown file that differ from HEAD right now (from `git diff`),
-    /// highlighted GitHub-PR-style. Refreshed as a fix edits the file, so you SEE changes land.
-    pub(crate) changed_lines: std::collections::BTreeSet<usize>,
-    /// The full PR-style diff of the shown file vs HEAD: `.added` (green, == `changed_lines`) plus
-    /// `.removed_before` (red deleted lines, anchored to the current line they sat before). Drives
-    /// the GitHub-diff rendering in the code view. Refreshed alongside `changed_lines`.
-    pub(crate) file_diff: sc_win::gitdiff::FileDiff,
-    /// The visible slice of the code view as (top_fraction, height_fraction) of the whole file,
-    /// updated on every scroll so the minimap draws a "you are here" box. `None` until first scroll.
-    pub(crate) code_viewport: Option<(f32, f32)>,
-    /// Pixel height of the code viewport (last seen on scroll), so a minimap jump can center the
-    /// clicked line rather than parking it at the top. `0.0` until first scroll.
-    pub(crate) code_view_h: f32,
-    /// Absolute vertical scroll offset (px) of the code view, last seen on scroll. Drives line
-    /// virtualization: only lines within `[code_scroll_y, code_scroll_y + code_view_h]` (plus
-    /// overscan) are turned into widgets. `0.0` until first scroll.
-    pub(crate) code_scroll_y: f32,
-    /// Pixel WIDTH of the code viewport, last seen on scroll. Sizes the comment/revert bars to the
-    /// viewport (not the horizontally-scrollable content width) so they end before the minimap and
-    /// stay visible without scrolling right. `0.0` until first scroll (→ fall back to Fill).
-    pub(crate) code_view_w: f32,
     /// The range the agent is actively working on (the lines you commented on), highlighted in
     /// a pulsing amber from submit until the change lands — so the "thinking" gap feels active.
     /// `(file, start, end)`; `None` when nothing is in flight.
@@ -507,18 +466,15 @@ impl Default for App {
             file_filter: String::new(),
             tree_cache,
             sync_pending: false,
-            selected_file: None,
-            tabs: Vec::new(),
+            panes: Panes::default(),
             project_kind: sc_win::project::ProjectKind::Unknown,
             compile_report: None,
             compiling: false,
             compile_cancel: None,
-            pending_scroll_line: None,
             unity_path_input: String::new(),
             confirm_close: None,
             save_conflict: None,
             follow_agent: true,
-            code: None,
             open_menu: None,
             conversation: None,
             chat_turns: Vec::new(),
@@ -533,23 +489,14 @@ impl Default for App {
             term_rx: None,
             term_container: None,
             term_container_started: false,
-            comment_range: None,
-            comment_draft: String::new(),
-            drag: None,
             triage: None,
             replace: None,
             iterate_from_comment: false,
             streaming: None,
             chat_stuck_to_bottom: true,
             debug: false,
-            changed_lines: std::collections::BTreeSet::new(),
-            file_diff: sc_win::gitdiff::FileDiff::default(),
-            code_viewport: None,
-            code_view_h: 0.0,
             working: None,
             comments: sc_win::comments::Comments::default(),
-            code_scroll_y: 0.0,
-            code_view_w: 0.0,
             file_status: std::collections::BTreeMap::new(),
             branch: None,
             upstream: sc_win::gitdiff::UpstreamStatus::default(),
@@ -624,7 +571,13 @@ pub(crate) enum Message {
     SettingsTabChanged(SettingsTab),
     // --- The editor (spec 21) ---
     /// An event from the CODE pane's edit view, forwarded to the active tab's buffer.
-    EditorEvent(iced_code_editor::Message),
+    /// An event from an editor pane's edit view, forwarded to **that pane's** active buffer.
+    ///
+    /// The id is carried, not inferred from focus. With two live editors, routing by focus means
+    /// a keystroke delivered in the same batch as the click that moved focus lands in the wrong
+    /// file — silent, and exactly the kind of bug that only shows up under real use. The view
+    /// knows which pane emitted it, so it says so.
+    EditorEvent(sc_win::layout::EditorId, iced_code_editor::Message),
     /// Flip the active tab between the read-only review view and the editor.
     ToggleTabView,
     /// Write the active tab to disk (Ctrl+S). Refuses on a save conflict.

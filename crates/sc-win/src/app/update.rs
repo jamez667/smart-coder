@@ -17,14 +17,16 @@ impl App {
             Message::PlannerProviderChanged(p) => self.cfg.planner_provider = p,
             Message::AdvisorProviderChanged(p) => self.cfg.advisor_provider = p,
             Message::SettingsTabChanged(t) => self.settings_tab = t,
-            Message::EditorEvent(ev) => {
-                // Forward to the active tab's buffer and adopt its modified flag. `is_modified`
-                // is the widget's own accounting, so the dirty dot can't drift from the buffer.
-                if let Some(tab) = self.active_tab_mut() {
+            Message::EditorEvent(pane, ev) => {
+                // Forward to THAT pane's active buffer — not the focused one — and adopt the
+                // widget's own modified flag, so the dirty dot can't drift from the buffer.
+                if let Some(tab) = self.panes.get_mut(pane).and_then(|p| p.active_tab_mut()) {
                     if let Some(editor) = tab.editor_mut() {
                         let task = editor.update(&ev);
                         tab.dirty = editor.is_modified();
-                        return task.map(Message::EditorEvent);
+                        // Re-wrap with the SAME id: the editor's own follow-up tasks (a
+                        // scroll after paste, say) must come back to the pane that sent them.
+                        return task.map(move |ev| Message::EditorEvent(pane, ev));
                     }
                 }
             }
@@ -36,7 +38,13 @@ impl App {
                 self.save_active_tab(true);
             }
             Message::DiscardAndClose(path) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.path == path) {
+                if let Some(tab) = self
+                    .panes
+                    .focused_mut()
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.path == path)
+                {
                     tab.dirty = false; // the answer WAS "lose these edits"
                 }
                 self.force_close_tab(&path);
@@ -56,6 +64,7 @@ impl App {
                 // The default layout differs per mode, and `App::default` picked one before the
                 // question was answered — so re-derive it now that we know.
                 self.layout = self.layouts.get(craft);
+                self.sync_panes_to_layout();
                 self.cfg.save_config();
                 // Finish the boot the prompt was holding up. `run()` skips the welcome and the
                 // conversation while the question is open, because both are Assistant-shaped and
@@ -77,8 +86,8 @@ impl App {
             Message::OpenDiagnostic(i) => return self.open_diagnostic(i),
             Message::UnityPathChanged(s) => self.unity_path_input = s,
             Message::JumpToPendingLine => {
-                if let Some(line) = self.pending_scroll_line.take() {
-                    return self.scroll_code_to_line(line);
+                if let Some(line) = self.panes.focused_mut().pending_scroll_line.take() {
+                    return self.scroll_code_to_line(self.panes.focused_id(), line);
                 }
             }
             Message::EscapePressed => {
@@ -118,6 +127,7 @@ impl App {
                 // what make toggling back and forth non-destructive: each is found as it was
                 // left, rather than one mode silently rearranging the other.
                 self.layout = self.layouts.get(self.cfg.craft());
+                self.sync_panes_to_layout();
                 // Persist immediately. Mode is an answer to a question we promised to ask once;
                 // losing it to a crash before the next save-on-close would ask again and read as
                 // the app ignoring them.
@@ -210,8 +220,8 @@ impl App {
             Message::HealthTick => self.tick_health_probe(),
             Message::LiveViewReloaded(result) => {
                 if let Some((code, added)) = result {
-                    self.code = Some(code);
-                    self.changed_lines = added;
+                    self.panes.focused_mut().code = Some(code);
+                    self.panes.focused_mut().changed_lines = added;
                 }
             }
             Message::SyncWorkspace => {
@@ -299,15 +309,15 @@ impl App {
                 // From the GIT panel → the review view: the intent is to see what changed, and
                 // only that surface has the diff wash and the jump-to-change affordance.
                 self.select_file_for_review(rel);
-                if self.changed_lines.iter().next().is_some() {
+                if self.panes.focused().changed_lines.iter().next().is_some() {
                     // Re-emit as a follow-up message: it's processed after this update's view()
                     // rebuilds with the new file, so scroll_to acts on the correct layout.
                     return Task::done(Message::JumpToFirstChange);
                 }
             }
             Message::JumpToFirstChange => {
-                if let Some(&first) = self.changed_lines.iter().next() {
-                    return self.scroll_code_to_line(first);
+                if let Some(&first) = self.panes.focused().changed_lines.iter().next() {
+                    return self.scroll_code_to_line(self.panes.focused_id(), first);
                 }
             }
             Message::ToggleDir(rel) => {
@@ -367,7 +377,7 @@ impl App {
             Message::RevertComment(i) => self.revert_comment(i),
             Message::RevertBlock(cur_start) => self.revert_block(cur_start),
             Message::MinimapJump(line) => {
-                return self.scroll_code_to_line(line);
+                return self.scroll_code_to_line(self.panes.focused_id(), line);
             }
             Message::CodeScrolled(vp) => {
                 // Record the visible slice as fractions of the whole content so the minimap can
@@ -376,11 +386,11 @@ impl App {
                 let top = vp.relative_offset().y;
                 let content_h = vp.content_bounds().height.max(1.0);
                 let view_h = vp.bounds().height;
-                self.code_view_h = view_h;
-                self.code_view_w = vp.bounds().width;
-                self.code_scroll_y = vp.absolute_offset().y;
+                self.panes.focused_mut().code_view_h = view_h;
+                self.panes.focused_mut().code_view_w = vp.bounds().width;
+                self.panes.focused_mut().code_scroll_y = vp.absolute_offset().y;
                 let height = (view_h / content_h).clamp(0.0, 1.0);
-                self.code_viewport = Some((top * (1.0 - height), height));
+                self.panes.focused_mut().code_viewport = Some((top * (1.0 - height), height));
             }
             Message::ChatScrolled(vp) => {
                 // Arm auto-scroll only when the user is at (or within a line of) the bottom; scrolling
@@ -643,6 +653,8 @@ impl App {
                 // If the file still on screen was reverted (not deleted), reload it to show the
                 // reverted content.
                 if self
+                    .panes
+                    .focused()
                     .selected_file
                     .as_ref()
                     .is_some_and(|s| targets.contains(s))
@@ -695,30 +707,30 @@ impl App {
             }
             Message::LineDragStart(n) => {
                 // Begin a drag-selection anchored at line n. Clear any open comment box.
-                self.drag = Some((n, n));
-                self.comment_range = None;
+                self.panes.focused_mut().drag = Some((n, n));
+                self.panes.focused_mut().comment_range = None;
             }
             Message::LineDragTo(n) => {
                 // Extend the drag to line n (only while a drag is active).
-                if let Some((anchor, _)) = self.drag {
-                    self.drag = Some((anchor, n));
+                if let Some((anchor, _)) = self.panes.focused().drag {
+                    self.panes.focused_mut().drag = Some((anchor, n));
                 }
             }
             Message::LineDragEnd => {
                 // Commit the drag into a comment range (normalized so start ≤ end) and open
                 // the comment box. A no-drag (just a click) yields a single-line range.
-                if let Some((a, b)) = self.drag.take() {
+                if let Some((a, b)) = self.panes.focused_mut().drag.take() {
                     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    self.comment_range = Some((lo, hi));
-                    self.comment_draft.clear();
+                    self.panes.focused_mut().comment_range = Some((lo, hi));
+                    self.panes.focused_mut().comment_draft.clear();
                 }
             }
-            Message::CommentDraftChanged(s) => self.comment_draft = s,
+            Message::CommentDraftChanged(s) => self.panes.focused_mut().comment_draft = s,
             Message::CommentSubmit => self.submit_line_comment(),
             Message::CommentCancel => {
-                self.comment_range = None;
-                self.drag = None;
-                self.comment_draft.clear();
+                self.panes.focused_mut().comment_range = None;
+                self.panes.focused_mut().drag = None;
+                self.panes.focused_mut().comment_draft.clear();
             }
             Message::ConfirmAllow => self.answer_confirm(Confirmation::AllowOnce),
             Message::ConfirmDeny => {
@@ -808,10 +820,12 @@ impl App {
             Message::ClearWorkspace => {
                 self.open_menu = None;
                 self.picked_workspace = None;
-                self.selected_file = None;
-                self.code = None;
+                self.panes.focused_mut().selected_file = None;
+                self.panes.focused_mut().code = None;
                 // Clear the CODE-panel tabs too — they belonged to the closed project.
-                self.tabs.clear();
+                // EVERY pane: the old project's tabs are meaningless, and so is an arrangement
+                // of panes holding them.
+                self.panes.clear();
                 self.confirm_close = None;
                 self.save_conflict = None;
                 self.refresh_project_kind();
@@ -837,6 +851,8 @@ impl App {
         // Keep the per-turn selectable editors in step with the chat thread (no-op unless the
         // thread changed). Runs after every message so streamed/appended turns are covered.
         self.sync_chat_editors();
+        #[cfg(debug_assertions)]
+        self.assert_panes_consistent();
         Task::none()
     }
 }

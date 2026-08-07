@@ -167,6 +167,8 @@ pub fn run() -> iced::Result {
             // The restored project needs detecting, or the Compile button stays dead until the
             // user re-picks the folder (spec 21).
             app.refresh_project_kind();
+            // The restored layout is the authority on how many panes the user had.
+            app.sync_panes_to_layout();
             // Boot is deferred while the first-run question is open (spec 21): opening a
             // conversation is Assistant-shaped, and doing it before the user has said which mode
             // they want would mean undoing it the moment they answer "Just code".
@@ -238,6 +240,9 @@ mod view_panels;
 
 mod helpers;
 pub(crate) use helpers::*;
+
+mod pane;
+pub(crate) use pane::*;
 
 mod tabs;
 pub(crate) use tabs::*;
@@ -347,14 +352,14 @@ mod tests {
     #[test]
     fn craft_mode_keeps_line_comments_but_never_triages_them() {
         let mut app = app_in(Mode::Craft);
-        app.code = Some(sc_win::codeview::CodeView {
+        app.panes.focused_mut().code = Some(sc_win::codeview::CodeView {
             rel: "src/main.rs".to_string(),
             lines: vec![(1, "fn main() {}".to_string())],
             truncated: false,
             note: None,
         });
-        app.comment_range = Some((1, 1));
-        app.comment_draft = "this allocates twice".to_string();
+        app.panes.focused_mut().comment_range = Some((1, 1));
+        app.panes.focused_mut().comment_draft = "this allocates twice".to_string();
 
         app.submit_line_comment();
 
@@ -366,7 +371,10 @@ mod tests {
                 .any(|(_, c)| c.text == "this allocates twice"),
             "but the comment itself is kept"
         );
-        assert!(app.comment_range.is_none(), "and the box closes");
+        assert!(
+            app.panes.focused_mut().comment_range.is_none(),
+            "and the box closes"
+        );
     }
 
     /// Clicking a diagnostic opens its file and queues the scroll to its line.
@@ -391,8 +399,16 @@ mod tests {
 
         let _ = app.open_diagnostic(0);
 
-        assert_eq!(app.selected_file.as_deref(), Some("Broken.cs"), "opened");
-        assert_eq!(app.pending_scroll_line, Some(2), "and queued the jump");
+        assert_eq!(
+            app.panes.focused_mut().selected_file.as_deref(),
+            Some("Broken.cs"),
+            "opened"
+        );
+        assert_eq!(
+            app.panes.focused_mut().pending_scroll_line,
+            Some(2),
+            "and queued the jump"
+        );
         assert!(!app.follow_agent, "clicking a problem pins the view");
 
         let _ = std::fs::remove_dir_all(dir);
@@ -420,8 +436,11 @@ mod tests {
 
         let _ = app.open_diagnostic(0);
 
-        assert!(app.selected_file.is_none(), "nothing opened");
-        assert!(app.pending_scroll_line.is_none());
+        assert!(
+            app.panes.focused_mut().selected_file.is_none(),
+            "nothing opened"
+        );
+        assert!(app.panes.focused_mut().pending_scroll_line.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -516,6 +535,105 @@ mod tests {
         assert!(
             !app.layout.contains(PanelKind::Git),
             "and OUR arrangement survived the round trip"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Keystrokes reach the pane that sent them, not whichever pane holds focus.
+    ///
+    /// THE correctness bug multi-pane introduces. `EditorEvent` used to route through
+    /// `active_tab_mut()`, which reads the FOCUSED pane — so with two live editors, a keystroke
+    /// delivered in the same batch as the click that moved focus lands in the wrong file. Silent,
+    /// and it corrupts the file you weren't looking at.
+    #[test]
+    fn keystrokes_go_to_the_pane_that_sent_them() {
+        use sc_win::layout::EditorId;
+        let (mut app, dir) = app_with_file("a.rs", "fn a() {}\n");
+        std::fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
+
+        // Pane 0 holds a.rs; a second pane holds b.rs.
+        app.select_file("a.rs".to_string());
+        let second = app.panes.insert();
+        app.select_file_into("b.rs".to_string(), Origin::Tree, second);
+
+        // Focus pane 0 — the WRONG pane for the event we're about to send.
+        app.panes.focus(EditorId::FIRST);
+        assert_eq!(app.panes.focused_id(), EditorId::FIRST);
+
+        let before_a = app
+            .panes
+            .get(EditorId::FIRST)
+            .and_then(|p| p.active_tab())
+            .and_then(|t| t.text());
+        // Type into the SECOND pane while the first is focused.
+        let _ = app.update(Message::EditorEvent(
+            second,
+            iced_code_editor::Message::CharacterInput('X'),
+        ));
+
+        assert_eq!(
+            app.panes
+                .get(EditorId::FIRST)
+                .and_then(|p| p.active_tab())
+                .and_then(|t| t.text()),
+            before_a,
+            "the focused pane's buffer must be untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file already open in one pane is focused there, not opened twice.
+    ///
+    /// `Tab` owns its buffer, so a second copy would be a second independent buffer over one
+    /// path — and the save-conflict slot is path-keyed, so saving one would raise a bogus
+    /// conflict in the other whose Overwrite destroys the first's edits.
+    #[test]
+    fn opening_a_file_already_open_elsewhere_focuses_that_pane() {
+        use sc_win::layout::EditorId;
+        let (mut app, dir) = app_with_file("shared.rs", "fn shared() {}\n");
+
+        app.select_file("shared.rs".to_string());
+        let second = app.panes.insert();
+
+        // Ask for it in the OTHER pane; it should take us back to the one that has it.
+        app.select_file_into("shared.rs".to_string(), Origin::Tree, second);
+
+        assert_eq!(
+            app.panes.focused_id(),
+            EditorId::FIRST,
+            "focus followed the file rather than opening a copy"
+        );
+        assert_eq!(
+            app.panes.get(second).map(|p| p.tabs.len()),
+            Some(0),
+            "and the other pane did not gain a second buffer for it"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Unsaved work in a BACKGROUND pane still blocks quit.
+    ///
+    /// `any_dirty` drives the window-title dot and the quit prompt. Scanning only the focused
+    /// pane would lose exactly the case the prompt exists for.
+    #[test]
+    fn an_unsaved_buffer_in_a_background_pane_still_blocks_quit() {
+        use sc_win::layout::EditorId;
+        let (mut app, dir) = app_with_file("bg.rs", "fn bg() {}\n");
+
+        let second = app.panes.insert();
+        app.select_file_into("bg.rs".to_string(), Origin::Tree, second);
+        if let Some(t) = app.panes.get_mut(second).and_then(|p| p.active_tab_mut()) {
+            t.dirty = true;
+        }
+        // Look away.
+        app.panes.focus(EditorId::FIRST);
+
+        assert!(
+            app.any_dirty(),
+            "a dirty buffer in a pane you aren't looking at still counts"
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -813,16 +931,26 @@ mod tests {
         let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
 
         app.select_file("a.rs".to_string());
-        assert_eq!(app.tabs.len(), 1);
-        assert!(app.tabs[0].editable(), "a normal source file is editable");
-        assert_eq!(app.tabs[0].view, TabView::Edit, "tree opens for editing");
+        assert_eq!(app.panes.focused_mut().tabs.len(), 1);
+        assert!(
+            app.panes.focused_mut().tabs[0].editable(),
+            "a normal source file is editable"
+        );
+        assert_eq!(
+            app.panes.focused_mut().tabs[0].view,
+            TabView::Edit,
+            "tree opens for editing"
+        );
 
         // Mark it dirty, then "re-open" it the way a tab click does.
-        app.tabs[0].dirty = true;
+        app.panes.focused_mut().tabs[0].dirty = true;
         app.select_file("a.rs".to_string());
 
-        assert_eq!(app.tabs.len(), 1, "no duplicate tab");
-        assert!(app.tabs[0].dirty, "the buffer survived the re-select");
+        assert_eq!(app.panes.focused_mut().tabs.len(), 1, "no duplicate tab");
+        assert!(
+            app.panes.focused_mut().tabs[0].dirty,
+            "the buffer survived the re-select"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -832,7 +960,7 @@ mod tests {
     fn the_git_panel_opens_files_in_the_review_view() {
         let (mut app, dir) = app_with_file("b.rs", "fn main() {}\n");
         app.select_file_for_review("b.rs".to_string());
-        assert_eq!(app.tabs[0].view, TabView::Review);
+        assert_eq!(app.panes.focused_mut().tabs[0].view, TabView::Review);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -843,15 +971,18 @@ mod tests {
     fn closing_a_dirty_tab_asks_first() {
         let (mut app, dir) = app_with_file("c.rs", "fn main() {}\n");
         app.select_file("c.rs".to_string());
-        app.tabs[0].dirty = true;
+        app.panes.focused_mut().tabs[0].dirty = true;
 
         app.close_tab("c.rs");
-        assert_eq!(app.tabs.len(), 1, "still open");
+        assert_eq!(app.panes.focused_mut().tabs.len(), 1, "still open");
         assert_eq!(app.confirm_close.as_deref(), Some("c.rs"), "prompting");
 
         // Discarding is the explicit answer, and only then does it close.
         let _ = app.update(Message::DiscardAndClose("c.rs".to_string()));
-        assert!(app.tabs.is_empty(), "closed on an explicit discard");
+        assert!(
+            app.panes.focused_mut().tabs.is_empty(),
+            "closed on an explicit discard"
+        );
         assert!(app.confirm_close.is_none(), "prompt dismissed");
 
         let _ = std::fs::remove_dir_all(dir);
@@ -863,7 +994,7 @@ mod tests {
         let (mut app, dir) = app_with_file("d.rs", "fn main() {}\n");
         app.select_file("d.rs".to_string());
         app.close_tab("d.rs");
-        assert!(app.tabs.is_empty());
+        assert!(app.panes.focused_mut().tabs.is_empty());
         assert!(app.confirm_close.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -877,10 +1008,10 @@ mod tests {
         // Stand in for typing. The widget only mutates through input events (there is no
         // setter), so a test substitutes a buffer with the post-edit contents — what's under
         // test here is the SAVE path, not the widget's own key handling.
-        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
-            "edited\n", "rs",
-        )));
-        app.tabs[0].dirty = true;
+        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(
+            iced_code_editor::CodeEditor::new("edited\n", "rs"),
+        ));
+        app.panes.focused_mut().tabs[0].dirty = true;
 
         app.save_active_tab(false);
 
@@ -888,7 +1019,10 @@ mod tests {
             std::fs::read_to_string(dir.join("e.rs")).unwrap(),
             "edited\n"
         );
-        assert!(!app.tabs[0].dirty, "clean after a successful save");
+        assert!(
+            !app.panes.focused_mut().tabs[0].dirty,
+            "clean after a successful save"
+        );
         assert!(app.save_conflict.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -904,12 +1038,14 @@ mod tests {
     fn saving_preserves_the_trailing_newline() {
         let (mut app, dir) = app_with_file("nl.rs", "fn main() {}\n");
         app.select_file("nl.rs".to_string());
-        assert!(app.tabs[0].trailing_newline, "recorded at open");
-        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
-            "fn main() { /* edited */ }\n",
-            "rs",
-        )));
-        app.tabs[0].dirty = true;
+        assert!(
+            app.panes.focused_mut().tabs[0].trailing_newline,
+            "recorded at open"
+        );
+        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(
+            iced_code_editor::CodeEditor::new("fn main() { /* edited */ }\n", "rs"),
+        ));
+        app.panes.focused_mut().tabs[0].dirty = true;
 
         app.save_active_tab(false);
 
@@ -919,13 +1055,18 @@ mod tests {
         // And a file WITHOUT one does not gain one.
         std::fs::write(dir.join("no-nl.rs"), "no newline").unwrap();
         app.select_file("no-nl.rs".to_string());
-        let i = app.tabs.iter().position(|t| t.path == "no-nl.rs").unwrap();
-        assert!(!app.tabs[i].trailing_newline);
-        app.tabs[i].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
-            "still no newline",
-            "rs",
-        )));
-        app.tabs[i].dirty = true;
+        let i = app
+            .panes
+            .focused_mut()
+            .tabs
+            .iter()
+            .position(|t| t.path == "no-nl.rs")
+            .unwrap();
+        assert!(!app.panes.focused_mut().tabs[i].trailing_newline);
+        app.panes.focused_mut().tabs[i].buf = Buffer::Live(Box::new(
+            iced_code_editor::CodeEditor::new("still no newline", "rs"),
+        ));
+        app.panes.focused_mut().tabs[i].dirty = true;
         app.save_active_tab(false);
         assert_eq!(
             std::fs::read_to_string(dir.join("no-nl.rs")).unwrap(),
@@ -945,12 +1086,13 @@ mod tests {
     fn saving_over_a_file_changed_underneath_is_refused() {
         let (mut app, dir) = app_with_file("f.rs", "original\n");
         app.select_file("f.rs".to_string());
-        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new("mine\n", "rs")));
-        app.tabs[0].dirty = true;
+        app.panes.focused_mut().tabs[0].buf =
+            Buffer::Live(Box::new(iced_code_editor::CodeEditor::new("mine\n", "rs")));
+        app.panes.focused_mut().tabs[0].dirty = true;
 
         // Something else (the agent) writes the file, and the stamp moves.
         std::fs::write(dir.join("f.rs"), "theirs, much longer than the original\n").unwrap();
-        app.tabs[0].opened = sc_win::editbuf::DiskStamp {
+        app.panes.focused_mut().tabs[0].opened = sc_win::editbuf::DiskStamp {
             mtime: Some(std::time::UNIX_EPOCH),
             len: 9,
         };
@@ -962,7 +1104,10 @@ mod tests {
             Some("f.rs"),
             "refused, and says so"
         );
-        assert!(app.tabs[0].dirty, "the buffer is untouched");
+        assert!(
+            app.panes.focused_mut().tabs[0].dirty,
+            "the buffer is untouched"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("f.rs")).unwrap(),
             "theirs, much longer than the original\n",
@@ -985,11 +1130,10 @@ mod tests {
     fn an_agent_reload_leaves_a_dirty_buffer_alone() {
         let (mut app, dir) = app_with_file("g.rs", "original\n");
         app.select_file("g.rs".to_string());
-        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
-            "my unsaved work\n",
-            "rs",
-        )));
-        app.tabs[0].dirty = true;
+        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(
+            iced_code_editor::CodeEditor::new("my unsaved work\n", "rs"),
+        ));
+        app.panes.focused_mut().tabs[0].dirty = true;
 
         // The agent writes the file, and the app reloads the shown file.
         std::fs::write(dir.join("g.rs"), "agent wrote this\n").unwrap();
@@ -998,11 +1142,11 @@ mod tests {
         // `text()` is the widget's `content()`, which rejoins lines without a trailing newline —
         // hence no `\n` here. The save path restores it (see `saving_preserves_the_trailing_newline`).
         assert_eq!(
-            app.tabs[0].text().as_deref(),
+            app.panes.focused_mut().tabs[0].text().as_deref(),
             Some("my unsaved work"),
             "the dirty buffer survived the reload"
         );
-        assert!(app.tabs[0].dirty);
+        assert!(app.panes.focused_mut().tabs[0].dirty);
 
         let _ = std::fs::remove_dir_all(dir);
     }

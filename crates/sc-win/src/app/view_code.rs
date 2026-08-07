@@ -59,7 +59,13 @@ impl App {
         .align_y(iced::Alignment::Center);
 
         let mut col_ = column![
-            container(editor.view().map(Message::EditorEvent)).height(Fill),
+            container({
+                // Tag events with the pane that produced them, so keystrokes reach THAT
+                // buffer rather than whichever pane happens to hold focus.
+                let pane = self.panes.focused_id();
+                editor.view().map(move |ev| Message::EditorEvent(pane, ev))
+            })
+            .height(Fill),
             status,
         ]
         .spacing(4)
@@ -111,7 +117,7 @@ impl App {
     /// The REVIEW view: the original read-only pane. Unchanged by the editor work — it carries
     /// the diff washes, inline comments and gate affordances that no editor widget can host.
     fn view_review_body(&self) -> Element<'_, Message> {
-        let inner: Element<'_, Message> = match &self.code {
+        let inner: Element<'_, Message> = match &self.panes.focused().code {
             Some(cv) if cv.note.is_some() => text(cv.note.clone().unwrap_or_default())
                 .size(12)
                 .color(FG_MUTED)
@@ -127,7 +133,9 @@ impl App {
                 let working_here = self
                     .working
                     .as_ref()
-                    .filter(|(f, _, _)| Some(f.as_str()) == self.selected_file.as_deref())
+                    .filter(|(f, _, _)| {
+                        Some(f.as_str()) == self.panes.focused().selected_file.as_deref()
+                    })
                     .map(|(_, lo, hi)| (*lo, *hi));
                 let pulse = 0.10 + 0.10 * (0.5 + 0.5 * (self.now() * 3.0).sin());
 
@@ -139,16 +147,19 @@ impl App {
                 // When the minimap is floating (file overflows the viewport), inline-comment rows
                 // need right padding so their ✕/revert buttons don't hide behind it. 72px minimap
                 // + a small gap. Computed here since the comment rows are built in the loop below.
-                let minimap_overflows =
-                    self.code_viewport.is_some_and(|(_, height)| height < 0.999);
+                let minimap_overflows = self
+                    .panes
+                    .focused()
+                    .code_viewport
+                    .is_some_and(|(_, height)| height < 0.999);
                 // Width for the comment / revert bars: the VIEWPORT width (not the horizontally-
                 // scrollable content width), minus the minimap gutter when it's floating, so a bar
                 // spans the visible area and ends just before the minimap — with round edges. It
                 // scales with the window and expands when the minimap is hidden. `None` (→ Fill)
                 // before the first scroll gives us a real viewport width.
-                let bar_width: Option<f32> = (self.code_view_w > 1.0).then(|| {
+                let bar_width: Option<f32> = (self.panes.focused().code_view_w > 1.0).then(|| {
                     let gutter = if minimap_overflows { 76.0 } else { 8.0 };
-                    (self.code_view_w - gutter).max(120.0)
+                    (self.panes.focused().code_view_w - gutter).max(120.0)
                 });
 
                 // Diff blocks (VS-Code-style). Two derived maps:
@@ -156,7 +167,7 @@ impl App {
                 //    the standalone "↩ revert block" bar).
                 //  • `line_to_block`: every green line → its block's cur_start (so a comment ON a
                 //    changed block can offer the same revert inline).
-                let hunks = self.file_diff.hunks();
+                let hunks = self.panes.focused().file_diff.hunks();
                 let block_bar_after: std::collections::BTreeMap<usize, usize> = hunks
                     .iter()
                     .filter(|h| h.cur_start <= h.cur_end) // has a current (green) line
@@ -170,6 +181,8 @@ impl App {
                 // Blocks that already have a comment on them — those revert from the comment row,
                 // so we skip the standalone bar to avoid a duplicate button.
                 let blocks_with_comment: std::collections::BTreeSet<usize> = self
+                    .panes
+                    .focused()
                     .selected_file
                     .as_deref()
                     .map(|f| {
@@ -186,12 +199,13 @@ impl App {
                 let (first_idx, last_idx) = {
                     const OVERSCAN: usize = 12;
                     let per = CODE_LINE_PX.max(1.0);
-                    let view_h = if self.code_view_h > 1.0 {
-                        self.code_view_h
+                    let view_h = if self.panes.focused().code_view_h > 1.0 {
+                        self.panes.focused().code_view_h
                     } else {
                         800.0 // generous first-frame guess before we know the real height
                     };
-                    let first = ((self.code_scroll_y / per) as usize).saturating_sub(OVERSCAN);
+                    let first = ((self.panes.focused().code_scroll_y / per) as usize)
+                        .saturating_sub(OVERSCAN);
                     let visible = (view_h / per).ceil() as usize + 2 * OVERSCAN;
                     (first.min(total), (first + visible).min(total))
                 };
@@ -204,6 +218,8 @@ impl App {
                 if first_idx > 0 {
                     let first_visible_line = first_idx + 1; // 1-based line number of cv.lines[first_idx]
                     let hidden_removed: usize = self
+                        .panes
+                        .focused()
                         .file_diff
                         .removed_before
                         .range(..first_visible_line)
@@ -217,7 +233,7 @@ impl App {
                 for (n, line) in &cv.lines[first_idx..last_idx] {
                     // GitHub-PR style: render any lines DELETED just before this one as red rows
                     // (a `-` gutter, red wash). They exist only in HEAD, so they're not selectable.
-                    if let Some(removed) = self.file_diff.removed_before.get(n) {
+                    if let Some(removed) = self.panes.focused().file_diff.removed_before.get(n) {
                         for gone in removed {
                             col = col.push(
                                 container(
@@ -240,7 +256,7 @@ impl App {
                     let working = working_here.is_some_and(|(lo, hi)| *n >= lo && *n <= hi);
                     // A line that differs from HEAD (git) → GitHub-PR-style green highlight
                     // with a `+` gutter marker, so you SEE what the agent changed, live.
-                    let changed = self.changed_lines.contains(n);
+                    let changed = self.panes.focused().changed_lines.contains(n);
                     let mark = if changed { "+" } else { " " };
                     let row_text = format!("{mark}{n:>4}  {line}");
                     let color = if in_sel {
@@ -289,7 +305,7 @@ impl App {
                     // style), struck-through + ✓ once resolved. Only the in-window lines are
                     // iterated, so a comment scrolled off-screen simply isn't drawn (its state
                     // persists); the box/comment adds height inside the window, not the spacers.
-                    if let Some(file) = self.selected_file.clone() {
+                    if let Some(file) = self.panes.focused().selected_file.clone() {
                         let here: Vec<(usize, sc_win::comments::Comment)> = self
                             .comments
                             .on_file(&file)
@@ -305,7 +321,12 @@ impl App {
                         }
                     }
                     // The (new) comment box after the last line of the committed range.
-                    if self.comment_range.is_some_and(|(_, hi)| hi == *n) {
+                    if self
+                        .panes
+                        .focused()
+                        .comment_range
+                        .is_some_and(|(_, hi)| hi == *n)
+                    {
                         col = col.push(self.view_comment_box());
                     }
                 }
@@ -314,6 +335,8 @@ impl App {
                 if last_idx < total {
                     let first_hidden_line = last_idx + 1; // 1-based line after the window
                     let below_removed: usize = self
+                        .panes
+                        .focused()
                         .file_diff
                         .removed_before
                         .range(first_hidden_line..)
@@ -326,7 +349,13 @@ impl App {
                 } else {
                     // Window reaches EOF: render removals anchored past the last line (deletions at
                     // end-of-file) as trailing red rows.
-                    for (anchor, removed) in self.file_diff.removed_before.range(total + 1..) {
+                    for (anchor, removed) in self
+                        .panes
+                        .focused()
+                        .file_diff
+                        .removed_before
+                        .range(total + 1..)
+                    {
                         let _ = anchor;
                         for gone in removed {
                             col = col.push(
@@ -370,7 +399,7 @@ impl App {
                 };
                 // One scrollable, BOTH axes: vertical for the file, horizontal for long lines.
                 let code_scroll = scrollable(col)
-                    .id(code_scroll_id())
+                    .id(code_scroll_id(self.panes.focused_id()))
                     .on_scroll(Message::CodeScrolled)
                     .direction(scrollable::Direction::Both {
                         vertical: vbar,
@@ -383,6 +412,8 @@ impl App {
                 let line_lens: Vec<usize> =
                     cv.lines.iter().map(|(_, t)| t.chars().count()).collect();
                 let commented: std::collections::BTreeSet<usize> = self
+                    .panes
+                    .focused()
                     .selected_file
                     .as_deref()
                     .map(|f| {
@@ -395,9 +426,9 @@ impl App {
                 if overflows {
                     let minimap = crate::minimap::Minimap::new(
                         line_lens,
-                        self.changed_lines.clone(),
+                        self.panes.focused().changed_lines.clone(),
                         commented,
-                        self.code_viewport,
+                        self.panes.focused().code_viewport,
                     )
                     .view();
                     // VS-Code style: the code fills the whole width and the minimap floats
@@ -433,9 +464,14 @@ impl App {
         // proposal card offers, acting on the active file.
         // "This is a feature plan, offer Breakdown/Build" — an agent action, so never in Craft
         // mode. A spec markdown file is just a file to read and edit there.
-        let is_open_plan =
-            !self.cfg.craft() && self.selected_file.as_deref().is_some_and(is_feature_plan);
-        let header_bar: Element<'_, Message> = if self.tabs.is_empty() {
+        let is_open_plan = !self.cfg.craft()
+            && self
+                .panes
+                .focused()
+                .selected_file
+                .as_deref()
+                .is_some_and(is_feature_plan);
+        let header_bar: Element<'_, Message> = if self.panes.focused().tabs.is_empty() {
             // No files open → the old "CODE" placeholder (matches the former (None, _) header).
             text("CODE").size(12).color(FG_MUTED).into()
         } else {
@@ -443,9 +479,9 @@ impl App {
             // plus a SIBLING ✕ button (buttons can't nest) that closes it. The active tab reads
             // in ACCENT on a card-ish wash; inactive tabs are FG_MUTED and transparent.
             let mut strip = row![].spacing(4).align_y(iced::Alignment::Center);
-            for tab in &self.tabs {
+            for tab in &self.panes.focused().tabs {
                 let path = &tab.path;
-                let active = self.selected_file.as_deref() == Some(path.as_str());
+                let active = self.panes.focused().selected_file.as_deref() == Some(path.as_str());
                 // Show the basename (full path is too long for a tab); duplicate basenames across
                 // open files are acceptable for v1. A leading ● marks unsaved edits — the one
                 // signal that says "closing this loses something".
@@ -500,7 +536,8 @@ impl App {
             // empty and the tab strip gets the full width.
             let viewing_gated_phase = !self.cfg.craft()
                 && self.gating_phase().is_some_and(|p| {
-                    self.plan.path_for(p).as_deref() == self.selected_file.as_deref()
+                    self.plan.path_for(p).as_deref()
+                        == self.panes.focused().selected_file.as_deref()
                 });
             let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
             // Review|Edit, on every editable tab. One control, both directions — reading a diff

@@ -50,8 +50,13 @@ pub(crate) const PAD: u16 = 8;
 
 /// A stable id for the code-view scrollable, so the minimap can scroll it to a clicked line
 /// via `iced::widget::operation::scroll_to`.
-pub(crate) fn code_scroll_id() -> iced::advanced::widget::Id {
-    iced::advanced::widget::Id::new("code-view")
+pub(crate) fn code_scroll_id(pane: sc_win::layout::EditorId) -> iced::advanced::widget::Id {
+    // PER PANE, not a singleton. `scroll_to` addresses a widget by id, so two panes sharing one
+    // id means jumping to a line in either scrolls BOTH — a silent bug that only appears once a
+    // second pane exists, which is why it survived until now.
+    // `Id::new` takes `&'static str`; a per-pane id is built at runtime, so go through
+    // `From<String>` (which stores an owned `Cow`) instead.
+    iced::advanced::widget::Id::from(format!("code-view:{pane}"))
 }
 
 /// A stable id for the chat thread scrollable, so we can keep it pinned to the bottom as new
