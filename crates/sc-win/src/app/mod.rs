@@ -489,7 +489,7 @@ mod tests {
     /// reversible.
     #[test]
     fn each_mode_keeps_its_own_panel_arrangement() {
-        use sc_win::layout::PanelKind;
+        use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("modes");
         let mut app = app_in(Mode::Assistant);
         app.layout = sc_win::layout::Layout::assistant_default();
@@ -505,7 +505,10 @@ mod tests {
             !app.layout.contains(PanelKind::Chat),
             "no chat without a model"
         );
-        assert!(app.layout.contains(PanelKind::Editor), "editor survives");
+        assert!(
+            app.layout.contains(PanelKind::Editor(EditorId::FIRST)),
+            "editor survives"
+        );
 
         // Back to Assistant: the arrangement we left is restored, git still hidden.
         let _ = app.update(Message::ToggleCraftMode(false));
@@ -521,7 +524,7 @@ mod tests {
     /// Dragging a panel's header onto another panel's edge rearranges the layout.
     #[test]
     fn dropping_a_panel_on_another_rearranges_and_persists() {
-        use sc_win::layout::PanelKind;
+        use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("panel-drop");
         let mut app = app_in(Mode::Craft);
         app.layout = sc_win::layout::Layout::craft_default();
@@ -536,7 +539,7 @@ mod tests {
         app.window_h = 1000.0;
         app.cursor_pos = iced::Point::new(500.0, 300.0);
         let _ = app.update(Message::PanelHover(
-            PanelKind::Editor,
+            PanelKind::Editor(EditorId::FIRST),
             95.0,
             50.0,
             100.0,
@@ -546,7 +549,11 @@ mod tests {
         ));
         assert_eq!(
             app.drop_target,
-            Some((PanelKind::Editor, sc_win::layout::Side::Right, false)),
+            Some((
+                PanelKind::Editor(EditorId::FIRST),
+                sc_win::layout::Side::Right,
+                false
+            )),
             "the near edge decides the side, and this one is interior"
         );
         let _ = app.update(Message::PanelDrop);
@@ -570,7 +577,7 @@ mod tests {
     /// tree meant the condition could never be true. This models the real geometry.
     #[test]
     fn dropping_at_the_bottom_edge_docks_across_the_full_width() {
-        use sc_win::layout::{Axis, Layout, PanelKind, Side};
+        use sc_win::layout::{Axis, EditorId, Layout, PanelKind, Side};
         let dir = redirect_layout_state("panel-bottom-drop");
         let mut app = app_in(Mode::Craft);
         app.layout = Layout::craft_default();
@@ -587,11 +594,19 @@ mod tests {
         let (x, y) = (500.0, 378.0);
 
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
-        let _ = app.update(Message::PanelHover(PanelKind::Editor, x, y, w, h, tw, th));
+        let _ = app.update(Message::PanelHover(
+            PanelKind::Editor(EditorId::FIRST),
+            x,
+            y,
+            w,
+            h,
+            tw,
+            th,
+        ));
 
         assert_eq!(
             app.drop_target,
-            Some((PanelKind::Editor, Side::Bottom, true)),
+            Some((PanelKind::Editor(EditorId::FIRST), Side::Bottom, true)),
             "the tree's bottom edge must register as OUTER even though it isn't the window's"
         );
 
@@ -645,7 +660,7 @@ mod tests {
     /// per-panel target must not also be live, or the highlight would promise two outcomes.
     #[test]
     fn the_dock_frame_supersedes_a_per_panel_target() {
-        use sc_win::layout::{Layout, PanelKind, Side};
+        use sc_win::layout::{EditorId, Layout, PanelKind, Side};
         let dir = redirect_layout_state("dock-priority");
         let mut app = app_in(Mode::Craft);
         app.layout = Layout::craft_default();
@@ -653,7 +668,7 @@ mod tests {
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
         // A per-panel target first…
         let _ = app.update(Message::PanelHover(
-            PanelKind::Editor,
+            PanelKind::Editor(EditorId::FIRST),
             500.0,
             300.0,
             1000.0,
@@ -702,15 +717,15 @@ mod tests {
     /// refuses rather than leaving the user with no way back.
     #[test]
     fn the_editor_panel_cannot_be_hidden() {
-        use sc_win::layout::PanelKind;
+        use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("no-hide-editor");
         let mut app = app_in(Mode::Craft);
         app.layout = sc_win::layout::Layout::craft_default();
 
-        let _ = app.update(Message::TogglePanel(PanelKind::Editor));
+        let _ = app.update(Message::TogglePanel(PanelKind::Editor(EditorId::FIRST)));
 
         assert!(
-            app.layout.contains(PanelKind::Editor),
+            app.layout.contains(PanelKind::Editor(EditorId::FIRST)),
             "hiding the editor must be refused"
         );
 

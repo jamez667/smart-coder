@@ -16,19 +16,44 @@
 
 use std::collections::BTreeSet;
 
+/// Which editor pane. Panes are told apart by this and nothing else.
+///
+/// **Ids are never reused.** A monotonically-allocated id means a stale one — left in a queued
+/// `Task`, or in a [`PanelSlot`] persisted before a pane was closed — resolves to nothing rather
+/// than silently addressing a *different* pane that happens to have inherited the number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct EditorId(pub u32);
+
+impl EditorId {
+    /// The pane that exists in every layout — the one a single-pane user has, and the one a
+    /// layout written before panes existed resolves to.
+    pub const FIRST: EditorId = EditorId(0);
+}
+
+impl std::fmt::Display for EditorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A panel that can appear in the tree.
 ///
 /// The `Assistant`-only ones are marked: a Craft-mode layout containing one is not an error, it
 /// is simply pruned (see [`Layout::prune`]) — the same "fall back, never wedge" rule
 /// [`crate::splits::SplitStore`] follows for a corrupt fraction.
+///
+/// [`PanelKind::Editor`] carries an [`EditorId`] because editor panes are the one kind you can
+/// have several of: each owns its own tabs and scroll, so two of them are two different things
+/// on screen. Every other panel renders one piece of app state, so a second would be the same
+/// view twice — see [`Layout::dedup`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PanelKind {
     /// The workspace file tree.
     Files,
     /// Branch, sync bar, and changed files.
     Git,
-    /// The CODE pane — editor or review.
-    Editor,
+    /// A CODE pane — editor or review — with its own tabs.
+    Editor(EditorId),
     /// The bottom strip (Problems / Terminal / …).
     Bottom,
     /// The chat thread and composer. **Assistant only.**
@@ -36,37 +61,71 @@ pub enum PanelKind {
 }
 
 impl PanelKind {
-    /// The stable slug persisted in `layout.json`.
-    pub fn slug(self) -> &'static str {
+    /// The stable slug persisted in `layout.json` — and, via [`Layout::move_panel`] and
+    /// [`Layout::move_to_edge`], baked into the **split ids that key
+    /// [`crate::splits::SplitStore`]**.
+    ///
+    /// The first editor pane is spelled `"editor"`, exactly as it was before panes had ids.
+    /// That is load-bearing, not cosmetic: a single-pane layout must serialise byte-identically
+    /// to what earlier builds wrote, and its split ids (`chat|editor`, `edge:editor:right`) must
+    /// keep matching the divider positions already saved under them. Emitting `editor:0` would
+    /// silently reset every existing user's dividers. Only a *second* pane introduces a new
+    /// spelling, and only it can introduce new ids.
+    pub fn slug(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
         match self {
-            PanelKind::Files => "files",
-            PanelKind::Git => "git",
-            PanelKind::Editor => "editor",
-            PanelKind::Bottom => "bottom",
-            PanelKind::Chat => "chat",
+            PanelKind::Files => Cow::Borrowed("files"),
+            PanelKind::Git => Cow::Borrowed("git"),
+            // `EditorId::FIRST` can't appear in a pattern (associated consts aren't patterns),
+            // hence the literal — kept in step by `editor_zero_is_still_spelled_editor`.
+            PanelKind::Editor(EditorId(0)) => Cow::Borrowed("editor"),
+            PanelKind::Editor(EditorId(n)) => Cow::Owned(format!("editor:{n}")),
+            PanelKind::Bottom => Cow::Borrowed("bottom"),
+            PanelKind::Chat => Cow::Borrowed("chat"),
         }
     }
 
     /// Parse a slug. Unknown ⇒ `None`, which [`Layout::parse`] prunes rather than failing on.
+    ///
+    /// Accepts both editor spellings: bare `"editor"` (every layout written before panes had
+    /// ids) and `"editor:N"`.
     pub fn from_slug(s: &str) -> Option<Self> {
         match s.trim() {
             "files" => Some(PanelKind::Files),
             "git" => Some(PanelKind::Git),
-            "editor" => Some(PanelKind::Editor),
+            "editor" => Some(PanelKind::Editor(EditorId::FIRST)),
             "bottom" => Some(PanelKind::Bottom),
             "chat" => Some(PanelKind::Chat),
-            _ => None,
+            rest => rest
+                .strip_prefix("editor:")
+                .and_then(|n| n.parse().ok())
+                .map(|n| PanelKind::Editor(EditorId(n))),
         }
     }
 
-    /// Human label for the View menu.
+    /// Short label — the panel's drag header, and the drag ghost.
+    ///
+    /// Every editor pane is just "Editor" here: the header names what the panel *is*, and a
+    /// number would be noise on the common single-pane layout. [`Self::menu_label`] disambiguates
+    /// where it matters.
     pub fn label(self) -> &'static str {
         match self {
             PanelKind::Files => "Files",
             PanelKind::Git => "Source control",
-            PanelKind::Editor => "Editor",
+            PanelKind::Editor(_) => "Editor",
             PanelKind::Bottom => "Panel",
             PanelKind::Chat => "Chat",
+        }
+    }
+
+    /// Label for the View menu, where several editors can be listed at once and have to be told
+    /// apart. Numbered from 1 for humans; the first is plain "Editor".
+    pub fn menu_label(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
+        match self {
+            PanelKind::Editor(EditorId(0)) => Cow::Borrowed("Editor"),
+            PanelKind::Editor(EditorId(n)) => Cow::Owned(format!("Editor {}", n + 1)),
+            other => Cow::Borrowed(other.label()),
         }
     }
 
@@ -75,14 +134,29 @@ impl PanelKind {
         matches!(self, PanelKind::Chat)
     }
 
-    /// Every panel, in menu order.
-    pub const ALL: [PanelKind; 5] = [
-        PanelKind::Files,
-        PanelKind::Git,
-        PanelKind::Editor,
-        PanelKind::Bottom,
-        PanelKind::Chat,
-    ];
+    /// Whether this is an editor pane, whichever one.
+    pub fn is_editor(self) -> bool {
+        matches!(self, PanelKind::Editor(_))
+    }
+}
+
+/// The panels the View menu offers, for a given layout.
+///
+/// Replaces a fixed `ALL` array: how many editor panes exist is a property of the user's
+/// layout, not of the type. Editors come from the tree (so each is listed once, in tree order);
+/// the singleton panels are always offered, whether or not they're currently shown, because the
+/// menu is how you get a hidden one back.
+pub fn menu_panels(layout: &Layout) -> Vec<PanelKind> {
+    let mut out = vec![PanelKind::Files, PanelKind::Git];
+    out.extend(layout.editor_ids().into_iter().map(PanelKind::Editor));
+    // A layout with no editor is rejected by `sanitize`, but a caller could hold one mid-edit;
+    // offer the first pane so the menu is never editor-less.
+    if !out.iter().any(|k| k.is_editor()) {
+        out.push(PanelKind::Editor(EditorId::FIRST));
+    }
+    out.push(PanelKind::Bottom);
+    out.push(PanelKind::Chat);
+    out
 }
 
 /// Which way a split divides its children.
@@ -297,7 +371,7 @@ impl Layout {
                     crate::splits::id::CHAT_CODE,
                     Axis::Horizontal,
                     Layout::Leaf(PanelKind::Chat),
-                    Layout::Leaf(PanelKind::Editor),
+                    Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
                 ),
             ),
             Layout::Leaf(PanelKind::Bottom),
@@ -318,7 +392,7 @@ impl Layout {
                     Layout::Leaf(PanelKind::Git),
                     Layout::Leaf(PanelKind::Files),
                 ),
-                Layout::Leaf(PanelKind::Editor),
+                Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
             ),
             Layout::Leaf(PanelKind::Bottom),
         )
@@ -353,6 +427,25 @@ impl Layout {
     /// Whether `kind` is on screen.
     pub fn contains(&self, kind: PanelKind) -> bool {
         self.panels().contains(&kind)
+    }
+
+    /// Every editor pane on screen, in tree order (left to right / top to bottom).
+    ///
+    /// Tree order matters wherever focus is retargeted after a pane closes — it lands somewhere
+    /// the user can see, rather than wherever a map happened to iterate.
+    pub fn editor_ids(&self) -> Vec<EditorId> {
+        self.panels()
+            .into_iter()
+            .filter_map(|k| match k {
+                PanelKind::Editor(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether any editor pane is on screen — the invariant [`Self::sanitize`] enforces.
+    pub fn has_editor(&self) -> bool {
+        self.panels().iter().any(|k| k.is_editor())
     }
 
     /// How deeply the tree nests.
@@ -570,8 +663,16 @@ impl Layout {
 
     /// Drop duplicate panels, keeping the first of each.
     ///
-    /// Two leaves of the same kind would render the same state twice — two editors over one
-    /// buffer — which reads as a bug rather than a feature.
+    /// Two leaves of the same kind would render the same state twice — one tree driven from two
+    /// places, one scroll position from two scrollables — which reads as a bug rather than a
+    /// feature.
+    ///
+    /// Editor panes are distinguished by their [`EditorId`], so `Editor(0)` and `Editor(1)` are
+    /// two *different* leaves and both survive: that is the whole point of panes. Two leaves
+    /// carrying the **same** id are still the duplicate this removes — that really would be one
+    /// pane rendered twice, sharing a widget id and a scroll offset.
+    ///
+    /// No code change was needed for that; the `BTreeSet` already tells the ids apart.
     pub fn dedup(&self) -> Option<Layout> {
         let mut seen = BTreeSet::new();
         self.dedup_inner(&mut seen)
@@ -600,7 +701,9 @@ impl Layout {
     ///   * too deep ⇒ reject (a hand-edited file must not blow the stack)
     ///   * duplicates ⇒ keep the first
     ///   * Assistant panels in Craft mode ⇒ pruned and rebalanced
-    ///   * no Editor ⇒ reject; an IDE with no editor is worse than a reset layout
+    ///   * no editor PANE at all ⇒ reject; an IDE with nowhere to open a file is worse than a
+    ///     reset layout. Note this counts panes, not "the editor": closing one of several is
+    ///     fine, closing the last is not.
     pub fn sanitize(self, craft: bool) -> Option<Layout> {
         if self.depth() > MAX_DEPTH {
             return None;
@@ -611,7 +714,7 @@ impl Layout {
         } else {
             tree
         };
-        tree.contains(PanelKind::Editor).then_some(tree)
+        tree.has_editor().then_some(tree)
     }
 
     /// Serialize to JSON. Hand-rolled over `serde_json::Value` to match the house style — no
@@ -757,7 +860,7 @@ mod tests {
             PanelKind::Git,
             PanelKind::Files,
             PanelKind::Chat,
-            PanelKind::Editor,
+            PanelKind::Editor(EditorId::FIRST),
             PanelKind::Bottom,
         ] {
             assert!(a.contains(k), "assistant default missing {}", k.slug());
@@ -766,7 +869,7 @@ mod tests {
         // Craft is the same minus chat — the editor takes that width.
         let c = Layout::craft_default();
         assert!(!c.contains(PanelKind::Chat), "no chat without a model");
-        assert!(c.contains(PanelKind::Editor));
+        assert!(c.contains(PanelKind::Editor(EditorId::FIRST)));
         assert!(c.contains(PanelKind::Files));
         assert!(a.depth() <= MAX_DEPTH && c.depth() <= MAX_DEPTH);
     }
@@ -796,7 +899,10 @@ mod tests {
         let l = Layout::assistant_default();
         let without_chat = l.without(PanelKind::Chat).expect("still usable");
         assert!(!without_chat.contains(PanelKind::Chat));
-        assert!(without_chat.contains(PanelKind::Editor), "editor survives");
+        assert!(
+            without_chat.contains(PanelKind::Editor(EditorId::FIRST)),
+            "editor survives"
+        );
         // The `chat|code` split is gone entirely — the editor took its place rather than sitting
         // beside an empty frame. (Overall depth is unchanged, because the explorer's git|files
         // split is what sets it.)
@@ -821,7 +927,7 @@ mod tests {
             .sanitize(true)
             .expect("still usable");
         assert!(!sane.contains(PanelKind::Chat));
-        assert!(sane.contains(PanelKind::Editor));
+        assert!(sane.contains(PanelKind::Editor(EditorId::FIRST)));
     }
 
     #[test]
@@ -847,22 +953,116 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_panels_are_reduced_to_the_first() {
-        // Two editors would render one buffer twice — a bug, not a feature.
+    fn editor_zero_is_still_spelled_editor() {
+        // COMPATIBILITY. Every layout.json written before panes had ids says `"editor"`, and the
+        // split ids keyed into splits.json are built from these slugs. Spelling the first pane
+        // `editor:0` would parse fine but silently reset every existing user's saved dividers,
+        // because `chat|editor:0` is not the key `chat|editor` they were stored under.
+        assert_eq!(PanelKind::Editor(EditorId::FIRST).slug(), "editor");
+        assert_eq!(PanelKind::Editor(EditorId(1)).slug(), "editor:1");
+
+        // Both spellings parse, and each round-trips to itself.
+        assert_eq!(
+            PanelKind::from_slug("editor"),
+            Some(PanelKind::Editor(EditorId::FIRST)),
+            "a layout written before panes existed still loads"
+        );
+        for k in [
+            PanelKind::Editor(EditorId::FIRST),
+            PanelKind::Editor(EditorId(7)),
+        ] {
+            assert_eq!(PanelKind::from_slug(&k.slug()), Some(k));
+        }
+        // Garbage after the prefix is rejected rather than defaulting to pane 0.
+        assert_eq!(PanelKind::from_slug("editor:x"), None);
+        assert_eq!(PanelKind::from_slug("editor:"), None);
+    }
+
+    #[test]
+    fn a_single_pane_layout_generates_the_split_ids_it_always_did() {
+        // THE test that protects splits.json. These exact id strings are keys into the store of
+        // saved divider positions; if this ever fails, upgrading silently resets everyone's
+        // layout proportions with no error to notice.
+        let one = Layout::Leaf(PanelKind::Editor(EditorId::FIRST));
+
+        let docked = one.move_to_edge(PanelKind::Editor(EditorId::FIRST), Side::Right);
+        assert_eq!(docked, None, "already the only panel — nothing to span");
+
+        let with_chat = Layout::split(
+            crate::splits::id::CHAT_CODE,
+            Axis::Horizontal,
+            Layout::Leaf(PanelKind::Chat),
+            Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
+        );
+        let moved = with_chat
+            .move_panel(
+                PanelKind::Chat,
+                PanelKind::Editor(EditorId::FIRST),
+                Side::Right,
+            )
+            .expect("valid move");
+        assert!(
+            moved.to_json().to_string().contains("chat|editor"),
+            "the generated split id must still be `chat|editor`: {moved:?}"
+        );
+
+        // And the default tree still serialises with the legacy spelling throughout.
+        let json = Layout::assistant_default().to_json().to_string();
+        assert!(json.contains(r#""leaf":"editor""#), "{json}");
+        assert!(
+            !json.contains("editor:"),
+            "no id suffix on a single pane: {json}"
+        );
+    }
+
+    #[test]
+    fn two_leaves_of_the_same_panel_are_reduced_to_the_first() {
+        // Every panel but the editor renders ONE piece of app state, so a second leaf would be
+        // the same view twice — one tree driven from two places.
         let dup = Layout::split(
             "x",
             Axis::Horizontal,
-            Layout::Leaf(PanelKind::Editor),
-            Layout::Leaf(PanelKind::Editor),
+            Layout::Leaf(PanelKind::Files),
+            Layout::Leaf(PanelKind::Files),
         );
-        let fixed = dup.sanitize(false).expect("usable after dedup");
-        assert_eq!(fixed, Layout::Leaf(PanelKind::Editor));
+        assert_eq!(dup.dedup(), Some(Layout::Leaf(PanelKind::Files)));
+
+        // Two editor leaves carrying the SAME id are the same bug: one pane, one set of tabs,
+        // one widget id, rendered twice.
+        let same_pane = Layout::split(
+            "x",
+            Axis::Horizontal,
+            Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
+            Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
+        );
+        let fixed = same_pane.sanitize(false).expect("usable after dedup");
+        assert_eq!(fixed, Layout::Leaf(PanelKind::Editor(EditorId::FIRST)));
+    }
+
+    #[test]
+    fn two_editor_panes_both_survive() {
+        // The inverse of the rule above, and the whole point of panes: distinct ids are distinct
+        // leaves, each with its own tabs and scroll, so both stay. This is the assertion that
+        // changed when editor panes gained identity — the old test asserted they collapsed.
+        let two = Layout::split(
+            "editor|editor",
+            Axis::Horizontal,
+            Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
+            Layout::Leaf(PanelKind::Editor(EditorId(1))),
+        );
+        let kept = two.clone().sanitize(false).expect("two panes are valid");
+        assert_eq!(kept, two, "neither pane was pruned");
+        assert_eq!(
+            kept.editor_ids(),
+            vec![EditorId::FIRST, EditorId(1)],
+            "and they come back in tree order"
+        );
     }
 
     #[test]
     fn a_pathologically_deep_tree_is_rejected_before_it_can_recurse() {
         // A hand-edited or corrupt file must not blow the walker's stack.
-        let mut l = Layout::Leaf(PanelKind::Editor);
+        let mut l = Layout::Leaf(PanelKind::Editor(EditorId::FIRST));
         for i in 0..(MAX_DEPTH + 3) {
             l = Layout::split(
                 &format!("d{i}"),
@@ -913,7 +1113,11 @@ mod tests {
         // Drop Git to the RIGHT of the editor: it leaves the explorer column (collapsing that
         // split onto Files) and becomes the editor's right-hand neighbour.
         let after = before
-            .move_panel(PanelKind::Git, PanelKind::Editor, Side::Right)
+            .move_panel(
+                PanelKind::Git,
+                PanelKind::Editor(EditorId::FIRST),
+                Side::Right,
+            )
             .expect("a valid move");
 
         assert!(after.contains(PanelKind::Git), "still on screen");
@@ -930,7 +1134,10 @@ mod tests {
 
         // Git now sits immediately after Editor in reading order.
         let order = after.panels();
-        let ie = order.iter().position(|k| *k == PanelKind::Editor).unwrap();
+        let ie = order
+            .iter()
+            .position(|k| *k == PanelKind::Editor(EditorId::FIRST))
+            .unwrap();
         assert_eq!(
             order.get(ie + 1),
             Some(&PanelKind::Git),
@@ -1056,10 +1263,17 @@ mod tests {
     fn dropping_on_the_left_or_top_puts_the_panel_first() {
         let before = Layout::assistant_default();
         let after = before
-            .move_panel(PanelKind::Bottom, PanelKind::Editor, Side::Left)
+            .move_panel(
+                PanelKind::Bottom,
+                PanelKind::Editor(EditorId::FIRST),
+                Side::Left,
+            )
             .expect("valid");
         let order = after.panels();
-        let ie = order.iter().position(|k| *k == PanelKind::Editor).unwrap();
+        let ie = order
+            .iter()
+            .position(|k| *k == PanelKind::Editor(EditorId::FIRST))
+            .unwrap();
         assert_eq!(
             order.get(ie.wrapping_sub(1)),
             Some(&PanelKind::Bottom),
@@ -1078,11 +1292,19 @@ mod tests {
         // A panel that isn't on screen can't be moved or targeted.
         let no_git = l.without(PanelKind::Git).unwrap();
         assert_eq!(
-            no_git.move_panel(PanelKind::Git, PanelKind::Editor, Side::Left),
+            no_git.move_panel(
+                PanelKind::Git,
+                PanelKind::Editor(EditorId::FIRST),
+                Side::Left
+            ),
             None
         );
         assert_eq!(
-            no_git.move_panel(PanelKind::Editor, PanelKind::Git, Side::Left),
+            no_git.move_panel(
+                PanelKind::Editor(EditorId::FIRST),
+                PanelKind::Git,
+                Side::Left
+            ),
             None
         );
     }
@@ -1108,7 +1330,11 @@ mod tests {
     fn a_moved_panel_survives_a_round_trip_through_json() {
         // A rearranged layout has generated split ids; they must persist like any other.
         let moved = Layout::assistant_default()
-            .move_panel(PanelKind::Git, PanelKind::Editor, Side::Bottom)
+            .move_panel(
+                PanelKind::Git,
+                PanelKind::Editor(EditorId::FIRST),
+                Side::Bottom,
+            )
             .unwrap();
         let store = LayoutStore {
             assistant: Some(moved.clone()),
@@ -1168,13 +1394,13 @@ mod tests {
         let chat_slot = before.slot_of(PanelKind::Chat).unwrap();
         assert_eq!(
             chat_slot.siblings,
-            vec![PanelKind::Editor],
+            vec![PanelKind::Editor(EditorId::FIRST)],
             "sat beside the editor"
         );
 
         let hidden = before
             .without(PanelKind::Chat)
-            .and_then(|l| l.without(PanelKind::Editor))
+            .and_then(|l| l.without(PanelKind::Editor(EditorId::FIRST)))
             .expect("usable");
 
         assert_eq!(

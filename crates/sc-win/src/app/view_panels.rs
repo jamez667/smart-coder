@@ -554,13 +554,15 @@ impl App {
                 // in Craft mode — it can't be shown there, and offering a toggle that silently
                 // does nothing is worse than not offering it.
                 v.push(("— Panels —".to_string(), Message::NoOp));
-                for kind in sc_win::layout::PanelKind::ALL {
+                // Derived from the LAYOUT, not a fixed list: how many editor panes exist is the
+                // user's arrangement, not a property of the type. `menu_label` numbers them.
+                for kind in sc_win::layout::menu_panels(&self.layout) {
                     if self.cfg.craft() && kind.needs_model() {
                         continue;
                     }
                     let on = self.layout.contains(kind);
                     v.push((
-                        format!("{}  {}", if on { "✓" } else { "  " }, kind.label()),
+                        format!("{}  {}", if on { "✓" } else { "  " }, kind.menu_label()),
                         Message::TogglePanel(kind),
                     ));
                 }

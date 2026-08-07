@@ -87,7 +87,7 @@ impl App {
 
         // A cheap, honest summary of the panel's contents.
         let summary: String = match kind {
-            PanelKind::Editor => match self.active_tab() {
+            PanelKind::Editor(_) => match self.active_tab() {
                 Some(t) => t.path.clone(),
                 None => "no file open".to_string(),
             },
@@ -289,11 +289,7 @@ impl App {
         // The EDITOR is exempt and sits flush: its line-number gutter is meant to start at the
         // panel's edge, and any padding shows as a stripe of background to the left of the
         // numbers. It draws its own background, so it needs no inset to look contained.
-        let pad = if kind == PanelKind::Editor {
-            0
-        } else {
-            PANEL_PAD
-        };
+        let pad = if kind.is_editor() { 0 } else { PANEL_PAD };
         let mut body: Element<'_, Message> = container(self.view_panel(kind))
             .width(Fill)
             .height(Fill)
@@ -395,7 +391,7 @@ impl App {
         match kind {
             PanelKind::Files => self.view_files_tab(),
             PanelKind::Git => self.view_git_panel(),
-            PanelKind::Editor => self.view_code_panel(),
+            PanelKind::Editor(_) => self.view_code_panel(),
             PanelKind::Bottom => self.view_bottom_panel(),
             // A swarm build in flight: the live topology IS the story, so it takes the chat
             // panel's place for the duration — the same swap the fixed layout used to do.
