@@ -140,8 +140,12 @@ fn ab_hard_bank_ledger() {
 /// Arm A: pipeline plans, then the agent loop implements against the INJECTED oracle.
 fn arm_pipeline(cfg: &UiConfig) -> (bool, usize, usize, usize) {
     let ws = fresh_ws(cfg, "hard-pipe");
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let orchestrator = cfg
+        .orchestrator()
+        .expect("live test needs an orchestrator (not Craft mode)");
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let outcome = sc_workflow::run_workflow(
         &orchestrator,
         &worker,
@@ -206,7 +210,9 @@ fn arm_pipeline(cfg: &UiConfig) -> (bool, usize, usize, usize) {
 /// Arm B: one raw completion (multi-file reply), judged by the same oracle.
 fn arm_raw(cfg: &UiConfig) -> (bool, usize, usize) {
     let ws = fresh_ws(cfg, "hard-raw");
-    let worker = cfg.backend();
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let prompt = format!(
         "Write ALL the source files for this task. The app spans MULTIPLE files. For EACH \
          file, output a fenced block whose info string is the path, like:\n\

@@ -452,41 +452,92 @@ impl App {
         }
     }
 
-    /// Select `rel` for the code panel and load its contents from the workspace root.
+    /// Select `rel` for the code panel, opening it as a tab if it isn't one already.
+    ///
+    /// Defaults to the edit view — this is the tree/plan/comment path, i.e. "I want to work on
+    /// this file". [`Self::select_file_for_review`] is the git/follow-agent path.
     pub(crate) fn select_file(&mut self, rel: String) {
+        self.select_file_from(rel, Origin::Tree);
+    }
+
+    /// Select `rel` and land in the REVIEW view — for the git panel and `follow_agent`, where
+    /// the intent is to see what changed rather than to type.
+    pub(crate) fn select_file_for_review(&mut self, rel: String) {
+        self.select_file_from(rel, Origin::Review);
+    }
+
+    /// Select `rel`, opening a tab with `origin` deciding the initial view.
+    pub(crate) fn select_file_from(&mut self, rel: String, origin: Origin) {
         let root = self.workspace_root();
+        let switching = self.selected_file.as_deref() != Some(rel.as_str());
         // Switching to a different file resets the scrollable to the top; keep our virtualization
         // offset in sync so the first frame renders the top window, not the old file's slice.
-        if self.selected_file.as_deref() != Some(rel.as_str()) {
+        if switching {
             self.code_scroll_y = 0.0;
             self.code_viewport = None;
         }
+        // The REVIEW view is rebuilt from disk on every selection — it is a rendering of the
+        // file, not a buffer, so it must show current bytes.
         self.code = Some(sc_win::codeview::load(&root, &rel));
-        // Opening a file makes it a CODE-panel tab. Push before the move into `selected_file`
-        // (which becomes the ACTIVE tab); no duplicates, so re-opening an already-open file
-        // just re-selects it. Every open path (tree/git/plan/comment) funnels through here, so
-        // they all get a tab for free.
-        if !self.open_tabs.contains(&rel) {
-            self.open_tabs.push(rel.clone());
+        // Re-selecting an ALREADY-OPEN tab must not re-open it: that would throw away its
+        // buffer, and with it any unsaved edits. Just make it active.
+        if !self.tabs.iter().any(|t| t.path == rel) {
+            let abs = root.join(&rel);
+            self.tabs.push(Tab::open(rel.clone(), &abs, origin));
         }
         self.selected_file = Some(rel);
         self.refresh_changed_lines();
+    }
+
+    /// The active tab, if any.
+    pub(crate) fn active_tab(&self) -> Option<&Tab> {
+        let sel = self.selected_file.as_deref()?;
+        self.tabs.iter().find(|t| t.path == sel)
+    }
+
+    /// The active tab, mutably.
+    pub(crate) fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let sel = self.selected_file.clone()?;
+        self.tabs.iter_mut().find(|t| t.path == sel)
+    }
+
+    /// Whether the tab for `rel` has unsaved edits. Used to guard every path that would
+    /// overwrite or reload a file behind the editor's back.
+    pub(crate) fn is_dirty(&self, rel: &str) -> bool {
+        self.tabs.iter().any(|t| t.path == rel && t.dirty)
     }
 
     /// Close the CODE-panel tab for `path` (no-op if it isn't open). If it was the active tab,
     /// a neighbour becomes active (see `tab_after_close`); if none remain, the panel clears.
     /// Called by the ✕ button and when a file is deleted/discarded out from under it — a tab on
     /// a file that no longer exists is dead weight.
+    ///
+    /// A tab with unsaved edits is NOT closed — it raises the confirm prompt instead. Losing
+    /// typing to a stray click on a ✕ is exactly the kind of quiet data loss the editor has to
+    /// rule out.
     pub(crate) fn close_tab(&mut self, path: &str) {
-        if let Some(i) = self.open_tabs.iter().position(|p| p == path) {
+        if self.is_dirty(path) {
+            self.confirm_close = Some(path.to_string());
+            return;
+        }
+        self.force_close_tab(path);
+    }
+
+    /// Close `path` without the dirty check — the "Discard" answer to the confirm prompt, and
+    /// the path used when a file has been deleted out from under its tab.
+    pub(crate) fn force_close_tab(&mut self, path: &str) {
+        if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
             let was_active = self.selected_file.as_deref() == Some(path);
-            self.open_tabs.remove(i);
+            self.tabs.remove(i);
+            if self.confirm_close.as_deref() == Some(path) {
+                self.confirm_close = None;
+            }
             // Only the active tab closing changes what's shown; closing a background tab leaves
             // the active file alone.
             if was_active {
-                match tab_after_close(i, self.open_tabs.len()) {
+                match tab_after_close(i, self.tabs.len()) {
                     Some(idx) => {
-                        let next = self.open_tabs[idx].clone();
+                        let next = self.tabs[idx].path.clone();
                         self.select_file(next);
                     }
                     None => {
@@ -504,6 +555,10 @@ impl App {
         if let Some(rel) = self.selected_file.clone() {
             let root = self.workspace_root();
             self.code = Some(sc_win::codeview::load(&root, &rel));
+            // The review view above is derived from disk, so refreshing it is always safe. The
+            // tab's BUFFER is not — `reload_tab_from_disk` refuses while it's dirty, so an
+            // agent write can never erase what you were typing.
+            self.reload_tab_from_disk(&rel);
         }
         self.refresh_changed_lines();
     }

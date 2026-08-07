@@ -80,7 +80,16 @@ impl UiConfig {
 
     /// Build the coder/worker backend, applying the requested tool-calling
     /// enforcement — the mirror of `Cli::backend()`.
-    pub fn backend(&self) -> OpenAiBackend {
+    ///
+    /// **`None` in Craft mode** (spec 21). This is the seam that makes "no model is contacted" a
+    /// property of the type rather than of discipline: a caller added later cannot dial out
+    /// without handling the `None`, whereas guarding each call site only protects the sites
+    /// someone remembered to guard. Note constructing a backend is not free — it ends in
+    /// `with_detected_context()`, a live `/models` probe — so this really is the network seam.
+    pub fn backend(&self) -> Option<OpenAiBackend> {
+        if self.craft() {
+            return None;
+        }
         let b = match self.tool_calling {
             ToolCalling::None => OpenAiBackend::new(self.base_url.clone(), self.model.clone()),
             ToolCalling::Native => {
@@ -98,7 +107,7 @@ impl UiConfig {
         // of the conservative 8192 default — best-effort, falls back to the default if the
         // server doesn't advertise it. This is the worker backend that drives the agent
         // loop, where the under-budget hurt most.
-        b.with_detected_context()
+        Some(b.with_detected_context())
     }
 
     /// Like [`backend`], but the returned backend honours `cancel`: setting it true aborts an
@@ -108,13 +117,17 @@ impl UiConfig {
     pub fn backend_cancellable(
         &self,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> OpenAiBackend {
-        self.backend().with_cancel(cancel)
+    ) -> Option<OpenAiBackend> {
+        Some(self.backend()?.with_cancel(cancel))
     }
 
     /// Build the advisor backend if a model was set — its own URL if given, else the
     /// coder endpoint (mirror of `Cli::advisor()`).
+    /// `None` in Craft mode, as well as when no advisor model is set (spec 21).
     pub fn advisor(&self) -> Option<OpenAiBackend> {
+        if self.craft() {
+            return None;
+        }
         let url = self
             .advisor_url
             .clone()
@@ -127,7 +140,12 @@ impl UiConfig {
 
     /// Build the orchestrator (decomposer) backend — its own URL/model if set, else
     /// the worker endpoint/model (mirror of `Cli::orchestrator()`).
-    pub fn orchestrator(&self) -> OpenAiBackend {
+    /// `None` in Craft mode (spec 21) — like [`Self::backend`], this ends in a live `/models`
+    /// probe, so returning it at all would be contacting a model.
+    pub fn orchestrator(&self) -> Option<OpenAiBackend> {
+        if self.craft() {
+            return None;
+        }
         let url = self
             .orchestrator_url
             .clone()
@@ -144,13 +162,13 @@ impl UiConfig {
         // Detect the server's real context window (like `backend()` does) — the workflow phases
         // ground on real file CONTENTS, which need the full window; at the hardcoded 8192 a
         // large source file is clipped and the design hallucinates around the missing code.
-        b.with_detected_context()
+        Some(b.with_detected_context())
     }
 
     /// The swarm's advisor: an explicit advisor if set, else the orchestrator
-    /// (mirror of `Cli::swarm_advisor()`).
-    pub fn swarm_advisor(&self) -> OpenAiBackend {
-        self.advisor().unwrap_or_else(|| self.orchestrator())
+    /// (mirror of `Cli::swarm_advisor()`). `None` in Craft mode, since both are.
+    pub fn swarm_advisor(&self) -> Option<OpenAiBackend> {
+        self.advisor().or_else(|| self.orchestrator())
     }
 
     /// The permission policy from the posture flags (mirror of

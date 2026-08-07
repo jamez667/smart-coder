@@ -9,7 +9,108 @@ impl App {
     /// side-by-side columns; wrapping is disabled so a long line scrolls horizontally
     /// instead of wrapping into — and interrupting — the number gutter. One vertical
     /// scroll (whole editor) + one horizontal scroll (the code column) is what you get.
-    pub(crate) fn view_code(&self, portion: u16) -> Element<'_, Message> {
+    pub(crate) fn view_code(&self) -> Element<'_, Message> {
+        // Which surface the active tab is showing (spec 21). The REVIEW view is the original
+        // read-only pane — diffs, line comments, gates — and is untouched by the editor work.
+        // The EDIT view is a real buffer. A tab that can't be edited never reaches the second
+        // branch: `Tab::open` forces it to Review.
+        let editing = self
+            .active_tab()
+            .is_some_and(|t| t.view == TabView::Edit && t.editable());
+        let inner: Element<'_, Message> = if editing {
+            self.view_edit_body()
+        } else {
+            self.view_review_body()
+        };
+        self.view_code_frame(inner)
+    }
+
+    /// The EDIT view: the editor over the active tab's buffer, with a status line beneath.
+    fn view_edit_body(&self) -> Element<'_, Message> {
+        let Some(tab) = self.active_tab() else {
+            return Space::new().into();
+        };
+        let Some(editor) = tab.editor() else {
+            return Space::new().into();
+        };
+
+        // Status line: where the caret is, how big the file is, and what will be written back.
+        // The line endings and encoding are shown because they are decisions the editor made on
+        // the user's behalf — a silent CRLF→LF rewrite is a whole-file diff, so it is stated.
+        let (line, col) = editor.cursor_position();
+        let status = row![
+            text(format!("Ln {}, Col {}", line + 1, col + 1))
+                .size(11)
+                .color(FG_MUTED),
+            text("·").size(11).color(FG_MUTED),
+            text(tab.ending.label()).size(11).color(FG_MUTED),
+            text("·").size(11).color(FG_MUTED),
+            text(if tab.bom { "UTF-8 BOM" } else { "UTF-8" })
+                .size(11)
+                .color(FG_MUTED),
+            Space::new().width(Fill),
+            if tab.dirty {
+                text("● unsaved — Ctrl+S").size(11).color(AMBER)
+            } else {
+                text("saved").size(11).color(FG_MUTED)
+            },
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+        let mut col_ = column![
+            container(editor.view().map(Message::EditorEvent)).height(Fill),
+            status,
+        ]
+        .spacing(4)
+        .height(Fill);
+
+        // A refused save is surfaced here, right under the buffer it refers to — and it offers
+        // the only two honest answers. It is never resolved automatically: both versions hold
+        // real work, so the user picks.
+        if self.save_conflict.as_deref() == Some(tab.path.as_str()) {
+            col_ = col_.push(self.view_save_conflict());
+        }
+        col_.into()
+    }
+
+    /// The save-refused notice: what happened, and the two ways out.
+    fn view_save_conflict(&self) -> Element<'_, Message> {
+        container(
+            column![
+                text("Not saved — this file changed on disk since you opened it.")
+                    .size(12)
+                    .color(AMBER),
+                text(
+                    "Something else (probably the agent) wrote to it while you had unsaved \
+                     edits. Overwriting discards their version; dismissing keeps yours in the \
+                     buffer, unsaved.",
+                )
+                .size(11)
+                .color(FG_MUTED),
+                row![
+                    button(text("Overwrite the file").size(12))
+                        .on_press(Message::OverwriteOnConflict)
+                        .padding([3, 10])
+                        .style(menu_item_style),
+                    button(text("Keep editing").size(12))
+                        .on_press(Message::DismissSaveConflict)
+                        .padding([3, 10])
+                        .style(primary_button),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6),
+        )
+        .padding(8)
+        .width(Fill)
+        .style(card_style)
+        .into()
+    }
+
+    /// The REVIEW view: the original read-only pane. Unchanged by the editor work — it carries
+    /// the diff washes, inline comments and gate affordances that no editor widget can host.
+    fn view_review_body(&self) -> Element<'_, Message> {
         let inner: Element<'_, Message> = match &self.code {
             Some(cv) if cv.note.is_some() => text(cv.note.clone().unwrap_or_default())
                 .size(12)
@@ -315,15 +416,26 @@ impl App {
                 .color(FG_MUTED)
                 .into(),
         };
+        inner
+    }
 
+    /// The CODE panel's chrome: the tab strip, the Review|Edit toggle, and the pinned agent
+    /// actions. Shared by both views so the frame can't drift between them.
+    ///
+    /// Returns `Fill × Fill` with no sizing of its own — the panel-tree walker positions it
+    /// (spec 21). Taking a `portion` was what made panel identity positional.
+    fn view_code_frame<'a>(&'a self, inner: Element<'a, Message>) -> Element<'a, Message> {
         // Header stays fixed; the code area is the single scrollable (no outer scroll wrap,
         // which is what previously collapsed the inner one). The header is now a TAB STRIP — one
         // tab per open file, the ACTIVE tab (=== `selected_file`) highlighted, each closeable.
         // When the active file is a feature plan (PLAN-<slug>.md) and no session is running, the
         // strip's right end carries an "⚒ Execute plan" button — the same one-click build the
         // proposal card offers, acting on the active file.
-        let is_open_plan = self.selected_file.as_deref().is_some_and(is_feature_plan);
-        let header_bar: Element<'_, Message> = if self.open_tabs.is_empty() {
+        // "This is a feature plan, offer Breakdown/Build" — an agent action, so never in Craft
+        // mode. A spec markdown file is just a file to read and edit there.
+        let is_open_plan =
+            !self.cfg.craft() && self.selected_file.as_deref().is_some_and(is_feature_plan);
+        let header_bar: Element<'_, Message> = if self.tabs.is_empty() {
             // No files open → the old "CODE" placeholder (matches the former (None, _) header).
             text("CODE").size(12).color(FG_MUTED).into()
         } else {
@@ -331,19 +443,30 @@ impl App {
             // plus a SIBLING ✕ button (buttons can't nest) that closes it. The active tab reads
             // in ACCENT on a card-ish wash; inactive tabs are FG_MUTED and transparent.
             let mut strip = row![].spacing(4).align_y(iced::Alignment::Center);
-            for path in &self.open_tabs {
+            for tab in &self.tabs {
+                let path = &tab.path;
                 let active = self.selected_file.as_deref() == Some(path.as_str());
                 // Show the basename (full path is too long for a tab); duplicate basenames across
-                // open files are acceptable for v1.
+                // open files are acceptable for v1. A leading ● marks unsaved edits — the one
+                // signal that says "closing this loses something".
                 let base = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str());
-                let label = button(text(base.to_string()).size(12).color(if active {
-                    ACCENT
+                let shown = if tab.dirty {
+                    format!("● {base}")
                 } else {
-                    FG_MUTED
-                }))
-                .on_press(Message::SelectTab(path.clone()))
-                .padding([2, 6])
-                .style(if active { menu_item_style } else { tree_button });
+                    base.to_string()
+                };
+                // The label and its ✕ are separate buttons (buttons can't nest), so the FILL goes
+                // on a container wrapping both — styling only the label left the ✕ sitting on a
+                // different colour, which showed as a notch out of the active tab.
+                let label =
+                    button(
+                        text(shown)
+                            .size(12)
+                            .color(if active { ACCENT } else { FG_MUTED }),
+                    )
+                    .on_press(Message::SelectTab(path.clone()))
+                    .padding([6, 8])
+                    .style(tab_label_button);
                 let close =
                     button(
                         text("✕")
@@ -351,22 +474,59 @@ impl App {
                             .color(if active { ACCENT } else { FG_MUTED }),
                     )
                     .on_press(Message::CloseTab(path.clone()))
-                    .padding([2, 4])
-                    .style(tree_button);
-                strip = strip.push(
+                    .padding([6, 6])
+                    .style(tab_label_button);
+                let mut tab = container(
                     row![label, close]
                         .spacing(0)
                         .align_y(iced::Alignment::Center),
                 );
+                // The active tab carries the editor's own background so it reads as continuous
+                // with the document beneath, rather than as one more button on the strip.
+                if active {
+                    tab = tab.style(|_t: &Theme| container::Style {
+                        background: Some(Background::Color(EDITOR_BG)),
+                        ..container::Style::default()
+                    });
+                }
+                strip = strip.push(tab);
             }
             // Build the header ACTION buttons first (their own fixed-width row), so they can be
             // PINNED to the right while the tab strip scrolls in the remaining space — VS Code
             // style. Without this, the scroller expanded to fit every tab and pushed the buttons
             // off the panel's right edge (the bug: Build/Breakdown vanished with many tabs open).
-            let viewing_gated_phase = self
-                .gating_phase()
-                .is_some_and(|p| self.plan.path_for(p).as_deref() == self.selected_file.as_deref());
+            // Every action in this row drives the agent — approving a phase, sending it back,
+            // or starting a build. None of them exist in Craft mode (spec 21), so the row stays
+            // empty and the tab strip gets the full width.
+            let viewing_gated_phase = !self.cfg.craft()
+                && self.gating_phase().is_some_and(|p| {
+                    self.plan.path_for(p).as_deref() == self.selected_file.as_deref()
+                });
             let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
+            // Review|Edit, on every editable tab. One control, both directions — reading a diff
+            // and typing are separate surfaces (see `view_code`), and this is how you move
+            // between them. A tab that cannot be edited shows nothing rather than a dead toggle.
+            if let Some(tab) = self.active_tab().filter(|t| t.editable()) {
+                let editing = tab.view == TabView::Edit;
+                actions = actions.push(
+                    button(
+                        text(if editing { "◧ Review" } else { "✎ Edit" })
+                            .size(12)
+                            .color(FG_MUTED),
+                    )
+                    .on_press(Message::ToggleTabView)
+                    .padding([3, 10])
+                    .style(menu_item_style),
+                );
+                if editing && tab.dirty {
+                    actions = actions.push(
+                        button(text("Save").size(12))
+                            .on_press(Message::SaveFile)
+                            .padding([3, 10])
+                            .style(primary_button),
+                    );
+                }
+            }
             if viewing_gated_phase {
                 // The file being viewed IS the phase at a gate: its Approve / Send back / Abort
                 // controls sit here so you review the artifact and act in the same place (Send back
@@ -415,10 +575,17 @@ impl App {
             // would overlap the tab text; reserve a lane for it with bottom padding on the strip
             // content, and keep tabs top-aligned so they sit ABOVE the bar, not centered onto it.
             // Mouse-wheel over the strip scrolls it horizontally too.
-            let strip = strip.align_y(iced::Alignment::Start);
-            let scroller = scrollable(container(strip).padding(iced::Padding::ZERO.bottom(9)))
+            // Tabs stretch to the strip's full height and reach its BOTTOM edge, so the active
+            // tab meets the document with no seam. The scrollbar lane that used to be reserved
+            // here (9px of bottom padding) showed as a gap under every tab — the bar now
+            // overlays the strip instead, which costs nothing since it only appears on overflow.
+            let strip = strip.align_y(iced::Alignment::Center);
+            let scroller = scrollable(strip)
                 .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(5).scroller_width(5),
+                    scrollable::Scrollbar::new()
+                        .width(3)
+                        .scroller_width(3)
+                        .margin(0),
                 ))
                 .width(Fill);
             // The row MUST be `width(Fill)`: in a Shrink row, a `Fill` child resolves against the
@@ -434,12 +601,26 @@ impl App {
         // The body column must be `Fill`-width so `header_bar`'s Fill row has a bounded width to
         // fill — a Shrink column would collapse it to content width and the tab-scroll/pinned-
         // buttons layout would break (the buttons get pushed off again).
-        let body = column![header_bar, inner].spacing(6).width(Fill);
-        container(body)
-            .width(Length::FillPortion(portion))
-            .height(Fill)
-            .padding(PAD)
-            .style(card_style)
-            .into()
+        // No padding or card style here — the tree walker applies both, so every panel is
+        // framed identically wherever it sits.
+        // The document area sits on the EDITOR canvas in BOTH views — a shade darker than the
+        // panel, so the code reads as recessed. Applied here rather than per-view so toggling
+        // Review/Edit doesn't change the background under you.
+        //
+        // No spacing between the strip and the body: the active tab is filled with this same
+        // colour, so they meet as one surface. A gap would break that join.
+        column![
+            header_bar,
+            container(inner)
+                .width(Fill)
+                .height(Fill)
+                .style(|_t: &Theme| container::Style {
+                    background: Some(Background::Color(EDITOR_BG)),
+                    ..container::Style::default()
+                }),
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
     }
 }

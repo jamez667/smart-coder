@@ -681,10 +681,14 @@ fn ab_scale_ladder() {
 /// vs oracle_v2 (plan-free). Returns (v1 pass, v2 pass, total source files built).
 fn arm(cfg: &UiConfig, rung: &Rung) -> (Pass, Pass, usize) {
     let ws = fresh_ws(cfg, &format!("scale-{}", rung.name));
-    let worker = cfg.backend();
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
 
     // ---------- PASS 1: greenfield BUILD vs oracle_v1 ----------
-    let orchestrator = cfg.orchestrator();
+    let orchestrator = cfg
+        .orchestrator()
+        .expect("live test needs an orchestrator (not Craft mode)");
     let plan_ctx = sc_workflow::run_workflow(
         &orchestrator,
         &worker,
@@ -748,8 +752,12 @@ fn arm(cfg: &UiConfig, rung: &Rung) -> (Pass, Pass, usize) {
 /// on the build that the whole-task path thrashes.
 fn arm_sequential_build(cfg: &UiConfig, rung: &Rung) -> (Pass, usize) {
     let ws = fresh_ws(cfg, &format!("scale-seq-{}", rung.name));
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let orchestrator = cfg
+        .orchestrator()
+        .expect("live test needs an orchestrator (not Craft mode)");
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
 
     // Plan → board. Then inject the frozen oracle (after planning, before the per-file walk).
     let board = sc_workflow::run_workflow(

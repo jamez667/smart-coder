@@ -15,6 +15,13 @@ use sc_model::{GenerateRequest, ModelBackend};
 use crate::chat::{ChatIntent, Conversation};
 use crate::config::UiConfig;
 
+/// What a worker reports when there is no model to talk to (Craft mode, spec 21).
+///
+/// Shared so every seam says the same thing: the mode is a deliberate setting, not a failure, and
+/// the message points at where to change it rather than reading as an error.
+pub const NO_MODEL: &str =
+    "Craft mode is on — no model is contacted. Turn it off in Settings ▸ General to use the agent.";
+
 /// The result of one chat turn streamed back to the UI.
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
@@ -49,7 +56,13 @@ impl ChatSession {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let handle = thread::spawn(move || {
-            let backend = cfg.backend_cancellable(worker_cancel);
+            // `None` in Craft mode (spec 21) — no model is contacted, so the turn reports why
+            // instead of dialling out. The UI that starts a chat is hidden there; this is the
+            // seam that holds even if some path reaches here anyway.
+            let Some(backend) = cfg.backend_cancellable(worker_cancel) else {
+                let _ = tx.send(ChatEvent::Failed(NO_MODEL.to_string()));
+                return;
+            };
             // Stream tokens live (the "watch it type" effect); on completion send the full
             // Reply so the app can parse plan-file blocks / strip <think> from the whole text.
             let tok_tx = tx.clone();
@@ -91,7 +104,10 @@ impl ChatSession {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let handle = thread::spawn(move || {
-            let backend = cfg.backend_cancellable(worker_cancel);
+            let Some(backend) = cfg.backend_cancellable(worker_cancel) else {
+                let _ = tx.send(ChatEvent::Failed(NO_MODEL.to_string()));
+                return;
+            };
             // 1) Classify. On any failure, fall back to Question (prose-only — the safe default).
             let intent = match backend.generate(&convo.classify_request()) {
                 Ok(resp) => ChatIntent::parse(&resp.content),

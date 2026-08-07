@@ -421,9 +421,13 @@ fn arm_pipeline(cfg: &UiConfig, rung: &Rung) -> (bool, usize, usize, usize) {
     let ws = fresh_ws(cfg, &format!("ladder-pipe-{}", rung.name));
     seed_files(&ws, rung.seed);
 
-    let worker = cfg.backend();
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let plan_ctx = if rung.kind == Kind::Greenfield {
-        let orchestrator = cfg.orchestrator();
+        let orchestrator = cfg
+            .orchestrator()
+            .expect("live test needs an orchestrator (not Craft mode)");
         sc_workflow::run_workflow(
             &orchestrator,
             &worker,
@@ -505,7 +509,9 @@ fn arm_pipeline(cfg: &UiConfig, rung: &Rung) -> (bool, usize, usize, usize) {
 /// Arm B: one raw completion (greenfield only). Seeds nothing.
 fn arm_raw(cfg: &UiConfig, rung: &Rung) -> (bool, usize, usize) {
     let ws = fresh_ws(cfg, &format!("ladder-raw-{}", rung.name));
-    let worker = cfg.backend();
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let prompt = format!(
         "Write ALL the source files for this task. For EACH file, output a fenced block whose \
          info string is the path, like:\n```python path=app.py\n<contents>\n```\nOutput every \

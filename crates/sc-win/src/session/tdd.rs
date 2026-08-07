@@ -28,8 +28,16 @@ pub fn run_tdd(
     ev_tx: Sender<UiEvent>,
     pending_tx: Sender<Pending>,
 ) {
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let Some(orchestrator) = cfg.orchestrator() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(worker) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
 
     // Each phase artifact lands here as the workflow produces it → the plan panel.
     let phase_tx = ev_tx.clone();
@@ -118,7 +126,12 @@ pub fn run_tdd(
             .join("\n\n")
     );
 
-    let backend = cfg.backend();
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(backend) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
     let registry = sc_tools::default_registry();
     let strategy = sc_core::select_strategy(&backend.capabilities());
     let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
@@ -173,8 +186,16 @@ pub fn run_sequential_build(
     ev_tx: Sender<UiEvent>,
     pending_tx: Sender<Pending>,
 ) {
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let Some(orchestrator) = cfg.orchestrator() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(worker) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
     let phase_tx = ev_tx.clone();
     let on_phase = move |phase: sc_workflow::Phase, content: &str| {
         let _ = phase_tx.send(UiEvent::Phase {

@@ -5,34 +5,10 @@ use iced::widget::{column, row};
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
-        // The IDE body: three columns — EXPLORER (file tree) · CENTER (activity stream +
-        // the intent composer beneath it) · CODE (the file being edited). VS-Code-style.
-        let center: Element<'_, Message> = if self.plan.started() && self.is_swarm() {
-            // A swarm build in flight: the live topology is the story.
-            self.view_topology()
-        } else {
-            // Staged build / iterate / idle: the chat thread (with inline gate controls when a
-            // phase is waiting) is the center column. The old left PLAN panel is gone — the phase
-            // content streams into the chat and the gating file auto-opens in CODE.
-            self.view_center()
-        };
-
-        // The chat and code panels share the region right of the explorer; `chat_frac` splits
-        // it, driven by dragging the divider between them. Explorer stays a fixed ~20% (200 of
-        // the 1000 total portions), so chat+code get 800 to divide.
-        let chat_portion = (self.chat_frac * 800.0).round() as u16;
-        let code_portion = 800u16.saturating_sub(chat_portion);
-        let body = row![
-            self.view_explorer(),
-            v_divider(),
-            container(center)
-                .width(Length::FillPortion(chat_portion))
-                .height(Fill),
-            v_divider_draggable(),
-            self.view_code(code_portion),
-        ]
-        .spacing(GAP)
-        .height(Fill);
+        // The IDE body is now a PANEL TREE (spec 21): the arrangement is data, so which panels
+        // are on screen and how they're split is the user's choice rather than three hardcoded
+        // columns. Craft mode simply gets a tree without a Chat leaf in it.
+        let body = self.view_layout();
 
         let gate = self.view_gatebar();
 
@@ -40,14 +16,15 @@ impl App {
         // The run outcome now lives in the BUILD panel of the bottom strip (not a top
         // banner), so it no longer shoves the three columns down.
         let mut body_col = column![].spacing(GAP);
-        if self.plan.started() {
+        // The phase strip tracks an agent workflow, so it has no meaning in Craft mode. Guarded
+        // rather than assumed impossible: a plan from before the switch would otherwise linger.
+        if self.plan.started() && !self.cfg.craft() {
             body_col = body_col.push(self.view_step_flow());
         }
+        // The bottom strip is a PANEL now (`PanelKind::Bottom`), sized by the tree's
+        // `body|bottom` split — so it's resizable and hideable rather than a fixed 180px band
+        // appended here.
         body_col = body_col.push(body);
-        if let Some(strip) = self.view_bottom_strip() {
-            body_col = body_col.push(h_divider());
-            body_col = body_col.push(strip);
-        }
         if let Some(g) = gate {
             body_col = body_col.push(g);
         }
@@ -76,37 +53,25 @@ impl App {
         if self.comply_open {
             layers = layers.push(self.view_comply_modal());
         }
+        if let Some(prompt) = self.view_close_confirm() {
+            layers = layers.push(prompt);
+        }
+        // LAST, so nothing renders over it: until a mode is chosen, the app is not usable and
+        // no other overlay should be reachable (spec 21).
+        if let Some(prompt) = self.view_first_run() {
+            layers = layers.push(prompt);
+        }
         layers.width(Fill).height(Fill).into()
     }
 
-    /// The rendered height (px) of the EXPLORER column — `window_h` minus the chrome above and
-    /// below the body row. Used to scale a divider drag so it tracks the cursor 1:1. The layout
-    /// (see `view()`): a menu bar on top, then a padded body column that holds an optional
-    /// step-flow bar, the three-panel body row (which contains the explorer), and an optional
-    /// bottom strip (fixed 180px) — the explorer gets what's left. These are close estimates of
-    /// the fixed chrome; exact-to-the-pixel isn't needed, but the SCALE must be right so the drag
-    /// doesn't lag or race the cursor.
-    pub(crate) fn explorer_region_h(&self) -> f32 {
-        const MENU_BAR: f32 = 34.0; // top menu row + its padding
-        const STEP_FLOW: f32 = 52.0; // the phase step-flow card, shown only while planning
-        const BOTTOM_STRIP: f32 = 190.0; // the fixed 180px strip + its gap, when shown
-        const BODY_PAD: f32 = 2.0 * PAD as f32; // the body container's top+bottom padding
-        let mut h = self.window_h - MENU_BAR - BODY_PAD;
-        if self.plan.started() {
-            h -= STEP_FLOW;
-        }
-        if self.view_bottom_strip().is_some() {
-            h -= BOTTOM_STRIP;
-        }
-        h.max(1.0)
-    }
-
-    /// The left EXPLORER column: a tabbed panel — **Files** (the workspace file tree) and
-    /// **Git** (just the changed files, PR-style). A tab bar sits under a branch header that's
-    /// shared across both tabs.
-    pub(crate) fn view_explorer(&self) -> Element<'_, Message> {
+    /// The GIT panel: branch header, sync bar, and the changed files.
+    ///
+    /// A [`sc_win::layout::PanelKind`] leaf, so it returns `Fill × Fill` with no padding or card
+    /// of its own — the tree walker applies those (see [`Self::view_panel`]). That uniformity is
+    /// what lets it be placed anywhere in the layout.
+    pub(crate) fn view_git_panel(&self) -> Element<'_, Message> {
         // GitHub-PR-style header: the current branch, ahead/behind vs upstream, and a count of
-        // changed files. Shared by both tabs.
+        // changed files.
         let n_changed = self.file_status.len();
         let up = &self.upstream;
         let branch_line = match &self.branch {
@@ -123,42 +88,28 @@ impl App {
             }
             None => "not a git repo".to_string(),
         };
-        // Top section (25%): everything git — the branch line, push/pull/fetch, and the changed
-        // files. Bottom section (75%): the Files tree with its quick filter. Stacked rather than
-        // tabbed so both are visible at once.
-        let mut git_col = column![text(branch_line)
+        let mut col = column![text(branch_line)
             .size(11)
             .color(iced::Color::from_rgb(0.55, 0.58, 0.70)),]
         .spacing(6);
         // Push / Pull / Fetch — only when the repo is on a branch (has a name). Labels show the
         // ahead/behind counts so you know what each will move.
         if self.branch.is_some() {
-            git_col = git_col.push(self.view_sync_bar());
+            col = col.push(self.view_sync_bar());
         }
-        git_col = git_col.push(self.view_git_tab());
+        col = col.push(self.view_git_tab());
+        col.width(Fill).height(Fill).into()
+    }
 
-        // Each section is its own rounded card, stacked with a draggable divider between them.
-        // `explorer_frac` (0.1..0.8) splits the height; the clamp guarantees both portions are
-        // ≥100, so neither FillPortion is ever zero.
-        let git_portion = (self.explorer_frac * 1000.0).round() as u16;
-        let files_portion = 1000u16.saturating_sub(git_portion);
-        let git_section = container(git_col.spacing(6))
-            .height(Length::FillPortion(git_portion))
-            .width(Fill)
-            .padding(PAD)
-            .style(card_style);
-        let files_section = container(self.view_files_tab())
-            .height(Length::FillPortion(files_portion))
-            .width(Fill)
-            .padding(PAD)
-            .style(card_style);
+    /// The CODE panel — editor or review, per the active tab.
+    pub(crate) fn view_code_panel(&self) -> Element<'_, Message> {
+        self.view_code()
+    }
 
-        // 200 of the 1000-portion total (chat+code share the other 800) → a fixed ~20% width,
-        // so dragging the chat|code divider never moves the explorer.
-        container(column![git_section, h_divider_draggable(), files_section])
-            .width(Length::FillPortion(200))
-            .height(Fill)
-            .into()
+    /// The bottom panel: Problems / Terminal (+ Verification / Build in Assistant mode).
+    pub(crate) fn view_bottom_panel(&self) -> Element<'_, Message> {
+        self.view_bottom_strip()
+            .unwrap_or_else(|| Space::new().into())
     }
 
     /// The push / pull / fetch bar shown under the branch line. Push shows the ahead count, Pull

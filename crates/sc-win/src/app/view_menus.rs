@@ -8,7 +8,10 @@ impl App {
     /// docked at the bottom. When the assistant proposes plan-file changes, they render as
     /// Apply cards under its message. Before a project is opened, a hint to open a folder.
     pub(crate) fn view_center(&self) -> Element<'_, Message> {
-        let mut thread = column![section("CHAT  ·  PLAN")].spacing(8);
+        // No "CHAT · PLAN" heading here: the panel's own drag header already names it, and two
+        // titles stacked on one panel is just noise (spec 21's panel tree gave every panel a
+        // header, which made these in-panel section labels redundant).
+        let mut thread = column![].spacing(8);
         if self.conversation.is_none() {
             thread = thread.push(
                 text("Open a project folder (File ▸ Open folder) to start planning.")
@@ -512,6 +515,12 @@ impl App {
     /// buttons sit inline on its row, beside the file you review in CODE. A `Gate` at the front of
     /// the queue therefore renders nothing here (the master list owns it).
     pub(crate) fn view_gatebar(&self) -> Option<Element<'_, Message>> {
+        // Only an agent asks to run a shell command, so the queue is empty in Craft mode by
+        // construction. Guarded anyway: a pending confirm from before the switch must not
+        // survive into a mode where nothing can answer it.
+        if self.cfg.craft() {
+            return None;
+        }
         match self.gatebar.first()? {
             // Workflow gate → handled by the master list, not this bottom card.
             Gatebar::Gate { .. } => None,
@@ -554,13 +563,24 @@ impl App {
                     stage_toggle_button
                 })
         };
-        let tabs = row![
-            tab("Connections", SettingsTab::Connections),
-            tab("Routing", SettingsTab::Routing),
-        ]
+        // In Craft mode the model tabs are hidden entirely rather than shown disabled: they
+        // configure an endpoint nothing will contact (spec 21).
+        let tabs = if self.cfg.craft() {
+            row![tab("General", SettingsTab::General)]
+        } else {
+            row![
+                tab("General", SettingsTab::General),
+                tab("Connections", SettingsTab::Connections),
+                tab("Routing", SettingsTab::Routing),
+            ]
+        }
         .spacing(8);
 
         let body = match self.settings_tab {
+            SettingsTab::General => self.view_general_tab(),
+            // Craft mode hides these tabs, but the field can still hold a stale value from
+            // before the switch — fall back to General rather than rendering a dead panel.
+            _ if self.cfg.craft() => self.view_general_tab(),
             SettingsTab::Connections => self.view_connections_tab(),
             SettingsTab::Routing => self.view_routing_tab(),
         };
@@ -568,6 +588,79 @@ impl App {
         column![tabs, scrollable(body).height(Length::Fixed(400.0))]
             .spacing(12)
             .into()
+    }
+
+    /// The GENERAL tab: how the app works — Craft (no model) or Assistant (spec 21).
+    ///
+    /// The copy states exactly what Craft mode does and nothing grander: *no language model is
+    /// contacted*. It deliberately does NOT claim a general network kill switch — git push and
+    /// the terminal still reach the network, obviously and by design. Overclaiming here would be
+    /// worse than underclaiming, because the user who wants this setting is the one most likely
+    /// to check.
+    pub(crate) fn view_general_tab(&self) -> Element<'_, Message> {
+        let craft = self.cfg.craft();
+        let toggle = checkbox(craft)
+            .label("Craft mode — just code, no AI")
+            .on_toggle(Message::ToggleCraftMode)
+            .style(checkbox_style);
+
+        // What the mode actually does, stated plainly. Both branches are the same size and
+        // weight: switching back is exactly as easy as switching away, and neither reads as the
+        // recommended path.
+        let detail: Element<'_, Message> = if craft {
+            column![
+                text("On. No language model is contacted.")
+                    .size(11)
+                    .color(GOOD),
+                text("The editor, file tree, git and terminal work as normal. Chat, the agent, review gates and the remote mirror are hidden, and no backend health check runs.")
+                    .size(11)
+                    .color(FG_MUTED),
+                text("Git and anything you run in the terminal still reach the network — this setting is about models, not connectivity.")
+                    .size(10)
+                    .color(FG_MUTED),
+            ]
+        } else {
+            column![
+                text("Off. The agent, chat and review gates are available.")
+                    .size(11)
+                    .color(FG_MUTED),
+                text("Turn this on to work without any model. Nothing is lost — the editor, file tree, git and terminal are the same in both modes.")
+                    .size(11)
+                    .color(FG_MUTED),
+            ]
+        }
+        .spacing(6)
+        .into();
+
+        // The Unity editor path. Only shown for a Unity project — a setting for a toolchain you
+        // aren't using is noise, and the Hub convention finds it without help on most machines.
+        let mut col = column![
+            text("HOW YOU WORK").size(11).color(FG_MUTED),
+            toggle,
+            detail,
+        ]
+        .spacing(10);
+
+        if self.project_kind == sc_win::project::ProjectKind::Unity {
+            let version = sc_win::project::unity_version(&self.workspace_root())
+                .map(|v| format!("This project wants Unity {v}."))
+                .unwrap_or_else(|| {
+                    "ProjectSettings/ProjectVersion.txt doesn't name an editor version.".to_string()
+                });
+            col = col.push(text("UNITY").size(11).color(FG_MUTED));
+            col = col.push(text(version).size(11).color(FG_MUTED));
+            col = col.push(
+                text_input(
+                    "editor path (blank = find it via Unity Hub)",
+                    &self.unity_path_input,
+                )
+                .on_input(Message::UnityPathChanged)
+                .padding(6)
+                .style(input_style),
+            );
+        }
+
+        col.into()
     }
 
     /// The CONNECTIONS tab: the two endpoints (Local + Gemini), each an url + secure key. This is

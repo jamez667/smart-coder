@@ -40,6 +40,32 @@ impl App {
     /// verify output, no build result — so planning gets the full height. During a swarm
     /// build the coder prompt/output panel takes the whole strip.
     pub(crate) fn view_bottom_strip(&self) -> Option<Element<'_, Message>> {
+        // Craft mode: the Terminal only. Verification and Build report on an AGENT run — its
+        // verify output, its outcome, its "build this plan" actions — so both are empty shells
+        // without a model. The strip itself stays: a terminal is core to "just code".
+        if self.cfg.craft() {
+            return self.picked_workspace.is_some().then(|| {
+                // Problems FIRST: with no agent, "does it compile?" is the question this strip
+                // exists to answer.
+                let tabs = row![
+                    self.bottom_tab_button("Problems", BottomTab::Problems),
+                    self.bottom_tab_button("Terminal", BottomTab::Terminal),
+                ]
+                .spacing(4);
+                let content = match self.bottom_tab {
+                    BottomTab::Terminal => self.view_terminal_tab(),
+                    // Verification/Build are Assistant-only; a stale selection lands on
+                    // Problems rather than rendering an empty panel.
+                    _ => self.view_problems_tab(),
+                };
+                container(column![tabs, content].spacing(6))
+                    .width(Fill)
+                    .height(Length::Fixed(180.0))
+                    .padding(10)
+                    .style(card_style)
+                    .into()
+            });
+        }
         if self.is_swarm() {
             return Some(self.view_coder_io());
         }
@@ -53,12 +79,14 @@ impl App {
             return None;
         }
         let tabs = row![
+            self.bottom_tab_button("Problems", BottomTab::Problems),
             self.bottom_tab_button("Verification", BottomTab::Verification),
             self.bottom_tab_button("Build", BottomTab::Build),
             self.bottom_tab_button("Terminal", BottomTab::Terminal),
         ]
         .spacing(4);
         let content = match self.bottom_tab {
+            BottomTab::Problems => self.view_problems_tab(),
             BottomTab::Verification => self.view_verification_tab(),
             BottomTab::Build => self.view_build_tab(),
             BottomTab::Terminal => self.view_terminal_tab(),
@@ -371,7 +399,13 @@ impl App {
         let status = text(self.workspace_status())
             .size(11)
             .color(iced::Color::from_rgb(0.55, 0.58, 0.70));
-        let health = self.view_backend_badge();
+        // No badge in Craft mode: it reports a MODEL endpoint's state, and there is no model to
+        // report on. Leaving it would also be a lie — the probe that feeds it never runs.
+        let health: Element<'_, Message> = if self.cfg.craft() {
+            Space::new().into()
+        } else {
+            self.view_backend_badge()
+        };
         let bar = row![
             file,
             view_m,
@@ -507,14 +541,32 @@ impl App {
                 }
                 v
             }
-            Menu::View => vec![(
-                if self.settings_open {
-                    "⚙  Hide settings".to_string()
-                } else {
-                    "⚙  Settings…".to_string()
-                },
-                Message::ToggleSettings,
-            )],
+            Menu::View => {
+                let mut v = vec![(
+                    if self.settings_open {
+                        "⚙  Hide settings".to_string()
+                    } else {
+                        "⚙  Settings…".to_string()
+                    },
+                    Message::ToggleSettings,
+                )];
+                // Show/hide each panel (spec 21). A tick marks what's on screen. Chat is omitted
+                // in Craft mode — it can't be shown there, and offering a toggle that silently
+                // does nothing is worse than not offering it.
+                v.push(("— Panels —".to_string(), Message::NoOp));
+                for kind in sc_win::layout::PanelKind::ALL {
+                    if self.cfg.craft() && kind.needs_model() {
+                        continue;
+                    }
+                    let on = self.layout.contains(kind);
+                    v.push((
+                        format!("{}  {}", if on { "✓" } else { "  " }, kind.label()),
+                        Message::TogglePanel(kind),
+                    ));
+                }
+                v.push(("↺  Reset layout".to_string(), Message::ResetLayout));
+                v
+            }
         };
         let mut col = column![].spacing(0);
         for (label, msg) in items {
@@ -563,6 +615,249 @@ impl App {
     /// The Settings modal: a centered card floating over a dimmed backdrop (an overlay
     /// layer in `view`'s Stack). Clicking the backdrop or the ✕ closes it. This replaces the
     /// old inline panel that pushed the layout around.
+    /// The PROBLEMS tab: compile the project and list what the compiler objected to (spec 21).
+    ///
+    /// Present in both modes, and in Craft mode it is the *only* way to learn whether the code
+    /// builds — with the agent off there is nobody to ask, so the loop the model used to close
+    /// closes here instead.
+    ///
+    /// The output is a **list, not a log**: the terminal already shows walls of text, so the
+    /// value added is rows you can click into the editor at the offending line.
+    pub(crate) fn view_problems_tab(&self) -> Element<'_, Message> {
+        let kind = self.project_kind;
+
+        // The action. Unrecognised projects get an explanation instead of a dead button — the
+        // user otherwise cannot tell whether the feature is broken or their project just isn't
+        // one we know.
+        let action: Element<'_, Message> = if self.compiling {
+            row![
+                text("Compiling…").size(12).color(AMBER),
+                button(text("Cancel").size(12))
+                    .on_press(Message::CancelCompile)
+                    .padding([3, 10])
+                    .style(menu_item_style),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else if kind.compilable() {
+            row![
+                button(text("⚙ Compile").size(12))
+                    .on_press(Message::RunCompile)
+                    .padding([3, 12])
+                    .style(primary_button),
+                text(format!("{} project", kind.label()))
+                    .size(11)
+                    .color(FG_MUTED),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else if self.picked_workspace.is_none() {
+            text("Open a project folder to compile it.")
+                .size(11)
+                .color(FG_MUTED)
+                .into()
+        } else {
+            text(
+                "No recognised project here. Looked for a Unity project (Assets/ + \
+                 ProjectSettings/), Cargo.toml, a .sln/.csproj, or package.json.",
+            )
+            .size(11)
+            .color(FG_MUTED)
+            .into()
+        };
+
+        let mut col = column![action].spacing(8);
+
+        if let Some(report) = &self.compile_report {
+            // The headline, coloured by outcome so "did it build?" needs no reading.
+            let colour = if report.failure.is_some() {
+                AMBER
+            } else if report.ok() {
+                GOOD
+            } else {
+                BAD
+            };
+            col = col.push(text(report.summary()).size(12).color(colour));
+
+            // One clickable row per problem. Location first — it's what you're scanning for.
+            let mut list = column![].spacing(2);
+            for (i, d) in report.diagnostics.iter().enumerate() {
+                let sev_colour = match d.severity {
+                    sc_win::diagnostics::Severity::Error => BAD,
+                    sc_win::diagnostics::Severity::Warning => AMBER,
+                };
+                let code = d
+                    .code
+                    .as_deref()
+                    .map(|c| format!(" {c}"))
+                    .unwrap_or_default();
+                list = list.push(
+                    button(
+                        row![
+                            text(d.location()).size(11).color(ACCENT),
+                            text(format!("{}{}", d.severity.label(), code))
+                                .size(11)
+                                .color(sev_colour),
+                            text(d.message.clone()).size(11).color(FG),
+                        ]
+                        .spacing(8),
+                    )
+                    .on_press(Message::OpenDiagnostic(i))
+                    .padding([1, 4])
+                    .width(Fill)
+                    .style(tree_button),
+                );
+            }
+            col = col.push(scrollable(list).height(Fill));
+        }
+
+        col.into()
+    }
+
+    /// The first-run question: how do you want to work? (spec 21)
+    ///
+    /// Shown once, on the first launch where no mode has ever been chosen, and never again.
+    /// `None` once [`UiConfig::mode_chosen`] is true.
+    ///
+    /// **No persuasion.** The two cards are the same size, the same weight, and in neither order
+    /// is one marked "recommended"; nothing is pre-selected and there is no default-on-Enter.
+    /// The person this setting exists for came here distrusting AI products — a nudge would read
+    /// as confirmation, and they would be right. There is also no ✕: dismissing quits
+    /// ([`Message::DeclineToChoose`]) rather than picking for them.
+    pub(crate) fn view_first_run(&self) -> Option<Element<'_, Message>> {
+        if self.cfg.mode_chosen() {
+            return None;
+        }
+
+        // Opaque, not the usual 55% scrim: there is nothing behind this worth looking at yet,
+        // and a half-visible UI invites clicking past the question.
+        let backdrop =
+            iced::widget::mouse_area(container(Space::new()).width(Fill).height(Fill).style(
+                |_t: &Theme| container::Style {
+                    background: Some(Background::Color(Color {
+                        a: 0.92,
+                        ..Color::BLACK
+                    })),
+                    ..container::Style::default()
+                },
+            ))
+            .on_press(Message::DeclineToChoose);
+
+        // One card per mode. Identical construction — same width, same padding, same style — so
+        // neither can read as the favoured one.
+        let card = |title: &str, body: &str, msg: Message| {
+            button(
+                column![
+                    text(title.to_string()).size(15).color(FG),
+                    text(body.to_string()).size(11).color(FG_MUTED),
+                ]
+                .spacing(8),
+            )
+            .on_press(msg)
+            .width(Length::Fixed(230.0))
+            .padding(16)
+            .style(menu_item_style)
+        };
+
+        let choices = row![
+            card(
+                "Just code",
+                "Editor, files, git and terminal.\nNo language model is ever contacted.",
+                Message::ChooseMode(true),
+            ),
+            card(
+                "Code with AI",
+                "Everything in Just code, plus the\nagent, chat and review gates.",
+                Message::ChooseMode(false),
+            ),
+        ]
+        .spacing(14);
+
+        let body = container(
+            column![
+                text("How do you want to work?").size(20).color(FG),
+                choices,
+                text("You can change this any time in Settings ▸ General.")
+                    .size(11)
+                    .color(FG_MUTED),
+            ]
+            .spacing(18)
+            .align_x(iced::Alignment::Center),
+        )
+        .padding(28)
+        .style(dropdown_style);
+
+        Some(
+            iced::widget::stack![backdrop, iced::widget::center(iced::widget::opaque(body))]
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        )
+    }
+
+    /// "This tab has unsaved changes" — shown instead of closing (spec 21).
+    ///
+    /// Three answers, and **Cancel is the safe one**: the backdrop and the ✕ both cancel, so a
+    /// stray click keeps the work. Losing typing to a mis-aimed tab close is exactly the quiet
+    /// data loss the editor has to rule out.
+    pub(crate) fn view_close_confirm(&self) -> Option<Element<'_, Message>> {
+        let path = self.confirm_close.clone()?;
+        let base = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();
+
+        let backdrop =
+            iced::widget::mouse_area(container(Space::new()).width(Fill).height(Fill).style(
+                |_t: &Theme| container::Style {
+                    background: Some(Background::Color(Color {
+                        a: 0.55,
+                        ..Color::BLACK
+                    })),
+                    ..container::Style::default()
+                },
+            ))
+            .on_press(Message::CancelClose);
+
+        let card = container(
+            column![
+                text(format!("{base} has unsaved changes"))
+                    .size(15)
+                    .color(FG),
+                text("Closing this tab without saving discards them.")
+                    .size(12)
+                    .color(FG_MUTED),
+                row![
+                    button(text("Save and close").size(13))
+                        .on_press(Message::SaveAndClose(path.clone()))
+                        .padding([5, 14])
+                        .style(primary_button),
+                    button(text("Discard changes").size(13))
+                        .on_press(Message::DiscardAndClose(path.clone()))
+                        .padding([5, 14])
+                        .style(menu_item_style),
+                    Space::new().width(Fill),
+                    button(text("Cancel").size(13))
+                        .on_press(Message::CancelClose)
+                        .padding([5, 14])
+                        .style(menu_item_style),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(12),
+        )
+        .width(Length::Fixed(440.0))
+        .padding(18)
+        .style(dropdown_style);
+
+        Some(
+            iced::widget::stack![backdrop, iced::widget::center(iced::widget::opaque(card))]
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        )
+    }
+
     pub(crate) fn view_settings_modal(&self) -> Element<'_, Message> {
         // The dim backdrop; clicking it closes settings.
         let backdrop =

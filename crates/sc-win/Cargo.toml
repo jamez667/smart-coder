@@ -27,6 +27,14 @@ sc-verify = { path = "../sc-verify" }
 sc-web = { path = "../sc-web" }
 sc-proto = { path = "../sc-proto" }
 iced = { version = "0.14", features = ["tokio", "canvas", "advanced", "image"] }
+# The CODE pane's EDIT view (spec 21). A canvas-based editor that owns its own scroll state,
+# which is what makes a scroll-synced line-number gutter possible at all: iced's built-in
+# `text_editor` does not expose its scroll offset, and upstream declined to add it
+# (iced-rs/iced#2970, closed unmerged: "not reasonable to implement externally"). Brings syntax
+# highlighting, folding, undo and search with it.
+# PINNED EXACTLY: pre-1.0 and single-maintainer, so a patch release must never arrive
+# unreviewed. Bump deliberately, then re-run scripts/check.ps1.
+iced-code-editor = "=0.3.11"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde_json = { workspace = true }

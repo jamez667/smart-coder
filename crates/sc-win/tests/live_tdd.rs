@@ -32,8 +32,12 @@ fn hello_world_goes_green_with_one_agent() {
                 text 'Hello, World!' with a 200 status.";
 
     // --- Stage 1: plan + write frozen tests (same as run_tdd) ---
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let orchestrator = cfg
+        .orchestrator()
+        .expect("live test needs an orchestrator (not Craft mode)");
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let on_phase = |phase: sc_workflow::Phase, _content: &str| {
         eprintln!("[phase] {}", phase.title());
     };
@@ -70,7 +74,9 @@ fn hello_world_goes_green_with_one_agent() {
             .join("\n\n")
     );
 
-    let backend = cfg.backend();
+    let backend = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let registry = sc_tools::default_registry();
     let strategy = sc_core::select_strategy(&backend.capabilities());
     let mut agent_cfg = cfg.agent_config(None);

@@ -172,8 +172,12 @@ fn ab_winfind_across_tasks() {
 fn arm_pipeline(cfg: &UiConfig, task: &Task) -> (bool, usize) {
     let ws = fresh_ws(cfg, &format!("win-pipe-{}", task.name));
     // Plan for context (specs/arch/etc.) — but we DON'T use its generated tests.
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let orchestrator = cfg
+        .orchestrator()
+        .expect("live test needs an orchestrator (not Craft mode)");
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let outcome = match sc_workflow::run_workflow(
         &orchestrator,
         &worker,
@@ -242,7 +246,9 @@ fn arm_pipeline(cfg: &UiConfig, task: &Task) -> (bool, usize) {
 /// Arm B: one raw completion, judged by the same injected oracle.
 fn arm_raw(cfg: &UiConfig, task: &Task) -> bool {
     let ws = fresh_ws(cfg, &format!("win-raw-{}", task.name));
-    let worker = cfg.backend();
+    let worker = cfg
+        .backend()
+        .expect("live test needs a backend (not Craft mode)");
     let prompt = format!(
         "Write a complete, runnable Python file `app.py` for this task. Output ONLY the \
          contents of app.py inside a single ```python code block — no explanation.\n\n\

@@ -20,9 +20,20 @@ pub fn run_swarm(
     ev_tx: Sender<UiEvent>,
     pending_tx: Sender<Pending>,
 ) {
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
-    let advisor = cfg.swarm_advisor();
+    let Some(orchestrator) = cfg.orchestrator() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(worker) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    let Some(advisor) = cfg.swarm_advisor() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
     let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
     let swarm_cfg = cfg.swarm_config(Some(confirmer));
 

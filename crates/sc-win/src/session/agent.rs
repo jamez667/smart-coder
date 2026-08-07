@@ -23,7 +23,12 @@ pub fn run_agent(
     ev_tx: Sender<UiEvent>,
     pending_tx: Sender<Pending>,
 ) {
-    let backend = cfg.backend();
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(backend) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
     let advisor = cfg.advisor();
     let registry = sc_tools::default_registry();
     let strategy = sc_core::select_strategy(&backend.capabilities());
@@ -79,7 +84,12 @@ pub fn run_iterate(
     pending_tx: Sender<Pending>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let backend = cfg.backend();
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(backend) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
     let advisor = cfg.advisor();
     let registry = sc_tools::default_registry();
     let strategy = sc_core::select_strategy(&backend.capabilities());

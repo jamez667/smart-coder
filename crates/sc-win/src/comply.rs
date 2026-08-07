@@ -166,6 +166,13 @@ pub fn backend_for(
     cfg: &UiConfig,
     choice: ComplyModel,
 ) -> Result<Option<sc_model::OpenAiBackend>, ComplyError> {
+    // Craft mode contacts no model (spec 21). This constructs `OpenAiBackend` directly rather
+    // than through `UiConfig::backend()`, so the `Option`-returning builders don't cover it —
+    // the same blind spot the health probe had. `Ok(None)` rather than `Err`: the deterministic
+    // audit is complete without a model, so this is a mode, not a failure.
+    if cfg.craft() {
+        return Ok(None);
+    }
     let Some(provider) = choice.provider() else {
         return Ok(None);
     };

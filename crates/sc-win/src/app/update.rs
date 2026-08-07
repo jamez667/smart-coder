@@ -17,6 +17,112 @@ impl App {
             Message::PlannerProviderChanged(p) => self.cfg.planner_provider = p,
             Message::AdvisorProviderChanged(p) => self.cfg.advisor_provider = p,
             Message::SettingsTabChanged(t) => self.settings_tab = t,
+            Message::EditorEvent(ev) => {
+                // Forward to the active tab's buffer and adopt its modified flag. `is_modified`
+                // is the widget's own accounting, so the dirty dot can't drift from the buffer.
+                if let Some(tab) = self.active_tab_mut() {
+                    if let Some(editor) = tab.editor_mut() {
+                        let task = editor.update(&ev);
+                        tab.dirty = editor.is_modified();
+                        return task.map(Message::EditorEvent);
+                    }
+                }
+            }
+            Message::ToggleTabView => self.toggle_tab_view(),
+            Message::SaveFile => self.save_active_tab(false),
+            Message::DismissSaveConflict => self.save_conflict = None,
+            Message::OverwriteOnConflict => {
+                // The user's explicit answer to the refusal — the only path that overwrites.
+                self.save_active_tab(true);
+            }
+            Message::DiscardAndClose(path) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.path == path) {
+                    tab.dirty = false; // the answer WAS "lose these edits"
+                }
+                self.force_close_tab(&path);
+            }
+            Message::SaveAndClose(path) => {
+                self.save_tab(&path, false);
+                // Only close if the save actually landed; a refused save must not take the
+                // buffer down with it.
+                if !self.is_dirty(&path) {
+                    self.force_close_tab(&path);
+                }
+            }
+            Message::CancelClose => self.confirm_close = None,
+            Message::ChooseMode(craft) => {
+                use sc_win::config::Mode;
+                self.cfg.mode = Some(if craft { Mode::Craft } else { Mode::Assistant });
+                // The default layout differs per mode, and `App::default` picked one before the
+                // question was answered — so re-derive it now that we know.
+                self.layout = self.layouts.get(craft);
+                self.cfg.save_config();
+                // Finish the boot the prompt was holding up. `run()` skips the welcome and the
+                // conversation while the question is open, because both are Assistant-shaped and
+                // would have to be undone the moment someone answered "Just code".
+                if self.picked_workspace.is_some() {
+                    self.show_welcome();
+                    if !craft {
+                        self.open_conversation();
+                    }
+                }
+            }
+            Message::RunCompile => return self.start_compile(),
+            Message::CompileDone(report) => {
+                self.compiling = false;
+                self.compile_cancel = None;
+                self.compile_report = Some(*report);
+            }
+            Message::CancelCompile => self.cancel_compile(),
+            Message::OpenDiagnostic(i) => return self.open_diagnostic(i),
+            Message::UnityPathChanged(s) => self.unity_path_input = s,
+            Message::JumpToPendingLine => {
+                if let Some(line) = self.pending_scroll_line.take() {
+                    return self.scroll_code_to_line(line);
+                }
+            }
+            Message::EscapePressed => {
+                // Only meaningful while the first-run question is open. Deliberately narrow:
+                // Escape closing arbitrary UI is a separate decision, not one to make here.
+                if !self.cfg.mode_chosen() {
+                    return Task::done(Message::DeclineToChoose);
+                }
+            }
+            Message::DeclineToChoose => {
+                // Closing the question is not an answer. Nothing is written, so the prompt
+                // returns on the next launch.
+                return iced::window::latest()
+                    .and_then(|id: iced::window::Id| iced::window::close(id));
+            }
+            Message::ToggleCraftMode(on) => {
+                use sc_win::config::Mode;
+                self.cfg.mode = Some(if on { Mode::Craft } else { Mode::Assistant });
+                if on {
+                    // A run must never outlive the switch into a mode that claims no model is
+                    // contacted — cancel first, then drop the surfaces. Both sessions: an agent
+                    // run and a chat turn are separate workers.
+                    if let Some(s) = &self.session {
+                        s.cancel();
+                    }
+                    if let Some(s) = &self.chat_session {
+                        s.cancel();
+                    }
+                    // The health badge showed a *model* endpoint's state; in Craft mode there is
+                    // no such thing, so clear it rather than leaving a stale verdict on screen.
+                    self.backend_health = None;
+                    self.health_rx = None;
+                    // Land on the only tab that still means anything.
+                    self.settings_tab = SettingsTab::General;
+                }
+                // Swap to the arrangement saved for the mode being entered. Per-mode layouts are
+                // what make toggling back and forth non-destructive: each is found as it was
+                // left, rather than one mode silently rearranging the other.
+                self.layout = self.layouts.get(self.cfg.craft());
+                // Persist immediately. Mode is an answer to a question we promised to ask once;
+                // losing it to a crash before the next save-on-close would ask again and read as
+                // the app ignoring them.
+                self.cfg.save_config();
+            }
             Message::VerifyChanged(s) => self.verify_input = s,
             Message::SuffixChanged(s) => self.suffix_input = s,
             Message::ToggleSettings => {
@@ -50,7 +156,14 @@ impl App {
 
                 let workspace = self.workspace_root();
                 let out_dir = sc_win::comply::output_dir(&workspace);
-                let choice = self.comply_model;
+                // Craft mode forces the deterministic audit. Hiding the picker is not enough on
+                // its own — a value chosen before the switch would still be sitting in
+                // `comply_model` — so the decision is made HERE, where the run is spawned.
+                let choice = if self.cfg.craft() {
+                    sc_win::comply::ComplyModel::None
+                } else {
+                    self.comply_model
+                };
                 let cfg = self.cfg.clone();
                 return Task::perform(
                     async move {
@@ -183,7 +296,9 @@ impl App {
                 // tree — a same-frame scroll_to misses on large files (the new lines don't exist
                 // in the layout yet).
                 self.follow_agent = false;
-                self.select_file(rel);
+                // From the GIT panel → the review view: the intent is to see what changed, and
+                // only that surface has the diff wash and the jump-to-change affordance.
+                self.select_file_for_review(rel);
                 if self.changed_lines.iter().next().is_some() {
                     // Re-emit as a follow-up message: it's processed after this update's view()
                     // rebuilds with the new file, so scroll_to acts on the correct layout.
@@ -316,52 +431,157 @@ impl App {
             Message::TermHistoryNext => self.terminal.history_next(),
             Message::GitCursorMoved(p) => {
                 self.cursor_pos = p;
-                // While the chat|code divider is held, map the absolute cursor X to chat's share
-                // of the chat+code region. The explorer occupies a fixed 20% on the left, so that
-                // region runs from 0.20·W to W.
-                if self.dragging_split && self.window_w > 0.0 {
-                    let region_left = 0.20 * self.window_w;
-                    let region_w = self.window_w - region_left;
-                    if region_w > 1.0 {
-                        let frac = (p.x - region_left) / region_w;
-                        self.chat_frac = frac.clamp(0.15, 0.85);
-                    }
-                }
-                // While the git|files divider is held, move it by the cursor Y DELTA from the grab
-                // point — not an absolute mapping (which would need the explorer's exact top offset
-                // and snap on grab). `explorer_frac` is Git's share of the EXPLORER COLUMN's height,
-                // so a cursor delta of `d` px must be scaled by that column's height, NOT the whole
-                // window — dividing by `window_h` made the divider lag the cursor (the column is
-                // shorter than the window). `explorer_region_h()` is the column's true height, so
-                // the divider now tracks the cursor 1:1.
-                if let Some((y0, frac0)) = self.explorer_drag {
-                    let region_h = self.explorer_region_h();
-                    if region_h > 1.0 {
-                        let dfrac = (p.y - y0) / region_h;
-                        self.explorer_frac = (frac0 + dfrac).clamp(0.1, 0.8);
+                // Move the held divider by the cursor DELTA from the grab point, scaled by the
+                // split's own extent. Delta-mapping needs only the extent — never the region's
+                // origin — which is what let the guessed `0.20 * window_w` and the
+                // chrome-constant arithmetic in `explorer_region_h` be deleted outright.
+                if let Some(d) = &self.drag_split {
+                    if d.extent > 1.0 {
+                        let moved = match d.axis {
+                            sc_win::layout::Axis::Horizontal => p.x - d.origin,
+                            sc_win::layout::Axis::Vertical => p.y - d.origin,
+                        };
+                        let frac = (d.frac0 + moved / d.extent).clamp(0.1, 0.9);
+                        let id = d.id.clone();
+                        self.splits.set(&id, frac);
                     }
                 }
             }
-            Message::SplitDragStart => self.dragging_split = true,
+            Message::SplitGrab { id, axis, extent } => {
+                // Anchor at the current cursor and fraction, so the divider never jumps on grab.
+                let frac0 = self.splits.get(&id, 0.5);
+                let origin = match axis {
+                    sc_win::layout::Axis::Horizontal => self.cursor_pos.x,
+                    sc_win::layout::Axis::Vertical => self.cursor_pos.y,
+                };
+                self.drag_split = Some(Drag {
+                    id,
+                    axis,
+                    extent,
+                    origin,
+                    frac0,
+                });
+            }
             Message::SplitDragEnd => {
-                self.dragging_split = false;
-                self.explorer_drag = None;
-                // A drag settled — persist both dividers' current positions by id (one write, on
-                // release, not per mouse-move).
-                self.splits
-                    .set(sc_win::splits::id::CHAT_CODE, self.chat_frac);
-                self.splits
-                    .set(sc_win::splits::id::EXPLORER_GIT_FILES, self.explorer_frac);
-                self.splits.save();
+                // Persist on release, not per mouse-move. The fraction is already in the store —
+                // the tree keys dividers by id, so there is nothing to copy across.
+                if self.drag_split.take().is_some() {
+                    self.splits.save();
+                }
+                // A panel released outside every drop target: cancel rather than strand it. This
+                // fires for ANY release, so a drag can't survive letting go over the menu bar or
+                // off the window.
+                if self.drag_panel.is_some() {
+                    // A window-edge band counts as a target too, so a release over the frame
+                    // completes the dock rather than cancelling it.
+                    if self.drop_target.is_some() || self.dock_side.is_some() {
+                        return Task::done(Message::PanelDrop);
+                    }
+                    self.drag_panel = None;
+                    self.dock_side = None;
+                    self.drop_target = None;
+                }
             }
             Message::WindowSize(w, h) => {
                 self.window_w = w;
                 self.window_h = h;
             }
-            // Anchor the drag at the current cursor Y and current fraction — moves are deltas
-            // from here, so the divider never jumps on grab.
-            Message::ExplorerDragStart => {
-                self.explorer_drag = Some((self.cursor_pos.y, self.explorer_frac));
+            Message::TogglePanel(kind) => {
+                let next = if self.layout.contains(kind) {
+                    // Remember where it sat, so ticking it back on returns it there instead of
+                    // dropping it beside whatever leaf comes first.
+                    if let Some(slot) = self.layout.slot_of(kind) {
+                        self.panel_slots.insert(kind, slot);
+                    }
+                    // Never hide the last editor — an IDE with nothing to edit is not a layout
+                    // choice, it's a broken window.
+                    self.layout.without(kind)
+                } else {
+                    // Put it back where it was. The fallback covers a first-ever show, or the
+                    // case where the panel it used to sit beside is itself now hidden.
+                    self.panel_slots
+                        .get(&kind)
+                        .and_then(|slot| self.layout.restore(kind, slot))
+                        .or_else(|| {
+                            Some(self.layout.with(
+                                kind,
+                                &format!("user:{}", kind.slug()),
+                                sc_win::layout::Axis::Horizontal,
+                            ))
+                        })
+                };
+                if let Some(next) = next.and_then(|l| l.sanitize(self.cfg.craft())) {
+                    self.layout = next.clone();
+                    self.layouts.set(self.cfg.craft(), next);
+                    self.layouts.save();
+                }
+                self.open_menu = None;
+            }
+            Message::PanelGrab(kind) => {
+                self.drag_panel = Some(kind);
+                self.dock_side = None;
+                self.drop_target = None;
+            }
+            Message::PanelHover(target, x, y, w, h, tw, th) => {
+                // Resolve the cursor to an EDGE of the hovered panel. Zones are fractions of the
+                // panel, so a narrow panel is still droppable on all four sides.
+                if self.drag_panel.is_some_and(|d| d != target) {
+                    let side = sc_win::layout::Side::nearest(x, y, w, h);
+                    // Judged against the TREE, never the window: the window has a menu bar above
+                    // the tree and sometimes a gate bar below, so neither edge lines up — which
+                    // is exactly why bottom-edge docking never fired.
+                    let outer = side.is_outer(x, y, w, h, tw, th);
+                    self.drop_target = Some((target, side, outer));
+                }
+            }
+            Message::DockHover(side) => {
+                // Only meaningful mid-drag. Entering a band supersedes any per-panel target, so
+                // the highlight can't show two competing outcomes at once.
+                if self.drag_panel.is_some() {
+                    self.dock_side = side;
+                    if side.is_some() {
+                        self.drop_target = None;
+                    }
+                }
+            }
+            Message::PanelDrop => {
+                if let (Some(kind), Some(side)) = (self.drag_panel, self.dock_side) {
+                    // A WINDOW-edge dock: a full-span column or row across the whole layout,
+                    // whatever happens to sit under the cursor.
+                    if let Some(next) = self
+                        .layout
+                        .move_to_edge(kind, side)
+                        .and_then(|l| l.sanitize(self.cfg.craft()))
+                    {
+                        self.layout = next.clone();
+                        self.layouts.set(self.cfg.craft(), next);
+                        self.layouts.save();
+                    }
+                } else if let (Some(kind), Some((target, side, outer))) =
+                    (self.drag_panel, self.drop_target)
+                {
+                    // An outer-edge drop docks down the side of EVERYTHING (a new full-span
+                    // column/row); an interior one splits just the panel under the cursor.
+                    let moved = if outer {
+                        self.layout.move_to_edge(kind, side)
+                    } else {
+                        self.layout.move_panel(kind, target, side)
+                    };
+                    if let Some(next) = moved.and_then(|l| l.sanitize(self.cfg.craft())) {
+                        self.layout = next.clone();
+                        self.layouts.set(self.cfg.craft(), next);
+                        self.layouts.save();
+                    }
+                }
+                self.drag_panel = None;
+                self.dock_side = None;
+                self.drop_target = None;
+            }
+            Message::ResetLayout => {
+                self.layout = sc_win::layout::Layout::default_for(self.cfg.craft());
+                self.layouts.set(self.cfg.craft(), self.layout.clone());
+                self.layouts.save();
+                self.open_menu = None;
             }
             Message::GitRowMenu(path, status) => {
                 self.git_menu_at = self.cursor_pos;
@@ -591,7 +811,10 @@ impl App {
                 self.selected_file = None;
                 self.code = None;
                 // Clear the CODE-panel tabs too — they belonged to the closed project.
-                self.open_tabs.clear();
+                self.tabs.clear();
+                self.confirm_close = None;
+                self.save_conflict = None;
+                self.refresh_project_kind();
                 // Forget the *current* project so a restart doesn't re-open it, but keep the
                 // recents list (the user may want to re-pick one).
                 let mut state = sc_win::persist::load();

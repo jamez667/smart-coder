@@ -11,6 +11,13 @@ pub(crate) const SURFACE: Color = Color::from_rgb(0.106, 0.118, 0.18);
 /// Input field fill — a touch lighter than [`SURFACE`], so the composer input stands out
 /// gently from the panel behind it.
 pub(crate) const INPUT_BG: Color = Color::from_rgb(0.15, 0.165, 0.24);
+/// The editor's own canvas — a shade DARKER than [`SURFACE`].
+///
+/// The document you're editing should read as recessed into the panel rather than flush with the
+/// chrome around it: the tab strip and status line sit on [`SURFACE`], the text sits in here.
+/// Darker rather than lighter follows every editor's convention, and keeps syntax colours
+/// carrying more contrast than the UI around them.
+pub(crate) const EDITOR_BG: Color = Color::from_rgb(0.075, 0.085, 0.135);
 /// A subtle border around cards.
 pub(crate) const CARD_BORDER: Color = Color::from_rgb(0.20, 0.22, 0.32);
 /// Primary text.
@@ -65,9 +72,135 @@ pub(crate) fn card_style(_t: &Theme) -> container::Style {
         background: Some(Background::Color(SURFACE)),
         border: Border {
             radius: RADIUS.into(),
+            // NO outline. The draggable divider between panels already draws the seam, so a
+            // per-panel border stacked two lines at every join — visible as a double edge with a
+            // trough between them. One line per seam, owned by the divider.
             ..Default::default()
         },
         text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// A panel's drag header — a shade lighter than the panel body so the grab strip reads as
+/// distinct from the content without becoming a stripe of chrome.
+pub(crate) fn panel_header_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.145, 0.161, 0.235))),
+        border: Border {
+            radius: iced::border::radius(RADIUS).bottom(0.0),
+            ..Default::default()
+        },
+        text_color: Some(FG_MUTED),
+        ..container::Style::default()
+    }
+}
+
+/// The header of the panel currently being dragged — accent-tinted, so it's obvious which one is
+/// in flight while the cursor is somewhere else entirely.
+pub(crate) fn panel_header_dragging_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.35, ..ACCENT })),
+        border: Border {
+            radius: iced::border::radius(RADIUS).bottom(0.0),
+            ..Default::default()
+        },
+        text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// The drag ghost: a small floating copy of the panel being moved, following the cursor.
+///
+/// Opaque rather than translucent, with an accent border — it has to read as a solid thing you
+/// are carrying, over arbitrary panel content underneath. A see-through ghost over a busy file
+/// tree is illegible.
+pub(crate) fn drag_ghost_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(SURFACE)),
+        border: Border {
+            radius: RADIUS.into(),
+            width: 2.0,
+            color: Color { a: 0.95, ..ACCENT },
+        },
+        text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// A window-edge dock band at rest.
+///
+/// These form a frame around the WHOLE layout and dock a full-width row or full-height column,
+/// unlike the per-panel zones below which only split one panel. Distinctly stronger than an idle
+/// per-panel zone so the frame reads as its own surface rather than more of the same.
+pub(crate) fn dock_band_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.22, ..ACCENT })),
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: Color { a: 0.45, ..ACCENT },
+        },
+        text_color: Some(FG_MUTED),
+        ..container::Style::default()
+    }
+}
+
+/// The dock band under the cursor — the strongest state in the drag UI, because it does the most.
+pub(crate) fn dock_band_active_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.72, ..ACCENT })),
+        border: Border {
+            radius: 4.0.into(),
+            width: 2.0,
+            color: Color { a: 1.0, ..ACCENT },
+        },
+        text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// The four drop-zone styles, shown on every panel while a drag is in flight.
+///
+/// All four zones of every target are drawn at once, at the same proportions the hit test uses —
+/// revealing them only on hover meant you had to know where to aim before you could see where to
+/// aim. Two axes of emphasis:
+///
+/// * **idle vs active** — active is the one under the cursor.
+/// * **split vs span** — a *span* zone docks a full column/row across the whole layout; a *split*
+///   zone only divides that one panel. Very different outcomes, so they never look alike.
+///
+/// Idle zones are deliberately faint: legible as "you may drop here", quiet enough that four of
+/// them on every panel don't drown the UI.
+pub(crate) fn drop_zone_idle_style(_t: &Theme) -> container::Style {
+    drop_zone(0.10, false)
+}
+
+/// A span zone at rest — brighter than a split zone, because it does more.
+pub(crate) fn drop_zone_span_style(_t: &Theme) -> container::Style {
+    drop_zone(0.18, false)
+}
+
+/// The split zone under the cursor.
+pub(crate) fn drop_zone_active_style(_t: &Theme) -> container::Style {
+    drop_zone(0.45, true)
+}
+
+/// The span zone under the cursor — the strongest state there is.
+pub(crate) fn drop_zone_active_span_style(_t: &Theme) -> container::Style {
+    drop_zone(0.65, true)
+}
+
+/// Shared shape for the drop zones: an accent wash, outlined when active so the target reads as
+/// a region rather than a tint.
+fn drop_zone(alpha: f32, active: bool) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: alpha, ..ACCENT })),
+        border: Border {
+            radius: 3.0.into(),
+            width: if active { 1.5 } else { 0.0 },
+            color: Color { a: 0.9, ..ACCENT },
+        },
         ..container::Style::default()
     }
 }
@@ -87,22 +220,26 @@ pub(crate) fn v_divider<'a>() -> Element<'a, Message> {
 /// A draggable version of [`v_divider`]: the same 1px hairline, but wrapped in a wider
 /// invisible grab strip that shows the horizontal-resize cursor and starts a divider drag
 /// on mouse-down. Used only between the chat and code panels.
-pub(crate) fn v_divider_draggable<'a>() -> Element<'a, Message> {
-    // A 1px visible line at the LEFT of a 7px hit strip: the line sits flush against the chat
-    // panel's edge (so the composer's horizontal divider meets it with no gap), while the grab
-    // area still extends 6px rightward for an easy drag target. The strip is filled with the
-    // panel SURFACE so the 6px right of the line matches the code panel it borders (otherwise
-    // the bare strip showed the darker window background as a faint band).
+///
+/// Takes the grab message so every split in the panel tree carries its own node id and extent
+/// (spec 21) — previously there was one global `SplitDragStart` because there was exactly one
+/// draggable vertical divider.
+pub(crate) fn v_divider_draggable<'a>(grab: Message) -> Element<'a, Message> {
+    // A 1px visible line centred in a 3px hit strip. The strip used to be 7px, which read as a
+    // trough between panels rather than a seam — at 3px the panels butt together with a single
+    // hairline, and the target is still wide enough to grab. Filled with the panel SURFACE so
+    // the pixels either side of the line match the panels they border, rather than showing the
+    // darker window background as a faint band.
     let handle = container(v_divider())
-        .width(Length::Fixed(7.0))
+        .width(Length::Fixed(3.0))
         .height(Fill)
-        .align_x(iced::alignment::Horizontal::Left)
+        .align_x(iced::alignment::Horizontal::Center)
         .style(|_t: &Theme| container::Style {
             background: Some(Background::Color(SURFACE)),
             ..container::Style::default()
         });
     iced::widget::mouse_area(handle)
-        .on_press(Message::SplitDragStart)
+        .on_press(grab)
         .interaction(iced::mouse::Interaction::ResizingHorizontally)
         .into()
 }
@@ -122,20 +259,22 @@ pub(crate) fn h_divider<'a>() -> Element<'a, Message> {
 /// A draggable version of [`h_divider`]: the same 1px hairline, but wrapped in a taller
 /// invisible grab strip that shows the vertical-resize cursor and starts a drag on mouse-down.
 /// Used between the Git and Files sections of the explorer column to resize their split.
-pub(crate) fn h_divider_draggable<'a>() -> Element<'a, Message> {
-    // A 1px visible line centered in a 7px hit strip: the grab area extends 3px above and below
-    // for an easy drag target. The strip is filled with the panel SURFACE so it matches the
-    // stacked sections it borders (otherwise the bare strip showed the darker window background).
+///
+/// Takes the grab message, as [`v_divider_draggable`] does.
+pub(crate) fn h_divider_draggable<'a>(grab: Message) -> Element<'a, Message> {
+    // A 1px visible line centred in a 3px hit strip — see [`v_divider_draggable`]: 7px read as a
+    // trough between stacked panels rather than a seam. Filled with the panel SURFACE so the
+    // pixels either side match the sections it borders.
     let handle = container(h_divider())
         .width(Fill)
-        .height(Length::Fixed(7.0))
+        .height(Length::Fixed(3.0))
         .align_y(iced::alignment::Vertical::Center)
         .style(|_t: &Theme| container::Style {
             background: Some(Background::Color(SURFACE)),
             ..container::Style::default()
         });
     iced::widget::mouse_area(handle)
-        .on_press(Message::ExplorerDragStart)
+        .on_press(grab)
         .interaction(iced::mouse::Interaction::ResizingVertically)
         .into()
 }
@@ -232,6 +371,27 @@ pub(crate) fn stage_toggle_button(_t: &Theme, status: button::Status) -> button:
             },
             width: 1.0,
             radius: RADIUS.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// A file tab's label and its ✕ — transparent, so the tab's own container supplies the fill.
+///
+/// The two are separate buttons (buttons can't nest), so the active tab's background belongs on
+/// a container wrapping both. Styling the buttons individually left the ✕ on a different colour,
+/// which read as a notch bitten out of the tab.
+pub(crate) fn tab_label_button(_t: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        // A faint wash on hover, so an inactive tab still responds to the pointer.
+        background: matches!(status, button::Status::Hovered).then_some(Background::Color(Color {
+            a: 0.35,
+            ..INPUT_BG
+        })),
+        text_color: FG,
+        border: Border {
+            radius: RADIUS.into(),
+            ..Default::default()
         },
         ..Default::default()
     }

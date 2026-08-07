@@ -81,8 +81,16 @@ pub fn run_plan(
     ev_tx: Sender<UiEvent>,
     pending_tx: Sender<Pending>,
 ) {
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let Some(orchestrator) = cfg.orchestrator() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(worker) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
     // Human-in-the-loop: pause at each design phase for Approve/Send-back via the gatebar/master
     // list — a Breakdown is a REVIEW pass, so it must gate exactly like a staged build (it just
     // stops before the code build). `AutoApprove` would barrel through with nothing to approve.
@@ -144,8 +152,16 @@ pub fn run_staged_build(
     pending_tx: Sender<Pending>,
     _cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let orchestrator = cfg.orchestrator();
-    let worker = cfg.backend();
+    let Some(orchestrator) = cfg.orchestrator() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    // `None` in Craft mode (spec 21): no model is contacted, so the run reports why rather than
+    // dialling out. The type is the seam — a caller added later cannot skip this.
+    let Some(worker) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
 
     // Preflight: warn if the verify command can't run in the chosen sandbox (a Rust project with
     // the default Python image), so the user fixes it BEFORE the build writes files and the verify

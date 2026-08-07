@@ -4,7 +4,14 @@ use super::*;
 
 impl App {
     pub(crate) fn title(&self) -> String {
-        "smart-coder — vibe coding".to_string()
+        // A leading ● when any tab has unsaved edits — the convention every editor uses, and
+        // the one signal visible when the window isn't focused. Closing the window is an OS
+        // action we can't intercept, so this is what warns before it happens.
+        if self.any_dirty() {
+            "● smart-coder — vibe coding".to_string()
+        } else {
+            "smart-coder — vibe coding".to_string()
+        }
     }
 
     pub(crate) fn theme(&self) -> Theme {
@@ -46,7 +53,15 @@ impl App {
         // ~10s; the 3s tick just gives the 10s gate resolution and adopts a finished probe
         // promptly). Runs even when the app is otherwise idle — that's the whole point: know
         // the backend is down BEFORE you try to use it.
-        let health = iced::time::every(Duration::from_secs(3)).map(|_| Message::HealthTick);
+        // NOT registered in Craft mode (spec 21). The probe constructs an `OpenAiBackend`
+        // directly rather than going through `UiConfig::backend()`, so making the builders
+        // mode-aware would MISS the one caller that dials out on a timer. The switch has to
+        // happen here, at the subscription.
+        let health = if self.cfg.craft() {
+            Subscription::none()
+        } else {
+            iced::time::every(Duration::from_secs(3)).map(|_| Message::HealthTick)
+        };
         // Track the window-absolute cursor position so a right-click in the git tab can pop its
         // context menu exactly at the pointer. `mouse_area::on_move` reports widget-relative
         // coordinates (useless for placing a window overlay); this window event is absolute.
@@ -73,6 +88,23 @@ impl App {
             iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
                 Some(Message::ModifiersChanged(m))
             }
+            // Ctrl+S saves the active tab. Handled at the WINDOW level, not as an editor key
+            // binding, so it works with focus anywhere — including a find box or the tab strip.
+            // `save_active_tab` is a no-op on a clean or unopened buffer, so this is safe to
+            // fire unconditionally.
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Character(ref c),
+                modifiers,
+                ..
+            }) if modifiers.command() && c.as_str().eq_ignore_ascii_case("s") => {
+                Some(Message::SaveFile)
+            }
+            // Escape while the first-run question is open declines it (and so quits) — the
+            // handler no-ops once a mode is chosen, so this can't dismiss anything else.
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                ..
+            }) => Some(Message::EscapePressed),
             _ => None,
         });
         Subscription::batch([tick, sync, cursor, health])
@@ -128,6 +160,14 @@ impl App {
     }
 
     pub(crate) fn start(&mut self, kind: RunKind) {
+        // Craft mode contacts no model (spec 21). Belt AND braces, deliberately: the builders
+        // return `None` so a run physically cannot reach a backend, but that refusal happens on
+        // a worker thread and would surface as a run that starts and immediately fails. Refusing
+        // here means nothing visibly starts at all. The builders are the guarantee; this is the
+        // manners.
+        if self.cfg.craft() {
+            return;
+        }
         if self.intent.trim().is_empty() || self.session.is_some() {
             return;
         }
@@ -267,7 +307,11 @@ impl App {
         self.selected_file = None;
         self.code = None;
         // Tabs held the old project's files — clear them so they don't linger into the new one.
-        self.open_tabs.clear();
+        self.tabs.clear();
+        self.confirm_close = None;
+        self.save_conflict = None;
+        // Which toolchain the Compile button offers depends on what's open (spec 21).
+        self.refresh_project_kind();
         // Drop the git multi-selection + its shift anchor too — they keyed off the old project's
         // paths and would highlight/act on stale files in the new one.
         self.git_selection.clear();
@@ -367,6 +411,11 @@ impl App {
     /// Send the composer text as a chat turn to the planning agent (worker thread). No-op
     /// when there's no conversation, no text, or a turn is already in flight.
     pub(crate) fn send_chat(&mut self) {
+        // Craft mode contacts no model (spec 21) — the composer is hidden, and this is the
+        // refusal behind it. See `start` for why hiding the control is not sufficient.
+        if self.cfg.craft() {
+            return;
+        }
         let text = self.intent.trim().to_string();
         if text.is_empty() || self.chat_session.is_some() || self.conversation.is_none() {
             return;
@@ -503,6 +552,15 @@ impl App {
             lc.comment.clone(),
         ));
         sc_win::comments::save(&self.workspace_root(), &self.comments);
+        // Craft mode: the comment is SAVED and stays visible — line comments are a review
+        // annotation, not an AI feature (they're also how Send back harvests revision notes).
+        // What stops here is the auto-fix: no triage call, so nothing is classified or spliced
+        // by a model. The user keeps a durable note on the line and nothing dials out.
+        if self.cfg.craft() {
+            self.comment_range = None;
+            self.comment_draft.clear();
+            return;
+        }
         // Commit connection settings so the triage/edit use the current backend.
         self.commit_settings();
         // Keep the commented lines highlighted (pulsing amber) while the agent works on them,

@@ -161,9 +161,65 @@ pub(crate) struct App {
     /// is chosen / touched.
     pub(crate) selected_file: Option<String>,
     /// The files open as tabs in the CODE panel, in the order they were opened (left→right).
-    /// `selected_file` is the ACTIVE tab; this is the full open set. Opening a file adds it
-    /// here if absent; closing a tab removes it.
-    pub(crate) open_tabs: Vec<String>,
+    /// `selected_file` is the ACTIVE tab's path; this is the full open set with each tab's
+    /// buffer. Opening a file adds it here if absent; closing a tab removes it.
+    ///
+    /// `selected_file` stays a *path* rather than becoming an index into this: it is read at
+    /// dozens of call sites (git rows, minimap, `working`, `follow_agent`), and converting them
+    /// all would be a large refactor with no behaviour to show for it.
+    pub(crate) tabs: Vec<Tab>,
+    // --- Panel layout (spec 21) ---
+    /// The panel arrangement currently on screen, for the current mode.
+    pub(crate) layout: sc_win::layout::Layout,
+    /// The saved arrangement for each mode, so toggling modes doesn't rearrange the other one.
+    pub(crate) layouts: sc_win::layout::LayoutStore,
+    /// The divider drag in flight. ONE field for every split — it replaces the two bespoke
+    /// `dragging_split: bool` / `explorer_drag` fields, which only worked because there were
+    /// exactly two draggable dividers.
+    pub(crate) drag_split: Option<Drag>,
+    /// The panel being dragged by its header, if any (spec 21).
+    pub(crate) drag_panel: Option<sc_win::layout::PanelKind>,
+    /// The window-edge dock band under the cursor, if any.
+    ///
+    /// Takes priority over [`Self::drop_target`]: the frame sits above the panels, so pointing at
+    /// it means "dock across the whole layout" no matter which panel happens to be underneath.
+    pub(crate) dock_side: Option<sc_win::layout::Side>,
+    /// The drop target under the cursor while dragging: which panel, which of its edges, and
+    /// whether the drop would span the WHOLE layout (an outer-edge drop) rather than split that
+    /// one panel. The two produce very different layouts, so the preview must distinguish them.
+    pub(crate) drop_target: Option<(sc_win::layout::PanelKind, sc_win::layout::Side, bool)>,
+    /// Where each hidden panel used to sit, so ticking it back on returns it there.
+    ///
+    /// Session-scoped rather than persisted: it only matters between a hide and the matching
+    /// show, and the layout itself already survives a restart.
+    pub(crate) panel_slots:
+        std::collections::BTreeMap<sc_win::layout::PanelKind, sc_win::layout::PanelSlot>,
+
+    // --- Compile & check (spec 21) ---
+    /// The kind of project open, detected from the tree on workspace change. Decides whether a
+    /// compile can be offered at all, and with what command.
+    pub(crate) project_kind: sc_win::project::ProjectKind,
+    /// The last compile's outcome. `None` before the first run.
+    pub(crate) compile_report: Option<sc_win::diagnostics::CompileReport>,
+    /// A compile is in flight — the button reads "Compiling…" and offers cancel.
+    pub(crate) compiling: bool,
+    /// A line to scroll to once the newly-opened file has been laid out. Deferred for the same
+    /// reason the git-tab jump is: a same-frame scroll misses, because the new content doesn't
+    /// exist in the layout yet.
+    pub(crate) pending_scroll_line: Option<usize>,
+    /// The Unity editor path override (Settings ▸ General). Blank ⇒ search the Hub convention.
+    pub(crate) unity_path_input: String,
+    /// Set to cancel an in-flight compile. The worker checks it between reads and kills the
+    /// child, so a cold Unity build (minutes) is never a hostage situation.
+    pub(crate) compile_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    /// The tab a close was attempted on while it had unsaved edits — the confirm prompt's
+    /// subject. `None` = no prompt showing.
+    pub(crate) confirm_close: Option<String>,
+    /// A save that was REFUSED because the file changed on disk under a dirty buffer. Holds the
+    /// path, so the conflict can be explained where the user is looking rather than failing
+    /// silently or clobbering someone's work.
+    pub(crate) save_conflict: Option<String>,
     /// When true, the code panel follows the agent (auto-jumps to the file it's
     /// editing). Clicking a file in the tree pins it (sets this false); it re-arms when
     /// a new run starts. This is the "watch it work" behaviour, escapable on demand.
@@ -316,30 +372,14 @@ pub(crate) struct App {
     /// re-selects the contiguous range from here to the clicked row. `None` until first click.
     pub(crate) git_select_anchor: Option<String>,
 
-    // --- Resizable chat|code divider --------------------------------------------
-    /// Chat's share of the combined chat+code region (0.15..0.85). 0.5 = the old even
-    /// split; dragging the divider between the chat and code panels moves this.
-    pub(crate) chat_frac: f32,
-    /// Last-seen window width (px), from resize events — needed to turn an absolute
-    /// cursor X into a split fraction while dragging the chat|code divider.
+    // --- Window geometry --------------------------------------------------------
+    /// Last-seen window width (px), from resize events. Still tracked for overlay placement;
+    /// divider drags no longer need it — `responsive` gives each split its true extent.
     pub(crate) window_w: f32,
-    /// True while the chat|code divider is being dragged (mouse down on the handle).
-    pub(crate) dragging_split: bool,
-
-    // --- Resizable git|files divider (explorer column) --------------------------
-    /// Fraction of the explorer column's height given to the Git section (the rest goes to
-    /// Files). Dragged via the horizontal divider between them. Clamped to a sane band.
-    pub(crate) explorer_frac: f32,
-    /// The window height, tracked so an explorer-divider drag maps cursor Y *delta* to a
-    /// fraction delta (the region height is what matters, not the absolute origin).
+    /// Last-seen window height (px).
     pub(crate) window_h: f32,
-    /// The grab anchor for a git|files divider drag: `(cursor_y_at_grab, explorer_frac_at_grab)`.
-    /// `None` when not dragging. We drag by DELTA from this anchor — the divider moves only by how
-    /// far the cursor actually travels — so it never jumps on grab (an absolute-Y mapping needs
-    /// the explorer's exact top offset, which we don't track; a delta needs none).
-    pub(crate) explorer_drag: Option<(f32, f32)>,
-    /// Persisted divider positions, keyed by id — the ONE place split positions are saved. Seeded
-    /// from `chat_frac`/`explorer_frac` at startup and re-saved when a drag settles.
+    /// Persisted divider positions, keyed by split id — the ONE place split positions are saved.
+    /// The panel tree stores ids, not fractions, so this needed no change to serve it.
     pub(crate) splits: sc_win::splits::SplitStore,
 }
 
@@ -368,6 +408,10 @@ pub(crate) enum BottomTab {
     Build,
     /// The integrated command-runner terminal.
     Terminal,
+    /// Compile results: the Compile button and the parsed diagnostics (spec 21). Present in both
+    /// modes — in Craft mode it is the ONLY way to find out whether the code builds, since there
+    /// is no agent to ask.
+    Problems,
 }
 
 /// The top menu-bar dropdowns.
@@ -397,8 +441,10 @@ impl Default for App {
         // Restore saved divider positions (one id-keyed store), so each split comes back where the
         // user left it. Defaults match the historical hardcoded fractions.
         let splits = sc_win::splits::SplitStore::load();
-        let chat_frac = splits.get(sc_win::splits::id::CHAT_CODE, 0.5);
-        let explorer_frac = splits.get(sc_win::splits::id::EXPLORER_GIT_FILES, 0.25);
+        // The panel arrangement for whichever mode we're in. An unusable stored tree (no editor,
+        // too deep, corrupt) falls back to the default rather than wedging the window.
+        let layouts = sc_win::layout::LayoutStore::load();
+        let layout = layouts.get(cfg.craft());
         // Re-open the last project the user worked in (if it still exists on disk), so the
         // app comes back to where they left off instead of the empty scratch base.
         let picked_workspace = sc_win::persist::load().last_project;
@@ -462,7 +508,15 @@ impl Default for App {
             tree_cache,
             sync_pending: false,
             selected_file: None,
-            open_tabs: Vec::new(),
+            tabs: Vec::new(),
+            project_kind: sc_win::project::ProjectKind::Unknown,
+            compile_report: None,
+            compiling: false,
+            compile_cancel: None,
+            pending_scroll_line: None,
+            unity_path_input: String::new(),
+            confirm_close: None,
+            save_conflict: None,
             follow_agent: true,
             code: None,
             open_menu: None,
@@ -509,22 +563,30 @@ impl Default for App {
             modifiers: iced::keyboard::Modifiers::empty(),
             git_selection: std::collections::BTreeSet::new(),
             git_select_anchor: None,
-            chat_frac,
+            layout,
+            layouts,
+            drag_split: None,
+            drag_panel: None,
+            dock_side: None,
+            drop_target: None,
+            panel_slots: std::collections::BTreeMap::new(),
             window_w: 1040.0,
-            dragging_split: false,
-            explorer_frac,
             window_h: 800.0,
-            explorer_drag: None,
             splits,
         }
     }
 }
 
-/// Which tab of the settings modal is showing. **Connections** edits the two endpoints + keys;
-/// **Routing** picks which connection + model each pipeline stage uses.
+/// Which tab of the settings modal is showing. **General** carries the Craft/Assistant mode
+/// switch (spec 21); **Connections** edits the two endpoints + keys; **Routing** picks which
+/// connection + model each pipeline stage uses.
+///
+/// General is the default because it is the only tab that means anything in Craft mode — the
+/// other two configure a model that Craft mode never contacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsTab {
     #[default]
+    General,
     Connections,
     Routing,
 }
@@ -558,8 +620,57 @@ pub(crate) enum Message {
     OpenComplyReport,
     PlannerProviderChanged(sc_win::config::Provider),
     AdvisorProviderChanged(sc_win::config::Provider),
-    /// Switch the settings modal tab (Connections / Routing).
+    /// Switch the settings modal tab (General / Connections / Routing).
     SettingsTabChanged(SettingsTab),
+    // --- The editor (spec 21) ---
+    /// An event from the CODE pane's edit view, forwarded to the active tab's buffer.
+    EditorEvent(iced_code_editor::Message),
+    /// Flip the active tab between the read-only review view and the editor.
+    ToggleTabView,
+    /// Write the active tab to disk (Ctrl+S). Refuses on a save conflict.
+    SaveFile,
+    /// Dismiss the save-conflict notice, leaving the buffer untouched and unsaved.
+    DismissSaveConflict,
+    /// Discard the file on disk and write the buffer over it — the explicit answer to a save
+    /// conflict, never automatic.
+    OverwriteOnConflict,
+    /// Drop the unsaved changes in the tab awaiting a close confirmation, and close it.
+    DiscardAndClose(String),
+    /// Save the tab awaiting a close confirmation, then close it.
+    SaveAndClose(String),
+    /// Cancel a pending close, keeping the tab and its edits.
+    CancelClose,
+    /// Switch between Craft (no model) and Assistant (spec 21). `true` ⇒ Craft.
+    ///
+    /// Takes effect immediately and persists: entering Craft cancels any in-flight run, because
+    /// a session outliving the switch would contradict the mode's whole promise.
+    ToggleCraftMode(bool),
+    /// The answer to the first-run question (spec 21). `true` ⇒ Craft.
+    ///
+    /// Distinct from [`Message::ToggleCraftMode`] because this one also completes the boot the
+    /// prompt was holding up — opening the remembered project once a mode exists to open it in.
+    ChooseMode(bool),
+    /// Dismissing the first-run prompt without answering — quits.
+    ///
+    /// Choosing is cheap; being chosen for is the thing this whole feature avoids. Someone who
+    /// closes the question rather than answering it has not consented to either mode.
+    DeclineToChoose,
+    /// Escape. Declines the first-run question if it's open; otherwise does nothing.
+    EscapePressed,
+    // --- Compile & check (spec 21) ---
+    /// Run the project's compile command and parse its diagnostics.
+    RunCompile,
+    /// The compile finished off-thread.
+    CompileDone(Box<sc_win::diagnostics::CompileReport>),
+    /// Stop an in-flight compile — a cold Unity build is minutes, not seconds.
+    CancelCompile,
+    /// Open a diagnostic's file at its line. This is what makes the panel a list rather than a
+    /// log: the whole point is to land on the offending character.
+    OpenDiagnostic(usize),
+    /// The Unity editor path override in Settings.
+    UnityPathChanged(String),
+    /// Scroll the code view to [`App::pending_scroll_line`], once the file is laid out.
+    JumpToPendingLine,
     VerifyChanged(String),
     SuffixChanged(String),
     ToggleSettings,
@@ -737,16 +848,36 @@ pub(crate) enum Message {
     ClearWorkspace,
     /// Open the output folder of the last run in the system file manager.
     OpenOutputFolder,
-    // Resizable chat|code divider.
-    /// Mouse pressed on the chat|code divider → begin dragging it.
-    SplitDragStart,
-    /// Mouse released anywhere → stop dragging the divider (either the chat|code or git|files one).
+    // --- Panel tree (spec 21) ---
+    /// Mouse pressed on a divider → begin dragging THAT split.
+    ///
+    /// One message for every divider, carrying the node's id and the region's true extent from
+    /// `responsive`. Replaces the two bespoke start messages, which only worked because there
+    /// were exactly two draggable dividers in a fixed layout.
+    SplitGrab {
+        id: String,
+        axis: sc_win::layout::Axis,
+        extent: f32,
+    },
+    /// Mouse released anywhere → end the drag and persist the position.
     SplitDragEnd,
-    /// The window was resized — remember its width AND height so the divider drags can map an
-    /// absolute cursor X→chat fraction (width) and cursor Y→explorer fraction (height).
+    /// The window was resized — remembered for overlay placement.
     WindowSize(f32, f32),
-    // Resizable git|files divider (explorer column). Release is handled by `SplitDragEnd`,
-    // which clears both drag flags, so there's no separate ExplorerDragEnd.
-    /// Mouse pressed on the git|files divider → begin dragging it.
-    ExplorerDragStart,
+    /// Show or hide a panel (View ▸ Panels).
+    TogglePanel(sc_win::layout::PanelKind),
+    /// Mouse down on a panel's header → pick that panel up.
+    PanelGrab(sc_win::layout::PanelKind),
+    /// The cursor moved over a panel while dragging:
+    /// `(target, cursor x, y within the panel, panel w, h, tree w, h)`.
+    ///
+    /// The tree's size rides along because edge-docking is judged against the LAYOUT, not the
+    /// window — the tree sits below the menu bar. The side is derived in `update` rather than
+    /// the view, so all the geometry lives in one place.
+    PanelHover(sc_win::layout::PanelKind, f32, f32, f32, f32, f32, f32),
+    /// The cursor entered or left a window-edge dock band.
+    DockHover(Option<sc_win::layout::Side>),
+    /// Mouse released → drop the dragged panel on the current target, if there is one.
+    PanelDrop,
+    /// Put the panels back the way they started.
+    ResetLayout,
 }

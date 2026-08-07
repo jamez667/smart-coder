@@ -62,7 +62,21 @@ impl App {
             .color(FG_MUTED),
         );
 
-        // The picker.
+        // The picker — hidden in Craft mode, where the only valid answer is "no model" and
+        // offering the other two would be offering something the mode forbids. The audit itself
+        // is unaffected: control results never used a model (spec 13), so what's lost is the
+        // prose summary, not the evidence.
+        if self.cfg.craft() {
+            col = col.push(
+                text(
+                    "Deterministic audit — no executive summary or auditor guidance. Every \
+                     control result is still produced.",
+                )
+                .size(11)
+                .color(FG_MUTED),
+            );
+            return self.view_comply_run_controls(col);
+        }
         col = col.push(text("Summary written by").size(12).color(FG));
         let seg = |m: ComplyModel| {
             let active = self.comply_model == m;
@@ -113,7 +127,19 @@ impl App {
             .color(FG_MUTED),
         );
 
-        // Run / running.
+        self.view_comply_run_controls(col)
+    }
+
+    /// The Run button, the in-flight note, and the outcome — the part of the dialog that is the
+    /// same whether or not a model writes the summary. Shared so the Craft-mode path (which
+    /// skips the picker entirely) cannot drift from the Assistant one.
+    fn view_comply_run_controls<'a>(
+        &'a self,
+        mut col: iced::widget::Column<'a, Message>,
+    ) -> Element<'a, Message> {
+        // Craft mode never narrates, regardless of a stale picker value from before the switch.
+        let narrating = !self.cfg.craft() && self.comply_model != ComplyModel::None;
+
         col = col.push(Space::new().height(Length::Fixed(4.0)));
         let mut run = button(
             text(if self.comply_running {
@@ -134,11 +160,11 @@ impl App {
 
         if self.comply_running {
             col = col.push(
-                text(if self.comply_model == ComplyModel::None {
-                    "Scanning the workspace…"
-                } else {
+                text(if narrating {
                     "Scanning the workspace, then writing the summary. \
                      The model calls take a while."
+                } else {
+                    "Scanning the workspace…"
                 })
                 .size(11)
                 .color(FG_MUTED),
@@ -188,7 +214,7 @@ impl App {
                     ]
                     .spacing(12),
                 );
-                if !r.narrated && self.comply_model != ComplyModel::None {
+                if !r.narrated && !self.cfg.craft() && self.comply_model != ComplyModel::None {
                     // The user asked for a summary and did not get one. Say so
                     // rather than letting them assume the page has one.
                     col = col.push(

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::file::{
     is_gemini_url, parse_config, serialize_config, ConfigFields, GEMINI_OPENAI_BASE_URL,
 };
-use super::types::{Connection, Provider, UiConfig};
+use super::types::{Connection, Mode, Provider, UiConfig};
 use super::workspace::{detect_verify_command, repo_overview, source_files};
 
 #[test]
@@ -25,6 +25,120 @@ fn detect_verify_command_matches_the_test_language() {
 
     // Nothing recognizable → the fallback.
     assert_eq!(detect_verify_command(&[], "the-fallback"), "the-fallback");
+}
+
+#[test]
+fn mode_round_trips_through_config_json() {
+    // The answer to the first-run question has to survive a restart. A mode that reset would
+    // read as the app ignoring the user — the worst possible first impression for this feature.
+    for m in [Mode::Craft, Mode::Assistant] {
+        let cfg = UiConfig {
+            mode: Some(m),
+            ..UiConfig::default()
+        };
+        let json = serialize_config(&ConfigFields {
+            mode: cfg.mode.map(|m| m.slug().to_string()),
+            ..ConfigFields::default()
+        });
+        let back = parse_config(&json);
+        assert_eq!(
+            back.mode.as_deref().and_then(Mode::from_slug),
+            Some(m),
+            "{} did not survive the round trip: {json}",
+            m.slug()
+        );
+    }
+}
+
+#[test]
+fn an_unchosen_mode_writes_nothing_and_stays_unchosen() {
+    // Tri-state: absent means NEVER CHOSEN, which is what raises the first-run prompt. It must
+    // not collapse into a default, or the prompt would never fire on a fresh install.
+    let json = serialize_config(&ConfigFields {
+        mode: None,
+        ..ConfigFields::default()
+    });
+    assert!(
+        !json.contains("mode"),
+        "unchosen must not be written: {json}"
+    );
+    assert!(parse_config(&json).mode.is_none());
+    assert!(!UiConfig::default().mode_chosen(), "default is unchosen");
+}
+
+#[test]
+fn a_corrupt_mode_asks_again_rather_than_guessing() {
+    // Guessing here is the one failure this feature cannot afford: silently resolving garbage to
+    // Assistant would put someone who chose Craft back in front of a model. Unparseable ⇒ None ⇒
+    // ask again.
+    let f = parse_config(r#"{"mode":"CRAFT MODE PLEASE"}"#);
+    assert_eq!(
+        f.mode.as_deref(),
+        Some("CRAFT MODE PLEASE"),
+        "read verbatim"
+    );
+    assert_eq!(
+        f.mode.as_deref().and_then(Mode::from_slug),
+        None,
+        "but rejected"
+    );
+}
+
+#[test]
+fn craft_mode_builds_no_backend_at_all() {
+    // THE contract behind "no language model is contacted" (spec 21), asserted on CONSTRUCTION
+    // rather than on any proxy for it.
+    //
+    // This matters because constructing a backend is not free: `backend()` and `orchestrator()`
+    // end in `with_detected_context()`, a live `/models` probe. Returning one at all IS the
+    // network call. Making the builders `Option` puts that in the type system, so a caller added
+    // later cannot dial out without handling the `None` — whereas guarding each call site only
+    // ever protects the sites someone remembered to guard.
+    let craft = UiConfig {
+        mode: Some(Mode::Craft),
+        // Fully configured — the refusal must come from the MODE, not from missing config.
+        advisor_model: Some("advisor-model".into()),
+        orchestrator_model: Some("planner-model".into()),
+        ..UiConfig::default()
+    };
+    assert!(craft.backend().is_none(), "no coder backend");
+    assert!(craft.orchestrator().is_none(), "no planner backend");
+    assert!(craft.advisor().is_none(), "no advisor backend");
+    assert!(
+        craft.swarm_advisor().is_none(),
+        "and none via the swarm path"
+    );
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    assert!(craft.backend_cancellable(cancel).is_none());
+
+    // The same config in Assistant mode DOES build them — otherwise the assertions above would
+    // pass for the wrong reason (e.g. a builder that never returns anything).
+    let assistant = UiConfig {
+        mode: Some(Mode::Assistant),
+        ..craft.clone()
+    };
+    assert!(assistant.advisor().is_some(), "Assistant still builds one");
+}
+
+#[test]
+fn craft_is_only_true_when_craft_was_actually_chosen() {
+    // `craft()` is the single predicate for "no model", so the unchosen case must NOT read as
+    // Craft — until the user answers, the app behaves as Assistant and the prompt does the
+    // asking. Getting this backwards would silently disable the agent for every fresh install.
+    let unchosen = UiConfig::default();
+    assert!(!unchosen.craft(), "unchosen is not Craft");
+
+    let craft = UiConfig {
+        mode: Some(Mode::Craft),
+        ..UiConfig::default()
+    };
+    assert!(craft.craft() && craft.mode_chosen());
+
+    let assistant = UiConfig {
+        mode: Some(Mode::Assistant),
+        ..UiConfig::default()
+    };
+    assert!(!assistant.craft() && assistant.mode_chosen());
 }
 
 #[test]

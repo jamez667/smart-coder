@@ -366,6 +366,12 @@ impl App {
     /// A real 1-token completion is used (not a `/models` ping) so a router with no model
     /// loaded reads as `NoModel`, not healthy.
     pub(crate) fn tick_health_probe(&mut self) {
+        // Craft mode contacts no model (spec 21). The subscription is already unregistered, so
+        // this is the second line of defence: any future caller that reaches here — a manual
+        // refresh, a replayed message — still cannot spawn the probe thread.
+        if self.cfg.craft() {
+            return;
+        }
         // 1) Adopt a completed probe.
         if let Some(rx) = &self.health_rx {
             if let Ok(h) = rx.try_recv() {
@@ -647,7 +653,14 @@ impl App {
                     // show that file in the code panel — so edits land in front of you.
                     if self.follow_agent {
                         if let Some(rel) = sc_win::codeview::file_touched_by(&e) {
-                            self.select_file(rel);
+                            // Never yank the pane away from a buffer with unsaved edits: the
+                            // user is mid-sentence in a file the agent happens to be touching.
+                            // Following is a convenience; their typing is not.
+                            if !self.active_tab().is_some_and(|t| t.dirty) {
+                                // Agent-driven opens land in the REVIEW view — the point is to
+                                // watch what changed, and it carries the diff wash.
+                                self.select_file_for_review(rel);
+                            }
                         }
                     }
                     // (A tool result may have changed the shown file on disk; the live view is

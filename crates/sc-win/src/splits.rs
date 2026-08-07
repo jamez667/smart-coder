@@ -20,6 +20,12 @@ pub mod id {
     pub const CHAT_CODE: &str = "chat|code";
     /// The explorer column's git | files split (fraction = git's share of the column height).
     pub const EXPLORER_GIT_FILES: &str = "explorer:git|files";
+    /// The explorer | (everything right of it) split. Was a hardcoded 20% before the panel tree
+    /// (spec 21); it defaults to the same 0.20, so the layout is pixel-identical to before — but
+    /// now it can be dragged.
+    pub const EXPLORER_BODY: &str = "explorer|body";
+    /// The body | bottom-strip split. Was a fixed 180px strip; now resizable.
+    pub const BODY_BOTTOM: &str = "body|bottom";
 }
 
 /// An id → fraction map of divider positions, loaded once at startup and re-saved (best-effort)

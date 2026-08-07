@@ -38,6 +38,11 @@ pub const GEMINI_OPENAI_BASE_URL: &str = "https://generativelanguage.googleapis.
 /// restart instead of resetting to the local defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigFields {
+    /// How the app works: `"craft"` / `"assistant"` (spec 21). Absent ⇒ never chosen, which
+    /// raises the first-run prompt. A garbage value parses back to `None` and so asks again —
+    /// deliberately, because guessing a mode for someone who chose Craft would be the one
+    /// failure this feature cannot afford.
+    pub mode: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub key: Option<String>,
@@ -73,6 +78,7 @@ pub(super) fn parse_config(text: &str) -> ConfigFields {
             .map(str::to_string)
     };
     ConfigFields {
+        mode: field("mode"),
         base_url: field("base_url"),
         model: field("model"),
         key: field("key"),
@@ -99,6 +105,7 @@ pub(super) fn serialize_config(f: &ConfigFields) -> String {
             obj.insert(k.to_string(), serde_json::Value::String(s.to_string()));
         }
     };
+    put("mode", &f.mode);
     put("base_url", &f.base_url);
     put("model", &f.model);
     put("key", &f.key);

@@ -164,18 +164,38 @@ pub fn run() -> iced::Result {
     iced::application(
         || {
             let mut app = App::default();
-            if app.picked_workspace.is_some() {
+            // The restored project needs detecting, or the Compile button stays dead until the
+            // user re-picks the folder (spec 21).
+            app.refresh_project_kind();
+            // Boot is deferred while the first-run question is open (spec 21): opening a
+            // conversation is Assistant-shaped, and doing it before the user has said which mode
+            // they want would mean undoing it the moment they answer "Just code".
+            // `Message::ChooseMode` finishes this once they have.
+            if app.picked_workspace.is_some() && app.cfg.mode_chosen() {
                 app.show_welcome();
-                app.open_conversation();
+                if !app.cfg.craft() {
+                    app.open_conversation();
+                }
             }
             // Remote-mirror mode (Claude-Code-remote style): when SC_REMOTE is set, start a
             // mirror server so a phone can attach to THIS live session — see the chat + agent
             // activity, send chat, approve/deny, stop. Bound to 127.0.0.1 (front it with
             // `tailscale serve`); every request needs the printed per-run token.
+            // Refused in Craft mode (spec 21): the mirror exists to bring agent output to a
+            // phone and to accept chat/approvals back, so starting it would be a model surface
+            // arriving through a side door. Say why rather than failing silently — someone who
+            // set SC_REMOTE deliberately deserves to know it was ignored.
             if std::env::var("SC_REMOTE").is_ok() {
-                app.remote = Some(start_mirror());
-                // Publish the initially-open project so the phone shows it on first connect.
-                app.publish_workspace_to_remote();
+                if app.cfg.craft() {
+                    eprintln!(
+                        "SC_REMOTE ignored: the remote mirror is an agent surface, and this \
+                         install is in Craft mode (Settings ▸ General)."
+                    );
+                } else {
+                    app.remote = Some(start_mirror());
+                    // Publish the initially-open project so the phone shows it on first connect.
+                    app.publish_workspace_to_remote();
+                }
             }
             (app, Task::none())
         },
@@ -205,20 +225,784 @@ pub(crate) use types::*;
 mod logic_a;
 mod logic_b;
 mod logic_c;
+mod logic_compile;
+mod logic_save;
 mod update;
 mod view_code;
 mod view_comply;
 mod view_core;
+mod view_layout;
+pub(crate) use view_layout::Drag;
 mod view_menus;
 mod view_panels;
 
 mod helpers;
 pub(crate) use helpers::*;
 
+mod tabs;
+pub(crate) use tabs::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sc_win::comply::ComplyModel;
+    use sc_win::config::Mode;
+
+    /// An `App` in a known mode.
+    ///
+    /// `App::default()` reads the developer's real config.json, so a test that cares about mode
+    /// must SET it rather than assume — otherwise it passes or fails depending on whose machine
+    /// it runs on.
+    fn app_in(mode: Mode) -> App {
+        let mut app = App::default();
+        app.cfg.mode = Some(mode);
+        app
+    }
+
+    /// Craft mode spawns no health probe.
+    ///
+    /// This is the mode's whole promise (spec 21): no language model is contacted. The probe is
+    /// the one caller that dials out on a TIMER rather than on a user action, and it builds an
+    /// `OpenAiBackend` DIRECTLY instead of going through `UiConfig::backend()` — so a
+    /// mode-aware builder would miss it entirely. Asserting on the spawn, not the builder, is
+    /// what keeps that hole closed.
+    #[test]
+    fn craft_mode_never_spawns_the_health_probe() {
+        let mut app = app_in(Mode::Craft);
+        app.health_rx = None;
+        app.last_health_probe = None; // "never probed" ⇒ a probe is due
+
+        app.tick_health_probe();
+
+        assert!(
+            app.health_rx.is_none(),
+            "Craft mode must not put a probe in flight"
+        );
+        assert!(
+            app.last_health_probe.is_none(),
+            "and must not record having probed"
+        );
+    }
+
+    /// The same tick DOES probe in Assistant mode — otherwise the test above would pass for the
+    /// wrong reason (e.g. a probe that never fires in either mode).
+    #[test]
+    fn assistant_mode_still_spawns_the_health_probe() {
+        let mut app = app_in(Mode::Assistant);
+        app.health_rx = None;
+        app.last_health_probe = None;
+
+        app.tick_health_probe();
+
+        assert!(app.health_rx.is_some(), "Assistant mode probes as before");
+    }
+
+    /// Switching to Craft clears the backend verdict.
+    ///
+    /// A stale "backend reachable" badge left on screen in a mode that contacts no backend is a
+    /// lie about the thing the user just asked us to stop doing.
+    #[test]
+    fn entering_craft_mode_clears_the_backend_health_verdict() {
+        let mut app = app_in(Mode::Assistant);
+        app.backend_health = Some(sc_model::BackendHealth::Ready);
+
+        let _ = app.update(Message::ToggleCraftMode(true));
+
+        assert!(app.cfg.craft(), "mode switched");
+        assert!(app.backend_health.is_none(), "stale verdict dropped");
+        assert!(app.health_rx.is_none(), "no probe left in flight");
+    }
+
+    /// Chat send is refused in Craft mode — at the entry point, not just in the view.
+    ///
+    /// Hiding the composer is presentation. This asserts the REFUSAL: a keyboard shortcut, a
+    /// replayed message, or a caller added later must not be able to spawn a model turn.
+    #[test]
+    fn craft_mode_refuses_to_send_chat() {
+        let mut app = app_in(Mode::Craft);
+        app.intent = "write me a parser".to_string();
+
+        app.send_chat();
+
+        assert!(app.chat_session.is_none(), "no model turn may be spawned");
+        assert_eq!(app.intent, "write me a parser", "composer left untouched");
+    }
+
+    /// Same for starting a run.
+    #[test]
+    fn craft_mode_refuses_to_start_a_run() {
+        let mut app = app_in(Mode::Craft);
+        app.intent = "build the thing".to_string();
+
+        app.start(RunKind::Agent);
+
+        assert!(app.session.is_none(), "no run may be spawned");
+    }
+
+    /// A line comment still SAVES in Craft mode; only the auto-fix stops.
+    ///
+    /// The distinction matters: line comments are a review annotation, not an AI feature — they
+    /// are also how Send back harvests revision notes. A naive "hide the AI bits" pass would
+    /// break the annotation along with the model call.
+    #[test]
+    fn craft_mode_keeps_line_comments_but_never_triages_them() {
+        let mut app = app_in(Mode::Craft);
+        app.code = Some(sc_win::codeview::CodeView {
+            rel: "src/main.rs".to_string(),
+            lines: vec![(1, "fn main() {}".to_string())],
+            truncated: false,
+            note: None,
+        });
+        app.comment_range = Some((1, 1));
+        app.comment_draft = "this allocates twice".to_string();
+
+        app.submit_line_comment();
+
+        assert!(app.triage.is_none(), "no triage call may be spawned");
+        assert!(app.working.is_none(), "and no agent-working range is set");
+        assert!(
+            app.comments
+                .on_file("src/main.rs")
+                .any(|(_, c)| c.text == "this allocates twice"),
+            "but the comment itself is kept"
+        );
+        assert!(app.comment_range.is_none(), "and the box closes");
+    }
+
+    /// Clicking a diagnostic opens its file and queues the scroll to its line.
+    ///
+    /// This is what makes the Problems panel a list rather than a log. If it stops working the
+    /// feature degrades to a wall of text the terminal already provides.
+    #[test]
+    fn clicking_a_problem_opens_the_file_at_that_line() {
+        let (mut app, dir) = app_with_file("Broken.cs", "class A {\n  int x =\n}\n");
+        app.compile_report = Some(sc_win::diagnostics::CompileReport {
+            diagnostics: vec![sc_win::diagnostics::Diagnostic {
+                file: "Broken.cs".to_string(),
+                line: 2,
+                col: 9,
+                severity: sc_win::diagnostics::Severity::Error,
+                code: Some("CS1525".to_string()),
+                message: "invalid expression term".to_string(),
+            }],
+            exit_code: Some(1),
+            failure: None,
+        });
+
+        let _ = app.open_diagnostic(0);
+
+        assert_eq!(app.selected_file.as_deref(), Some("Broken.cs"), "opened");
+        assert_eq!(app.pending_scroll_line, Some(2), "and queued the jump");
+        assert!(!app.follow_agent, "clicking a problem pins the view");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A diagnostic pointing outside the workspace opens nothing.
+    ///
+    /// Compilers report paths into package caches and SDK sources. Opening those gives a tab
+    /// full of "(file not found)", which is worse than the click doing nothing.
+    #[test]
+    fn a_problem_outside_the_workspace_is_not_opened() {
+        let (mut app, dir) = app_with_file("Real.cs", "class A {}\n");
+        app.compile_report = Some(sc_win::diagnostics::CompileReport {
+            diagnostics: vec![sc_win::diagnostics::Diagnostic {
+                file: "C:/Program Files/Unity/Editor/Data/Managed/UnityEngine.dll".to_string(),
+                line: 1,
+                col: 1,
+                severity: sc_win::diagnostics::Severity::Error,
+                code: None,
+                message: "somewhere else entirely".to_string(),
+            }],
+            exit_code: Some(1),
+            failure: None,
+        });
+
+        let _ = app.open_diagnostic(0);
+
+        assert!(app.selected_file.is_none(), "nothing opened");
+        assert!(app.pending_scroll_line.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An unrecognised project reports why rather than compiling something arbitrary.
+    #[test]
+    fn compiling_an_unrecognised_project_explains_itself() {
+        let (mut app, dir) = app_with_file("notes.txt", "just some notes\n");
+        app.refresh_project_kind();
+        assert_eq!(app.project_kind, sc_win::project::ProjectKind::Unknown);
+
+        let _ = app.start_compile();
+
+        assert!(!app.compiling, "nothing was launched");
+        let report = app.compile_report.as_ref().expect("reported");
+        let failure = report.failure.as_deref().unwrap_or_default();
+        assert!(
+            failure.contains("Unity"),
+            "names what it looked for: {failure}"
+        );
+        assert!(!report.ok());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Switching projects drops the previous one's problems.
+    ///
+    /// Stale diagnostics against a different project are worse than none — they point at files
+    /// that may not exist and imply a build that never ran.
+    #[test]
+    fn changing_project_clears_stale_problems() {
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
+        app.compile_report = Some(sc_win::diagnostics::CompileReport {
+            diagnostics: vec![],
+            exit_code: Some(1),
+            failure: Some("from the last project".to_string()),
+        });
+
+        app.refresh_project_kind();
+
+        assert!(app.compile_report.is_none(), "stale report dropped");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Point layout persistence at a scratch dir for the duration of a test.
+    ///
+    /// `App::default()` reads and writes REAL machine state, so a test that toggles a panel
+    /// otherwise rewrites the developer's actual `layout.json` — which it did, once, before this
+    /// existed. Tests that mutate the layout must call this first.
+    fn redirect_layout_state(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-win-layout-{name}-{:?}",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: single-threaded test process state; each test uses its own directory.
+        unsafe { std::env::set_var("SC_STATE_DIR", &dir) };
+        dir
+    }
+
+    /// Switching modes swaps the layout, and each mode keeps its own arrangement.
+    ///
+    /// A shared tree would mean entering Craft mode silently rearranged the Assistant one — the
+    /// user would come back to find their panels moved by a setting that was supposed to be
+    /// reversible.
+    #[test]
+    fn each_mode_keeps_its_own_panel_arrangement() {
+        use sc_win::layout::PanelKind;
+        let dir = redirect_layout_state("modes");
+        let mut app = app_in(Mode::Assistant);
+        app.layout = sc_win::layout::Layout::assistant_default();
+
+        // Rearrange Assistant: drop the git panel.
+        let _ = app.update(Message::TogglePanel(PanelKind::Git));
+        assert!(!app.layout.contains(PanelKind::Git), "hidden");
+        assert!(app.layout.contains(PanelKind::Chat), "still Assistant");
+
+        // Into Craft: chat is gone, and this is a DIFFERENT arrangement.
+        let _ = app.update(Message::ToggleCraftMode(true));
+        assert!(
+            !app.layout.contains(PanelKind::Chat),
+            "no chat without a model"
+        );
+        assert!(app.layout.contains(PanelKind::Editor), "editor survives");
+
+        // Back to Assistant: the arrangement we left is restored, git still hidden.
+        let _ = app.update(Message::ToggleCraftMode(false));
+        assert!(app.layout.contains(PanelKind::Chat), "chat is back");
+        assert!(
+            !app.layout.contains(PanelKind::Git),
+            "and OUR arrangement survived the round trip"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Dragging a panel's header onto another panel's edge rearranges the layout.
+    #[test]
+    fn dropping_a_panel_on_another_rearranges_and_persists() {
+        use sc_win::layout::PanelKind;
+        let dir = redirect_layout_state("panel-drop");
+        let mut app = app_in(Mode::Craft);
+        app.layout = sc_win::layout::Layout::craft_default();
+        let before = app.layout.clone();
+
+        // Grab Git's header, hover the right edge of the editor, release.
+        let _ = app.update(Message::PanelGrab(PanelKind::Git));
+        assert_eq!(app.drag_panel, Some(PanelKind::Git), "picked up");
+        // A small panel in the middle of a large window, so its right edge is INTERIOR — the
+        // drop splits the editor rather than spanning the whole layout.
+        app.window_w = 2000.0;
+        app.window_h = 1000.0;
+        app.cursor_pos = iced::Point::new(500.0, 300.0);
+        let _ = app.update(Message::PanelHover(
+            PanelKind::Editor,
+            95.0,
+            50.0,
+            100.0,
+            100.0,
+            2000.0,
+            1000.0,
+        ));
+        assert_eq!(
+            app.drop_target,
+            Some((PanelKind::Editor, sc_win::layout::Side::Right, false)),
+            "the near edge decides the side, and this one is interior"
+        );
+        let _ = app.update(Message::PanelDrop);
+
+        assert_ne!(app.layout, before, "the layout changed");
+        assert!(app.drag_panel.is_none(), "the drag ended");
+        assert!(app.drop_target.is_none());
+        // Membership is unchanged — a move must never lose or duplicate a panel.
+        let (mut a, mut b) = (before.panels(), app.layout.panels());
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Dropping at the layout's BOTTOM edge makes a full-width row.
+    ///
+    /// The reported bug: bottom docking never fired. The tree renders below the menu bar, so the
+    /// bottom panel's edge is ~34px above `window_h` — testing against the window instead of the
+    /// tree meant the condition could never be true. This models the real geometry.
+    #[test]
+    fn dropping_at_the_bottom_edge_docks_across_the_full_width() {
+        use sc_win::layout::{Axis, Layout, PanelKind, Side};
+        let dir = redirect_layout_state("panel-bottom-drop");
+        let mut app = app_in(Mode::Craft);
+        app.layout = Layout::craft_default();
+
+        // A 1000x800 window with a 34px menu bar → the tree is 1000x766, well short of the
+        // window's height. That gap is what the old window-relative test could never bridge.
+        const MENU_BAR: f32 = 34.0;
+        app.window_w = 1000.0;
+        app.window_h = 800.0;
+        let (tw, th) = (1000.0, 800.0 - MENU_BAR);
+
+        // The Editor spanning the tree's full WIDTH, cursor near its lower edge.
+        let (w, h) = (tw, 383.0);
+        let (x, y) = (500.0, 378.0);
+
+        let _ = app.update(Message::PanelGrab(PanelKind::Git));
+        let _ = app.update(Message::PanelHover(PanelKind::Editor, x, y, w, h, tw, th));
+
+        assert_eq!(
+            app.drop_target,
+            Some((PanelKind::Editor, Side::Bottom, true)),
+            "the tree's bottom edge must register as OUTER even though it isn't the window's"
+        );
+
+        let _ = app.update(Message::PanelDrop);
+
+        // Git is now the root's lower child — a full-width row under everything else.
+        match &app.layout {
+            Layout::Split { axis, b, .. } => {
+                assert_eq!(*axis, Axis::Vertical, "a row");
+                assert_eq!(**b, Layout::Leaf(PanelKind::Git), "spanning the bottom");
+            }
+            other => panic!("expected a root split, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Dropping on the WINDOW's dock frame docks across the whole layout.
+    ///
+    /// The frame is a separate surface from the per-panel zones: it hugs the outside of the
+    /// entire tree, so "throw it at the edge" works without aiming at any particular panel.
+    #[test]
+    fn dropping_on_the_window_dock_frame_spans_the_layout() {
+        use sc_win::layout::{Axis, Layout, PanelKind, Side};
+        let dir = redirect_layout_state("dock-frame");
+        let mut app = app_in(Mode::Craft);
+        app.layout = Layout::craft_default();
+
+        let _ = app.update(Message::PanelGrab(PanelKind::Git));
+        let _ = app.update(Message::DockHover(Some(Side::Bottom)));
+        assert_eq!(app.dock_side, Some(Side::Bottom));
+
+        let _ = app.update(Message::PanelDrop);
+
+        match &app.layout {
+            Layout::Split { axis, b, .. } => {
+                assert_eq!(*axis, Axis::Vertical, "a full-width row");
+                assert_eq!(**b, Layout::Leaf(PanelKind::Git), "docked at the bottom");
+            }
+            other => panic!("expected a root split, got {other:?}"),
+        }
+        assert!(app.dock_side.is_none(), "drag state cleared");
+        assert!(app.drag_panel.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The window frame wins over whatever panel is underneath it.
+    ///
+    /// The bands sit ABOVE the panels, so pointing at one means "dock across everything" — the
+    /// per-panel target must not also be live, or the highlight would promise two outcomes.
+    #[test]
+    fn the_dock_frame_supersedes_a_per_panel_target() {
+        use sc_win::layout::{Layout, PanelKind, Side};
+        let dir = redirect_layout_state("dock-priority");
+        let mut app = app_in(Mode::Craft);
+        app.layout = Layout::craft_default();
+
+        let _ = app.update(Message::PanelGrab(PanelKind::Git));
+        // A per-panel target first…
+        let _ = app.update(Message::PanelHover(
+            PanelKind::Editor,
+            500.0,
+            300.0,
+            1000.0,
+            600.0,
+            1000.0,
+            766.0,
+        ));
+        assert!(app.drop_target.is_some());
+
+        // …then the cursor reaches the frame, which takes over.
+        let _ = app.update(Message::DockHover(Some(Side::Left)));
+        assert_eq!(app.dock_side, Some(Side::Left));
+        assert!(
+            app.drop_target.is_none(),
+            "the per-panel target must clear, so only one outcome is promised"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Releasing away from any panel cancels the drag instead of stranding it.
+    ///
+    /// Without this, letting go over the menu bar (or off the window) would leave a panel
+    /// permanently "in flight" and every other panel showing drop zones.
+    #[test]
+    fn releasing_outside_a_drop_target_cancels_the_drag() {
+        use sc_win::layout::PanelKind;
+        let dir = redirect_layout_state("panel-cancel");
+        let mut app = app_in(Mode::Craft);
+        app.layout = sc_win::layout::Layout::craft_default();
+        let before = app.layout.clone();
+
+        let _ = app.update(Message::PanelGrab(PanelKind::Git));
+        // No hover — the release happens somewhere that isn't a panel.
+        let _ = app.update(Message::SplitDragEnd);
+
+        assert!(app.drag_panel.is_none(), "drag cancelled");
+        assert_eq!(app.layout, before, "and nothing moved");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The editor can never be hidden.
+    ///
+    /// An IDE with nothing to edit isn't a layout choice, it's a broken window — so the toggle
+    /// refuses rather than leaving the user with no way back.
+    #[test]
+    fn the_editor_panel_cannot_be_hidden() {
+        use sc_win::layout::PanelKind;
+        let dir = redirect_layout_state("no-hide-editor");
+        let mut app = app_in(Mode::Craft);
+        app.layout = sc_win::layout::Layout::craft_default();
+
+        let _ = app.update(Message::TogglePanel(PanelKind::Editor));
+
+        assert!(
+            app.layout.contains(PanelKind::Editor),
+            "hiding the editor must be refused"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The first-run question shows only while no mode has been chosen.
+    ///
+    /// The tri-state is the point: "never asked" is a different state from "chose Assistant",
+    /// and collapsing them would either nag someone who already answered or never ask at all.
+    #[test]
+    fn the_first_run_question_shows_once_and_only_when_unanswered() {
+        let mut app = App::default();
+
+        app.cfg.mode = None;
+        assert!(
+            app.view_first_run().is_some(),
+            "unanswered → the question is asked"
+        );
+
+        for m in [Mode::Craft, Mode::Assistant] {
+            app.cfg.mode = Some(m);
+            assert!(
+                app.view_first_run().is_none(),
+                "{} was chosen → never asked again",
+                m.slug()
+            );
+        }
+    }
+
+    /// Answering the question records the mode.
+    #[test]
+    fn choosing_a_mode_answers_the_question_for_good() {
+        for (craft, expected) in [(true, Mode::Craft), (false, Mode::Assistant)] {
+            let mut app = App::default();
+            app.cfg.mode = None;
+
+            let _ = app.update(Message::ChooseMode(craft));
+
+            assert_eq!(app.cfg.mode, Some(expected));
+            assert!(app.cfg.mode_chosen(), "and it counts as answered");
+            assert!(app.view_first_run().is_none(), "so the prompt is gone");
+        }
+    }
+
+    /// Escape only means anything while the question is open.
+    ///
+    /// It declines (and so quits) rather than picking — being chosen for is precisely what this
+    /// feature avoids. Once a mode exists, Escape must not be repurposed silently.
+    #[test]
+    fn escape_declines_the_question_but_is_inert_afterwards() {
+        let mut app = App::default();
+        app.cfg.mode = Some(Mode::Assistant);
+        let _ = app.update(Message::EscapePressed);
+        assert_eq!(app.cfg.mode, Some(Mode::Assistant), "nothing changed");
+
+        // Unanswered: Escape must NOT write a mode. Declining is not an answer, so the question
+        // returns on the next launch.
+        let mut app = App::default();
+        app.cfg.mode = None;
+        let _ = app.update(Message::EscapePressed);
+        assert_eq!(app.cfg.mode, None, "declining never picks a mode");
+    }
+
+    /// A scratch workspace with one file in it, and an `App` pointed at it.
+    fn app_with_file(name: &str, body: &str) -> (App, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-win-edit-{name}-{:?}",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join(name), body).unwrap();
+        let mut app = App::default();
+        app.picked_workspace = Some(dir.clone());
+        (app, dir)
+    }
+
+    /// Opening a file from the tree gives an editable buffer; opening the same file again
+    /// re-selects the tab rather than rebuilding it.
+    ///
+    /// The re-select path is what protects unsaved edits: rebuilding would silently discard the
+    /// buffer, which is how a click on an already-open tab could eat your typing.
+    #[test]
+    fn reopening_a_tab_reuses_its_buffer_instead_of_rebuilding() {
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
+
+        app.select_file("a.rs".to_string());
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.tabs[0].editable(), "a normal source file is editable");
+        assert_eq!(app.tabs[0].view, TabView::Edit, "tree opens for editing");
+
+        // Mark it dirty, then "re-open" it the way a tab click does.
+        app.tabs[0].dirty = true;
+        app.select_file("a.rs".to_string());
+
+        assert_eq!(app.tabs.len(), 1, "no duplicate tab");
+        assert!(app.tabs[0].dirty, "the buffer survived the re-select");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The git panel opens files for REVIEW, not editing.
+    #[test]
+    fn the_git_panel_opens_files_in_the_review_view() {
+        let (mut app, dir) = app_with_file("b.rs", "fn main() {}\n");
+        app.select_file_for_review("b.rs".to_string());
+        assert_eq!(app.tabs[0].view, TabView::Review);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Closing a tab with unsaved edits prompts instead of closing.
+    ///
+    /// The whole point: a stray click on ✕ must not be able to discard work.
+    #[test]
+    fn closing_a_dirty_tab_asks_first() {
+        let (mut app, dir) = app_with_file("c.rs", "fn main() {}\n");
+        app.select_file("c.rs".to_string());
+        app.tabs[0].dirty = true;
+
+        app.close_tab("c.rs");
+        assert_eq!(app.tabs.len(), 1, "still open");
+        assert_eq!(app.confirm_close.as_deref(), Some("c.rs"), "prompting");
+
+        // Discarding is the explicit answer, and only then does it close.
+        let _ = app.update(Message::DiscardAndClose("c.rs".to_string()));
+        assert!(app.tabs.is_empty(), "closed on an explicit discard");
+        assert!(app.confirm_close.is_none(), "prompt dismissed");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A clean tab closes immediately — the prompt is only for unsaved work.
+    #[test]
+    fn closing_a_clean_tab_does_not_ask() {
+        let (mut app, dir) = app_with_file("d.rs", "fn main() {}\n");
+        app.select_file("d.rs".to_string());
+        app.close_tab("d.rs");
+        assert!(app.tabs.is_empty());
+        assert!(app.confirm_close.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Saving writes the buffer and clears the dirty flag.
+    #[test]
+    fn saving_writes_the_buffer_to_disk() {
+        let (mut app, dir) = app_with_file("e.rs", "original\n");
+        app.select_file("e.rs".to_string());
+
+        // Stand in for typing. The widget only mutates through input events (there is no
+        // setter), so a test substitutes a buffer with the post-edit contents — what's under
+        // test here is the SAVE path, not the widget's own key handling.
+        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
+            "edited\n", "rs",
+        )));
+        app.tabs[0].dirty = true;
+
+        app.save_active_tab(false);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("e.rs")).unwrap(),
+            "edited\n"
+        );
+        assert!(!app.tabs[0].dirty, "clean after a successful save");
+        assert!(app.save_conflict.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A save keeps the file's trailing newline.
+    ///
+    /// The editor widget's `content()` rejoins its lines and DROPS a trailing newline. Almost
+    /// every source file has one, so without the fix in `save_tab` every single save would
+    /// rewrite the last line of every file touched — a spurious diff on work you didn't do.
+    /// Found by the save test failing on `"edited"` vs `"edited\n"`.
+    #[test]
+    fn saving_preserves_the_trailing_newline() {
+        let (mut app, dir) = app_with_file("nl.rs", "fn main() {}\n");
+        app.select_file("nl.rs".to_string());
+        assert!(app.tabs[0].trailing_newline, "recorded at open");
+        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
+            "fn main() { /* edited */ }\n",
+            "rs",
+        )));
+        app.tabs[0].dirty = true;
+
+        app.save_active_tab(false);
+
+        let on_disk = std::fs::read_to_string(dir.join("nl.rs")).unwrap();
+        assert!(on_disk.ends_with('\n'), "newline restored: {on_disk:?}");
+
+        // And a file WITHOUT one does not gain one.
+        std::fs::write(dir.join("no-nl.rs"), "no newline").unwrap();
+        app.select_file("no-nl.rs".to_string());
+        let i = app.tabs.iter().position(|t| t.path == "no-nl.rs").unwrap();
+        assert!(!app.tabs[i].trailing_newline);
+        app.tabs[i].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
+            "still no newline",
+            "rs",
+        )));
+        app.tabs[i].dirty = true;
+        app.save_active_tab(false);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("no-nl.rs")).unwrap(),
+            "still no newline",
+            "a file without a trailing newline must not gain one"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A save is REFUSED when the file changed on disk under a dirty buffer.
+    ///
+    /// This is the agent-vs-editor race. Neither version may be discarded silently, so the save
+    /// stops and asks — and critically, the file on disk is left exactly as the other writer
+    /// left it.
+    #[test]
+    fn saving_over_a_file_changed_underneath_is_refused() {
+        let (mut app, dir) = app_with_file("f.rs", "original\n");
+        app.select_file("f.rs".to_string());
+        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new("mine\n", "rs")));
+        app.tabs[0].dirty = true;
+
+        // Something else (the agent) writes the file, and the stamp moves.
+        std::fs::write(dir.join("f.rs"), "theirs, much longer than the original\n").unwrap();
+        app.tabs[0].opened = sc_win::editbuf::DiskStamp {
+            mtime: Some(std::time::UNIX_EPOCH),
+            len: 9,
+        };
+
+        app.save_active_tab(false);
+
+        assert_eq!(
+            app.save_conflict.as_deref(),
+            Some("f.rs"),
+            "refused, and says so"
+        );
+        assert!(app.tabs[0].dirty, "the buffer is untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "theirs, much longer than the original\n",
+            "and THEIR bytes are still on disk"
+        );
+
+        // Overwriting is available, but only as an explicit answer.
+        app.save_active_tab(true);
+        assert_eq!(std::fs::read_to_string(dir.join("f.rs")).unwrap(), "mine\n");
+        assert!(app.save_conflict.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent reload must not overwrite a buffer with unsaved edits.
+    ///
+    /// `live_reload_task` fires every 750ms during a run, so without this guard a run would
+    /// erase whatever you were typing in the file it happened to touch.
+    #[test]
+    fn an_agent_reload_leaves_a_dirty_buffer_alone() {
+        let (mut app, dir) = app_with_file("g.rs", "original\n");
+        app.select_file("g.rs".to_string());
+        app.tabs[0].buf = Buffer::Live(Box::new(iced_code_editor::CodeEditor::new(
+            "my unsaved work\n",
+            "rs",
+        )));
+        app.tabs[0].dirty = true;
+
+        // The agent writes the file, and the app reloads the shown file.
+        std::fs::write(dir.join("g.rs"), "agent wrote this\n").unwrap();
+        app.reload_selected();
+
+        // `text()` is the widget's `content()`, which rejoins lines without a trailing newline —
+        // hence no `\n` here. The save path restores it (see `saving_preserves_the_trailing_newline`).
+        assert_eq!(
+            app.tabs[0].text().as_deref(),
+            Some("my unsaved work"),
+            "the dirty buffer survived the reload"
+        );
+        assert!(app.tabs[0].dirty);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Toggling back restores Assistant, and is exactly one message either way.
+    ///
+    /// Spec 21 requires the return trip to be as easy as the outbound one — no confirmation, no
+    /// extra step. If this ever needs two messages, that requirement has been broken.
+    #[test]
+    fn craft_mode_toggles_back_off() {
+        let mut app = app_in(Mode::Craft);
+        let _ = app.update(Message::ToggleCraftMode(false));
+        assert!(!app.cfg.craft());
+        assert_eq!(app.cfg.mode, Some(Mode::Assistant), "chosen, not unchosen");
+    }
 
     /// The dialog opens with no model selected.
     ///

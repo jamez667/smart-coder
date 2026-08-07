@@ -5,7 +5,7 @@ use super::file::{
     config_file, is_gemini_url, parse_config, serialize_config, ConfigFields,
     GEMINI_OPENAI_BASE_URL,
 };
-use super::types::{Provider, UiConfig};
+use super::types::{Mode, Provider, UiConfig};
 
 impl UiConfig {
     /// The default config, then the machine-local endpoint/model layered on top.
@@ -34,6 +34,14 @@ impl UiConfig {
                 *dst = Some(v);
             }
         };
+
+        // How the app works (spec 21). `SC_MODE=craft` lets an org pin Craft mode without
+        // hand-editing config.json. An unparseable value stays `None` — "never chosen" — so a
+        // corrupt file asks again at startup rather than silently picking a mode.
+        cfg.mode = env("SC_MODE")
+            .or(file.mode)
+            .as_deref()
+            .and_then(Mode::from_slug);
 
         set(&mut cfg.base_url, env("SC_BASE_URL").or(file.base_url));
         set(&mut cfg.model, env("SC_MODEL").or(file.model));
@@ -166,6 +174,10 @@ impl UiConfig {
     /// posture flags) live elsewhere. env vars still override on the next `load()`.
     pub fn save_config(&self) {
         let fields = ConfigFields {
+            // How the app works (spec 21). This MUST be persisted: an unsaved mode would reset
+            // on restart, which the user would rightly read as the app ignoring their answer.
+            // `None` (never chosen) writes nothing, so the first-run prompt still fires.
+            mode: self.mode.map(|m| m.slug().to_string()),
             // The connection + routing shape (the authoring surface).
             local_url: Some(self.local_conn.base_url.clone()),
             local_key: self.local_conn.key.clone(),

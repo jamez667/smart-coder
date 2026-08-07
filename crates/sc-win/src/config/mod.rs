@@ -23,5 +23,5 @@ mod workspace;
 mod tests;
 
 pub use file::{log_dir, ConfigFields, GEMINI_OPENAI_BASE_URL};
-pub use types::{Connection, Provider, ToolCalling, UiConfig};
+pub use types::{Connection, Mode, Provider, ToolCalling, UiConfig};
 pub use workspace::{default_workspace, detect_verify_command, repo_overview, source_files};
