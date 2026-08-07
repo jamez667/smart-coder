@@ -46,9 +46,12 @@ major design decision in `smart-coder` is a direct response to one of these:
 - **No large/frontier-model support path.** The constraints are the product. We
   will not add "just use GPT-4 for the hard parts." (A backend *could* point at
   a big model, but the harness is tuned for and tested against small ones.)
-- **No editor/IDE extension.** No IDE plugin for v1; the shipped surfaces are the
-  CLI ([06](06-cli-ux.md)), the `sc-win` GUI ([12](12-platform-clients.md)) and the
-  local web surface ([18](18-task-intake.md)).
+- **No plugin for third-party IDEs.** No VS Code / JetBrains extension for v1;
+  the shipped surfaces are the CLI ([06](06-cli-ux.md)), the `sc-win` GUI
+  ([12](12-platform-clients.md)) and the local web surface
+  ([18](18-task-intake.md)). This bounds where we ship, not what `sc-win` may
+  become: it has its own editor ([21](21-craft-mode.md)), because a client that
+  can run without a model has to be usable without one.
 - **No unattended *approval*.** v1 is human-in-the-loop at the gates
   ([09](09-workflow-and-checkpoints.md)): the harness enforces them, and no model
   may pass one. Unattended *execution between* gates is permitted and bounded —
@@ -65,6 +68,11 @@ major design decision in `smart-coder` is a direct response to one of these:
 - Developers who want a private, local coding assistant with no API dependency.
 - People on constrained or offline hardware (laptops, homelabs, phones).
 - Researchers probing how far small models can be pushed on agentic tasks.
+- **Developers who want no assistant at all.** `sc-win` ships a mode that
+  contacts no model — editor, files, git, terminal, compile-and-check, nothing
+  else ([21](21-craft-mode.md)). Serving them is not a hedge against the thesis
+  above: a harness whose model can be removed entirely is one whose seams are
+  real, and the same editor and panels serve both audiences.
 
 ## Guiding principles
 
