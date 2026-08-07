@@ -173,8 +173,11 @@ pub(crate) struct App {
     /// `dragging_split: bool` / `explorer_drag` fields, which only worked because there were
     /// exactly two draggable dividers.
     pub(crate) drag_split: Option<Drag>,
-    /// The panel being dragged by its header, if any (spec 21).
-    pub(crate) drag_panel: Option<sc_win::layout::PanelKind>,
+    /// What is being dragged — a panel by its header, or a tab out of its strip (spec 21).
+    ///
+    /// One field for both, so the shared drop machinery can't be handed a state where two things
+    /// are in flight at once. See [`DragSubject`].
+    pub(crate) drag: Option<DragSubject>,
     /// The window-edge dock band under the cursor, if any.
     ///
     /// Takes priority over [`Self::drop_target`]: the frame sits above the panels, so pointing at
@@ -513,7 +516,7 @@ impl Default for App {
             layout,
             layouts,
             drag_split: None,
-            drag_panel: None,
+            drag: None,
             dock_side: None,
             drop_target: None,
             panel_slots: std::collections::BTreeMap::new(),
@@ -647,12 +650,31 @@ pub(crate) enum Message {
     // Explorer / code-viewer interaction.
     /// Select a file in the tree → show it in the code panel (and pin, stop following).
     SelectFile(String),
-    /// Click a CODE-panel tab → make it the active file. Pins (stops following) and just
-    /// re-selects (no jump-to-first-change; that's a git-row nicety, not a plain tab switch).
-    SelectTab(String),
     /// Close a CODE-panel tab (its ✕). Removes it from `open_tabs`; if it was the ACTIVE tab,
     /// a neighbour is activated (see `tab_after_close`), else `selected_file` is unchanged.
     CloseTab(String),
+    /// Mouse pressed on a tab — a *possible* drag, not yet a real one.
+    ///
+    /// Nothing is selected here. A tab both selects and drags, so committing to either on press
+    /// would break the other: selection happens on release-without-movement ([`Self::TabRelease`])
+    /// and the drag arms only once the cursor passes `DragSubject::THRESHOLD`, measured in the
+    /// existing global [`Self::CursorMoved`] handler.
+    ///
+    /// Carries no position: the origin is read from the app's tracked `cursor_pos`, which is
+    /// WINDOW space. A position from the tab's own `mouse_area` would be content-space — the tab
+    /// strip is inside a `scrollable`, and iced translates the cursor by the scroll offset before
+    /// handing it down, so the two would be measured in different frames of reference.
+    TabPress(sc_win::layout::EditorId, String),
+    /// Mouse released on the tab it was pressed on, having never moved: that's a click, so make
+    /// it the active file. Pins (stops following) and just re-selects — no jump-to-first-change,
+    /// which is a git-row nicety rather than part of a plain tab switch.
+    ///
+    /// Replaces the old `SelectTab`: selection had to move from press to release so that the same
+    /// gesture could also start a drag. A release that DID move is a drop and ends at
+    /// [`Self::PanelDrop`] or [`Self::TabDropOnPane`] instead.
+    TabRelease(String),
+    /// Drop the dragged tab onto `pane`'s strip — a move between panes, with no layout change.
+    TabDropOnPane(sc_win::layout::EditorId),
     /// Toggle a directory's collapsed state in the explorer.
     ToggleDir(String),
     /// The explorer's quick-filter text changed → narrow the tree to matching files/folders.

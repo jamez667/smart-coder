@@ -381,26 +381,12 @@ pub(crate) fn stage_toggle_button(_t: &Theme, status: button::Status) -> button:
     }
 }
 
-/// A file tab's label and its ✕ — transparent, so the tab's own container supplies the fill.
-///
-/// The two are separate buttons (buttons can't nest), so the active tab's background belongs on
-/// a container wrapping both. Styling the buttons individually left the ✕ on a different colour,
-/// which read as a notch bitten out of the tab.
-pub(crate) fn tab_label_button(_t: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        // A faint wash on hover, so an inactive tab still responds to the pointer.
-        background: matches!(status, button::Status::Hovered).then_some(Background::Color(Color {
-            a: 0.35,
-            ..INPUT_BG
-        })),
-        text_color: FG,
-        border: Border {
-            radius: RADIUS.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
+// NOTE: tabs used to have a `tab_label_button` style giving inactive ones a wash on hover. It
+// went when tabs stopped being buttons — a `button` captures its own press, and `mouse_area`
+// skips its handler when the child captured, so a button anywhere inside a tab would swallow the
+// drag before it began. A `container` style fn takes only `&Theme`, with no hover status, so
+// restoring the wash would mean tracking the hovered tab in `App` purely for a cosmetic effect.
+// The pointer already changes to a grab cursor over a tab, which is the affordance that matters.
 
 pub(crate) fn menu_item_style(_t: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);

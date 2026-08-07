@@ -234,7 +234,7 @@ mod view_code;
 mod view_comply;
 mod view_core;
 mod view_layout;
-pub(crate) use view_layout::Drag;
+pub(crate) use view_layout::{Drag, DragSubject};
 mod view_menus;
 mod view_panels;
 
@@ -621,6 +621,223 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A press that never moves is a CLICK: it selects, and creates no drag.
+    ///
+    /// Selection had to move from press to release so the same gesture could also start a drag.
+    /// Without the threshold every click would be a one-pixel drag and the strip would flicker.
+    #[test]
+    fn a_tab_press_without_movement_selects_and_never_drags() {
+        use sc_win::layout::EditorId;
+        let dir = redirect_layout_state("tab-click");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        std::fs::write(ws.join("b.rs"), "fn b() {}\n").unwrap();
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("a.rs".to_string());
+        app.select_file("b.rs".to_string()); // b active
+
+        // Press a.rs's tab — nothing selected yet, and the drag is not armed.
+        let _ = app.update(Message::TabPress(EditorId::FIRST, "a.rs".to_string()));
+        assert_eq!(
+            app.panes.focused().selected_file.as_deref(),
+            Some("b.rs"),
+            "press alone does not select — that would flicker at the start of every drag"
+        );
+        assert!(!app.dragging(), "and it is not yet a drag");
+
+        // Release without having moved.
+        let _ = app.update(Message::TabRelease("a.rs".to_string()));
+        assert_eq!(
+            app.panes.focused().selected_file.as_deref(),
+            Some("a.rs"),
+            "release-without-movement is a click, so it selects"
+        );
+        assert!(app.drag.is_none(), "and leaves nothing in flight");
+        assert_eq!(app.panes.len(), 1, "no pane was created");
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A press that moves past the threshold arms the drag — and only then.
+    #[test]
+    fn a_tab_drag_arms_only_after_the_threshold() {
+        use sc_win::layout::EditorId;
+        let dir = redirect_layout_state("tab-threshold");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        app.select_file("a.rs".to_string());
+
+        app.cursor_pos = iced::Point::new(100.0, 100.0);
+        let _ = app.update(Message::TabPress(EditorId::FIRST, "a.rs".to_string()));
+
+        // A jitter of a pixel or two is a click, not a drag.
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(101.0, 101.0)));
+        assert!(!app.dragging(), "1.4px of jitter is still a click");
+
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(120.0, 100.0)));
+        assert!(app.dragging(), "20px is unmistakably a drag");
+
+        // Latched: wandering back over the origin does not un-arm it.
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(100.0, 100.0)));
+        assert!(
+            app.dragging(),
+            "a drag that passes back over its origin stays a drag"
+        );
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **The feature.** Dragging a tab to a pane edge opens a NEW pane holding that tab.
+    #[test]
+    fn dragging_a_tab_to_an_edge_opens_a_new_pane_for_it() {
+        use sc_win::layout::{EditorId, PanelKind, Side};
+        let dir = redirect_layout_state("tab-drag-out");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        std::fs::write(ws.join("b.rs"), "fn b() {}\n").unwrap();
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("a.rs".to_string());
+        app.select_file("b.rs".to_string());
+        assert_eq!(app.panes.len(), 1);
+
+        app.cursor_pos = iced::Point::new(100.0, 100.0);
+        let _ = app.update(Message::TabPress(EditorId::FIRST, "b.rs".to_string()));
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(400.0, 100.0)));
+        // Aim at the right edge of the editor pane.
+        let _ = app.update(Message::PanelHover(
+            PanelKind::Editor(EditorId::FIRST),
+            95.0,
+            50.0,
+            100.0,
+            100.0,
+            2000.0,
+            1000.0,
+        ));
+        assert_eq!(
+            app.drop_target.map(|(_, s, _)| s),
+            Some(Side::Right),
+            "a tab drag lights up pane edges, same as a panel drag"
+        );
+        let _ = app.update(Message::PanelDrop);
+
+        assert_eq!(app.panes.len(), 2, "a new pane opened for the dragged tab");
+        assert_eq!(
+            app.layout.editor_ids().len(),
+            2,
+            "and the layout renders it"
+        );
+        let holders: Vec<_> = app
+            .panes
+            .iter()
+            .filter(|(_, p)| p.holds("b.rs"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(holders.len(), 1, "one path, one buffer — never copied");
+        assert_ne!(holders[0], EditorId::FIRST, "it moved to the new pane");
+        assert!(
+            app.panes
+                .get(EditorId::FIRST)
+                .is_some_and(|p| p.holds("a.rs")),
+            "and the tab left behind stayed"
+        );
+        assert!(app.drag.is_none(), "the drag ended");
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **The round trip.** Dragging that tab back onto the other pane's strip closes the pane it
+    /// left behind — which is the gesture as the user described it.
+    #[test]
+    fn dragging_the_last_tab_back_closes_the_pane_it_emptied() {
+        use sc_win::layout::EditorId;
+        let dir = redirect_layout_state("tab-drag-back");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        std::fs::write(ws.join("b.rs"), "fn b() {}\n").unwrap();
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("a.rs".to_string());
+        app.select_file("b.rs".to_string());
+
+        // Split b.rs out into its own pane.
+        let _ = app.update(Message::SplitEditor);
+        let second = app.panes.focused_id();
+        assert_ne!(second, EditorId::FIRST);
+        assert_eq!(app.panes.len(), 2);
+
+        // Now drag it back onto pane 0's strip.
+        app.cursor_pos = iced::Point::new(400.0, 100.0);
+        let _ = app.update(Message::TabPress(second, "b.rs".to_string()));
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(100.0, 100.0)));
+        assert!(app.dragging());
+        let _ = app.update(Message::TabDropOnPane(EditorId::FIRST));
+
+        assert_eq!(
+            app.panes.len(),
+            1,
+            "the pane it emptied closed itself — drag out to open, drag back to close"
+        );
+        assert_eq!(app.layout.editor_ids(), vec![EditorId::FIRST]);
+        assert!(app.panes.focused().holds("a.rs") && app.panes.focused().holds("b.rs"));
+        assert!(app.drag.is_none());
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A tab dropped back on the pane it came from changes nothing.
+    ///
+    /// The no-op has to be explicit: the move is a remove-then-add, so treating this as a real
+    /// drop would take the tab out of its only pane and rely on the re-add to save it.
+    #[test]
+    fn dropping_a_tab_back_on_its_own_pane_is_a_no_op() {
+        use sc_win::layout::EditorId;
+        let dir = redirect_layout_state("tab-self-drop");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("a.rs".to_string());
+        let before = app.layout.clone();
+
+        app.cursor_pos = iced::Point::new(100.0, 100.0);
+        let _ = app.update(Message::TabPress(EditorId::FIRST, "a.rs".to_string()));
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(150.0, 100.0)));
+        let _ = app.update(Message::TabDropOnPane(EditorId::FIRST));
+
+        assert_eq!(app.panes.len(), 1, "no pane appeared or vanished");
+        assert_eq!(app.layout, before, "and the layout is untouched");
+        assert!(app.panes.focused().holds("a.rs"), "the tab is still open");
+        assert!(app.drag.is_none());
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Dragging a lone tab to its OWN pane's edge is a no-op, not a split into an empty half.
+    #[test]
+    fn dragging_a_lone_tab_to_its_own_edge_does_nothing() {
+        use sc_win::layout::{EditorId, PanelKind, Side};
+        let dir = redirect_layout_state("tab-lone-edge");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("a.rs".to_string());
+        let before = app.layout.clone();
+
+        app.cursor_pos = iced::Point::new(100.0, 100.0);
+        let _ = app.update(Message::TabPress(EditorId::FIRST, "a.rs".to_string()));
+        let _ = app.update(Message::GitCursorMoved(iced::Point::new(150.0, 100.0)));
+        app.drop_target = Some((PanelKind::Editor(EditorId::FIRST), Side::Right, false));
+        let _ = app.update(Message::PanelDrop);
+
+        assert_eq!(
+            app.panes.len(),
+            1,
+            "nothing to separate, so nothing happened"
+        );
+        assert_eq!(app.layout, before);
+        assert!(app.panes.focused().holds("a.rs"));
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Splitting with nothing open is a no-op.
     ///
     /// The new pane carries the active tab, so with no tab it would be an empty pane beside an
@@ -747,7 +964,7 @@ mod tests {
 
         // Grab Git's header, hover the right edge of the editor, release.
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
-        assert_eq!(app.drag_panel, Some(PanelKind::Git), "picked up");
+        assert_eq!(app.dragged_panel(), Some(PanelKind::Git), "picked up");
         // A small panel in the middle of a large window, so its right edge is INTERIOR — the
         // drop splits the editor rather than spanning the whole layout.
         app.window_w = 2000.0;
@@ -774,7 +991,7 @@ mod tests {
         let _ = app.update(Message::PanelDrop);
 
         assert_ne!(app.layout, before, "the layout changed");
-        assert!(app.drag_panel.is_none(), "the drag ended");
+        assert!(app.drag.is_none(), "the drag ended");
         assert!(app.drop_target.is_none());
         // Membership is unchanged — a move must never lose or duplicate a panel.
         let (mut a, mut b) = (before.panels(), app.layout.panels());
@@ -864,7 +1081,7 @@ mod tests {
             other => panic!("expected a root split, got {other:?}"),
         }
         assert!(app.dock_side.is_none(), "drag state cleared");
-        assert!(app.drag_panel.is_none());
+        assert!(app.drag.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -920,7 +1137,7 @@ mod tests {
         // No hover — the release happens somewhere that isn't a panel.
         let _ = app.update(Message::SplitDragEnd);
 
-        assert!(app.drag_panel.is_none(), "drag cancelled");
+        assert!(app.drag.is_none(), "drag cancelled");
         assert_eq!(app.layout, before, "and nothing moved");
 
         let _ = std::fs::remove_dir_all(dir);

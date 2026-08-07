@@ -26,6 +26,56 @@ use super::{
     v_divider_draggable, App, BottomTab, Message, FG, FG_MUTED, GAP, PAD,
 };
 
+/// What is currently being carried by a header/tab drag.
+///
+/// ONE field on [`App`] rather than two parallel `Option`s, because the drop machinery — the
+/// window dock frame, the per-panel zones, the global release catch, the ghost — is identical for
+/// both and must never see a state where both are set. Only the *resolution* differs: a panel
+/// moves a leaf in the tree, a tab moves a path between panes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DragSubject {
+    /// A whole panel, picked up by its header.
+    Panel(PanelKind),
+    /// A single editor tab, picked up from its strip.
+    ///
+    /// Carries where it came from, so a drop back onto its own pane is a no-op rather than a
+    /// remove-then-add that would lose the buffer.
+    Tab {
+        from: sc_win::layout::EditorId,
+        path: String,
+        /// Whether the cursor has yet moved far enough to count as a drag. Until it has, this is
+        /// still a *click* — which is why selection happens on release, not on press. A tab has
+        /// two jobs (select, close) where a panel header has one, so without a threshold every
+        /// click would be a one-pixel drag and the strip would flicker.
+        armed: bool,
+        /// Cursor position at the press, to measure the threshold against.
+        origin: iced::Point,
+    },
+}
+
+impl DragSubject {
+    /// How far the cursor must travel before a tab press becomes a drag.
+    pub(crate) const THRESHOLD: f32 = 4.0;
+
+    /// The panel being dragged, if this is a panel drag. Lets the shared drop machinery keep
+    /// asking the question it always asked.
+    pub(crate) fn panel(&self) -> Option<PanelKind> {
+        match self {
+            DragSubject::Panel(k) => Some(*k),
+            DragSubject::Tab { .. } => None,
+        }
+    }
+
+    /// Whether this drag should currently paint drop targets. A tab that hasn't crossed the
+    /// threshold is still a click, so the whole UI must stay quiet.
+    pub(crate) fn is_active(&self) -> bool {
+        match self {
+            DragSubject::Panel(_) => true,
+            DragSubject::Tab { armed, .. } => *armed,
+        }
+    }
+}
+
 /// A divider drag in progress.
 #[derive(Debug, Clone)]
 pub(crate) struct Drag {
@@ -42,6 +92,20 @@ pub(crate) struct Drag {
 }
 
 impl App {
+    /// The PANEL currently being dragged, if the drag is a panel drag at all.
+    ///
+    /// Most of the drop machinery predates tab drags and only ever asked this question; keeping
+    /// the accessor means those sites read the same as before rather than each growing a match.
+    pub(crate) fn dragged_panel(&self) -> Option<PanelKind> {
+        self.drag.as_ref().and_then(|d| d.panel())
+    }
+
+    /// Whether a drag is in flight AND has committed to being one — a tab press that hasn't
+    /// crossed the threshold is still a click, and must not light up the whole UI.
+    pub(crate) fn dragging(&self) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.is_active())
+    }
+
     /// Render the whole panel tree, with the window-edge drop frame over it while dragging.
     ///
     /// The tree's on-screen rect is reported by `responsive` — measured, never assumed to be the
@@ -50,9 +114,9 @@ impl App {
     pub(crate) fn view_layout(&self) -> Element<'_, Message> {
         responsive(move |size| {
             let tree = self.view_node(&self.layout, size);
-            let Some(kind) = self.drag_panel else {
+            if !self.dragging() {
                 return tree;
-            };
+            }
             // Mid-drag the tree is INSET by the band width, so the dock frame occupies real
             // space instead of floating over the panels. Seeing the layout physically make room
             // is what makes the drop obvious — the bands are a place, not an overlay.
@@ -61,7 +125,7 @@ impl App {
                 inset,
                 self.view_window_dock_frame(),
                 // The ghost rides on top of everything so it's never clipped by a panel.
-                self.view_drag_ghost(kind),
+                self.view_drag_ghost(),
             ]
             .into()
         })
@@ -78,7 +142,22 @@ impl App {
     /// was tried and looked worse: scaled into a small box it reads as a smeared thumbnail, and
     /// it can't be re-rendered per frame anyway (re-laying-out a code editor at mouse-move rate
     /// would make the drag stutter). The card says what it is; that's the useful part.
-    fn view_drag_ghost(&self, kind: PanelKind) -> Element<'_, Message> {
+    fn view_drag_ghost(&self) -> Element<'_, Message> {
+        // A dragged TAB is one file, so its ghost is a small chip rather than a panel-sized card —
+        // the size says which of the two gestures is in flight before you read either label.
+        let kind = match &self.drag {
+            Some(DragSubject::Panel(k)) => *k,
+            Some(DragSubject::Tab { path, .. }) => {
+                let base = path.rsplit(['/', '\\']).next().unwrap_or(path.as_str());
+                let x = (self.cursor_pos.x + 8.0).max(0.0);
+                let y = (self.cursor_pos.y + 8.0).max(0.0);
+                let chip = container(text(base.to_string()).size(11).color(FG))
+                    .padding([4, 8])
+                    .style(drag_ghost_style);
+                return iced::widget::pin(chip).x(x).y(y).into();
+            }
+            None => return Space::new().into(),
+        };
         const W: f32 = 240.0;
         const H: f32 = 150.0;
         // Anchored near the cursor's top-left, as if carried by its header.
@@ -254,7 +333,7 @@ impl App {
 
     /// One panel: its drag header, its content, and any drop-edge highlight.
     fn view_leaf(&self, kind: PanelKind, tree: iced::Size) -> Element<'_, Message> {
-        let dragging = self.drag_panel == Some(kind);
+        let dragging = self.dragged_panel() == Some(kind);
         // The header is the GRAB HANDLE — a shade lighter than the body so it reads as chrome
         // you can pick up, not content. Pressing it starts the drag; the release that ends it is
         // caught globally, so letting go outside the window can't strand a panel mid-flight.
@@ -316,7 +395,15 @@ impl App {
         // The overlay wraps the BODY, not the whole leaf. Stacking it over `header + body` made
         // the bottom band render below the visible area by the header's height — which is why
         // the bottom zone appeared to be missing entirely.
-        if self.drag_panel.is_some_and(|d| d != kind) {
+        // A dragged TAB can only land in an editor, so only editor panes light up for one —
+        // offering the git panel as a target would promise a drop that has nowhere to go. A
+        // dragged PANEL lights up everything except itself.
+        let is_target = match &self.drag {
+            Some(DragSubject::Panel(d)) => *d != kind,
+            Some(tab @ DragSubject::Tab { .. }) => tab.is_active() && kind.is_editor(),
+            None => false,
+        };
+        if is_target {
             let hovered = self
                 .drop_target
                 .filter(|(t, _, _)| *t == kind)

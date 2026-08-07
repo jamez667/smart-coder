@@ -271,6 +271,27 @@ Promote to a per-tab struct owning:
 Tab strip shows a dirty marker. Closing a dirty tab prompts; closing the window
 with dirty tabs prompts once, listing them.
 
+**A tab is also the handle you drag it by, so neither its label nor its ✕ may be
+a `button`.** A button calls `shell.capture_event()` on press, and `mouse_area`
+skips its own handler once a child has captured — so a button anywhere inside a
+tab swallows the drag before it begins. The label is a plain container; the ✕ is
+an inner `mouse_area`, which fires without capturing and so lets the outer one
+see the press too.
+
+Selection therefore happens on **a release that never moved**, not on press.
+Selecting on press would switch you to the tab you were about to drag away, which
+reads as a flicker at the start of every drag. Movement is measured against a 4px
+threshold: a tab has two jobs where a panel header has one, and without a
+threshold every click is a one-pixel drag.
+
+The threshold is measured against the app's window-space cursor position, **never
+against a position reported by the tab's own `mouse_area`**. A `mouse_area` inside
+a `scrollable` receives *content-space* coordinates — iced translates the cursor
+by the scroll offset before handing it down — so the two are different frames of
+reference. For the same reason, dropping a tab on another pane's strip **appends**
+it; choosing a position within the strip is deferred, since resolving an index
+needs that same untracked offset.
+
 ### Data-loss hazards that must be fixed first
 
 `CodeView` was written for a viewer, and three of its properties become
@@ -377,8 +398,15 @@ A recursive layout tree, persisted:
 Layout := Leaf(PanelKind)
         | Split { id: String, axis: Horizontal | Vertical, a: Layout, b: Layout }
 
-PanelKind := Files | Git | Editor | Bottom | Chat
+PanelKind := Files | Git | Editor(EditorId) | Bottom | Chat
 ```
+
+`Editor` is the one kind that may appear **more than once** in a tree, and its
+`EditorId` keys the pane holding that strip's tabs. Every other panel renders one
+piece of app state, so a second copy would be the same view twice. `EditorId::FIRST`
+serialises as the bare `editor` the app already persisted, so existing layouts —
+and the split ids in `splits.json` that are built from slugs — load unchanged.
+See "Several editor panes" below.
 
 Two details settled during implementation, both load-bearing:
 
@@ -398,7 +426,11 @@ Requirements this imposes:
 - **Uniform panel signature.** `fn view_panel(&self, kind: PanelKind) -> Element`.
   Sizing is applied by the tree walker, never by the panel itself.
 - **Per-node drag state.** Replace the two bespoke fields and two bespoke
-  messages with `dragging: Option<(NodeId, Axis, f32)>`.
+  messages with `dragging: Option<(NodeId, Axis, f32)>` for divider drags.
+  Picking a panel *up* is a second, separate state — `drag: Option<DragSubject>`,
+  one field covering both a panel carried by its header and a tab carried out of
+  its strip, so the shared drop machinery can never be handed two things in
+  flight at once.
 - **Real bounds, not guessed ones.** The hardcoded `0.20 * window_w` and the
   chrome-constant arithmetic must go; each split node needs its actual rect.
   This is the one genuinely fiddly part, since iced does not hand bounds back
@@ -406,6 +438,62 @@ Requirements this imposes:
 - **`splits.rs` needs essentially no change.** It is already an arbitrary
   `id → fraction` map with NaN/out-of-range rejection, which is exactly a tree's
   persistence layer. Keyed by node id, it just works.
+
+### Several editor panes
+
+One editor was a limit of the model, not a decision. The gesture users expect is
+VS Code's: **drag a tab out to open a second editor, drag it back to close that
+one.** That requires editor panes to have identity, which the rest of the tree
+does not need.
+
+**Panes are keyed by `EditorId`, and ids are never reused.** A monotonic
+allocator means a stale id — one left in a queued `Task`, or in a `PanelSlot`
+persisted before a pane closed — resolves to nothing, rather than silently
+addressing a *different* pane that inherited the number. `EditorPane` owns what
+is genuinely per-pane: its tabs, selected file, scroll position, viewport, diff
+and comment state. `App` keeps what is per-*file* — the save-conflict slot, the
+git status map — because those are path-keyed, which the next rule is what makes
+sound.
+
+**A file may be open in exactly one pane.** Asking for one already open elsewhere
+focuses that pane. This is a data-loss rule, not a preference: a `Tab` owns its
+live buffer, so two tabs on one path means two buffers, two disk stamps, and one
+path-keyed conflict slot between them. Edit and save in A, then edit and save in
+B, and B reports a conflict caused by you ten seconds earlier — and its Overwrite
+destroys A's work. The proper fix is one document with N views, but the editor
+widget owns its own cursor, scroll and undo stack; that is a larger project and
+must not be smuggled inside this one. Because a tab drag is a **move**, the
+natural gesture for "put this over there" still does the right thing.
+
+**A tab drag resolves to a pane, never to a tree edit of its own.**
+
+| Released on | Result |
+|---|---|
+| Another pane's tab strip | A pure move. No layout change. |
+| A pane edge, or a window dock band | A **new pane** opens there (`Layout::with_at_edge` for a full-span edge, `insert_at` beside a panel) and the tab moves into it. |
+| Its own pane, or nothing | Nothing. |
+
+**A `Tab` is relocated whole, never reopened.** It carries its live buffer, dirty
+flag and disk stamp, so re-opening it at the destination would discard unsaved
+edits and re-read from disk — silent data loss dressed up as a layout gesture.
+
+**Emptied panes close; the last pane never does.** A pane that empties without
+closing is a dead rectangle you cannot get rid of: there is no tab in it to drag,
+and its only remaining affordance is the View menu. Pruning lives in one function
+called after anything that removes a tab, because a *drag* empties a pane without
+any close path running. The last pane survives however empty — the same rule as
+"never hide the last editor", since an IDE with nowhere to open a file is a broken
+window rather than a layout choice. Focus is retargeted **only** when the pane it
+pointed at is actually gone.
+
+Because these invariants are the kind a "remember to call X afterwards"
+convention lets rot, a debug-only assertion checks them at the end of every
+update: every editor leaf has a pane, focus points at a live pane, no pane is
+empty unless it is the only one, and no path is open twice.
+
+**Splitting a single-tab pane makes an empty second pane** rather than moving the
+tab. Moving a pane's only tab would empty it, and pruning would then close it —
+collapsing straight back to one pane.
 
 ### How mode uses it
 

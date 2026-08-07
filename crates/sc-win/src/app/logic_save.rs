@@ -7,8 +7,9 @@
 //! The one invariant: **a save never silently discards someone else's bytes.** Spec 21.
 
 use sc_win::editbuf::{self, SaveVerdict};
+use sc_win::layout::{EditorId, PanelKind, Side};
 
-use super::{App, TabView};
+use super::{App, DragSubject, TabView};
 
 impl App {
     /// Save the active tab, if it has unsaved edits.
@@ -176,24 +177,7 @@ impl App {
         self.layouts.save();
 
         if move_tab {
-            // Move the tab whole — buffer, dirty flag and disk stamp. A fresh `Tab::open` would
-            // discard unsaved edits and re-read from disk.
-            if let Some(i) = self
-                .panes
-                .focused()
-                .tabs
-                .iter()
-                .position(|t| t.path == path)
-            {
-                let tab = self.panes.focused_mut().tabs.remove(i);
-                // The source pane loses its active file; hand it a neighbour.
-                let next_active = self.panes.focused().tabs.first().map(|t| t.path.clone());
-                self.panes.focused_mut().selected_file = next_active;
-                if let Some(p) = self.panes.get_mut(new_id) {
-                    p.selected_file = Some(tab.path.clone());
-                    p.tabs.push(tab);
-                }
-            }
+            self.move_tab_between_panes(&path, from, new_id);
         }
 
         // Focus the new pane either way — you split in order to work over there.
@@ -205,6 +189,132 @@ impl App {
             // must survive, so pruning is scoped to the pane that just lost something.
             self.prune_empty_panes();
         }
+    }
+
+    /// Move one open tab from `from` to `into`, whole.
+    ///
+    /// The `Tab` is **relocated, never reopened**: it owns its live buffer, dirty flag and disk
+    /// stamp, so a fresh `Tab::open` at the destination would discard unsaved edits and re-read
+    /// from disk — silent data loss dressed up as a layout gesture.
+    ///
+    /// Leaves the source pane's `selected_file` on a surviving neighbour, and makes the moved tab
+    /// active in its new home (you dragged it there to look at it). Does **not** prune: callers
+    /// differ on whether an emptied source should close, and a freshly-made destination pane must
+    /// survive being empty for the instant before the tab lands.
+    pub(crate) fn move_tab_between_panes(&mut self, path: &str, from: EditorId, into: EditorId) {
+        if from == into {
+            return;
+        }
+        let Some(i) = self
+            .panes
+            .get(from)
+            .and_then(|p| p.tabs.iter().position(|t| t.path == path))
+        else {
+            return;
+        };
+        let Some(src) = self.panes.get_mut(from) else {
+            return;
+        };
+        let tab = src.tabs.remove(i);
+        // The source pane loses its active file; hand it a neighbour.
+        let next_active = src.tabs.first().map(|t| t.path.clone());
+        src.selected_file = next_active;
+        if let Some(dst) = self.panes.get_mut(into) {
+            dst.selected_file = Some(tab.path.clone());
+            dst.tabs.push(tab);
+        } else {
+            // No such destination — put it back rather than dropping a live buffer on the floor.
+            if let Some(src) = self.panes.get_mut(from) {
+                src.selected_file = Some(tab.path.clone());
+                src.tabs.insert(i, tab);
+            }
+        }
+    }
+
+    /// Drop the dragged tab onto an existing pane's tab strip: a pure move, no layout change.
+    ///
+    /// Appends to the end of the strip. Indexed insertion needs the strip's scroll offset — a
+    /// `mouse_area` inside a `scrollable` is handed CONTENT-space coordinates (iced translates the
+    /// cursor before passing it down), and that offset isn't tracked. Append is the useful 90%.
+    pub(crate) fn drop_tab_on_pane(&mut self, into: EditorId) {
+        let Some(DragSubject::Tab {
+            from,
+            path,
+            armed: true,
+            ..
+        }) = self.drag.clone()
+        else {
+            return;
+        };
+        self.drag = None;
+        self.dock_side = None;
+        self.drop_target = None;
+        if from == into {
+            return; // dropped back where it came from
+        }
+        self.move_tab_between_panes(&path, from, into);
+        self.panes.focus(into);
+        self.select_file(path);
+        self.prune_empty_panes();
+    }
+
+    /// Drop the dragged tab on an EDGE — of one panel, or of the whole window.
+    ///
+    /// This is the gesture the user asked for: drag a tab out and a new editor appears. It opens a
+    /// **new pane** at that edge and moves the tab into it.
+    ///
+    /// The one case that isn't a new pane: dragging a pane's only tab to an edge of *that same
+    /// pane*. There is nothing to separate, so it's a no-op rather than a split into an empty
+    /// half that immediately prunes itself.
+    pub(crate) fn drop_tab_at(&mut self, target: Option<PanelKind>, side: Side) {
+        let Some(DragSubject::Tab {
+            from,
+            path,
+            armed: true,
+            ..
+        }) = self.drag.clone()
+        else {
+            return;
+        };
+        self.drag = None;
+        self.dock_side = None;
+        self.drop_target = None;
+
+        // Dropping onto an edge of the source pane when it holds nothing else: the tab is already
+        // the whole pane, so there is no split to make.
+        let alone = self.panes.get(from).is_some_and(|p| p.tabs.len() <= 1);
+        if alone && target == Some(PanelKind::Editor(from)) {
+            return;
+        }
+
+        let new_id = self.panes.insert();
+        let craft = self.cfg.craft();
+        // A window-edge drop spans the whole layout; a panel-edge drop splits that panel.
+        let placed = match target {
+            Some(t) => self.layout.insert_at(
+                PanelKind::Editor(new_id),
+                t,
+                side,
+                &format!("split:{t}|{new_id}", t = t.slug()),
+            ),
+            None => {
+                self.layout
+                    .with_at_edge(PanelKind::Editor(new_id), side, &format!("edge:{new_id}"))
+            }
+        };
+        let Some(next) = placed.and_then(|l| l.sanitize(craft)) else {
+            // Nothing moved yet, so dropping the pane leaves no half-done state.
+            self.panes.remove(new_id);
+            return;
+        };
+        self.layout = next.clone();
+        self.layouts.set(craft, next);
+        self.layouts.save();
+
+        self.move_tab_between_panes(&path, from, new_id);
+        self.panes.focus(new_id);
+        self.select_file(path);
+        self.prune_empty_panes();
     }
 
     /// Make `panes` agree with the layout tree: a pane for every editor leaf.

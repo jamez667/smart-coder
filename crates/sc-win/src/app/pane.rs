@@ -257,6 +257,18 @@ impl Panes {
         self.map.get(&id).unwrap_or_else(|| self.focused())
     }
 
+    /// The id [`Self::or_focused`] would resolve `id` to.
+    ///
+    /// A tab drag has to name the pane it came from, and naming the *requested* id when the
+    /// rendered pane was the fallback would move a tab out of a pane that isn't showing it.
+    pub(crate) fn resolve(&self, id: EditorId) -> EditorId {
+        if self.map.contains_key(&id) {
+            id
+        } else {
+            self.focused
+        }
+    }
+
     /// Whether ANY pane has unsaved edits — the quit prompt and the window-title dot.
     pub(crate) fn any_dirty(&self) -> bool {
         self.map.values().any(|p| p.any_dirty())

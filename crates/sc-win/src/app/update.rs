@@ -253,13 +253,6 @@ impl App {
                 self.follow_agent = false;
                 self.select_file(rel);
             }
-            Message::SelectTab(path) => {
-                // Switching tabs pins the view and re-selects the file. `select_file` is
-                // idempotent for an already-open tab (it reloads + re-selects), and the active
-                // tab === `selected_file`, so the body just follows.
-                self.follow_agent = false;
-                self.select_file(path);
-            }
             Message::CloseTab(path) => self.close_tab(&path),
             Message::ModifiersChanged(m) => {
                 // Cache the held modifiers so the next git-row click can tell single- from
@@ -441,6 +434,15 @@ impl App {
             Message::TermHistoryNext => self.terminal.history_next(),
             Message::GitCursorMoved(p) => {
                 self.cursor_pos = p;
+                // Arm a pending tab drag once the cursor has travelled far enough to mean it.
+                // Latching rather than re-testing each move means a drag that wanders back over
+                // its origin stays a drag. Below the threshold the press is still a click, and
+                // nothing about the UI has changed yet.
+                if let Some(DragSubject::Tab { armed, origin, .. }) = &mut self.drag {
+                    if !*armed && origin.distance(p) >= DragSubject::THRESHOLD {
+                        *armed = true;
+                    }
+                }
                 // Move the held divider by the cursor DELTA from the grab point, scaled by the
                 // split's own extent. Delta-mapping needs only the extent — never the region's
                 // origin — which is what let the guessed `0.20 * window_w` and the
@@ -481,13 +483,13 @@ impl App {
                 // A panel released outside every drop target: cancel rather than strand it. This
                 // fires for ANY release, so a drag can't survive letting go over the menu bar or
                 // off the window.
-                if self.drag_panel.is_some() {
+                if self.drag.is_some() {
                     // A window-edge band counts as a target too, so a release over the frame
                     // completes the dock rather than cancelling it.
                     if self.drop_target.is_some() || self.dock_side.is_some() {
                         return Task::done(Message::PanelDrop);
                     }
-                    self.drag_panel = None;
+                    self.drag = None;
                     self.dock_side = None;
                     self.drop_target = None;
                 }
@@ -528,14 +530,51 @@ impl App {
                 self.open_menu = None;
             }
             Message::PanelGrab(kind) => {
-                self.drag_panel = Some(kind);
+                self.drag = Some(DragSubject::Panel(kind));
                 self.dock_side = None;
                 self.drop_target = None;
+            }
+            Message::TabPress(pane, path) => {
+                // A *possible* drag. Nothing is selected and no drop target is painted until the
+                // cursor actually moves — see `TabRelease` for the click case. The origin is the
+                // live window-space cursor, which `CursorMoved` also arms against.
+                self.drag = Some(DragSubject::Tab {
+                    from: pane,
+                    path,
+                    armed: false,
+                    origin: self.cursor_pos,
+                });
+                self.dock_side = None;
+                self.drop_target = None;
+            }
+            Message::TabRelease(path) => {
+                // Released on the tab it was pressed on. If the drag never armed, the gesture was
+                // a click, so select. If it armed, the drop is resolved by `PanelDrop` and this
+                // must not also select — that would fight the drop.
+                let was_click = matches!(&self.drag, Some(DragSubject::Tab { armed: false, .. }));
+                if was_click {
+                    self.drag = None;
+                    // Switching tabs pins the view and re-selects the file. `select_file` is
+                    // idempotent for an already-open tab (it reloads + re-selects), and the
+                    // active tab === `selected_file`, so the body just follows.
+                    self.follow_agent = false;
+                    self.select_file(path);
+                }
+            }
+            Message::TabDropOnPane(into) => {
+                self.drop_tab_on_pane(into);
             }
             Message::PanelHover(target, x, y, w, h, tw, th) => {
                 // Resolve the cursor to an EDGE of the hovered panel. Zones are fractions of the
                 // panel, so a narrow panel is still droppable on all four sides.
-                if self.drag_panel.is_some_and(|d| d != target) {
+                // A panel can't be dropped on itself; a TAB can be dropped on the edge of any
+                // pane including its own (that's "split this pane and put me in the new half").
+                let live = match &self.drag {
+                    Some(DragSubject::Panel(k)) => *k != target,
+                    Some(tab @ DragSubject::Tab { .. }) => tab.is_active(),
+                    None => false,
+                };
+                if live {
                     let side = sc_win::layout::Side::nearest(x, y, w, h);
                     // Judged against the TREE, never the window: the window has a menu bar above
                     // the tree and sometimes a gate bar below, so neither edge lines up — which
@@ -547,7 +586,7 @@ impl App {
             Message::DockHover(side) => {
                 // Only meaningful mid-drag. Entering a band supersedes any per-panel target, so
                 // the highlight can't show two competing outcomes at once.
-                if self.drag_panel.is_some() {
+                if self.drag.as_ref().is_some_and(|d| d.is_active()) {
                     self.dock_side = side;
                     if side.is_some() {
                         self.drop_target = None;
@@ -555,35 +594,51 @@ impl App {
                 }
             }
             Message::PanelDrop => {
-                if let (Some(kind), Some(side)) = (self.drag_panel, self.dock_side) {
-                    // A WINDOW-edge dock: a full-span column or row across the whole layout,
-                    // whatever happens to sit under the cursor.
-                    if let Some(next) = self
-                        .layout
-                        .move_to_edge(kind, side)
-                        .and_then(|l| l.sanitize(self.cfg.craft()))
-                    {
-                        self.layout = next.clone();
-                        self.layouts.set(self.cfg.craft(), next);
-                        self.layouts.save();
+                match self.drag.clone() {
+                    // A tab resolves to a PANE, never to a tree edit of its own: it either lands
+                    // in an existing pane's strip, or a new pane is opened for it at the edge
+                    // that was targeted. See `drop_tab_at`.
+                    Some(DragSubject::Tab { .. }) => {
+                        let at = self
+                            .dock_side
+                            .map(|side| (None, side))
+                            .or_else(|| self.drop_target.map(|(t, side, _)| (Some(t), side)));
+                        if let Some((target, side)) = at {
+                            self.drop_tab_at(target, side);
+                        }
                     }
-                } else if let (Some(kind), Some((target, side, outer))) =
-                    (self.drag_panel, self.drop_target)
-                {
-                    // An outer-edge drop docks down the side of EVERYTHING (a new full-span
-                    // column/row); an interior one splits just the panel under the cursor.
-                    let moved = if outer {
-                        self.layout.move_to_edge(kind, side)
-                    } else {
-                        self.layout.move_panel(kind, target, side)
-                    };
-                    if let Some(next) = moved.and_then(|l| l.sanitize(self.cfg.craft())) {
-                        self.layout = next.clone();
-                        self.layouts.set(self.cfg.craft(), next);
-                        self.layouts.save();
+                    Some(DragSubject::Panel(kind)) => {
+                        if let Some(side) = self.dock_side {
+                            // A WINDOW-edge dock: a full-span column or row across the whole
+                            // layout, whatever happens to sit under the cursor.
+                            if let Some(next) = self
+                                .layout
+                                .move_to_edge(kind, side)
+                                .and_then(|l| l.sanitize(self.cfg.craft()))
+                            {
+                                self.layout = next.clone();
+                                self.layouts.set(self.cfg.craft(), next);
+                                self.layouts.save();
+                            }
+                        } else if let Some((target, side, outer)) = self.drop_target {
+                            // An outer-edge drop docks down the side of EVERYTHING (a new
+                            // full-span column/row); an interior one splits just the panel under
+                            // the cursor.
+                            let moved = if outer {
+                                self.layout.move_to_edge(kind, side)
+                            } else {
+                                self.layout.move_panel(kind, target, side)
+                            };
+                            if let Some(next) = moved.and_then(|l| l.sanitize(self.cfg.craft())) {
+                                self.layout = next.clone();
+                                self.layouts.set(self.cfg.craft(), next);
+                                self.layouts.save();
+                            }
+                        }
                     }
+                    None => {}
                 }
-                self.drag_panel = None;
+                self.drag = None;
                 self.dock_side = None;
                 self.drop_target = None;
             }

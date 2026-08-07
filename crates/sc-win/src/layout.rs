@@ -582,6 +582,27 @@ impl Layout {
         Some(Layout::split(&id, side.axis(), a, b))
     }
 
+    /// Add a panel **not yet in the tree** as a new full-span column or row at the outer edge.
+    ///
+    /// [`Self::move_to_edge`]'s counterpart for arrival rather than relocation: that one starts by
+    /// pruning the panel from where it was, so it answers `None` for a panel that was never there.
+    /// This is what a tab dragged to a window-edge band needs — the pane it lands in does not
+    /// exist until the drop.
+    ///
+    /// `None` when the panel is already on screen (use `move_to_edge`) or the tree is empty.
+    pub fn with_at_edge(&self, kind: PanelKind, side: Side, id: &str) -> Option<Layout> {
+        if self.contains(kind) || self.panels().is_empty() {
+            return None;
+        }
+        let me = Layout::Leaf(kind);
+        let (a, b) = if side.puts_new_first() {
+            (me, self.clone())
+        } else {
+            (self.clone(), me)
+        };
+        Some(Layout::split(id, side.axis(), a, b))
+    }
+
     /// Move `kind` so it sits on the `side` of `target`.
     ///
     /// Two steps: prune it from where it was (collapsing the split it leaves behind), then split

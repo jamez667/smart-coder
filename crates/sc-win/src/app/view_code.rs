@@ -499,27 +499,32 @@ impl App {
                 } else {
                     base.to_string()
                 };
-                // The label and its ✕ are separate buttons (buttons can't nest), so the FILL goes
-                // on a container wrapping both — styling only the label left the ✕ sitting on a
-                // different colour, which showed as a notch out of the active tab.
+                // NEITHER the label nor the ✕ is a `button`, and that is load-bearing. A `button`
+                // calls `shell.capture_event()` on both press and release, and `mouse_area`
+                // returns early when its child captured — so a button inside the tab's drag area
+                // would swallow the gesture and the tab could never be picked up. Two nested
+                // `mouse_area`s both fire, which is exactly what a tab needs: the outer one starts
+                // a possible drag, the inner ✕ closes.
                 let label =
-                    button(
+                    container(
                         text(shown)
                             .size(12)
                             .color(if active { ACCENT } else { FG_MUTED }),
                     )
-                    .on_press(Message::SelectTab(path.clone()))
-                    .padding([6, 8])
-                    .style(tab_label_button);
-                let close =
-                    button(
+                    .padding([6, 8]);
+                // The ✕ is safe without its own threshold: a press-and-release that never moves
+                // is a click by definition, and one that DOES move became a drag, whose drop is
+                // resolved elsewhere and never reaches here.
+                let close = iced::widget::mouse_area(
+                    container(
                         text("✕")
                             .size(11)
                             .color(if active { ACCENT } else { FG_MUTED }),
                     )
-                    .on_press(Message::CloseTab(path.clone()))
-                    .padding([6, 6])
-                    .style(tab_label_button);
+                    .padding([6, 6]),
+                )
+                .on_press(Message::CloseTab(path.clone()))
+                .interaction(iced::mouse::Interaction::Pointer);
                 let mut tab = container(
                     row![label, close]
                         .spacing(0)
@@ -533,7 +538,16 @@ impl App {
                         ..container::Style::default()
                     });
                 }
-                strip = strip.push(tab);
+                // The tab is the grab handle. Press does NOT select — it only records a possible
+                // drag; selection happens on a release that never moved (`TabRelease`). Doing it
+                // the other way round means every drag first switches you to the tab you were
+                // about to move away, which reads as a flicker.
+                let owner = self.panes.resolve(pane);
+                let dragged = iced::widget::mouse_area(tab)
+                    .on_press(Message::TabPress(owner, path.clone()))
+                    .on_release(Message::TabRelease(path.clone()))
+                    .interaction(iced::mouse::Interaction::Grab);
+                strip = strip.push(dragged);
             }
             // Build the header ACTION buttons first (their own fixed-width row), so they can be
             // PINNED to the right while the tab strip scrolls in the remaining space — VS Code
@@ -647,6 +661,19 @@ impl App {
                 .width(Fill)
                 .align_y(iced::Alignment::Center)
                 .into()
+        };
+        // Mid-tab-drag the whole strip is a drop target: releasing here MOVES the tab into this
+        // pane with no layout change, which is how a tab dragged out to a new pane gets dragged
+        // back to close it. The wrapper goes outside the scroller so an EMPTY pane's strip — the
+        // "CODE" placeholder, with no tabs to aim at — is droppable too, which is the pane you
+        // most need to be able to hit.
+        let header_bar: Element<'_, Message> = if self.dragging() {
+            let into = self.panes.resolve(pane);
+            iced::widget::mouse_area(container(header_bar).width(Fill))
+                .on_release(Message::TabDropOnPane(into))
+                .into()
+        } else {
+            header_bar
         };
         // The body column must be `Fill`-width so `header_bar`'s Fill row has a bounded width to
         // fill — a Shrink column would collapse it to content width and the tab-scroll/pinned-
