@@ -44,3 +44,9 @@ web/playwright-report/
 # build that says nothing about the source, and a merge conflict in a file
 # nobody can usefully resolve.
 *.tsbuildinfo
+
+# Scratch state from the spec-workflow tool, which writes into a top-level
+# `specs/<slugged-prompt>/` as it works. The project's real specs live in
+# `docs/specs/`; this directory is per-run working state that gets swept into
+# whatever commit happens next (it once did — see fbdd34a).
+/specs/
