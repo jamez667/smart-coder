@@ -260,13 +260,30 @@ impl UiConfig {
     /// mistaken for Craft: until the user answers, the app behaves as Assistant and the
     /// first-run prompt does the asking. Every backend builder and the health-probe
     /// subscription consult this.
+    ///
+    /// In a `craft-only` build this is unconditionally `true`, and that is the ENTIRE mechanism
+    /// of that build. Every guard the feature needs already exists and already routes through
+    /// here; pinning the predicate makes all of them fire at once, rather than introducing a
+    /// second enforcement path that could drift from the runtime one.
     pub fn craft(&self) -> bool {
-        self.mode == Some(Mode::Craft)
+        cfg!(feature = "craft-only") || self.mode == Some(Mode::Craft)
     }
 
     /// Whether the user has ever chosen a mode. `false` ⇒ show the first-run prompt.
+    ///
+    /// A `craft-only` build has nothing to ask: there is no second mode to choose between, so the
+    /// first-run question would be a dialog with one honest answer.
     pub fn mode_chosen(&self) -> bool {
-        self.mode.is_some()
+        cfg!(feature = "craft-only") || self.mode.is_some()
+    }
+
+    /// Whether this build can switch modes at all.
+    ///
+    /// The one predicate for "offer the mode UI". A `craft-only` build hides the Settings toggle
+    /// and never writes `mode` to `config.json` — writing it would leave a stale, unreachable
+    /// setting behind that a later ordinary build would silently honour.
+    pub fn mode_switchable(&self) -> bool {
+        !cfg!(feature = "craft-only")
     }
 }
 

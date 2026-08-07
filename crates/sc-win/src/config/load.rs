@@ -38,10 +38,19 @@ impl UiConfig {
         // How the app works (spec 21). `SC_MODE=craft` lets an org pin Craft mode without
         // hand-editing config.json. An unparseable value stays `None` — "never chosen" — so a
         // corrupt file asks again at startup rather than silently picking a mode.
-        cfg.mode = env("SC_MODE")
-            .or(file.mode)
-            .as_deref()
-            .and_then(Mode::from_slug);
+        cfg.mode = if cfg!(feature = "craft-only") {
+            // A craft-only build has one mode, and neither the env var nor a config.json carried
+            // over from an ordinary build may contradict it. `craft()` already answers true
+            // regardless, so this is belt-and-braces — but leaving `Some(Assistant)` in the
+            // struct would be a live trap for any later code that reads `mode` directly instead
+            // of going through the predicate.
+            Some(Mode::Craft)
+        } else {
+            env("SC_MODE")
+                .or(file.mode)
+                .as_deref()
+                .and_then(Mode::from_slug)
+        };
 
         set(&mut cfg.base_url, env("SC_BASE_URL").or(file.base_url));
         set(&mut cfg.model, env("SC_MODEL").or(file.model));
@@ -177,7 +186,16 @@ impl UiConfig {
             // How the app works (spec 21). This MUST be persisted: an unsaved mode would reset
             // on restart, which the user would rightly read as the app ignoring their answer.
             // `None` (never chosen) writes nothing, so the first-run prompt still fires.
-            mode: self.mode.map(|m| m.slug().to_string()),
+            //
+            // A craft-only build never writes it. The guard belongs HERE rather than only at the
+            // two mode-writing messages, because this function also runs on ordinary connection
+            // edits — so a craft-only build saving a Gemini key would otherwise stamp a `mode`
+            // into config.json that a later ordinary build would silently honour, pinning a user
+            // into Craft with no record of having chosen it.
+            mode: self
+                .mode
+                .filter(|_| self.mode_switchable())
+                .map(|m| m.slug().to_string()),
             // The connection + routing shape (the authoring surface).
             local_url: Some(self.local_conn.base_url.clone()),
             local_key: self.local_conn.key.clone(),

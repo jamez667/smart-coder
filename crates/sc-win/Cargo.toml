@@ -14,6 +14,16 @@ path = "src/main.rs"
 name = "sc_win"
 path = "src/lib.rs"
 
+[features]
+# A CRAFT-ONLY build: the editor, with no mode and no way back to the agent (spec 21).
+#
+# Deliberately a flag on the ordinary binary rather than a separate crate graph. The agent crates
+# still compile in — Craft mode was always a *runtime* kill, enforced at the backend builders,
+# and duplicating that as a compile-time split would mean two divergent enforcement paths where
+# today there is one. This flag only pins the switch: `craft()` answers true unconditionally, so
+# every existing guard fires exactly as it does for a user who chose Craft.
+craft-only = []
+
 [dependencies]
 sc-comply = { path = "../sc-comply" }
 sc-comply-author = { path = "../sc-comply-author" }

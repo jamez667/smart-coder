@@ -121,7 +121,7 @@ The tri-state matters:
 
 | Stored value | Meaning | Startup |
 | --- | --- | --- |
-| absent | never chosen | show the first-run modal |
+| absent | never chosen | show the first-run modal (an ordinary build only — a `craft-only` build has one honest answer, so it never asks) |
 | `"craft"` | chosen | Craft mode, no modal |
 | `"assistant"` | chosen | Assistant mode, no modal |
 | garbage | corrupt | treat as absent — ask again, never guess |
@@ -133,9 +133,47 @@ that set of unpersisted flags would be a bug the user experiences as the app
 ignoring them — the worst possible first impression for this feature.
 
 `SC_MODE=craft|assistant` overrides for testing and locked-down deployments,
-following the existing env-var precedence. An org that wants Craft mode
+following the existing env-var precedence — **except in a `craft-only` build**,
+where `mode` is forced to `Craft` and neither the env var nor a `config.json`
+carried over from an ordinary build is consulted. An org that wants Craft mode
 mandatory sets the env var; the setting then displays as enforced rather than
-silently refusing to change.
+silently refusing to change. An org that wants it *unavailable* ships the
+craft-only build instead.
+
+**A `craft-only` build never writes `mode`.** The filter sits in `save_config`
+rather than only at the two mode-writing messages, because that function also
+runs on ordinary connection edits — so saving a Gemini key would otherwise stamp
+a mode into `config.json` that a later ordinary build would silently honour,
+pinning a user into Craft with no record of their ever having chosen it.
+
+### The craft-only build
+
+A `craft-only` cargo feature on `sc-win` ships the editor with **no mode at
+all** — for someone who doesn't want the choice, only the tool.
+
+It is a flag on the ordinary binary, **not a separate crate graph**. The agent
+crates still compile in, because Craft mode was always a *runtime* kill enforced
+at the `Option`-returning builders (Part 2); a compile-time split would create a
+second enforcement path that could drift from the runtime one, and the whole
+argument for trusting this feature is that there is exactly one.
+
+The feature pins three predicates, and that is the entire mechanism:
+
+| Predicate | craft-only | Meaning |
+| --- | --- | --- |
+| `craft()` | always `true` | every guard that already consults it fires at once |
+| `mode_chosen()` | always `true` | nothing to ask, so no first-run modal |
+| `mode_switchable()` | always `false` | no toggle, and `mode` is never written |
+
+Settings shows a **statement** — "This is a Craft-only build" — in place of the
+toggle, and the detail copy drops the word "On". A disabled checkbox would be
+worse than none: it implies a setting that exists and is merely unavailable, when
+in this build there is nothing to switch to.
+
+Both gates run in `scripts/check.ps1` and `check.sh`. A cargo feature is only
+compiled when something asks for it, so without them the flag rots silently —
+nothing in the default build would notice a `cfg(feature = ...)` block that
+stopped compiling, or a test whose assumptions the pinned mode invalidates.
 
 ## Part 2 — Craft mode is a hard kill
 

@@ -60,6 +60,12 @@ impl App {
             Message::CancelClose => self.confirm_close = None,
             Message::ChooseMode(craft) => {
                 use sc_win::config::Mode;
+                // Unreachable in a craft-only build — `mode_chosen()` is true there, so the
+                // first-run question never opens. Guarded anyway: this is the write that would
+                // leave a `mode` in config.json for a later ordinary build to honour.
+                if !self.cfg.mode_switchable() {
+                    return Task::none();
+                }
                 self.cfg.mode = Some(if craft { Mode::Craft } else { Mode::Assistant });
                 // The default layout differs per mode, and `App::default` picked one before the
                 // question was answered — so re-derive it now that we know.
@@ -105,6 +111,12 @@ impl App {
             }
             Message::ToggleCraftMode(on) => {
                 use sc_win::config::Mode;
+                // The toggle isn't rendered in a craft-only build, so this can only arrive from a
+                // stale queued `Task`. Refusing here keeps the "never writes a mode" claim a
+                // property of the build rather than of the view.
+                if !self.cfg.mode_switchable() {
+                    return Task::none();
+                }
                 self.cfg.mode = Some(if on { Mode::Craft } else { Mode::Assistant });
                 if on {
                     // A run must never outlive the switch into a mode that claims no model is

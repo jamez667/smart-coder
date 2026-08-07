@@ -363,12 +363,18 @@ mod tests {
         assert!(backend_for(&cfg, ComplyModel::None).expect("ok").is_none());
     }
 
+    // The prose-summary backend is the one thing here a craft-only build cannot have: `craft()`
+    // is pinned true, so `backend_for` short-circuits to `Ok(None)` before it ever reaches the
+    // provider or the key. These four pin what happens when a model IS available, which is a
+    // question that build cannot ask — `craft_only_asks_for_no_summary_backend` covers it there.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn local_needs_no_key() {
         let cfg = cfg_with("http://localhost:11435/v1", None);
         assert!(backend_for(&cfg, ComplyModel::Local).expect("ok").is_some());
     }
 
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn gemini_without_a_key_is_an_error_not_a_silent_downgrade() {
         // Falling back to "no summary" would look like the feature is broken.
@@ -380,6 +386,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn gemini_with_a_key_builds_a_backend() {
         let cfg = cfg_with("http://localhost:11435/v1", Some("k-123"));
@@ -388,6 +395,7 @@ mod tests {
             .is_some());
     }
 
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn a_blank_gemini_key_counts_as_missing() {
         // A whitespace-only key would otherwise build a backend that 401s
@@ -397,6 +405,25 @@ mod tests {
             backend_for(&cfg, ComplyModel::Gemini).err(),
             Some(ComplyError::MissingKey("Gemini"))
         );
+    }
+
+    /// In a craft-only build the compliance audit still runs — it just never asks for prose.
+    ///
+    /// Worth pinning rather than assuming: `Ok(None)` and `Err(MissingKey)` are very different
+    /// outcomes here. The deterministic evidence engine is complete without a model, so a
+    /// craft-only build must DEGRADE to the silent summary, not fail the audit outright.
+    #[cfg(feature = "craft-only")]
+    #[test]
+    fn craft_only_asks_for_no_summary_backend() {
+        let cfg = cfg_with("http://localhost:11435/v1", Some("k-123"));
+        for choice in [ComplyModel::None, ComplyModel::Local, ComplyModel::Gemini] {
+            // `OpenAiBackend` is neither `Debug` nor `PartialEq`, so the Result can't be compared
+            // whole — assert the shape.
+            assert!(
+                matches!(backend_for(&cfg, choice), Ok(None)),
+                "{choice:?} must be a complete audit with no prose, not an error"
+            );
+        }
     }
 
     #[test]

@@ -291,6 +291,8 @@ mod tests {
 
     /// The same tick DOES probe in Assistant mode — otherwise the test above would pass for the
     /// wrong reason (e.g. a probe that never fires in either mode).
+    // A craft-only build has one mode, so there is no switch to exercise.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn assistant_mode_still_spawns_the_health_probe() {
         let mut app = app_in(Mode::Assistant);
@@ -306,6 +308,8 @@ mod tests {
     ///
     /// A stale "backend reachable" badge left on screen in a mode that contacts no backend is a
     /// lie about the thing the user just asked us to stop doing.
+    // A craft-only build has one mode, so there is no switch to exercise.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn entering_craft_mode_clears_the_backend_health_verdict() {
         let mut app = app_in(Mode::Assistant);
@@ -506,6 +510,8 @@ mod tests {
     /// A shared tree would mean entering Craft mode silently rearranged the Assistant one — the
     /// user would come back to find their panels moved by a setting that was supposed to be
     /// reversible.
+    // A craft-only build has one mode, so there is no switch to exercise.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn each_mode_keeps_its_own_panel_arrangement() {
         use sc_win::layout::{EditorId, PanelKind};
@@ -1168,6 +1174,8 @@ mod tests {
     ///
     /// The tri-state is the point: "never asked" is a different state from "chose Assistant",
     /// and collapsing them would either nag someone who already answered or never ask at all.
+    // A craft-only build has one mode, so there is no switch to exercise.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn the_first_run_question_shows_once_and_only_when_unanswered() {
         let mut app = App::default();
@@ -1189,6 +1197,8 @@ mod tests {
     }
 
     /// Answering the question records the mode.
+    // A craft-only build has one mode, so there is no switch to exercise.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn choosing_a_mode_answers_the_question_for_good() {
         for (craft, expected) in [(true, Mode::Craft), (false, Mode::Assistant)] {
@@ -1469,6 +1479,8 @@ mod tests {
     ///
     /// Spec 21 requires the return trip to be as easy as the outbound one — no confirmation, no
     /// extra step. If this ever needs two messages, that requirement has been broken.
+    // A craft-only build has one mode, so there is no switch to exercise.
+    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn craft_mode_toggles_back_off() {
         let mut app = app_in(Mode::Craft);

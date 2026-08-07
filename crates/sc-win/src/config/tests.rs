@@ -63,7 +63,76 @@ fn an_unchosen_mode_writes_nothing_and_stays_unchosen() {
         "unchosen must not be written: {json}"
     );
     assert!(parse_config(&json).mode.is_none());
+    // A craft-only build has nothing to ask, so "unchosen" is not a state it can be in — see
+    // `a_craft_only_build_needs_no_first_run_question`.
+    #[cfg(not(feature = "craft-only"))]
     assert!(!UiConfig::default().mode_chosen(), "default is unchosen");
+}
+
+/// A craft-only build is Craft whatever the config or the environment say.
+///
+/// The whole feature is this one predicate: every existing guard — the backend builders, the
+/// health probe, the panel pruning — already routes through `craft()`, so pinning it here fires
+/// all of them at once rather than adding a second enforcement path that could drift.
+#[cfg(feature = "craft-only")]
+#[test]
+fn a_craft_only_build_is_craft_whatever_the_config_says() {
+    let cfg = UiConfig {
+        mode: Some(Mode::Assistant),
+        ..UiConfig::default()
+    };
+    assert!(cfg.craft(), "a stale Assistant in config.json cannot win");
+    assert!(UiConfig::default().craft(), "and neither can an absent one");
+}
+
+/// A craft-only build never asks which mode to use, and never offers to switch.
+#[cfg(feature = "craft-only")]
+#[test]
+fn a_craft_only_build_needs_no_first_run_question() {
+    assert!(
+        UiConfig::default().mode_chosen(),
+        "there is nothing to choose between, so the question would have one honest answer"
+    );
+    assert!(!UiConfig::default().mode_switchable(), "and no way back");
+}
+
+/// A craft-only build never writes `mode` — not even while saving something else.
+///
+/// The trap this guards: `save_config` also runs on ordinary connection edits. Stamping a `mode`
+/// into config.json would pin a user into Craft in a LATER ordinary build, with no record of
+/// their ever having chosen it.
+#[cfg(feature = "craft-only")]
+#[test]
+fn a_craft_only_build_never_persists_a_mode() {
+    let cfg = UiConfig {
+        mode: Some(Mode::Craft),
+        ..UiConfig::default()
+    };
+    let json = serialize_config(&ConfigFields {
+        mode: cfg
+            .mode
+            .filter(|_| cfg.mode_switchable())
+            .map(|m| m.slug().to_string()),
+        ..ConfigFields::default()
+    });
+    assert!(
+        !json.contains("\"mode\""),
+        "a craft-only build must leave no mode behind: {json}"
+    );
+}
+
+/// An ordinary build still offers both modes. The complement of the tests above, so a stray
+/// `cfg!` that hard-wired Craft everywhere would fail something.
+#[cfg(not(feature = "craft-only"))]
+#[test]
+fn an_ordinary_build_still_switches_modes() {
+    assert!(UiConfig::default().mode_switchable());
+    assert!(!UiConfig::default().craft(), "unchosen is not Craft");
+    let cfg = UiConfig {
+        mode: Some(Mode::Craft),
+        ..UiConfig::default()
+    };
+    assert!(cfg.craft());
 }
 
 #[test]
@@ -84,6 +153,10 @@ fn a_corrupt_mode_asks_again_rather_than_guessing() {
     );
 }
 
+/// The Assistant half of this is what a craft-only build has no way to express — there, EVERY
+/// builder returns `None` and the contrast that makes the assertions meaningful doesn't exist.
+/// `a_craft_only_build_is_craft_whatever_the_config_says` covers that build.
+#[cfg(not(feature = "craft-only"))]
 #[test]
 fn craft_mode_builds_no_backend_at_all() {
     // THE contract behind "no language model is contacted" (spec 21), asserted on CONSTRUCTION
@@ -120,6 +193,9 @@ fn craft_mode_builds_no_backend_at_all() {
     assert!(assistant.advisor().is_some(), "Assistant still builds one");
 }
 
+/// Pins the TRI-STATE, which only an ordinary build has: a craft-only build collapses it on
+/// purpose, and `a_craft_only_build_is_craft_whatever_the_config_says` pins that instead.
+#[cfg(not(feature = "craft-only"))]
 #[test]
 fn craft_is_only_true_when_craft_was_actually_chosen() {
     // `craft()` is the single predicate for "no model", so the unchosen case must NOT read as
@@ -524,6 +600,9 @@ fn swarm_workers_default_to_no_think_and_pin_frozen() {
     assert_eq!(sc.worker.permission.frozen_paths, vec!["tests/a.py"]);
 }
 
+/// The second half — a configured advisor DOES build — is unavailable in a craft-only build,
+/// where no builder returns anything by design.
+#[cfg(not(feature = "craft-only"))]
 #[test]
 fn advisor_requires_a_model() {
     // No advisor model ⇒ no advisor backend.

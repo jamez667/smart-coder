@@ -599,19 +599,35 @@ impl App {
     /// to check.
     pub(crate) fn view_general_tab(&self) -> Element<'_, Message> {
         let craft = self.cfg.craft();
-        let toggle = checkbox(craft)
-            .label("Craft mode — just code, no AI")
-            .on_toggle(Message::ToggleCraftMode)
-            .style(checkbox_style);
+        // A craft-only build has no second mode, so it shows a statement rather than a control.
+        // A disabled checkbox would be worse than none: it implies a setting that exists and is
+        // merely unavailable, when in this build there is nothing to switch to.
+        let toggle: Element<'_, Message> = if self.cfg.mode_switchable() {
+            checkbox(craft)
+                .label("Craft mode — just code, no AI")
+                .on_toggle(Message::ToggleCraftMode)
+                .style(checkbox_style)
+                .into()
+        } else {
+            text("This is a Craft-only build — just code, no AI.")
+                .size(12)
+                .color(GOOD)
+                .into()
+        };
 
         // What the mode actually does, stated plainly. Both branches are the same size and
         // weight: switching back is exactly as easy as switching away, and neither reads as the
         // recommended path.
         let detail: Element<'_, Message> = if craft {
             column![
-                text("On. No language model is contacted.")
-                    .size(11)
-                    .color(GOOD),
+                text(if self.cfg.mode_switchable() {
+                    "On. No language model is contacted."
+                } else {
+                    // Not "On" — nothing turned it on, and nothing can turn it off.
+                    "No language model is contacted."
+                })
+                .size(11)
+                .color(GOOD),
                 text("The editor, file tree, git and terminal work as normal. Chat, the agent, review gates and the remote mirror are hidden, and no backend health check runs.")
                     .size(11)
                     .color(FG_MUTED),
