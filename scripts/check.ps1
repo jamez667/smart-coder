@@ -12,6 +12,21 @@ function Invoke-Step($name, [scriptblock]$body) {
     if ($LASTEXITCODE -ne 0) { throw "$name failed (exit $LASTEXITCODE)" }
 }
 
+# `sc-core`'s TDD-loop tests drive a real red→green run over a sample repo whose
+# contract test is `sh test.sh` — a POSIX shell is a genuine requirement of those
+# tests, not an accident. Without one on PATH, `run_verification` can never go
+# green and two tests fail in a way that looks like broken agent logic. Git for
+# Windows ships one; add it rather than leaving the gate red.
+if (-not (Get-Command sh -ErrorAction SilentlyContinue)) {
+    $gitSh = 'C:\Program Files\Git\usr\bin'
+    if (Test-Path (Join-Path $gitSh 'sh.exe')) {
+        Write-Host "==> adding $gitSh to PATH (sc-core's TDD tests need a POSIX sh)"
+        $env:PATH = "$gitSh;$env:PATH"
+    } else {
+        throw "No POSIX 'sh' on PATH. sc-core's TDD-loop tests need one (Git for Windows provides it at C:\Program Files\Git\usr\bin)."
+    }
+}
+
 Invoke-Step 'rustfmt (check)' { cargo fmt --all -- --check }
 Invoke-Step 'clippy (deny warnings)' { cargo clippy --workspace --all-targets -- -D warnings }
 Invoke-Step 'build' { cargo check --workspace }
