@@ -129,6 +129,84 @@ impl App {
         self.panes.any_dirty()
     }
 
+    /// Split the focused editor: a new pane to its right, carrying the active tab.
+    ///
+    /// The tab **moves**. A path lives in exactly one pane (see
+    /// [`Self::select_file_into`]), so copying it would produce two buffers over one file —
+    /// the data-loss shape the duplicate-file rule exists to prevent. Moving also makes the
+    /// gesture mean what it looks like: this file, over there.
+    ///
+    /// No-op when the focused pane has no tab to give: an empty new pane beside an empty old one
+    /// is just a smaller editor.
+    pub(crate) fn split_editor(&mut self) {
+        let from = self.panes.focused_id();
+        let Some(path) = self.panes.focused().selected_file.clone() else {
+            return;
+        };
+        // Moving a pane's ONLY tab would empty it, and `prune_empty_panes` would close it —
+        // collapsing straight back to one pane. So a split from a single-tab pane makes an
+        // EMPTY second pane instead: the tab stays put, and the new pane is somewhere to open
+        // the next file. (Showing the same file in both is not an option — one path, one buffer;
+        // see `select_file_into`.)
+        let move_tab = self.panes.focused().tabs.len() > 1;
+
+        // Place the new pane in the tree FIRST. If the layout refuses it, nothing has moved yet
+        // and we can simply drop the pane — no half-done split, no tab stranded somewhere
+        // nothing renders.
+        let new_id = self.panes.insert();
+        let craft = self.cfg.craft();
+        // `insert_at`, not `with`: `with` descends to the first leaf it finds, which on the
+        // default tree is the git panel — it would split the explorer instead of the editor.
+        // The new pane belongs beside the editor that spawned it.
+        let Some(next) = self
+            .layout
+            .insert_at(
+                sc_win::layout::PanelKind::Editor(new_id),
+                sc_win::layout::PanelKind::Editor(from),
+                sc_win::layout::Side::Right,
+                &format!("split:{from}|{new_id}"),
+            )
+            .and_then(|l| l.sanitize(craft))
+        else {
+            self.panes.remove(new_id);
+            return;
+        };
+        self.layout = next.clone();
+        self.layouts.set(craft, next);
+        self.layouts.save();
+
+        if move_tab {
+            // Move the tab whole — buffer, dirty flag and disk stamp. A fresh `Tab::open` would
+            // discard unsaved edits and re-read from disk.
+            if let Some(i) = self
+                .panes
+                .focused()
+                .tabs
+                .iter()
+                .position(|t| t.path == path)
+            {
+                let tab = self.panes.focused_mut().tabs.remove(i);
+                // The source pane loses its active file; hand it a neighbour.
+                let next_active = self.panes.focused().tabs.first().map(|t| t.path.clone());
+                self.panes.focused_mut().selected_file = next_active;
+                if let Some(p) = self.panes.get_mut(new_id) {
+                    p.selected_file = Some(tab.path.clone());
+                    p.tabs.push(tab);
+                }
+            }
+        }
+
+        // Focus the new pane either way — you split in order to work over there.
+        self.panes.focus(new_id);
+        if move_tab {
+            // Populate the new pane's review view for the file it now holds.
+            self.select_file(path);
+            // Only meaningful when a tab moved: a freshly-split empty pane is deliberate and
+            // must survive, so pruning is scoped to the pane that just lost something.
+            self.prune_empty_panes();
+        }
+    }
+
     /// Make `panes` agree with the layout tree: a pane for every editor leaf.
     ///
     /// A saved layout naming pane 7 is the authority on how many panes the user had, so we make
@@ -176,10 +254,15 @@ impl App {
                 self.layouts.save();
             }
         }
-        // Focus in TREE order, so it lands somewhere the user can see rather than wherever the
-        // map happened to iterate.
-        if let Some(first) = self.layout.editor_ids().first() {
-            self.panes.focus(*first);
+        // Retarget focus ONLY if the pane it pointed at is gone. Re-focusing unconditionally
+        // yanked the user back to the first pane after any close — including closes that had
+        // nothing to do with where they were working.
+        if self.panes.get(self.panes.focused_id()).is_none() {
+            // Tree order, so focus lands somewhere visible rather than wherever the map
+            // happened to iterate.
+            if let Some(first) = self.layout.editor_ids().first() {
+                self.panes.focus(*first);
+            }
         }
     }
 
@@ -191,19 +274,17 @@ impl App {
     /// cheaper than finding it later through a mis-routed keystroke.
     #[cfg(debug_assertions)]
     pub(crate) fn assert_panes_consistent(&self) {
-        use sc_win::layout::PanelKind;
         for id in self.layout.editor_ids() {
             debug_assert!(
                 self.panes.get(id).is_some(),
                 "layout names editor pane {id} but no such pane exists"
             );
         }
-        for (id, _) in self.panes.iter() {
-            debug_assert!(
-                self.layout.contains(PanelKind::Editor(*id)),
-                "pane {id} exists but is not in the layout — it would be unreachable"
-            );
-        }
+        // NOT asserted: a pane with no leaf in the tree. `Panes::default()` creates pane 0
+        // before any layout is loaded, and `sync_panes_to_layout` reconciles the other
+        // direction — so a transient extra pane is normal at construction and is harmless
+        // (unrendered, and reclaimed by `prune_empty_panes`). Asserting it here fired on
+        // `App::default()` itself, which is a false positive rather than a bug caught.
         debug_assert!(
             self.panes.get(self.panes.focused_id()).is_some(),
             "focused pane does not exist"

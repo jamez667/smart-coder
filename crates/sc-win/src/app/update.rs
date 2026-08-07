@@ -587,6 +587,8 @@ impl App {
                 self.dock_side = None;
                 self.drop_target = None;
             }
+            Message::FocusPane(id) => self.panes.focus(id),
+            Message::SplitEditor => self.split_editor(),
             Message::ResetLayout => {
                 self.layout = sc_win::layout::Layout::default_for(self.cfg.craft());
                 self.layouts.set(self.cfg.craft(), self.layout.clone());

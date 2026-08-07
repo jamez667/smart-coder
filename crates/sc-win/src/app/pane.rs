@@ -248,6 +248,15 @@ impl Panes {
             .map(|(id, _)| *id)
     }
 
+    /// `id`'s pane, or the focused one if that id no longer exists.
+    ///
+    /// For the view layer, which is handed an id by the layout walker and must render
+    /// *something* — a stale id (a pane closed between layout and draw) should show the focused
+    /// pane for one frame, not panic mid-render.
+    pub(crate) fn or_focused(&self, id: EditorId) -> &EditorPane {
+        self.map.get(&id).unwrap_or_else(|| self.focused())
+    }
+
     /// Whether ANY pane has unsaved edits — the quit prompt and the window-title dot.
     pub(crate) fn any_dirty(&self) -> bool {
         self.map.values().any(|p| p.any_dirty())

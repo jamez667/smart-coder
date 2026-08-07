@@ -2,6 +2,7 @@
 
 use super::*;
 use iced::widget::{column, row};
+use sc_win::layout::EditorId;
 
 impl App {
     /// The right CODE column: the selected/followed file with line numbers, read-only,
@@ -9,7 +10,7 @@ impl App {
     /// side-by-side columns; wrapping is disabled so a long line scrolls horizontally
     /// instead of wrapping into — and interrupting — the number gutter. One vertical
     /// scroll (whole editor) + one horizontal scroll (the code column) is what you get.
-    pub(crate) fn view_code(&self) -> Element<'_, Message> {
+    pub(crate) fn view_code(&self, pane: EditorId) -> Element<'_, Message> {
         // Which surface the active tab is showing (spec 21). The REVIEW view is the original
         // read-only pane — diffs, line comments, gates — and is untouched by the editor work.
         // The EDIT view is a real buffer. A tab that can't be edited never reaches the second
@@ -18,16 +19,16 @@ impl App {
             .active_tab()
             .is_some_and(|t| t.view == TabView::Edit && t.editable());
         let inner: Element<'_, Message> = if editing {
-            self.view_edit_body()
+            self.view_edit_body(pane)
         } else {
-            self.view_review_body()
+            self.view_review_body(pane)
         };
-        self.view_code_frame(inner)
+        self.view_code_frame(pane, inner)
     }
 
     /// The EDIT view: the editor over the active tab's buffer, with a status line beneath.
-    fn view_edit_body(&self) -> Element<'_, Message> {
-        let Some(tab) = self.active_tab() else {
+    fn view_edit_body(&self, pane: EditorId) -> Element<'_, Message> {
+        let Some(tab) = self.panes.or_focused(pane).active_tab() else {
             return Space::new().into();
         };
         let Some(editor) = tab.editor() else {
@@ -62,7 +63,6 @@ impl App {
             container({
                 // Tag events with the pane that produced them, so keystrokes reach THAT
                 // buffer rather than whichever pane happens to hold focus.
-                let pane = self.panes.focused_id();
                 editor.view().map(move |ev| Message::EditorEvent(pane, ev))
             })
             .height(Fill),
@@ -116,8 +116,8 @@ impl App {
 
     /// The REVIEW view: the original read-only pane. Unchanged by the editor work — it carries
     /// the diff washes, inline comments and gate affordances that no editor widget can host.
-    fn view_review_body(&self) -> Element<'_, Message> {
-        let inner: Element<'_, Message> = match &self.panes.focused().code {
+    fn view_review_body(&self, pane: EditorId) -> Element<'_, Message> {
+        let inner: Element<'_, Message> = match &self.panes.or_focused(pane).code {
             Some(cv) if cv.note.is_some() => text(cv.note.clone().unwrap_or_default())
                 .size(12)
                 .color(FG_MUTED)
@@ -134,7 +134,7 @@ impl App {
                     .working
                     .as_ref()
                     .filter(|(f, _, _)| {
-                        Some(f.as_str()) == self.panes.focused().selected_file.as_deref()
+                        Some(f.as_str()) == self.panes.or_focused(pane).selected_file.as_deref()
                     })
                     .map(|(_, lo, hi)| (*lo, *hi));
                 let pulse = 0.10 + 0.10 * (0.5 + 0.5 * (self.now() * 3.0).sin());
@@ -157,17 +157,18 @@ impl App {
                 // spans the visible area and ends just before the minimap — with round edges. It
                 // scales with the window and expands when the minimap is hidden. `None` (→ Fill)
                 // before the first scroll gives us a real viewport width.
-                let bar_width: Option<f32> = (self.panes.focused().code_view_w > 1.0).then(|| {
-                    let gutter = if minimap_overflows { 76.0 } else { 8.0 };
-                    (self.panes.focused().code_view_w - gutter).max(120.0)
-                });
+                let bar_width: Option<f32> =
+                    (self.panes.or_focused(pane).code_view_w > 1.0).then(|| {
+                        let gutter = if minimap_overflows { 76.0 } else { 8.0 };
+                        (self.panes.or_focused(pane).code_view_w - gutter).max(120.0)
+                    });
 
                 // Diff blocks (VS-Code-style). Two derived maps:
                 //  • `block_bar_after`: last green line of a block → its cur_start (where to render
                 //    the standalone "↩ revert block" bar).
                 //  • `line_to_block`: every green line → its block's cur_start (so a comment ON a
                 //    changed block can offer the same revert inline).
-                let hunks = self.panes.focused().file_diff.hunks();
+                let hunks = self.panes.or_focused(pane).file_diff.hunks();
                 let block_bar_after: std::collections::BTreeMap<usize, usize> = hunks
                     .iter()
                     .filter(|h| h.cur_start <= h.cur_end) // has a current (green) line
@@ -199,12 +200,12 @@ impl App {
                 let (first_idx, last_idx) = {
                     const OVERSCAN: usize = 12;
                     let per = CODE_LINE_PX.max(1.0);
-                    let view_h = if self.panes.focused().code_view_h > 1.0 {
-                        self.panes.focused().code_view_h
+                    let view_h = if self.panes.or_focused(pane).code_view_h > 1.0 {
+                        self.panes.or_focused(pane).code_view_h
                     } else {
                         800.0 // generous first-frame guess before we know the real height
                     };
-                    let first = ((self.panes.focused().code_scroll_y / per) as usize)
+                    let first = ((self.panes.or_focused(pane).code_scroll_y / per) as usize)
                         .saturating_sub(OVERSCAN);
                     let visible = (view_h / per).ceil() as usize + 2 * OVERSCAN;
                     (first.min(total), (first + visible).min(total))
@@ -233,7 +234,9 @@ impl App {
                 for (n, line) in &cv.lines[first_idx..last_idx] {
                     // GitHub-PR style: render any lines DELETED just before this one as red rows
                     // (a `-` gutter, red wash). They exist only in HEAD, so they're not selectable.
-                    if let Some(removed) = self.panes.focused().file_diff.removed_before.get(n) {
+                    if let Some(removed) =
+                        self.panes.or_focused(pane).file_diff.removed_before.get(n)
+                    {
                         for gone in removed {
                             col = col.push(
                                 container(
@@ -256,7 +259,7 @@ impl App {
                     let working = working_here.is_some_and(|(lo, hi)| *n >= lo && *n <= hi);
                     // A line that differs from HEAD (git) → GitHub-PR-style green highlight
                     // with a `+` gutter marker, so you SEE what the agent changed, live.
-                    let changed = self.panes.focused().changed_lines.contains(n);
+                    let changed = self.panes.or_focused(pane).changed_lines.contains(n);
                     let mark = if changed { "+" } else { " " };
                     let row_text = format!("{mark}{n:>4}  {line}");
                     let color = if in_sel {
@@ -305,7 +308,7 @@ impl App {
                     // style), struck-through + ✓ once resolved. Only the in-window lines are
                     // iterated, so a comment scrolled off-screen simply isn't drawn (its state
                     // persists); the box/comment adds height inside the window, not the spacers.
-                    if let Some(file) = self.panes.focused().selected_file.clone() {
+                    if let Some(file) = self.panes.or_focused(pane).selected_file.clone() {
                         let here: Vec<(usize, sc_win::comments::Comment)> = self
                             .comments
                             .on_file(&file)
@@ -399,7 +402,7 @@ impl App {
                 };
                 // One scrollable, BOTH axes: vertical for the file, horizontal for long lines.
                 let code_scroll = scrollable(col)
-                    .id(code_scroll_id(self.panes.focused_id()))
+                    .id(code_scroll_id(pane))
                     .on_scroll(Message::CodeScrolled)
                     .direction(scrollable::Direction::Both {
                         vertical: vbar,
@@ -426,9 +429,9 @@ impl App {
                 if overflows {
                     let minimap = crate::minimap::Minimap::new(
                         line_lens,
-                        self.panes.focused().changed_lines.clone(),
+                        self.panes.or_focused(pane).changed_lines.clone(),
                         commented,
-                        self.panes.focused().code_viewport,
+                        self.panes.or_focused(pane).code_viewport,
                     )
                     .view();
                     // VS-Code style: the code fills the whole width and the minimap floats
@@ -455,7 +458,11 @@ impl App {
     ///
     /// Returns `Fill × Fill` with no sizing of its own — the panel-tree walker positions it
     /// (spec 21). Taking a `portion` was what made panel identity positional.
-    fn view_code_frame<'a>(&'a self, inner: Element<'a, Message>) -> Element<'a, Message> {
+    fn view_code_frame<'a>(
+        &'a self,
+        pane: EditorId,
+        inner: Element<'a, Message>,
+    ) -> Element<'a, Message> {
         // Header stays fixed; the code area is the single scrollable (no outer scroll wrap,
         // which is what previously collapsed the inner one). The header is now a TAB STRIP — one
         // tab per open file, the ACTIVE tab (=== `selected_file`) highlighted, each closeable.
@@ -471,7 +478,7 @@ impl App {
                 .selected_file
                 .as_deref()
                 .is_some_and(is_feature_plan);
-        let header_bar: Element<'_, Message> = if self.panes.focused().tabs.is_empty() {
+        let header_bar: Element<'_, Message> = if self.panes.or_focused(pane).tabs.is_empty() {
             // No files open → the old "CODE" placeholder (matches the former (None, _) header).
             text("CODE").size(12).color(FG_MUTED).into()
         } else {
@@ -479,9 +486,10 @@ impl App {
             // plus a SIBLING ✕ button (buttons can't nest) that closes it. The active tab reads
             // in ACCENT on a card-ish wash; inactive tabs are FG_MUTED and transparent.
             let mut strip = row![].spacing(4).align_y(iced::Alignment::Center);
-            for tab in &self.panes.focused().tabs {
+            for tab in &self.panes.or_focused(pane).tabs {
                 let path = &tab.path;
-                let active = self.panes.focused().selected_file.as_deref() == Some(path.as_str());
+                let active =
+                    self.panes.or_focused(pane).selected_file.as_deref() == Some(path.as_str());
                 // Show the basename (full path is too long for a tab); duplicate basenames across
                 // open files are acceptable for v1. A leading ● marks unsaved edits — the one
                 // signal that says "closing this loses something".
@@ -537,13 +545,18 @@ impl App {
             let viewing_gated_phase = !self.cfg.craft()
                 && self.gating_phase().is_some_and(|p| {
                     self.plan.path_for(p).as_deref()
-                        == self.panes.focused().selected_file.as_deref()
+                        == self.panes.or_focused(pane).selected_file.as_deref()
                 });
             let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
             // Review|Edit, on every editable tab. One control, both directions — reading a diff
             // and typing are separate surfaces (see `view_code`), and this is how you move
             // between them. A tab that cannot be edited shows nothing rather than a dead toggle.
-            if let Some(tab) = self.active_tab().filter(|t| t.editable()) {
+            if let Some(tab) = self
+                .panes
+                .or_focused(pane)
+                .active_tab()
+                .filter(|t| t.editable())
+            {
                 let editing = tab.view == TabView::Edit;
                 actions = actions.push(
                     button(

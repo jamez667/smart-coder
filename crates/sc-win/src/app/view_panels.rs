@@ -566,6 +566,11 @@ impl App {
                         Message::TogglePanel(kind),
                     ));
                 }
+                // Splitting is offered only with a file open — the new pane carries the active
+                // tab, so with nothing open it would make an empty pane beside an empty one.
+                if self.panes.focused().selected_file.is_some() {
+                    v.push(("▥  Split editor right".to_string(), Message::SplitEditor));
+                }
                 v.push(("↺  Reset layout".to_string(), Message::ResetLayout));
                 v
             }

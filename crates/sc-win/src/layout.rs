@@ -661,6 +661,25 @@ impl Layout {
         }
     }
 
+    /// Insert `kind` beside `target`, splitting the leaf that `target` occupies.
+    ///
+    /// Unlike [`Self::with`], which descends to the first leaf it finds, this places the new
+    /// panel *where you asked* — the difference between "split the editor" and "split whatever
+    /// happens to be leftmost in the tree". `None` when `target` isn't on screen, or `kind`
+    /// already is.
+    pub fn insert_at(
+        &self,
+        kind: PanelKind,
+        target: PanelKind,
+        side: Side,
+        id: &str,
+    ) -> Option<Layout> {
+        if self.contains(kind) || !self.contains(target) {
+            return None;
+        }
+        Some(self.insert_beside(kind, target, side, id))
+    }
+
     /// Drop duplicate panels, keeping the first of each.
     ///
     /// Two leaves of the same kind would render the same state twice — one tree driven from two

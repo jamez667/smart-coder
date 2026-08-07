@@ -296,6 +296,18 @@ impl App {
             .padding(pad)
             .into();
 
+        // Clicking anywhere in an editor pane focuses it. Focus decides where Ctrl+S saves and
+        // where the file tree opens files, so it must follow the pointer rather than being a
+        // hidden mode — and `mouse_area` here does not swallow the click, so the editor beneath
+        // still receives it.
+        if let PanelKind::Editor(id) = kind {
+            if self.panes.focused_id() != id {
+                body = iced::widget::mouse_area(body)
+                    .on_press(Message::FocusPane(id))
+                    .into();
+            }
+        }
+
         // While something is being dragged, every OTHER panel becomes a live drop target and
         // shows ALL FOUR of its zones at once. Revealing them only on hover meant you had to
         // already know where to aim; showing the whole set makes the available drops legible the
@@ -391,7 +403,7 @@ impl App {
         match kind {
             PanelKind::Files => self.view_files_tab(),
             PanelKind::Git => self.view_git_panel(),
-            PanelKind::Editor(_) => self.view_code_panel(),
+            PanelKind::Editor(id) => self.view_code_panel(id),
             PanelKind::Bottom => self.view_bottom_panel(),
             // A swarm build in flight: the live topology IS the story, so it takes the chat
             // panel's place for the duration — the same swap the fixed layout used to do.

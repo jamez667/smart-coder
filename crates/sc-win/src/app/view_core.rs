@@ -101,9 +101,9 @@ impl App {
         col.width(Fill).height(Fill).into()
     }
 
-    /// The CODE panel — editor or review, per the active tab.
-    pub(crate) fn view_code_panel(&self) -> Element<'_, Message> {
-        self.view_code()
+    /// The CODE panel for `pane` — editor or review, per that pane's active tab.
+    pub(crate) fn view_code_panel(&self, pane: sc_win::layout::EditorId) -> Element<'_, Message> {
+        self.view_code(pane)
     }
 
     /// The bottom panel: Problems / Terminal (+ Verification / Build in Assistant mode).

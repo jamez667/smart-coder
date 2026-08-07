@@ -833,4 +833,11 @@ pub(crate) enum Message {
     PanelDrop,
     /// Put the panels back the way they started.
     ResetLayout,
+    /// Split the focused editor, moving its active tab into a new pane beside it.
+    ///
+    /// The tab MOVES rather than being copied — a path lives in exactly one pane (see
+    /// `select_file_into`), and a copy would be two buffers over one file.
+    SplitEditor,
+    /// Make `id` the focused pane — where Ctrl+S saves, where the tree opens files.
+    FocusPane(sc_win::layout::EditorId),
 }

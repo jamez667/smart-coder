@@ -540,6 +540,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Splitting with one file open gives a second, empty pane — the tab stays put.
+    ///
+    /// Moving a pane's ONLY tab would empty it, and `prune_empty_panes` would then close it,
+    /// collapsing straight back to one pane. So the tab stays and the new pane is somewhere to
+    /// open the next file. Showing the same file in both is not available: one path, one buffer.
+    #[test]
+    fn splitting_a_single_tab_pane_leaves_the_tab_and_adds_an_empty_pane() {
+        use sc_win::layout::{EditorId, PanelKind};
+        let dir = redirect_layout_state("split-editor");
+        let (mut app, ws) = app_with_file("split.rs", "fn split() {}\n");
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("split.rs".to_string());
+        assert_eq!(app.panes.len(), 1);
+
+        let _ = app.update(Message::SplitEditor);
+
+        assert_eq!(app.panes.len(), 2, "a second pane exists");
+        assert_eq!(
+            app.layout.editor_ids().len(),
+            2,
+            "and the layout renders both"
+        );
+        // Exactly one pane holds it — never two buffers over one path.
+        let holders: Vec<_> = app
+            .panes
+            .iter()
+            .filter(|(_, p)| p.holds("split.rs"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            holders,
+            vec![EditorId::FIRST],
+            "the tab stayed where it was"
+        );
+        assert_ne!(
+            app.panes.focused_id(),
+            EditorId::FIRST,
+            "focus moved to the new pane — you split to work over there"
+        );
+        assert!(app.layout.contains(PanelKind::Editor(EditorId::FIRST)));
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With two tabs open, splitting MOVES the active one into the new pane.
+    #[test]
+    fn splitting_a_multi_tab_pane_moves_the_active_tab_across() {
+        use sc_win::layout::EditorId;
+        let dir = redirect_layout_state("split-move");
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        std::fs::write(ws.join("b.rs"), "fn b() {}\n").unwrap();
+        app.layout = sc_win::layout::Layout::craft_default();
+        app.select_file("a.rs".to_string());
+        app.select_file("b.rs".to_string()); // b is now active, both open
+        assert_eq!(app.panes.focused().tabs.len(), 2);
+
+        let _ = app.update(Message::SplitEditor);
+
+        assert_eq!(app.panes.len(), 2);
+        // The ACTIVE tab moved; the other stayed.
+        assert!(
+            app.panes
+                .get(EditorId::FIRST)
+                .is_some_and(|p| p.holds("a.rs")),
+            "the inactive tab stayed behind"
+        );
+        let moved: Vec<_> = app
+            .panes
+            .iter()
+            .filter(|(_, p)| p.holds("b.rs"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(moved.len(), 1, "b.rs is open in exactly one pane");
+        assert_ne!(moved[0], EditorId::FIRST, "and it moved to the new one");
+        assert_eq!(app.panes.focused_id(), moved[0], "focus followed it");
+
+        let _ = std::fs::remove_dir_all(ws);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Splitting with nothing open is a no-op.
+    ///
+    /// The new pane carries the active tab, so with no tab it would be an empty pane beside an
+    /// empty pane — a smaller editor and nothing else.
+    #[test]
+    fn splitting_with_no_file_open_does_nothing() {
+        let dir = redirect_layout_state("split-empty");
+        let mut app = app_in(Mode::Craft);
+        app.layout = sc_win::layout::Layout::craft_default();
+
+        let _ = app.update(Message::SplitEditor);
+
+        assert_eq!(app.panes.len(), 1, "no pane was created");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Keystrokes reach the pane that sent them, not whichever pane holds focus.
     ///
     /// THE correctness bug multi-pane introduces. `EditorEvent` used to route through
