@@ -1,0 +1,35 @@
+# Cargo configuration for this workspace.
+
+# **Statically link the C runtime on Windows**, so the desktop client is a single
+# file that runs on a stock Windows install.
+#
+# Without this, `sc-win.exe` imports `VCRUNTIME140.dll` and six `api-ms-win-crt-*`
+# stubs. Those come from the Visual C++ Redistributable, which is NOT part of
+# Windows — on a machine that has never had it, the app fails to start with a
+# missing-DLL dialog naming a file the user has never heard of. That is a failure
+# nobody can self-diagnose, which is what makes it worth 242 KB.
+#
+# Nothing in this project chose that dependency and nothing here can remove it by
+# rewriting code: the imports are `memcpy`/`memset`/`memcmp`/`memmove` (compiler
+# intrinsics — LLVM lowers array copies to these, so hand-writing the loop just
+# emits the call again) and the SEH unwinder that runs on `panic!`. A Rust
+# hello-world with zero dependencies imports the same set. Static linking does not
+# remove the code, it bundles it into the exe.
+#
+# What this costs, measured rather than assumed:
+#   * +242 KB (29.72 -> 29.96 MB).
+#   * CRT security fixes now arrive by rebuilding and re-shipping, instead of
+#     silently via Windows Update. The imports are the memory/unwind intrinsics
+#     rather than the parsing paths that historically carry CVEs, but the
+#     responsibility genuinely moves from Microsoft to this release pipeline.
+#   * NOT build time — 151s dynamic vs 153s static on a forced relink.
+#
+# The usual static-CRT hazard — allocating in one module and freeing in another
+# with a different heap — needs a DLL boundary to happen. `sc-win` is a `[[bin]]`
+# with no `LoadLibrary`, no `extern "C"` and no `no_mangle`, so it cannot arise.
+# (The workspace's one `cdylib` is `sc-android`, a different target entirely.)
+#
+# Scoped to the MSVC target on purpose: the tagged Linux release built by
+# `.woodpecker/release.yml` is unaffected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
