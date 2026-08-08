@@ -58,6 +58,32 @@ impl App {
                 }
             }
             Message::CancelClose => self.confirm_close = None,
+            Message::CloseRequested => {
+                // The one place unsaved work can leave the building without being asked about.
+                // Clean ⇒ quit straight away, so the guard costs nothing when there is nothing
+                // to guard.
+                if self.any_dirty() {
+                    self.confirm_quit = true;
+                } else {
+                    return Self::quit();
+                }
+            }
+            Message::SaveAllAndQuit => {
+                // Save every dirty buffer across EVERY pane, then leave — but only if they all
+                // landed. A save refused because the file changed on disk (`save_conflict`) must
+                // not be steamrolled by the quit it was blocking; the prompt stays up so the
+                // conflict can be answered.
+                for path in self.dirty_paths() {
+                    self.save_tab(&path, false);
+                }
+                if self.any_dirty() {
+                    self.confirm_quit = false; // let the conflict notice be seen and answered
+                } else {
+                    return Self::quit();
+                }
+            }
+            Message::DiscardAndQuit => return Self::quit(),
+            Message::CancelQuit => self.confirm_quit = false,
             Message::ChooseMode(craft) => {
                 use sc_win::config::Mode;
                 // Unreachable in a craft-only build — `mode_chosen()` is true there, so the
@@ -105,9 +131,9 @@ impl App {
             }
             Message::DeclineToChoose => {
                 // Closing the question is not an answer. Nothing is written, so the prompt
-                // returns on the next launch.
-                return iced::window::latest()
-                    .and_then(|id: iced::window::Id| iced::window::close(id));
+                // returns on the next launch. No dirty-buffer check: the question blocks boot,
+                // so there is nothing open yet to lose.
+                return Self::quit();
             }
             Message::ToggleCraftMode(on) => {
                 use sc_win::config::Mode;

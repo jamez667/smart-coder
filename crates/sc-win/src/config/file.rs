@@ -61,6 +61,22 @@ pub struct ConfigFields {
     pub coder_provider: Option<String>,
     pub planner_provider: Option<String>,
     pub advisor_provider: Option<String>,
+
+    // --- Endpoint-agnostic knobs (spec 21) ---
+    // These used to reset on every restart because `save_config` wrote only the connection
+    // fields. A setting the app forgets is one the user re-enters forever, so they are stored
+    // like everything else — each still `Option`, so absent means "keep the compiled default"
+    // rather than "false".
+    /// The verification command (`cargo test`, `npm test`, …).
+    pub verify_command: Option<String>,
+    /// Permission posture. **Absent means the default (`false`), never `true`** — a config file
+    /// that lost this key must not silently come back with permissions loosened.
+    pub yolo: Option<bool>,
+    /// Plan-only: run the pipeline without writing files.
+    pub dry_run: Option<bool>,
+    /// The Unity editor path override (Settings ▸ General). Blank ⇒ find it via the Hub
+    /// convention, which is the common case; this is for the machine where that fails.
+    pub unity_path: Option<String>,
 }
 
 /// Pull the connection fields out of the config JSON. Any key may be absent; a
@@ -92,6 +108,12 @@ pub(super) fn parse_config(text: &str) -> ConfigFields {
         coder_provider: field("coder_provider"),
         planner_provider: field("planner_provider"),
         advisor_provider: field("advisor_provider"),
+        verify_command: field("verify_command"),
+        unity_path: field("unity_path"),
+        // A NON-boolean value reads as absent rather than as `true`: a hand-edited
+        // `"yolo": "yes"` must fall back to the safe default, not enable it.
+        yolo: v.get("yolo").and_then(|x| x.as_bool()),
+        dry_run: v.get("dry_run").and_then(|x| x.as_bool()),
     }
 }
 
@@ -119,6 +141,17 @@ pub(super) fn serialize_config(f: &ConfigFields) -> String {
     put("coder_provider", &f.coder_provider);
     put("planner_provider", &f.planner_provider);
     put("advisor_provider", &f.advisor_provider);
+    put("verify_command", &f.verify_command);
+    put("unity_path", &f.unity_path);
+    // Written only when set, matching every other field: a `false` is the default, and writing
+    // it would turn "unset" into "explicitly off" in a file people hand-edit.
+    let mut put_bool = |k: &str, v: &Option<bool>| {
+        if let Some(b) = v {
+            obj.insert(k.to_string(), serde_json::Value::Bool(*b));
+        }
+    };
+    put_bool("yolo", &f.yolo);
+    put_bool("dry_run", &f.dry_run);
     serde_json::Value::Object(obj).to_string()
 }
 

@@ -804,6 +804,96 @@ impl App {
         )
     }
 
+    /// "You have unsaved changes" — shown instead of quitting (spec 21).
+    ///
+    /// **Lists the files by name.** "You have unsaved changes" alone makes the user guess what
+    /// they are about to lose, and with several panes open the dirty buffer is often not the one
+    /// on screen. Naming them is the difference between an informed answer and a coin flip.
+    ///
+    /// Cancel is the safe answer, as with the per-tab prompt: the backdrop cancels, so a stray
+    /// click keeps the work.
+    pub(crate) fn view_quit_confirm(&self) -> Option<Element<'_, Message>> {
+        if !self.confirm_quit {
+            return None;
+        }
+        let dirty = self.dirty_paths();
+        // Raced to clean (every buffer saved some other way) — nothing left to ask about.
+        if dirty.is_empty() {
+            return None;
+        }
+
+        let backdrop =
+            iced::widget::mouse_area(container(Space::new()).width(Fill).height(Fill).style(
+                |_t: &Theme| container::Style {
+                    background: Some(Background::Color(Color {
+                        a: 0.55,
+                        ..Color::BLACK
+                    })),
+                    ..container::Style::default()
+                },
+            ))
+            .on_press(Message::CancelQuit);
+
+        let heading = if dirty.len() == 1 {
+            "1 file has unsaved changes".to_string()
+        } else {
+            format!("{} files have unsaved changes", dirty.len())
+        };
+        // Full relative paths, not basenames: two panes often hold same-named files from
+        // different directories, and that is exactly when this list has to disambiguate.
+        // Capped so a big list can't push the buttons off-screen.
+        const MAX_SHOWN: usize = 8;
+        let mut files = column![].spacing(2);
+        for path in dirty.iter().take(MAX_SHOWN) {
+            files = files.push(text(format!("● {path}")).size(12).color(AMBER));
+        }
+        if dirty.len() > MAX_SHOWN {
+            files = files.push(
+                text(format!("… and {} more", dirty.len() - MAX_SHOWN))
+                    .size(12)
+                    .color(FG_MUTED),
+            );
+        }
+
+        let card = container(
+            column![
+                text(heading).size(15).color(FG),
+                files,
+                text("Quitting without saving discards them.")
+                    .size(12)
+                    .color(FG_MUTED),
+                row![
+                    button(text("Save all and quit").size(13))
+                        .on_press(Message::SaveAllAndQuit)
+                        .padding([5, 14])
+                        .style(primary_button),
+                    button(text("Discard and quit").size(13))
+                        .on_press(Message::DiscardAndQuit)
+                        .padding([5, 14])
+                        .style(menu_item_style),
+                    Space::new().width(Fill),
+                    button(text("Cancel").size(13))
+                        .on_press(Message::CancelQuit)
+                        .padding([5, 14])
+                        .style(menu_item_style),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(12),
+        )
+        .width(Length::Fixed(460.0))
+        .padding(18)
+        .style(dropdown_style);
+
+        Some(
+            iced::widget::stack![backdrop, iced::widget::center(iced::widget::opaque(card))]
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        )
+    }
+
     /// "This tab has unsaved changes" — shown instead of closing (spec 21).
     ///
     /// Three answers, and **Cancel is the safe one**: the backdrop and the ✕ both cancel, so a

@@ -9,7 +9,7 @@
 use sc_win::editbuf::{self, SaveVerdict};
 use sc_win::layout::{EditorId, PanelKind, Side};
 
-use super::{App, DragSubject, TabView};
+use super::{App, DragSubject, Message, TabView};
 
 impl App {
     /// Save the active tab, if it has unsaved edits.
@@ -29,7 +29,17 @@ impl App {
         let root = self.workspace_root();
         let abs = root.join(rel);
 
-        let Some(tab) = self.panes.focused().tabs.iter().find(|t| t.path == rel) else {
+        // The pane holding this path, which is NOT necessarily the focused one — `save_all` walks
+        // every pane, and the agent can write a file open in a background pane. A path lives in
+        // exactly one pane (see `select_file_into`), so this is unambiguous.
+        let Some(owner) = self.panes.pane_holding(rel) else {
+            return;
+        };
+        let Some(tab) = self
+            .panes
+            .get(owner)
+            .and_then(|p| p.tabs.iter().find(|t| t.path == rel))
+        else {
             return;
         };
         if !tab.dirty {
@@ -103,10 +113,8 @@ impl App {
         let stamp = editbuf::DiskStamp::read(&abs).unwrap_or_default();
         if let Some(tab) = self
             .panes
-            .focused_mut()
-            .tabs
-            .iter_mut()
-            .find(|t| t.path == rel)
+            .get_mut(owner)
+            .and_then(|p| p.tabs.iter_mut().find(|t| t.path == rel))
         {
             tab.opened = stamp;
             tab.dirty = false;
@@ -114,12 +122,43 @@ impl App {
         self.save_conflict = None;
 
         // The file just changed: refresh the review view and the git diff so the green/red
-        // gutter reflects what is now on disk.
-        if self.panes.focused().selected_file.as_deref() == Some(rel) {
-            self.panes.focused_mut().code = Some(sc_win::codeview::load(&root, rel));
+        // gutter reflects what is now on disk. In the OWNING pane — refreshing the focused one
+        // would rebuild the wrong pane's view when saving a background buffer.
+        if self
+            .panes
+            .get(owner)
+            .is_some_and(|p| p.selected_file.as_deref() == Some(rel))
+        {
+            if let Some(p) = self.panes.get_mut(owner) {
+                p.code = Some(sc_win::codeview::load(&root, rel));
+            }
         }
         self.refresh_changed_lines();
         self.refresh_git_view();
+    }
+
+    /// Every path with unsaved edits, across every pane, in tree-stable order.
+    ///
+    /// The quit prompt both lists these and saves them, and it must name the same files it would
+    /// write — so one function answers both rather than two scans that could disagree.
+    pub(crate) fn dirty_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .panes
+            .iter()
+            .flat_map(|(_, p)| p.tabs.iter())
+            .filter(|t| t.dirty)
+            .map(|t| t.path.clone())
+            .collect();
+        // `Panes` is a BTreeMap so pane order is already stable; sorting the paths within it
+        // makes the listed order stable too, which matters for a dialog you read.
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Close the window. The single exit point, so quitting always goes through one path.
+    pub(crate) fn quit() -> iced::Task<Message> {
+        iced::window::latest().and_then(|id: iced::window::Id| iced::window::close(id))
     }
 
     /// Whether any open tab has unsaved edits — for the quit prompt.

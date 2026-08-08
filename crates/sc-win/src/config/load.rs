@@ -76,6 +76,18 @@ impl UiConfig {
                 .or_else(|| env("GEMINI_API_KEY"))
                 .or(file.orchestrator_key),
         );
+        // The endpoint-agnostic knobs (spec 21). File-only — none has ever had an env override,
+        // and inventing one here would be scope this change doesn't need. Absent leaves the
+        // compiled default in place, which for the two flags means OFF: a config that lost its
+        // `yolo` key must not come back with permissions loosened.
+        set_opt(&mut cfg.verify_command, file.verify_command);
+        set_opt(&mut cfg.unity_path, file.unity_path);
+        if let Some(v) = file.yolo {
+            cfg.yolo = v;
+        }
+        if let Some(v) = file.dry_run {
+            cfg.dry_run = v;
+        }
         // The sandbox image and on/off are env-overridable too, so a machine can point the
         // terminal/agent at a project-appropriate image (e.g. a rust image) without editing
         // config.json. `SC_USE_DOCKER=0/false` forces host mode.
@@ -179,8 +191,10 @@ impl UiConfig {
     /// Gemini-planner setup entered in the settings panel survive a restart: previously the file
     /// was read-only (hand-edited) so nothing the UI changed was ever written back.
     ///
-    /// Only the connection fields are stored; the endpoint-agnostic knobs (verify command,
-    /// posture flags) live elsewhere. env vars still override on the next `load()`.
+    /// Stores the connection/routing shape AND the endpoint-agnostic knobs — the verify command,
+    /// the posture flags, the Unity path. Those last four used to reset on every restart, which
+    /// spec 21 called out: a setting the app forgets is one the user re-enters forever. env vars
+    /// still override on the next `load()`.
     pub fn save_config(&self) {
         let fields = ConfigFields {
             // How the app works (spec 21). This MUST be persisted: an unsaved mode would reset
@@ -212,6 +226,13 @@ impl UiConfig {
             orchestrator_url: self.orchestrator_url.clone(),
             orchestrator_model: self.orchestrator_model.clone(),
             orchestrator_key: self.orchestrator_key.clone(),
+            // The endpoint-agnostic knobs. Each written only when it differs from the compiled
+            // default, so the file stays small and an unset key keeps meaning "use the default"
+            // rather than freezing today's default into every user's config.
+            verify_command: self.verify_command.clone(),
+            unity_path: self.unity_path.clone(),
+            yolo: self.yolo.then_some(true),
+            dry_run: self.dry_run.then_some(true),
         };
         let path = config_file();
         if let Some(dir) = path.parent() {

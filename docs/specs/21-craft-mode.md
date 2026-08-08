@@ -126,11 +126,32 @@ The tri-state matters:
 | `"assistant"` | chosen | Assistant mode, no modal |
 | garbage | corrupt | treat as absent — ask again, never guess |
 
-**`save_config` must be extended.** Today it writes only connection/routing
+**`save_config` was extended.** It previously wrote only connection/routing
 fields ([`config/load.rs`](../../crates/sc-win/src/config/load.rs)), which is why
 `yolo`, `dry_run` and `verify_command` silently reset on restart. Mode joining
-that set of unpersisted flags would be a bug the user experiences as the app
-ignoring them — the worst possible first impression for this feature.
+that set of unpersisted flags would have been a bug the user experiences as the
+app ignoring them — the worst possible first impression for this feature. All
+four now persist, along with the Unity editor path.
+
+Two rules govern the flags, because `yolo` disables permission prompts:
+
+- **Absent means the compiled default, never `true`.** A config file that lost
+  the key must not come back with permissions loosened, and a non-boolean value
+  (a hand-edited `"yolo": "yes"`) falls back rather than being read generously.
+- **An unset flag is not written at all**, so "unset" never silently becomes
+  "explicitly off" in a file people hand-edit.
+
+The commit point is `commit_settings`, which runs on settings-*close* as well as
+before a run. That distinction is load-bearing: the pre-run path never fires in
+Craft mode, so anything committed only there would never persist for exactly the
+users who have no model — including the Unity path, which is a Craft-mode
+setting.
+
+Unlike `mode` and the connection fields, these four are read from the **file
+only**. None has ever had an env override and this change does not invent one, so
+their precedence is file > compiled default. (`SC_UNITY_EDITOR` is a separate
+`sc-iterate` fallback consulted when no path is configured there — not an
+override of the path saved here.)
 
 `SC_MODE=craft|assistant` overrides for testing and locked-down deployments,
 following the existing env-var precedence — **except in a `craft-only` build**,
@@ -309,6 +330,25 @@ Promote to a per-tab struct owning:
 Tab strip shows a dirty marker. Closing a dirty tab prompts; closing the window
 with dirty tabs prompts once, listing them.
 
+**The window-close prompt needs two halves and is useless with one.**
+`exit_on_close_request(false)` makes iced hand over the request instead of
+obeying it, and a `CloseRequested` subscription arm turns it into a message; with
+the flag alone the window becomes unclosable, and with the arm alone the close
+still happens. The title-bar ● is a *warning*, not a guard — it was for a while
+mistaken for one, on the belief that an OS close could not be intercepted.
+
+The prompt **names the files**, in full relative paths rather than basenames. "You
+have unsaved changes" alone makes the user guess what they are about to lose, and
+with several panes open the dirty buffer is frequently not the one on screen —
+which is also when two same-named files from different directories need telling
+apart. Save-all writes every dirty buffer in every pane, and **a refused save
+cancels the quit**: a save-conflict must not be steamrolled by the quit it was
+blocking.
+
+This is also why `save_tab` addresses the pane that *holds* the path rather than
+the focused one. Saving a background pane's buffer was previously a silent no-op,
+which the save-all path made reachable.
+
 **A tab is also the handle you drag it by, so neither its label nor its ✕ may be
 a `button`.** A button calls `shell.capture_event()` on press, and `mouse_area`
 skips its own handler once a child has captured — so a button anywhere inside a
@@ -381,7 +421,8 @@ stutters, not one that accumulates features.
 Core, required for the mode to be worth shipping:
 
 - Type, with caret, selection, and the standard keyboard conventions.
-- Save (`Ctrl+S`) and save-all (`Ctrl+Shift+S`); dirty state visible.
+- Save (`Ctrl+S`); dirty state visible. (Save-all and `Ctrl+G` go-to-line were
+  in this list and are deferred — see "What shipped, and what did not".)
 - Multi-tab editing with per-tab cursor and scroll retained across switches.
 - Undo/redo per buffer.
 - Find and replace within the file (`Ctrl+F` / `Ctrl+H`), with match count.
@@ -404,8 +445,9 @@ the two views stay separate.
 **What shipped, and what did not.** Typing, `Ctrl+S`, per-tab cursor and scroll,
 dirty markers, the close/quit prompts and the conflict refusal are all in, as are
 undo/redo and find/replace — the latter two from the widget rather than from
-`sc-win`. **Deferred rather than required:** save-all, go-to-line, and
-new-file/save-as from the tree. Files reach the editor through the file tree, the
+`sc-win`. Save-all exists only as the quit prompt's *Save all and quit*; there is
+no `Ctrl+Shift+S`. **Deferred rather than required:** a save-all binding,
+go-to-line, and new-file/save-as from the tree. Files reach the editor through the file tree, the
 git panel, or a click on a compile diagnostic.
 
 ## Part 4 — Modular panels
@@ -601,9 +643,11 @@ Shipping the toggle first produces a mode whose entire promise is "you can just
 code" over an app that cannot edit a file. That is worse than not shipping it.
 
 1. **Editor.** Per-tab state; the three data-loss fixes (truncation, encoding,
-   line endings) and the save-conflict guard; edit/review split; typing, save,
-   find/replace, go-to-line, undo. Lands in Assistant mode, useful immediately,
-   independent of any mode work.
+   line endings), the save-conflict guard and the close/quit prompts;
+   edit/review split; typing, save, find/replace, undo. Lands in Assistant mode,
+   useful immediately, independent of any mode work. (Go-to-line was in this
+   list and is **deferred** — see "What shipped, and what did not" above, which
+   is the later decision.)
 2. **Panels.** The layout tree, uniform panel signatures, per-node drag, real
    bounds. Also useful on its own; also mode-independent.
 3. **Mode.** The enum, persistence with the tri-state, the first-run modal, the
@@ -679,6 +723,10 @@ reason, never fail silently.
   `ProjectVersion.txt`; the install path is machine-local (Hub installs sit under
   a well-known root, but not reliably). Look it up, allow an override in
   Settings, and if it can't be found say so with the version that was wanted.
+  The override **persists** (see Part 1 → Persistence) — a path the user retypes
+  every launch is not really an override. A compile reads the path currently
+  *typed*, so a correction takes effect without closing the panel; committing is
+  what makes it survive a restart.
 - **The build is a real subprocess** and must go through `proc::command` so it
   doesn't flash a console window on Windows — the existing rule for every spawn
   in this client.

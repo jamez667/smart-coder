@@ -36,6 +36,9 @@ impl App {
         }
         let root = self.workspace_root();
         let kind = self.project_kind;
+        // The LIVE input, not `cfg.unity_path`: a compile should use what is typed right now,
+        // even before the settings panel closes and commits. `commit_settings` is what makes the
+        // same value survive a restart.
         let unity_override = self.unity_path_input.clone();
 
         // Resolve the command BEFORE showing a spinner: "Unity 2022.3.10f1 was not found" is an

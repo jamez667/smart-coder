@@ -149,6 +149,13 @@ pub struct UiConfig {
     /// leave it `None`.
     pub orchestrator_key: Option<String>,
 
+    /// The Unity editor path override (Settings ▸ General). Blank/`None` ⇒ find it via the Hub
+    /// convention, which works on most machines; this is for the one where it doesn't.
+    ///
+    /// On `UiConfig` rather than on `App` so it persists through the same path as every other
+    /// setting — it was previously session-only, so the user retyped it on every launch.
+    pub unity_path: Option<String>,
+
     // --- Verification + planning ---
     pub verify_command: Option<String>,
     pub plan_first: bool,
@@ -231,6 +238,8 @@ impl Default for UiConfig {
             // the frozen tests. Default to pytest (the live boxes are Python); editable
             // in settings. Without it the build stops at "plan + tests written".
             verify_command: Some("python -m pytest -q".to_string()),
+            // Find Unity via the Hub convention unless the user names a path.
+            unity_path: None,
             plan_first: false,
             // No system suffix. The historical `/no_think` was for early Qwen3 reasoning
             // models that burned the budget on a `<think>` block; the current coder model

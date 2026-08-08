@@ -188,15 +188,15 @@ pub fn run() -> iced::Result {
             // arriving through a side door. Say why rather than failing silently — someone who
             // set SC_REMOTE deliberately deserves to know it was ignored.
             if std::env::var("SC_REMOTE").is_ok() {
-                if app.cfg.craft() {
+                if app.should_start_mirror() {
+                    app.remote = Some(start_mirror());
+                    // Publish the initially-open project so the phone shows it on first connect.
+                    app.publish_workspace_to_remote();
+                } else {
                     eprintln!(
                         "SC_REMOTE ignored: the remote mirror is an agent surface, and this \
                          install is in Craft mode (Settings ▸ General)."
                     );
-                } else {
-                    app.remote = Some(start_mirror());
-                    // Publish the initially-open project so the phone shows it on first connect.
-                    app.publish_workspace_to_remote();
                 }
             }
             (app, Task::none())
@@ -207,6 +207,10 @@ pub fn run() -> iced::Result {
     .title(App::title)
     .subscription(App::subscription)
     .theme(App::theme)
+    // Hand us the close request instead of acting on it, so unsaved buffers can be defended
+    // (spec 21). The other half is the `CloseRequested` arm in `subscription()`; with this false
+    // and no handler, the window would become unclosable.
+    .exit_on_close_request(false)
     .window(iced::window::Settings {
         // The taskbar/title-bar icon of the RUNNING window is set here at runtime — the
         // exe's embedded icon only governs how Explorer shows the file, not the live window.
@@ -346,6 +350,29 @@ mod tests {
         app.start(RunKind::Agent);
 
         assert!(app.session.is_none(), "no run may be spawned");
+    }
+
+    /// The fourth leg of the zero-construction contract: remote attach.
+    ///
+    /// `SC_REMOTE` starts a server that carries agent output to a phone and accepts chat and
+    /// approvals back — a model surface arriving through a side door, and the one leg the spec
+    /// names that had no test. Asserted through the predicate rather than `run()`, which would
+    /// bind a real socket.
+    ///
+    /// Ordinary build only: it asserts the Assistant side too, and a craft-only build has no
+    /// Assistant mode to compare against.
+    #[cfg(not(feature = "craft-only"))]
+    #[test]
+    fn craft_mode_refuses_the_remote_mirror() {
+        assert!(
+            !app_in(Mode::Craft).should_start_mirror(),
+            "the mirror is an agent surface, so Craft mode must refuse it"
+        );
+        // The complement, so this can't pass by never starting the mirror in any mode.
+        assert!(
+            app_in(Mode::Assistant).should_start_mirror(),
+            "Assistant mode still attaches"
+        );
     }
 
     /// A line comment still SAVES in Craft mode; only the auto-fix stops.
@@ -932,6 +959,121 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Closing the window with a clean tree just quits — the guard is invisible when unneeded.
+    #[test]
+    fn closing_a_clean_window_does_not_prompt() {
+        let (mut app, ws) = app_with_file("clean.rs", "fn clean() {}\n");
+        app.select_file("clean.rs".to_string());
+        assert!(!app.any_dirty());
+
+        let _ = app.update(Message::CloseRequested);
+
+        assert!(!app.confirm_quit, "nothing to defend, so nothing to ask");
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    /// **The data-loss guard.** Closing the window with unsaved edits asks instead of quitting.
+    ///
+    /// Before this existed there was no window-close path at all: the ✕ discarded every dirty
+    /// buffer silently, which is exactly the loss the editor's save rules exist to prevent. The
+    /// title-bar ● was a *warning*, not a guard.
+    #[test]
+    fn closing_a_dirty_window_prompts_and_lists_every_dirty_file() {
+        use sc_win::layout::EditorId;
+        let (mut app, ws) = app_with_file("a.rs", "fn a() {}\n");
+        std::fs::write(ws.join("b.rs"), "fn b() {}\n").unwrap();
+        app.select_file("a.rs".to_string());
+
+        // A dirty buffer in a BACKGROUND pane — the case a focused-only scan would lose.
+        let second = app.panes.insert();
+        app.select_file_into("b.rs".to_string(), Origin::Tree, second);
+        if let Some(t) = app.panes.get_mut(second).and_then(|p| p.active_tab_mut()) {
+            t.dirty = true;
+        }
+        app.panes.focus(EditorId::FIRST);
+
+        let _ = app.update(Message::CloseRequested);
+
+        assert!(app.confirm_quit, "the close was intercepted, not obeyed");
+        assert_eq!(
+            app.dirty_paths(),
+            vec!["b.rs".to_string()],
+            "the prompt names the file you would lose, wherever it is open"
+        );
+        assert!(
+            app.view_quit_confirm().is_some(),
+            "and the prompt actually renders"
+        );
+
+        // Cancel keeps everything.
+        let _ = app.update(Message::CancelQuit);
+        assert!(!app.confirm_quit);
+        assert!(app.any_dirty(), "the edits survived the cancelled quit");
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    /// A save refused mid-quit keeps the app open rather than quitting anyway.
+    ///
+    /// `SaveAllAndQuit` must not become a way to bypass the save-conflict guard: if the file
+    /// changed on disk under a dirty buffer, the save is refused, and quitting regardless would
+    /// discard the very work the refusal was protecting.
+    #[test]
+    fn a_refused_save_cancels_the_quit_rather_than_losing_the_buffer() {
+        let (mut app, ws) = app_with_file("c.rs", "fn c() {}\n");
+        app.select_file("c.rs".to_string());
+        // Someone else wrote the file after we opened it, so the stamp no longer matches disk.
+        std::fs::write(ws.join("c.rs"), "fn c() { /* theirs, and longer */ }\n").unwrap();
+        if let Some(t) = app.panes.focused_mut().active_tab_mut() {
+            t.dirty = true;
+        }
+
+        let _ = app.update(Message::CloseRequested);
+        assert!(app.confirm_quit);
+        let _ = app.update(Message::SaveAllAndQuit);
+
+        assert!(
+            app.any_dirty(),
+            "the refused save left the buffer dirty, so the app must still be open"
+        );
+        assert!(
+            !app.confirm_quit,
+            "and the prompt stood down so the conflict notice can be seen and answered"
+        );
+
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    /// Save-all writes every dirty buffer, then quits.
+    #[test]
+    fn save_all_and_quit_writes_every_pane() {
+        let (mut app, ws) = app_with_file("d.rs", "fn d() {}\n");
+        std::fs::write(ws.join("e.rs"), "fn e() {}\n").unwrap();
+        use sc_win::layout::EditorId;
+        app.select_file("d.rs".to_string());
+        let second = app.panes.insert();
+        app.select_file_into("e.rs".to_string(), Origin::Tree, second);
+        // Dirty both, in different panes. `select_file_into` focuses the destination, so name
+        // the panes explicitly rather than reading `focused_id` — which is now `second`.
+        for id in [EditorId::FIRST, second] {
+            if let Some(t) = app.panes.get_mut(id).and_then(|p| p.active_tab_mut()) {
+                t.dirty = true;
+            }
+        }
+        assert_eq!(app.dirty_paths().len(), 2);
+
+        let _ = app.update(Message::CloseRequested);
+        let _ = app.update(Message::SaveAllAndQuit);
+
+        assert!(
+            !app.any_dirty(),
+            "every dirty buffer across every pane was written"
+        );
+
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     /// Unsaved work in a BACKGROUND pane still blocks quit.

@@ -135,6 +135,54 @@ fn an_ordinary_build_still_switches_modes() {
     assert!(cfg.craft());
 }
 
+/// The endpoint-agnostic knobs survive a restart (spec 21).
+///
+/// These silently reset on every launch until now, because `save_config` wrote only the
+/// connection fields. A setting the app forgets is one the user re-enters forever.
+#[test]
+fn the_endpoint_agnostic_knobs_round_trip() {
+    let json = serialize_config(&ConfigFields {
+        verify_command: Some("cargo test".to_string()),
+        unity_path: Some(r"C:\Unity\2022.3.10f1\Editor\Unity.exe".to_string()),
+        yolo: Some(true),
+        dry_run: Some(true),
+        ..ConfigFields::default()
+    });
+    let back = parse_config(&json);
+    assert_eq!(back.verify_command.as_deref(), Some("cargo test"));
+    assert_eq!(
+        back.unity_path.as_deref(),
+        Some(r"C:\Unity\2022.3.10f1\Editor\Unity.exe")
+    );
+    assert_eq!(back.yolo, Some(true));
+    assert_eq!(back.dry_run, Some(true));
+}
+
+/// **A lost or malformed posture flag must never read as `true`.**
+///
+/// `yolo` disables permission prompts. Absent has to mean the safe default, and a hand-edited
+/// `"yolo": "yes"` has to fall back rather than being coerced to on — this is the one field where
+/// guessing generously is a security decision made on the user's behalf.
+#[test]
+fn an_absent_or_malformed_posture_flag_is_off_not_on() {
+    assert_eq!(parse_config("{}").yolo, None, "absent stays absent");
+    assert_eq!(
+        parse_config(r#"{"yolo":"yes","dry_run":1}"#).yolo,
+        None,
+        "a non-boolean is not a yes"
+    );
+    assert_eq!(parse_config(r#"{"dry_run":1}"#).dry_run, None);
+
+    // And absent leaves the compiled default in place, which is off.
+    let cfg = UiConfig::default();
+    assert!(!cfg.yolo && !cfg.dry_run);
+
+    // An unset flag is not written at all, so "unset" never becomes "explicitly off".
+    let json = serialize_config(&ConfigFields::default());
+    assert!(!json.contains("yolo"), "{json}");
+    assert!(!json.contains("dry_run"), "{json}");
+}
+
 #[test]
 fn a_corrupt_mode_asks_again_rather_than_guessing() {
     // Guessing here is the one failure this feature cannot afford: silently resolving garbage to

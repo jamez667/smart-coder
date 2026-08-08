@@ -56,6 +56,11 @@ impl App {
         if let Some(prompt) = self.view_close_confirm() {
             layers = layers.push(prompt);
         }
+        // Over the per-tab prompt: quitting discards everything, so if both are somehow open the
+        // more consequential question is the one to answer.
+        if let Some(prompt) = self.view_quit_confirm() {
+            layers = layers.push(prompt);
+        }
         // LAST, so nothing renders over it: until a mode is chosen, the app is not usable and
         // no other overlay should be reachable (spec 21).
         if let Some(prompt) = self.view_first_run() {

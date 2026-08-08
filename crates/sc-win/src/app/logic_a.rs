@@ -5,8 +5,9 @@ use super::*;
 impl App {
     pub(crate) fn title(&self) -> String {
         // A leading ● when any tab has unsaved edits — the convention every editor uses, and
-        // the one signal visible when the window isn't focused. Closing the window is an OS
-        // action we can't intercept, so this is what warns before it happens.
+        // the one signal visible when the window isn't focused. It warns *before* a close is
+        // attempted; the close itself is intercepted (`Message::CloseRequested`), which this
+        // comment used to claim was impossible.
         if self.any_dirty() {
             "● smart-coder — vibe coding".to_string()
         } else {
@@ -105,6 +106,12 @@ impl App {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                 ..
             }) => Some(Message::EscapePressed),
+            // The ✕, Alt+F4, or a taskbar close. Paired with `exit_on_close_request(false)` in
+            // `run()`: iced hands us the request instead of obeying it, so unsaved buffers get
+            // a prompt rather than being discarded. Without BOTH halves the window just closes.
+            iced::Event::Window(iced::window::Event::CloseRequested) => {
+                Some(Message::CloseRequested)
+            }
             _ => None,
         });
         Subscription::batch([tick, sync, cursor, health])
@@ -140,6 +147,10 @@ impl App {
         self.cfg.advisor_model = non_empty(&self.advisor_input);
         self.cfg.verify_command = non_empty(&self.verify_input);
         self.cfg.system_suffix = non_empty(&self.suffix_input);
+        // The Unity editor path. Committed here like every other settings input — and note this
+        // function runs on settings-CLOSE as well as before a run, which is what makes it work in
+        // Craft mode, where nothing ever talks to a model and the pre-run path never fires.
+        self.cfg.unity_path = non_empty(&self.unity_path_input);
         // Connections (endpoint + key each). The per-stage provider routing is already live on
         // `cfg` (edited by the toggle handlers). A blank local url keeps the current one rather
         // than wiping the endpoint.
@@ -329,6 +340,16 @@ impl App {
         // Greet: show the README/roadmap in Activity, and open the planning conversation.
         self.show_welcome();
         self.open_conversation();
+    }
+
+    /// Whether the remote mirror may start (spec 21).
+    ///
+    /// A predicate rather than an inline check in `run()`, so the zero-construction contract can
+    /// be *tested*: the mirror is an agent surface — it carries agent output to a phone and takes
+    /// chat and approvals back — so starting it in Craft mode would be a model arriving through a
+    /// side door. Calling `run()` in a test would bind a real socket; this cannot.
+    pub(crate) fn should_start_mirror(&self) -> bool {
+        !self.cfg.craft()
     }
 
     /// Push the current workspace name + recents list to the remote mirror, so the phone's

@@ -211,6 +211,13 @@ pub(crate) struct App {
     /// The tab a close was attempted on while it had unsaved edits — the confirm prompt's
     /// subject. `None` = no prompt showing.
     pub(crate) confirm_close: Option<String>,
+    /// The window close the user asked for while unsaved work was open, held until they answer.
+    ///
+    /// Separate from [`Self::confirm_close`] because the two prompts have different subjects: one
+    /// tab versus *everything* dirty across every pane. Quitting is also the more dangerous of
+    /// the two — it discards all of it at once — so it is worth its own state rather than a flag
+    /// squeezed into the per-tab path.
+    pub(crate) confirm_quit: bool,
     /// A save that was REFUSED because the file changed on disk under a dirty buffer. Holds the
     /// path, so the conflict can be explained where the user is looking rather than failing
     /// silently or clobbering someone's work.
@@ -400,6 +407,9 @@ impl Default for App {
         // machine-local endpoint/model (config.json / env) over the neutral default,
         // so the specific backend this box uses never lives in the repo.
         let cfg = UiConfig::load();
+        // Read before `cfg` is moved into the struct below. The Unity path is a persisted setting
+        // now, so the input box has to come back filled or the user retypes it every launch.
+        let unity_path_seed = cfg.unity_path.clone().unwrap_or_default();
         // Restore saved divider positions (one id-keyed store), so each split comes back where the
         // user left it. Defaults match the historical hardcoded fractions.
         let splits = sc_win::splits::SplitStore::load();
@@ -474,8 +484,9 @@ impl Default for App {
             compile_report: None,
             compiling: false,
             compile_cancel: None,
-            unity_path_input: String::new(),
+            unity_path_input: unity_path_seed,
             confirm_close: None,
+            confirm_quit: false,
             save_conflict: None,
             follow_agent: true,
             open_menu: None,
@@ -596,6 +607,17 @@ pub(crate) enum Message {
     SaveAndClose(String),
     /// Cancel a pending close, keeping the tab and its edits.
     CancelClose,
+    /// The window manager asked to close the window (the ✕, Alt+F4, taskbar close).
+    ///
+    /// Intercepted rather than obeyed: with unsaved buffers this opens the quit prompt instead.
+    /// Clean ⇒ quits immediately, so the guard is invisible unless it is needed.
+    CloseRequested,
+    /// Save every dirty buffer in every pane, then quit.
+    SaveAllAndQuit,
+    /// Quit, discarding every unsaved buffer. The explicit answer, never automatic.
+    DiscardAndQuit,
+    /// Dismiss the quit prompt and stay open.
+    CancelQuit,
     /// Switch between Craft (no model) and Assistant (spec 21). `true` ⇒ Craft.
     ///
     /// Takes effect immediately and persists: entering Craft cancels any in-flight run, because
