@@ -14,6 +14,7 @@ pub mod board;
 pub mod bridge;
 pub mod chat;
 pub mod chat_session;
+pub mod claudecode;
 pub mod codeview;
 pub mod comments;
 pub mod comply;

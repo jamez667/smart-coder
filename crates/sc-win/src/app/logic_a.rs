@@ -187,7 +187,17 @@ impl App {
 
         // Preflight: don't launch a run against a known-bad backend — surface the reason in the
         // activity stream instead of failing several turns in.
-        if let Some(reason) = self.backend_unready_reason() {
+        //
+        // EXEMPT for Claude Code (spec 22): that run kind never touches our backend, so an
+        // unreachable local endpoint says nothing about whether it can work. Blocking on it
+        // would make the one run kind that needs no local model the one a missing local model
+        // prevents.
+        let preflight = if matches!(kind, RunKind::ClaudeCode) {
+            None
+        } else {
+            self.backend_unready_reason()
+        };
+        if let Some(reason) = preflight {
             self.rows.push(Row::ok(
                 "⚠",
                 format!("{reason} — check the backend badge (top bar)"),
@@ -216,6 +226,7 @@ impl App {
         self.follow_agent = true;
         // Track this run's mode + which files it edits (for the honest iterate banner).
         self.iterating = matches!(kind, RunKind::Iterate | RunKind::StagedBuild);
+        self.claude_run = matches!(kind, RunKind::ClaudeCode);
         self.planning_only = matches!(kind, RunKind::Plan);
         self.edited_files.clear();
         // Jump to the Verification tab so the run's checks are visible as it works.
@@ -340,6 +351,22 @@ impl App {
         // Greet: show the README/roadmap in Activity, and open the planning conversation.
         self.show_welcome();
         self.open_conversation();
+    }
+
+    /// Whether the Claude Code run kind may be offered (spec 22).
+    ///
+    /// Two independent conditions, and both are refusals rather than degradations:
+    ///
+    /// * **Craft mode contacts no model**, and Claude Code is unambiguously a model surface —
+    ///   the same reasoning that refuses the remote mirror. Goes through `cfg.craft()`, the one
+    ///   predicate every model surface consults, so the `craft-only` build gets this free.
+    /// * **The CLI may not be installed.** A menu item that always fails is worse than no menu
+    ///   item, so absence hides it rather than offering a dead control.
+    ///
+    /// There is no per-`RunKind` predicate to reuse here: every other kind needs a model, so
+    /// the question has never been asked before. This is the first one that must be gated.
+    pub(crate) fn claude_code_available(&self) -> bool {
+        !self.cfg.craft() && self.claude_available
     }
 
     /// Whether the remote mirror may start (spec 21).

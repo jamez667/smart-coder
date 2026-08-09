@@ -247,6 +247,14 @@ impl App {
             // instead of the bare single-agent iterate loop. The line-comment small-fix path
             // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
             Message::RunIterate => self.start(RunKind::StagedBuild),
+            Message::RunClaudeCode => {
+                self.open_menu = None;
+                // Guarded even though the menu item is hidden when unavailable: a queued Task
+                // or a stale message can arrive after a mode switch or a failed detection.
+                if self.claude_code_available() {
+                    self.start(RunKind::ClaudeCode);
+                }
+            }
             Message::Tick => {
                 self.pump();
                 // Drive the live code-view refresh OFF the UI thread (returns Task::none unless a

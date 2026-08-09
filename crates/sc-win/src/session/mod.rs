@@ -28,6 +28,7 @@ use crate::bridge::Pending;
 use crate::config::UiConfig;
 
 mod agent;
+mod claude;
 mod staged;
 mod swarm;
 mod tdd;
@@ -94,6 +95,14 @@ pub enum RunKind {
     /// then hand its foundational chunk to the compiler-driven executor, which applies it and
     /// loops cargo-check→fix-each-diagnostic until green. The daily-driver for a real change.
     StagedBuild,
+    /// Hand the task to **Claude Code**, the external agent CLI (spec 22).
+    ///
+    /// The odd one out, deliberately: every other kind runs *this* harness's loop over a
+    /// `ModelBackend`. This one runs somebody else's agent and translates its event stream, so
+    /// nothing here decodes a tool call or manages context. A **peer** surface, never a tier —
+    /// no phase delegates to it and nothing escalates into it, which is what keeps the
+    /// small-model thesis in spec 00 testable. Refused in Craft mode.
+    ClaudeCode,
 }
 
 /// A live run. Holds the receiving ends the UI drains; the worker thread owns the
@@ -132,6 +141,9 @@ impl Session {
             RunKind::StagedBuild => {
                 staged::run_staged_build(cfg, task, workspace, ev_tx, pending_tx, cancel_worker)
             }
+            RunKind::ClaudeCode => {
+                claude::run_claude_code(cfg, task, workspace, ev_tx, pending_tx, cancel_worker)
+            }
         });
 
         Self {
@@ -142,7 +154,11 @@ impl Session {
         }
     }
 
-    /// Request cancellation: the agent loop stops at its next turn boundary. Idempotent.
+    /// Request cancellation. Idempotent.
+    ///
+    /// What that means depends on the run kind: an agent loop stops at its next turn boundary,
+    /// while [`RunKind::ClaudeCode`] **kills its child process**, because a subprocess has no
+    /// turn boundary at which to notice a cooperative flag.
     pub fn cancel(&self) {
         self.cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);

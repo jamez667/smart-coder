@@ -169,6 +169,10 @@ pub fn run() -> iced::Result {
             app.refresh_project_kind();
             // The restored layout is the authority on how many panes the user had.
             app.sync_panes_to_layout();
+            // Probe for the `claude` CLI ONCE (spec 22). Spawning a process per menu rebuild
+            // would be absurd, and the answer cannot change without the user installing
+            // something — which is a restart-shaped event anyway.
+            app.claude_available = sc_win::claudecode::detect();
             // Boot is deferred while the first-run question is open (spec 21): opening a
             // conversation is Assistant-shaped, and doing it before the user has said which mode
             // they want would mean undoing it the moment they answer "Just code".
@@ -350,6 +354,76 @@ mod tests {
         app.start(RunKind::Agent);
 
         assert!(app.session.is_none(), "no run may be spawned");
+    }
+
+    /// Craft mode refuses Claude Code (spec 22) — it is a model surface like any other.
+    ///
+    /// Two independent conditions, tested apart so a pass can't come from the wrong one: the
+    /// mode refuses it even with the CLI installed, and a missing CLI hides it even in
+    /// Assistant mode.
+    #[cfg(not(feature = "craft-only"))]
+    #[test]
+    fn craft_mode_refuses_claude_code_and_so_does_a_missing_cli() {
+        let mut craft = app_in(Mode::Craft);
+        craft.claude_available = true; // installed, and still refused
+        assert!(
+            !craft.claude_code_available(),
+            "Craft mode contacts no model, and Claude Code is a model surface"
+        );
+
+        let mut assistant = app_in(Mode::Assistant);
+        assistant.claude_available = false;
+        assert!(
+            !assistant.claude_code_available(),
+            "a menu item that always fails is worse than no menu item"
+        );
+
+        // The complement, so this cannot pass by never offering it at all.
+        assistant.claude_available = true;
+        assert!(assistant.claude_code_available());
+    }
+
+    /// A Claude Code run says approvals are delegated, rather than showing an empty bar.
+    ///
+    /// The distinction spec 22 draws: "explicitly dark, not merely unused". An empty approval
+    /// surface during a run that is editing files reads as "nothing needed approving", which
+    /// would be a lie by omission — Claude Code asks its own questions elsewhere.
+    /// The notice belongs to a LIVE Claude Code run, and to nothing else.
+    ///
+    /// Its positive case needs a real subprocess, so what is asserted here is the half that
+    /// can go wrong silently: a finished run must not leave the notice on screen claiming
+    /// smart-coder is not gating, when the next run through the normal path would be.
+    #[cfg(not(feature = "craft-only"))]
+    #[test]
+    fn the_delegated_approvals_notice_does_not_outlive_its_run() {
+        let mut app = app_in(Mode::Assistant);
+        app.claude_run = true;
+        app.session = None; // the run ended
+        assert!(
+            app.view_gatebar().is_none(),
+            "a stale notice would claim we are not gating a run that isn't happening"
+        );
+
+        // And Craft mode shows nothing at all, whatever the flags say.
+        let mut craft = app_in(Mode::Craft);
+        craft.claude_run = true;
+        assert!(craft.view_gatebar().is_none());
+    }
+
+    /// A stale message cannot start a run the UI would not have offered.
+    ///
+    /// The button is hidden when unavailable, but a queued `Task` or a message in flight across
+    /// a mode switch can still arrive — so the handler refuses rather than trusting the view.
+    #[cfg(not(feature = "craft-only"))]
+    #[test]
+    fn a_stale_claude_code_message_starts_nothing() {
+        let mut app = app_in(Mode::Craft);
+        app.claude_available = true;
+        app.intent = "do the thing".to_string();
+
+        let _ = app.update(Message::RunClaudeCode);
+
+        assert!(app.session.is_none(), "no run may be spawned in Craft mode");
     }
 
     /// The fourth leg of the zero-construction contract: remote attach.

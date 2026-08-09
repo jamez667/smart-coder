@@ -131,6 +131,12 @@ pub(crate) struct App {
     /// banner reports "N files changed" from what the agent actually edited — never a
     /// whole-repo "files built" scan (which would count thousands in an existing project).
     pub(crate) iterating: bool,
+    /// True while the current/last run is a CLAUDE CODE run (spec 22).
+    ///
+    /// Drives the "approvals are delegated" notice: v1 lets Claude Code handle its own
+    /// permission prompts, and the spec asks for that to be **visibly** so rather than merely
+    /// an empty gate bar — an absent prompt must not be misread as "nothing needed approving".
+    pub(crate) claude_run: bool,
     /// True while the current/last run is PLAN-ONLY (Execute-plan design pass): it produces
     /// reviewable artifacts, not a build, so its outcome banner must NOT report "N files built"
     /// (a whole-repo scan counted every source file — the bogus "13730 files built").
@@ -202,6 +208,10 @@ pub(crate) struct App {
     pub(crate) compile_report: Option<sc_win::diagnostics::CompileReport>,
     /// A compile is in flight — the button reads "Compiling…" and offers cancel.
     pub(crate) compiling: bool,
+    /// Whether the `claude` CLI is on PATH (spec 22). Probed ONCE at startup, because probing
+    /// spawns a process and the menu is rebuilt every frame. `false` ⇒ the run kind is not
+    /// offered at all, rather than offered-and-failing.
+    pub(crate) claude_available: bool,
     /// The Unity editor path override (Settings ▸ General). Blank ⇒ search the Hub convention.
     pub(crate) unity_path_input: String,
     /// Set to cancel an in-flight compile. The worker checks it between reads and kills the
@@ -472,6 +482,7 @@ impl Default for App {
             run_dir: None,
             picked_workspace,
             iterating: false,
+            claude_run: false,
             planning_only: false,
             last_plan_task: None,
             edited_files: Vec::new(),
@@ -483,6 +494,9 @@ impl Default for App {
             project_kind: sc_win::project::ProjectKind::Unknown,
             compile_report: None,
             compiling: false,
+            // Probed at boot rather than here: `App::default()` runs in tests, and spawning a
+            // process per constructed App would make the suite slow and machine-dependent.
+            claude_available: false,
             compile_cancel: None,
             unity_path_input: unity_path_seed,
             confirm_close: None,
@@ -635,6 +649,9 @@ pub(crate) enum Message {
     DeclineToChoose,
     /// Escape. Declines the first-run question if it's open; otherwise does nothing.
     EscapePressed,
+    /// Hand the composer's task to **Claude Code** (spec 22). Offered only when the CLI is
+    /// present and the mode allows a model at all.
+    RunClaudeCode,
     // --- Compile & check (spec 21) ---
     /// Run the project's compile command and parse its diagnostics.
     RunCompile,

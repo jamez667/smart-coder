@@ -58,6 +58,12 @@ two agent loops in charge of one workspace: smart-coder would parse tool calls
 out of Claude Code's prose and run them a second time, having already been run.
 The result is not a worse integration — it is an incoherent one.
 
+Because it never touches `ModelBackend`, this run kind is **exempt from the
+`backend_unready_reason()` preflight** that gates every other run start. That
+check asks whether *our* local endpoint is reachable, which says nothing about
+Claude Code — blocking on it would make the one run kind that needs no local
+model the one a missing local model prevents.
+
 So the seam is `RunKind` <!--@ crates/sc-win/src/session/mod.rs -->, which
 already names seven strategies that each own their loop (`Agent`, `Swarm`,
 `Tdd`, `SequentialBuild`, `Iterate`, `Plan`, `StagedBuild`). Claude Code is an
@@ -95,6 +101,11 @@ Requirements:
   because one line was unexpected. Skipped lines are counted and reported at the
   end rather than swallowed silently.
 
+**stderr must be drained on its own thread**, capped at a few KB and reported
+only when the run ends without a result line. A child whose stderr pipe fills
+blocks forever writing to it — which presents as a *stuck* run rather than a
+failure, and is the worst shape a bug can take here.
+
 **Cancellation is a new obligation, not the existing path.** `Session::spawn`
 <!--@ crates/sc-win/src/session/mod.rs --> passes its shared cancel flag to
 `RunKind::Iterate` alone, and the flag is *cooperative*: it is checked at a turn
@@ -108,14 +119,37 @@ button, because the user would believe they had stopped it.
 The existing vocabulary <!--@ crates/sc-core/src/event.rs --> covers this almost
 exactly, which is the strongest evidence the seam is right:
 
-| Claude Code stream | `UiEvent` / `AgentEvent` |
-| --- | --- |
-| assistant text | `Agent(ModelTurn { raw, .. })` |
-| streamed text delta | `Agent(ContentDelta { cumulative, .. })` |
-| tool use | `Agent(ToolCall { tool, arg })` |
-| tool result | `Agent(ToolResult { summary, full, is_error })` |
-| final result | `Done { ok, summary }` |
-| spawn failure, non-zero exit | `Failed(String)` |
+The real schema, captured from `claude 2.1.126` rather than assumed. Every line is
+a JSON object with a top-level `type`, and **the interesting content is nested**:
+an `assistant` line carries `message.content[]`, an array of blocks each with
+their own `type` (`text`, `thinking`, `tool_use`). So the mapping is
+line-type-then-block-type, not a flat switch:
+
+| Line | Block | `UiEvent` / `AgentEvent` |
+| --- | --- | --- |
+| `assistant` | `text` | `Agent(ModelTurn { raw, .. })` |
+| `assistant` | `tool_use` | `Agent(ToolCall { tool: name, arg })` |
+| `assistant` | `thinking` | *skipped* — see below |
+| `user` | `tool_result` | `Agent(ToolResult { summary, full, is_error })` |
+| `result` | — | `Done { ok: !is_error, summary: result }` |
+| `system` (`subtype: init`) | — | `Agent(RunStarted { task, prompt_budget: 0 })` |
+| `rate_limit_event` | — | *skipped* |
+| spawn failure, non-zero exit | — | `Failed(String)` |
+
+**`arg` comes from the tool's `input` object, whose shape differs per tool** —
+`Read` has `file_path`, `Bash` has `command`, `Grep` has `pattern`. The mapping
+tries a short ordered list of known keys and falls back to the compact JSON of
+the whole input. A tool this doesn't know still renders something honest rather
+than an empty line.
+
+**`thinking` blocks are deliberately dropped.** They are the model's reasoning,
+often empty or a signature stub, and the activity feed exists to show what the
+agent *did*. Rendering reasoning as a turn would bury the tool calls that matter.
+
+**No `ContentDelta`.** `--output-format stream-json` emits whole assistant
+messages, not token deltas; `--include-partial-messages` would add them. v1 takes
+the simpler stream, so the feed updates per message rather than per token. Worth
+revisiting only if a run feels unresponsive.
 
 Two fields have no honest source and **must not be faked**: `prompt_tokens` (on
 `ModelTurn`) and `prompt_budget` (carried once on `RunStarted`) describe
@@ -141,7 +175,10 @@ Two supported postures, chosen per run:
 - **Delegated (v1 default).** Claude Code runs with its own permission handling.
   smart-coder's approve/deny UI is **explicitly dark** for the run — not merely
   unused, but visibly not offered, so nobody reads its absence as "nothing needed
-  approving".
+  approving". Concretely: the gate bar renders a standing notice for the duration
+  of a Claude Code run saying approvals are handled there and smart-coder will
+  not prompt. An empty bar during a run that is editing files would be a lie by
+  omission; the notice is what makes the delegation honest rather than invisible.
 - **Routed (later).** Claude Code's permission requests are surfaced through the
   existing `Pending::Confirm` <!--@ crates/sc-win/src/bridge.rs -->, which
   already carries a command plus a one-shot reply channel — the same path the
@@ -187,8 +224,12 @@ Where the refusal must bite:
 Claude Code is a separate install and **may not be present**. The integration
 must be honest about that rather than failing at spawn time:
 
-- **Detect once, at startup and on workspace change:** is `claude` resolvable on
-  `PATH`? Cache the answer; do not probe per keystroke.
+- **Detect once, at startup.** Runs `claude --version` and takes a zero exit as
+  the answer, so *installed but broken* counts as absent rather than as a button
+  that fails at spawn. Cache it: probing spawns a process, the menu is rebuilt
+  every frame, and the answer cannot change without the user installing
+  something — which is a restart-shaped event. It does not depend on the
+  workspace.
 - **Absent ⇒ the run kind is not offered**, with a one-line explanation of what
   to install if the user goes looking. A menu item that always fails is worse
   than no menu item.
