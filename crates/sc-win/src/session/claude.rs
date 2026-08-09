@@ -101,7 +101,7 @@ pub(super) fn run_claude_code(
             cancelled = true;
             break;
         }
-        for parsed in claudecode::parse_line(&line) {
+        for parsed in claudecode::parse_line_in(&line, &workspace) {
             match parsed {
                 Line::Event(ev) => {
                     let _ = tx.send(UiEvent::Agent(ev));

@@ -227,7 +227,12 @@ pub fn file_touched_by(ev: &AgentEvent) -> Option<String> {
     if let AgentEvent::ToolCall { tool, arg } = ev {
         if matches!(
             tool.as_str(),
+            // smart-coder's own tools (spec 04) …
             "read_file" | "write_file" | "create_file" | "edit_file"
+            // … and Claude Code's, which are PascalCase and a different vocabulary
+            // entirely (spec 22). Without these a Claude Code run edits files and the
+            // outcome banner reports zero, while the code pane follows nothing.
+            | "Read" | "Write" | "Edit" | "NotebookEdit"
         ) {
             let path = arg.trim();
             if !path.is_empty() {
@@ -245,7 +250,13 @@ pub fn is_mutating_touch(ev: &AgentEvent) -> bool {
     matches!(
         ev,
         AgentEvent::ToolCall { tool, .. }
-            if matches!(tool.as_str(), "write_file" | "create_file" | "edit_file")
+            if matches!(
+                tool.as_str(),
+                "write_file" | "create_file" | "edit_file"
+                // Claude Code's writing tools (spec 22). `Read` is deliberately absent —
+                // it is a touch but not a change, exactly like `read_file`.
+                | "Write" | "Edit" | "NotebookEdit"
+            )
     )
 }
 
@@ -353,5 +364,43 @@ mod tests {
             arg: String::new(),
         };
         assert!(file_touched_by(&other).is_none());
+    }
+
+    /// **Claude Code's tools count too** (spec 22).
+    ///
+    /// Its vocabulary is a different one — PascalCase `Edit`/`Write` rather than
+    /// `edit_file`/`write_file`. Recognising only ours meant a Claude Code run edited files
+    /// and the outcome banner reported zero while the code pane followed nothing: two silent
+    /// failures, because an unmatched tool name simply matches nothing.
+    #[test]
+    fn claude_codes_tool_vocabulary_is_recognised_too() {
+        for tool in ["Edit", "Write", "NotebookEdit"] {
+            let ev = AgentEvent::ToolCall {
+                tool: tool.to_string(),
+                arg: "src/main.rs".to_string(),
+            };
+            assert_eq!(
+                file_touched_by(&ev).as_deref(),
+                Some("src/main.rs"),
+                "{tool}"
+            );
+            assert!(is_mutating_touch(&ev), "{tool} writes, so it is a mutation");
+        }
+
+        // `Read` is a touch but NOT a mutation — the same distinction `read_file` draws.
+        let read = AgentEvent::ToolCall {
+            tool: "Read".to_string(),
+            arg: "src/lib.rs".to_string(),
+        };
+        assert_eq!(file_touched_by(&read).as_deref(), Some("src/lib.rs"));
+        assert!(!is_mutating_touch(&read), "reading is not changing");
+
+        // A Claude Code tool that isn't about files selects nothing.
+        let bash = AgentEvent::ToolCall {
+            tool: "Bash".to_string(),
+            arg: "cargo test".to_string(),
+        };
+        assert!(file_touched_by(&bash).is_none());
+        assert!(!is_mutating_touch(&bash));
     }
 }

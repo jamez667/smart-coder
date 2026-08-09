@@ -60,6 +60,40 @@ pub enum Line {
     Ignored,
 }
 
+/// Translate one line of `--output-format stream-json` into UI events, with tool paths made
+/// **workspace-relative** against `root`.
+///
+/// The relativising matters more than it looks: Claude Code reports absolute paths, and every
+/// consumer downstream — the edited-files banner, the code pane's follow-the-agent pinning, the
+/// file tree highlight — keys on workspace-relative ones. Doing it here means none of them
+/// needs to know which run kind produced the event.
+pub fn parse_line_in(line: &str, root: &std::path::Path) -> Vec<Line> {
+    let mut out = parse_line(line);
+    for l in &mut out {
+        if let Line::Event(AgentEvent::ToolCall { arg, .. }) = l {
+            if let Some(rel) = relativise(arg, root) {
+                *arg = rel;
+            }
+        }
+    }
+    out
+}
+
+/// Strip `root` from an absolute path, yielding the workspace-relative form.
+///
+/// `None` when it isn't under the root (a file edited outside the project, or an argument that
+/// was never a path at all — a `Bash` command, say), in which case the original is kept.
+fn relativise(arg: &str, root: &std::path::Path) -> Option<String> {
+    let p = std::path::Path::new(arg);
+    if !p.is_absolute() {
+        return None;
+    }
+    p.strip_prefix(root)
+        .ok()
+        .and_then(|r| r.to_str())
+        .map(|r| r.replace('\\', "/"))
+}
+
 /// Translate one line of `--output-format stream-json` into UI events.
 ///
 /// Returns a *list* because one `assistant` line can carry several content blocks — text plus
@@ -346,6 +380,35 @@ mod tests {
         let bare = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bare"}]}}"#;
         assert!(
             matches!(&parse_line(bare)[0], Line::Event(AgentEvent::ToolCall { arg, .. }) if arg.is_empty())
+        );
+    }
+
+    /// Tool paths come back workspace-relative, because everything downstream keys on that.
+    ///
+    /// Claude Code reports ABSOLUTE paths. Left as-is they would defeat the edited-files
+    /// banner, the code pane's follow-the-agent pinning and the file-tree highlight — three
+    /// silent failures, since each would simply match nothing.
+    #[test]
+    fn tool_paths_are_made_workspace_relative() {
+        let root = std::path::Path::new(r"C:\proj");
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":"C:\\proj\\src\\main.rs"}}]}}"#;
+        let got = parse_line_in(line, root);
+        assert!(
+            matches!(&got[0], Line::Event(AgentEvent::ToolCall { arg, .. }) if arg == "src/main.rs"),
+            "{got:?}"
+        );
+
+        // A path OUTSIDE the workspace is kept whole rather than mangled into a wrong
+        // relative path — better an absolute path in the feed than a plausible lie.
+        let outside = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"C:\\elsewhere\\notes.md"}}]}}"#;
+        assert!(
+            matches!(&parse_line_in(outside, root)[0], Line::Event(AgentEvent::ToolCall { arg, .. }) if arg == r"C:\elsewhere\notes.md")
+        );
+
+        // A non-path argument (a shell command) is untouched.
+        let bash = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#;
+        assert!(
+            matches!(&parse_line_in(bash, root)[0], Line::Event(AgentEvent::ToolCall { arg, .. }) if arg == "cargo test")
         );
     }
 
