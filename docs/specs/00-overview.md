@@ -47,11 +47,11 @@ major design decision in `smart-coder` is a direct response to one of these:
   will not add "just use GPT-4 for the hard parts." (A backend *could* point at
   a big model, but the harness is tuned for and tested against small ones.)
 - **No plugin for third-party IDEs.** No VS Code / JetBrains extension for v1;
-  the shipped surfaces are the CLI ([06](06-cli-ux.md)), the `sc-win` GUI
-  ([12](12-platform-clients.md)) and the local web surface
-  ([18](18-task-intake.md)). This bounds where we ship, not what `sc-win` may
-  become: it has its own editor ([21](21-craft-mode.md)), because a client that
-  can run without a model has to be usable without one.
+  the shipped surfaces are the CLI ([06](06-cli-ux.md)), the `sc-win` GUI and the
+  Android phone client (both [12](12-platform-clients.md)), and the local web
+  surface ([18](18-task-intake.md)). This bounds where we ship, not what `sc-win`
+  may become: it has its own editor ([21](21-craft-mode.md)), because a client
+  that can run without a model has to be usable without one.
 - **No unattended *approval*.** v1 is human-in-the-loop at the gates
   ([09](09-workflow-and-checkpoints.md)): the harness enforces them, and no model
   may pass one. Unattended *execution between* gates is permitted and bounded —

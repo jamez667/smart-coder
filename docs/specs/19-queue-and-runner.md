@@ -68,10 +68,10 @@ queue, the state machine, the parking gate, the git preflight, the spec-only
 runner, the four intake kinds and the feedback store. It is driveable today
 through `smart-coder queue`, and has been run end to end against a live model.
 
-⬚ **The remote half is not**: the hosted server ([18](18-task-intake.md)) and the
-daemon's long-poll loop that reaches it. Until those exist, a request is filed at
-a terminal rather than from a phone — which is the same queue, entered by a
-different door.
+✅ **The remote half is built too** <!--@ crates/sc-daemon/src/client.rs -->: the
+hosted server ([18](18-task-intake.md)) and the daemon's long-poll loop that
+reaches it. A request filed from a phone and one filed at a terminal are the same
+queue entered by a different door — which was always the point.
 
 What was never new is everything the runner drives: the five phases, the gate
 trait, the artifact directories and the resume path, reused unchanged — plus the
