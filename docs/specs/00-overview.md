@@ -45,7 +45,12 @@ major design decision in `smart-coder` is a direct response to one of these:
 
 - **No large/frontier-model support path.** The constraints are the product. We
   will not add "just use GPT-4 for the hard parts." (A backend *could* point at
-  a big model, but the harness is tuned for and tested against small ones.)
+  a big model, but the harness is tuned for and tested against small ones.) A
+  user may run **Claude Code** as a separate run kind ([22](22-claude-code.md)),
+  which is a peer surface rather than a tier — nothing escalates into it and no
+  phase delegates to it, so the harness thesis is still tested by the harness
+  running its own models. What stays forbidden is the escalation path: a failing
+  small-model run must never become a succeeding large-model one.
 - **No plugin for third-party IDEs.** No VS Code / JetBrains extension for v1;
   the shipped surfaces are the CLI ([06](06-cli-ux.md)), the `sc-win` GUI and the
   Android phone client (both [12](12-platform-clients.md)), and the local web
