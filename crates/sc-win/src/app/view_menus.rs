@@ -398,20 +398,9 @@ impl App {
         };
         // Send button is full composer height, sitting flush against the input.
         let mut bar = row![input, btn].spacing(0);
-        // Hand the same composer text to CLAUDE CODE instead (spec 22). Shown only when the CLI
-        // is installed AND the mode allows a model — never shown-and-disabled, which would
-        // imply a setting that could be turned on. Nothing here escalates: it is a separate
-        // button for a separate run, never a fallback the primary run reaches for.
-        if self.claude_code_available() && !run_active && !sending {
-            bar = bar.push(
-                button(text("✦ Claude").size(14).width(Fill).height(Fill).center())
-                    .on_press(Message::RunClaudeCode)
-                    .width(Length::Fixed(96.0))
-                    .height(Fill)
-                    .padding(0)
-                    .style(menu_item_style),
-            );
-        }
+        // NOTE: no Claude button here. Claude Code has its own panel (spec 22) — a button on
+        // this composer buried a peer surface inside an Assistant-only panel, and gave its run
+        // nowhere to appear, since this panel renders `chat_turns` and a run writes elsewhere.
         // The think/debug toggles stack vertically to the right of the send button. They're kept
         // small (14px box, 11px label, tight gap) so both fit within the one-input-tall composer.
         let mut toggles = column![]
@@ -535,30 +524,9 @@ impl App {
         if self.cfg.craft() {
             return None;
         }
-        // A Claude Code run handles its OWN permission prompts (spec 22, delegated posture), so
-        // this bar will stay empty for the whole run. Say so rather than showing nothing: an
-        // empty approval surface reads as "nothing needed approving", which during a run that
-        // is editing files would be a lie by omission.
-        if self.claude_run && self.session.is_some() {
-            return Some(
-                container(
-                    column![
-                        text("⛳ Approvals are handled by Claude Code for this run.").size(14),
-                        text(
-                            "It asks its own permission questions in its own way; smart-coder is \
-                             not gating this run and will not prompt here."
-                        )
-                        .size(12)
-                        .color(FG_MUTED),
-                    ]
-                    .spacing(6),
-                )
-                .width(Fill)
-                .padding(12)
-                .style(card_style)
-                .into(),
-            );
-        }
+        // A Claude Code run handles its own permission prompts (spec 22), so this bar stays
+        // empty for its duration. The notice saying so lives in the Claude PANEL, beside the
+        // run it describes — a notice in a bar the user may not have on screen defeats itself.
         match self.gatebar.first()? {
             // Workflow gate → handled by the master list, not this bottom card.
             Gatebar::Gate { .. } => None,

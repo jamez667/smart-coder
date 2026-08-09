@@ -65,6 +65,13 @@ pub(crate) fn chat_scroll_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("chat-thread")
 }
 
+/// A stable id for the Claude panel's run feed (spec 22), so it can be pinned to the bottom as
+/// the run narrates. Its own id, not the chat thread's — two scrollables sharing one id would
+/// both answer a scroll command aimed at either.
+pub(crate) fn claude_feed_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("claude-feed")
+}
+
 /// Approx. pixel height of one rendered code line (size-13 monospace) — used to convert a
 /// clicked minimap line into a scroll offset.
 pub(crate) const CODE_LINE_PX: f32 = 17.0;

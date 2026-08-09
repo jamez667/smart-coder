@@ -212,6 +212,16 @@ pub(crate) struct App {
     /// spawns a process and the menu is rebuilt every frame. `false` ⇒ the run kind is not
     /// offered at all, rather than offered-and-failing.
     pub(crate) claude_available: bool,
+    /// The Claude panel's own task input (spec 22) — deliberately NOT the chat composer's.
+    /// They address different agents, so one text box would mean two buttons reading the same
+    /// words and meaning different things.
+    pub(crate) claude_input: String,
+    /// The Claude panel's own run feed: what the current/last run did, newest last.
+    ///
+    /// Its own rather than the shared activity stream because `Session` holds exactly one run
+    /// and `start()` refuses while one is live — a Claude run and an agent run can never happen
+    /// together, so a shared feed would only mean each showing the other's history.
+    pub(crate) claude_feed: Vec<sc_win::view::Row>,
     /// The Unity editor path override (Settings ▸ General). Blank ⇒ search the Hub convention.
     pub(crate) unity_path_input: String,
     /// Set to cancel an in-flight compile. The worker checks it between reads and kills the
@@ -497,6 +507,8 @@ impl Default for App {
             // Probed at boot rather than here: `App::default()` runs in tests, and spawning a
             // process per constructed App would make the suite slow and machine-dependent.
             claude_available: false,
+            claude_input: String::new(),
+            claude_feed: Vec::new(),
             compile_cancel: None,
             unity_path_input: unity_path_seed,
             confirm_close: None,
@@ -649,8 +661,10 @@ pub(crate) enum Message {
     DeclineToChoose,
     /// Escape. Declines the first-run question if it's open; otherwise does nothing.
     EscapePressed,
-    /// Hand the composer's task to **Claude Code** (spec 22). Offered only when the CLI is
-    /// present and the mode allows a model at all.
+    /// The Claude panel's task input changed (spec 22).
+    ClaudeInputChanged(String),
+    /// Run the Claude panel's task through **Claude Code** (spec 22). Reachable only from that
+    /// panel, which exists only when the CLI is present and the mode allows a model.
     RunClaudeCode,
     // --- Compile & check (spec 21) ---
     /// Run the project's compile command and parse its diagnostics.

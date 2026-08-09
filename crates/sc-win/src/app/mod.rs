@@ -238,6 +238,7 @@ mod logic_c;
 mod logic_compile;
 mod logic_save;
 mod update;
+mod view_claude;
 mod view_code;
 mod view_comply;
 mod view_core;

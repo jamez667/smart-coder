@@ -669,7 +669,14 @@ impl App {
                     // refreshed asynchronously by the Tick-driven `live_reload_task`, not
                     // synchronously here — the reload does a file read + git diff that blocked the
                     // UI thread 80–432ms per call when done per-event.)
-                    self.rows.extend(agent_rows(&e));
+                    // A Claude Code run narrates into ITS OWN panel (spec 22). The two run
+                    // kinds can never be live together — `start()` refuses while a session
+                    // exists — so this is a routing choice, not a race.
+                    if self.claude_run {
+                        self.claude_feed.extend(agent_rows(&e));
+                    } else {
+                        self.rows.extend(agent_rows(&e));
+                    }
                 }
                 UiEvent::Swarm(e) => {
                     // Fold into the live topology (canvas) and the per-subtask board,
@@ -701,10 +708,22 @@ impl App {
                     }
                 }
                 UiEvent::Done { ok, summary } => {
+                    // The closing line goes in the panel too, so a Claude run ends visibly
+                    // rather than just stopping.
+                    if self.claude_run {
+                        self.claude_feed.push(if ok {
+                            Row::ok("✓", summary.clone())
+                        } else {
+                            Row::err("✗", summary.clone())
+                        });
+                    }
                     self.finish_run(ok, &summary);
                     self.session = None;
                 }
                 UiEvent::Failed(msg) => {
+                    if self.claude_run {
+                        self.claude_feed.push(Row::err("✗", msg.clone()));
+                    }
                     self.finish_run(false, &format!("error: {msg}"));
                     self.session = None;
                 }

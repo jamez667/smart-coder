@@ -560,6 +560,12 @@ impl App {
                     if self.cfg.craft() && kind.needs_model() {
                         continue;
                     }
+                    // The Claude panel is only offered when the CLI is actually installed
+                    // (spec 22) — a toggle that reveals a panel saying "not installed" is a
+                    // worse answer than not offering it. Same rule as the Craft filter above.
+                    if kind == sc_win::layout::PanelKind::Claude && !self.claude_available {
+                        continue;
+                    }
                     let on = self.layout.contains(kind);
                     v.push((
                         format!("{}  {}", if on { "✓" } else { "  " }, kind.menu_label()),

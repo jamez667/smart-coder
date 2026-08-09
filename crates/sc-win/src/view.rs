@@ -23,7 +23,9 @@ impl Row {
             is_error: false,
         }
     }
-    fn err(icon: &'static str, text: impl Into<String>) -> Self {
+    /// An error/failure row — rendered in the bad colour. Public because the Claude panel
+    /// builds its own closing row (spec 22) rather than going through `agent_rows`.
+    pub fn err(icon: &'static str, text: impl Into<String>) -> Self {
         Self {
             icon,
             text: text.into(),

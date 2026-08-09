@@ -247,13 +247,22 @@ impl App {
             // instead of the bare single-agent iterate loop. The line-comment small-fix path
             // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
             Message::RunIterate => self.start(RunKind::StagedBuild),
+            Message::ClaudeInputChanged(s) => self.claude_input = s,
             Message::RunClaudeCode => {
                 self.open_menu = None;
-                // Guarded even though the menu item is hidden when unavailable: a queued Task
-                // or a stale message can arrive after a mode switch or a failed detection.
-                if self.claude_code_available() {
-                    self.start(RunKind::ClaudeCode);
+                // Guarded even though the panel only exists when available: a queued Task or a
+                // stale message can arrive after a mode switch or a failed detection.
+                if !self.claude_code_available() || self.claude_input.trim().is_empty() {
+                    return Task::none();
                 }
+                // The panel's OWN input drives the run, not the chat composer's — but `start()`
+                // reads `self.intent`, which every run kind shares. Swap it in for the spawn and
+                // put the composer's text back, so pressing Run here cannot silently rewrite
+                // what the user had typed over there.
+                let composer = std::mem::replace(&mut self.intent, self.claude_input.clone());
+                self.claude_feed.clear();
+                self.start(RunKind::ClaudeCode);
+                self.intent = composer;
             }
             Message::Tick => {
                 self.pump();

@@ -189,6 +189,15 @@ impl App {
                 BottomTab::Build => "Build".to_string(),
             },
             PanelKind::Chat => format!("{} messages", self.chat_turns.len()),
+            PanelKind::Claude => {
+                if self.claude_run && self.session.is_some() {
+                    "running…".to_string()
+                } else if self.claude_feed.is_empty() {
+                    "idle".to_string()
+                } else {
+                    format!("{} events", self.claude_feed.len())
+                }
+            }
         };
 
         let ghost = container(
@@ -501,6 +510,7 @@ impl App {
                     self.view_center()
                 }
             }
+            PanelKind::Claude => self.view_claude_panel(),
         }
     }
 }

@@ -161,6 +161,51 @@ than an obvious zero.
 `Planned` is not emitted. Claude Code plans internally and does not surface a
 step list in the same form; inventing one from prose would be a fabrication.
 
+## Where it lives: a panel, not a button
+
+**Claude Code gets its own panel** — `PanelKind::Claude`, a column in the layout
+tree beside Files, Git, Editor and Chat. It is placeable, splittable, dockable
+and toggleable from the View menu exactly like the others, because it is exactly
+like the others: a surface you arrange where you want it.
+
+This is a correction. The first implementation hung a "✦ Claude" button off the
+chat composer, which was wrong twice over. It buried a peer surface inside
+another one — the composer belongs to Chat, an *Assistant* panel, so in a layout
+without Chat there was no way to reach Claude Code at all. And it gave the run
+**nowhere to appear**: the composer's neighbours render `chat_turns`, while a run
+writes to the activity stream, so pressing it started a real run that produced no
+visible output. A surface with its own input needs its own output beside it.
+
+The panel holds three things:
+
+- **A task input** — its own, not the chat composer's. The two are different
+  conversations with different agents; sharing one text box would mean the Send
+  button and the Claude button read the same words and mean different things.
+- **A live feed** of the run: the tool calls, their results, and the closing
+  summary, from the same [`AgentEvent`] stream the mapping above produces.
+- **The delegated-approvals notice** (below), which belongs beside the run it
+  describes rather than in a bar the user may not have on screen.
+
+**The feed is the panel's own, and this follows from a hard constraint.**
+`Session` holds exactly one run, and `start()` refuses while one is live, so a
+Claude Code run and an agent run **cannot happen at the same time**. Two surfaces
+that can never be busy together do not need to share a feed, and sharing one
+would mean each showing the other's history. Separate work, separate feeds.
+
+### The activity stream is orphaned
+
+Discovered while fixing the above, and **larger than this spec**: `App::rows` is
+written by the event pump — `rows.extend(agent_rows(&e))` — and **read by
+nothing**. No view renders it. It was stranded when the server-rendered page
+layer was deleted, and it silently swallows the output of *every* run kind, not
+just this one: agent, swarm, staged and iterate runs all narrate into a field
+that never reaches a screen.
+
+That is a defect in the existing client rather than in this feature, and it is
+recorded here only because this feature is how it was found. It must be fixed on
+its own terms — the fix is not "the Claude panel renders `rows`", which would
+couple one panel to every run kind and leave the others still invisible.
+
 ## Permissions and approvals
 
 This is the design's one genuinely hard choice, because **both systems have an
@@ -179,6 +224,8 @@ Two supported postures, chosen per run:
   of a Claude Code run saying approvals are handled there and smart-coder will
   not prompt. An empty bar during a run that is editing files would be a lie by
   omission; the notice is what makes the delegation honest rather than invisible.
+  It lives **in the Claude panel**, beside the run it describes — a notice in a
+  bar the user has not got on screen defeats its own purpose.
 - **Routed (later).** Claude Code's permission requests are surfaced through the
   existing `Pending::Confirm` <!--@ crates/sc-win/src/bridge.rs -->, which
   already carries a command plus a one-shot reply channel — the same path the
@@ -214,10 +261,20 @@ already exists.
 
 Where the refusal must bite:
 
-- The run kind is **not offered in the UI** — not shown-and-disabled, since a
-  disabled control implies a setting that could be enabled.
+- **The panel is `needs_model()`**, exactly like `Chat`. A Craft-mode layout
+  containing it is pruned rather than rejected, and the View menu does not offer
+  it — the same "fall back, never wedge" rule every Assistant-only panel follows.
+  This is what the existing predicate is *for*, so unlike the run-kind gate it is
+  a one-line addition rather than new machinery.
+- The run kind is **not offered** — not shown-and-disabled, since a disabled
+  control implies a setting that could be enabled.
 - The spawn path **refuses even if reached**, because a queued `Task` or a stale
   message can arrive after a mode switch.
+
+The panel being pruned in Craft mode has a consequence worth stating: a user who
+switches to Craft loses the panel from that mode's layout, and switching back
+restores it, because layouts are persisted **per mode** ([21](21-craft-mode.md)).
+That is the existing behaviour for Chat and needs no special case.
 
 ## Availability
 
@@ -264,7 +321,10 @@ Named so they are decisions rather than oversights:
 2. **Spawn + stream.** `proc::command`, line-by-line stdout, the event mapping
    above, and cancellation by killing the child — which is new work, not a reuse
    of the cooperative flag (see "The transport").
-3. **Delegated approvals.** The gate surface goes visibly dark for these runs.
+3. **The panel.** `PanelKind::Claude` in the layout tree, with its own input, its
+   own feed, and the delegated-approvals notice. Steps 1–2 are unreachable
+   without it: a run with nowhere to appear is indistinguishable from a run that
+   never started, which is precisely how the missing panel presented.
 4. *(Later)* **Routed approvals** through `Pending::Confirm`.
 
 ## Testing
@@ -281,6 +341,11 @@ Per [11](11-testing-and-tdd.md), the assertion is the specification:
   a proxy, matching the zero-construction contract in [21](21-craft-mode.md).
 - **Absent `claude` is not an error state** — the run kind is simply not offered,
   and detection returning `false` must not surface as a failure.
+- **The events reach a surface.** Asserted because its absence is what shipped:
+  every test drained the event channel directly, which passes whether or not any
+  view renders the result. A run that works perfectly and displays nothing is
+  indistinguishable, to the user, from one that never started — so "the events
+  are produced" is not the property worth pinning, "the events are *shown*" is.
 - **Not tested:** that Claude Code itself does the right thing. That is its
   project's contract, not this one's. The boundary here is the stream format and
   the spawn — assert those and stop.

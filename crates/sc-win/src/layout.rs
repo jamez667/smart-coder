@@ -58,6 +58,13 @@ pub enum PanelKind {
     Bottom,
     /// The chat thread and composer. **Assistant only.**
     Chat,
+    /// Claude Code: its own task input and its own run feed (spec 22). **Assistant only.**
+    ///
+    /// A panel rather than a button on another panel's composer. Claude Code is a peer of the
+    /// agent, not a mode of it, and a surface with its own input needs its own output beside
+    /// it — the first attempt hung a button off the Chat composer, which both buried it inside
+    /// an Assistant-only panel and left the run with nowhere to appear.
+    Claude,
 }
 
 impl PanelKind {
@@ -82,6 +89,7 @@ impl PanelKind {
             PanelKind::Editor(EditorId(n)) => Cow::Owned(format!("editor:{n}")),
             PanelKind::Bottom => Cow::Borrowed("bottom"),
             PanelKind::Chat => Cow::Borrowed("chat"),
+            PanelKind::Claude => Cow::Borrowed("claude"),
         }
     }
 
@@ -96,6 +104,7 @@ impl PanelKind {
             "editor" => Some(PanelKind::Editor(EditorId::FIRST)),
             "bottom" => Some(PanelKind::Bottom),
             "chat" => Some(PanelKind::Chat),
+            "claude" => Some(PanelKind::Claude),
             rest => rest
                 .strip_prefix("editor:")
                 .and_then(|n| n.parse().ok())
@@ -115,6 +124,7 @@ impl PanelKind {
             PanelKind::Editor(_) => "Editor",
             PanelKind::Bottom => "Panel",
             PanelKind::Chat => "Chat",
+            PanelKind::Claude => "Claude Code",
         }
     }
 
@@ -130,8 +140,12 @@ impl PanelKind {
     }
 
     /// Whether this panel needs the agent. Craft mode prunes these.
+    ///
+    /// `Claude` counts: Craft mode's promise is that no language model is contacted, and Claude
+    /// Code is unambiguously a model surface (spec 22). This is the existing predicate doing
+    /// exactly what it was built for, so the refusal is one variant rather than new machinery.
     pub fn needs_model(self) -> bool {
-        matches!(self, PanelKind::Chat)
+        matches!(self, PanelKind::Chat | PanelKind::Claude)
     }
 
     /// Whether this is an editor pane, whichever one.
@@ -156,6 +170,7 @@ pub fn menu_panels(layout: &Layout) -> Vec<PanelKind> {
     }
     out.push(PanelKind::Bottom);
     out.push(PanelKind::Chat);
+    out.push(PanelKind::Claude);
     out
 }
 
