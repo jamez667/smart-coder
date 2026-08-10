@@ -149,6 +149,11 @@ pub struct UiConfig {
     /// leave it `None`.
     pub orchestrator_key: Option<String>,
 
+    /// The Claude Code panel's run options (spec 22) — model, permission mode, continue, the
+    /// tool allow/deny lists. On `UiConfig` so they persist through the same path as every
+    /// other setting rather than resetting each launch.
+    pub claude: crate::claudecode::Options,
+
     /// The Unity editor path override (Settings ▸ General). Blank/`None` ⇒ find it via the Hub
     /// convention, which works on most machines; this is for the one where it doesn't.
     ///
@@ -238,6 +243,9 @@ impl Default for UiConfig {
             // the frozen tests. Default to pytest (the live boxes are Python); editable
             // in settings. Without it the build stops at "plan + tests written".
             verify_command: Some("python -m pytest -q".to_string()),
+            // Every Claude option defaults to "pass no flag", so a fresh install runs the CLI
+            // exactly as it would run itself.
+            claude: crate::claudecode::Options::default(),
             // Find Unity via the Hub convention unless the user names a path.
             unity_path: None,
             plan_first: false,

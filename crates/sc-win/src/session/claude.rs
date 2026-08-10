@@ -42,7 +42,7 @@ pub(super) fn run_claude_code(
     }
 
     let mut child = match crate::proc::command("claude")
-        .args(claudecode::args(&task))
+        .args(claudecode::args(&task, &cfg.claude))
         .current_dir(&workspace)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -77,6 +77,19 @@ pub struct ConfigFields {
     /// The Unity editor path override (Settings ▸ General). Blank ⇒ find it via the Hub
     /// convention, which is the common case; this is for the machine where that fails.
     pub unity_path: Option<String>,
+
+    // --- Claude Code panel options (spec 22) ---
+    /// Model alias (`opus` / `sonnet` / `haiku`); absent ⇒ the CLI's own default.
+    pub claude_model: Option<String>,
+    /// Permission mode (`acceptEdits` / `plan`); absent ⇒ the CLI asks as usual.
+    pub claude_permission: Option<String>,
+    /// Carry the previous run's context. Absent ⇒ `false`, like every other flag here.
+    pub claude_continue: Option<bool>,
+    /// Space-separated tool lists, stored as written so a pattern like `Bash(git *)` survives.
+    pub claude_allowed_tools: Option<String>,
+    pub claude_disallowed_tools: Option<String>,
+    /// Extra directories, one per line (a path may contain spaces, so lines not spaces).
+    pub claude_add_dirs: Option<String>,
 }
 
 /// Pull the connection fields out of the config JSON. Any key may be absent; a
@@ -110,6 +123,12 @@ pub(super) fn parse_config(text: &str) -> ConfigFields {
         advisor_provider: field("advisor_provider"),
         verify_command: field("verify_command"),
         unity_path: field("unity_path"),
+        claude_model: field("claude_model"),
+        claude_permission: field("claude_permission"),
+        claude_continue: v.get("claude_continue").and_then(|x| x.as_bool()),
+        claude_allowed_tools: field("claude_allowed_tools"),
+        claude_disallowed_tools: field("claude_disallowed_tools"),
+        claude_add_dirs: field("claude_add_dirs"),
         // A NON-boolean value reads as absent rather than as `true`: a hand-edited
         // `"yolo": "yes"` must fall back to the safe default, not enable it.
         yolo: v.get("yolo").and_then(|x| x.as_bool()),
@@ -143,6 +162,11 @@ pub(super) fn serialize_config(f: &ConfigFields) -> String {
     put("advisor_provider", &f.advisor_provider);
     put("verify_command", &f.verify_command);
     put("unity_path", &f.unity_path);
+    put("claude_model", &f.claude_model);
+    put("claude_permission", &f.claude_permission);
+    put("claude_allowed_tools", &f.claude_allowed_tools);
+    put("claude_disallowed_tools", &f.claude_disallowed_tools);
+    put("claude_add_dirs", &f.claude_add_dirs);
     // Written only when set, matching every other field: a `false` is the default, and writing
     // it would turn "unset" into "explicitly off" in a file people hand-edit.
     let mut put_bool = |k: &str, v: &Option<bool>| {
@@ -152,6 +176,7 @@ pub(super) fn serialize_config(f: &ConfigFields) -> String {
     };
     put_bool("yolo", &f.yolo);
     put_bool("dry_run", &f.dry_run);
+    put_bool("claude_continue", &f.claude_continue);
     serde_json::Value::Object(obj).to_string()
 }
 

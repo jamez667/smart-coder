@@ -7,6 +7,29 @@ use super::file::{
 };
 use super::types::{Mode, Provider, UiConfig};
 
+/// Split a newline-separated list (extra directories), dropping blanks.
+///
+/// Lines rather than spaces because a Windows path routinely contains a space, and splitting
+/// `C:\Program Files\x` on whitespace would produce two directories that don't exist.
+fn split_lines(s: Option<&str>) -> Vec<String> {
+    s.into_iter()
+        .flat_map(|s| s.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Join a list for persistence, or `None` when it's empty — so an untouched option writes no
+/// key at all rather than an empty string that reads back as "set to nothing".
+fn opt_join(v: &[String], sep: &str) -> Option<String> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.join(sep))
+    }
+}
+
 impl UiConfig {
     /// The default config, then the machine-local endpoint/model layered on top.
     ///
@@ -88,6 +111,29 @@ impl UiConfig {
         if let Some(v) = file.dry_run {
             cfg.dry_run = v;
         }
+        // The Claude panel's options (spec 22). Every one falls back to "no flag" when absent
+        // or unrecognised — see `Permission::from_slug`, where the fallback direction is a
+        // safety property rather than a convenience.
+        cfg.claude = crate::claudecode::Options {
+            model: file
+                .claude_model
+                .as_deref()
+                .map(crate::claudecode::Model::from_slug)
+                .unwrap_or_default(),
+            permission: file
+                .claude_permission
+                .as_deref()
+                .map(crate::claudecode::Permission::from_slug)
+                .unwrap_or_default(),
+            continue_session: file.claude_continue.unwrap_or(false),
+            add_dirs: split_lines(file.claude_add_dirs.as_deref()),
+            allowed_tools: crate::claudecode::split_tools(
+                file.claude_allowed_tools.as_deref().unwrap_or_default(),
+            ),
+            disallowed_tools: crate::claudecode::split_tools(
+                file.claude_disallowed_tools.as_deref().unwrap_or_default(),
+            ),
+        };
         // The sandbox image and on/off are env-overridable too, so a machine can point the
         // terminal/agent at a project-appropriate image (e.g. a rust image) without editing
         // config.json. `SC_USE_DOCKER=0/false` forces host mode.
@@ -233,6 +279,14 @@ impl UiConfig {
             unity_path: self.unity_path.clone(),
             yolo: self.yolo.then_some(true),
             dry_run: self.dry_run.then_some(true),
+            // The Claude panel's options. Written only when they differ from the CLI's own
+            // default, so an untouched config stays as small as it was.
+            claude_model: self.claude.model.flag().map(str::to_string),
+            claude_permission: self.claude.permission.flag().map(str::to_string),
+            claude_continue: self.claude.continue_session.then_some(true),
+            claude_allowed_tools: opt_join(&self.claude.allowed_tools, " "),
+            claude_disallowed_tools: opt_join(&self.claude.disallowed_tools, " "),
+            claude_add_dirs: opt_join(&self.claude.add_dirs, "\n"),
         };
         let path = config_file();
         if let Some(dir) = path.parent() {

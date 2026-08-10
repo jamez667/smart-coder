@@ -216,6 +216,10 @@ pub(crate) struct App {
     /// They address different agents, so one text box would mean two buttons reading the same
     /// words and meaning different things.
     pub(crate) claude_input: String,
+    /// The Claude panel's ⚙ options menu is open.
+    pub(crate) claude_menu: bool,
+    /// The options menu's filter box — types-to-narrow, like the CLI's own action list.
+    pub(crate) claude_filter: String,
     /// The Claude panel's own run feed: what the current/last run did, newest last.
     ///
     /// Its own rather than the shared activity stream because `Session` holds exactly one run
@@ -508,6 +512,8 @@ impl Default for App {
             // process per constructed App would make the suite slow and machine-dependent.
             claude_available: false,
             claude_input: String::new(),
+            claude_menu: false,
+            claude_filter: String::new(),
             claude_feed: Vec::new(),
             compile_cancel: None,
             unity_path_input: unity_path_seed,
@@ -663,6 +669,27 @@ pub(crate) enum Message {
     EscapePressed,
     /// The Claude panel's task input changed (spec 22).
     ClaudeInputChanged(String),
+    /// Open/close the Claude panel's ⚙ options menu.
+    ToggleClaudeMenu,
+    /// The options menu's filter text changed.
+    ClaudeFilterChanged(String),
+    /// Step the model selector to the next choice (Default → Opus → Sonnet → Haiku → …).
+    CycleClaudeModel,
+    /// Step the permission-mode selector. `bypassPermissions` is deliberately not in the cycle.
+    CycleClaudePermission,
+    /// Toggle `--continue`: carry the previous run's context instead of starting cold.
+    ToggleClaudeContinue,
+    /// Attach the file currently open in the editor to the next prompt.
+    AttachActiveFile,
+    /// Add a directory (folder picker) the run may touch beyond the workspace.
+    AddClaudeDir,
+    /// Drop the Nth extra directory.
+    RemoveClaudeDir(usize),
+    /// The allowed/disallowed tool lists changed (raw text, parsed on commit).
+    ClaudeAllowedChanged(String),
+    ClaudeDisallowedChanged(String),
+    /// Clear the panel's feed and input — the menu's "Clear conversation".
+    ClearClaudeRun,
     /// Run the Claude panel's task through **Claude Code** (spec 22). Reachable only from that
     /// panel, which exists only when the CLI is present and the mode allows a model.
     RunClaudeCode,

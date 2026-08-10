@@ -29,20 +29,198 @@ pub fn detect() -> bool {
         .unwrap_or(false)
 }
 
-/// The arguments for a run over `task`.
+/// Which model a run uses. `Default` passes no `--model`, deferring to the CLI's own choice —
+/// which is the honest default, since that choice is Claude Code's to make and it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Model {
+    #[default]
+    Default,
+    Opus,
+    Sonnet,
+    Haiku,
+}
+
+impl Model {
+    /// The `--model` alias. `None` for [`Model::Default`] — the flag is omitted entirely.
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Model::Default => None,
+            Model::Opus => Some("opus"),
+            Model::Sonnet => Some("sonnet"),
+            Model::Haiku => Some("haiku"),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Model::Default => "Default",
+            Model::Opus => "Opus",
+            Model::Sonnet => "Sonnet",
+            Model::Haiku => "Haiku",
+        }
+    }
+    /// The cycle order for the menu's selector.
+    pub const ALL: [Model; 4] = [Model::Default, Model::Opus, Model::Sonnet, Model::Haiku];
+
+    /// Parse a persisted alias. Unknown ⇒ [`Model::Default`], never a guess — a config naming a
+    /// model this build doesn't know should fall back to the CLI's own choice rather than
+    /// pinning something arbitrary.
+    pub fn from_slug(s: &str) -> Self {
+        match s.trim() {
+            "opus" => Model::Opus,
+            "sonnet" => Model::Sonnet,
+            "haiku" => Model::Haiku,
+            _ => Model::Default,
+        }
+    }
+}
+
+/// How much Claude Code asks before acting.
+///
+/// **`BypassPermissions` is deliberately not offered.** It lets an agent take every action
+/// without asking, in the user's real project, with no gate anywhere in this app — spec 00's
+/// "no unattended *approval*" non-goal is about exactly that judgement, and a one-click path to
+/// it in a side menu is not a considered decision. Someone who genuinely wants it can run the
+/// CLI directly, where the choice is at least explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Permission {
+    /// Claude Code asks as it normally would.
+    #[default]
+    Default,
+    /// File edits are auto-accepted; other tools still ask.
+    AcceptEdits,
+    /// Plan only — it works out what it would do without doing it.
+    Plan,
+}
+
+impl Permission {
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Permission::Default => None,
+            Permission::AcceptEdits => Some("acceptEdits"),
+            Permission::Plan => Some("plan"),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Permission::Default => "Ask as usual",
+            Permission::AcceptEdits => "Auto-accept edits",
+            Permission::Plan => "Plan only",
+        }
+    }
+    pub const ALL: [Permission; 3] = [
+        Permission::Default,
+        Permission::AcceptEdits,
+        Permission::Plan,
+    ];
+
+    /// Parse a persisted mode. **Unknown ⇒ [`Permission::Default`]**, which is the mode that
+    /// asks the most. That direction is deliberate: a config carrying `bypassPermissions` —
+    /// hand-edited, or written by some future build — must fall back to asking rather than to
+    /// the permissive thing it names.
+    pub fn from_slug(s: &str) -> Self {
+        match s.trim() {
+            "acceptEdits" => Permission::AcceptEdits,
+            "plan" => Permission::Plan,
+            _ => Permission::Default,
+        }
+    }
+}
+
+/// Everything the panel's ⚙ menu can set for a run (spec 22).
+///
+/// One struct so [`args`] has a single input and the whole flag surface is asserted in one
+/// place. Every field's default is "pass no flag", so a fresh install behaves exactly as the
+/// CLI would on its own — the options add to Claude Code's behaviour, they never silently
+/// replace it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Options {
+    pub model: Model,
+    pub permission: Permission,
+    /// Carry the previous run's context (`--continue`) instead of starting cold.
+    pub continue_session: bool,
+    /// Extra directories the run may touch, beyond the workspace (`--add-dir`).
+    pub add_dirs: Vec<String>,
+    /// Restrict the run to these tools (`--allowedTools`). Empty ⇒ no restriction.
+    pub allowed_tools: Vec<String>,
+    /// Forbid these tools (`--disallowedTools`). Empty ⇒ nothing forbidden.
+    pub disallowed_tools: Vec<String>,
+}
+
+/// Split a tool list on whitespace, but **keep bracketed patterns whole**.
+///
+/// The CLI's own examples include `Bash(git *)` — a single tool spec containing a space. A
+/// naive `split_whitespace` turns that into `Bash(git` and `*)`, neither of which names a tool,
+/// so a restriction the user carefully typed silently stops restricting anything.
+pub fn split_tools(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                cur.push(c);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !cur.trim().is_empty() {
+                    out.push(cur.trim().to_string());
+                }
+                cur.clear();
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// The arguments for a run over `task`, with the panel's options applied.
 ///
 /// Split out so the argument list is asserted in a test rather than buried in the spawn: the
 /// output format is the contract this whole module is written against, and a silent change to
 /// `--output-format` would turn every line into an unparseable one.
-pub fn args(task: &str) -> Vec<String> {
-    vec![
+pub fn args(task: &str, opts: &Options) -> Vec<String> {
+    let mut v = vec![
         "-p".to_string(),
         task.to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         // stream-json refuses to run without --verbose.
         "--verbose".to_string(),
-    ]
+    ];
+    if let Some(m) = opts.model.flag() {
+        v.push("--model".to_string());
+        v.push(m.to_string());
+    }
+    if let Some(p) = opts.permission.flag() {
+        v.push("--permission-mode".to_string());
+        v.push(p.to_string());
+    }
+    if opts.continue_session {
+        v.push("--continue".to_string());
+    }
+    for d in &opts.add_dirs {
+        v.push("--add-dir".to_string());
+        v.push(d.clone());
+    }
+    // Space-separated in ONE argument, which is the shape the CLI documents. Passing each tool
+    // as its own argv entry works for bare names but breaks a pattern like `Bash(git *)`, whose
+    // space would then split it into two tools that mean nothing.
+    if !opts.allowed_tools.is_empty() {
+        v.push("--allowedTools".to_string());
+        v.push(opts.allowed_tools.join(" "));
+    }
+    if !opts.disallowed_tools.is_empty() {
+        v.push("--disallowedTools".to_string());
+        v.push(opts.disallowed_tools.join(" "));
+    }
+    v
 }
 
 /// What one line of the stream means to the UI.
@@ -415,12 +593,115 @@ mod tests {
     /// The argument list IS the contract this module parses against.
     #[test]
     fn the_arguments_pin_the_output_format() {
-        let a = args("do the thing");
+        let a = args("do the thing", &Options::default());
         assert!(a.contains(&"stream-json".to_string()), "{a:?}");
         assert!(
             a.contains(&"--verbose".to_string()),
             "stream-json refuses to run without it: {a:?}"
         );
         assert_eq!(a[1], "do the thing", "the task is passed verbatim");
+    }
+
+    /// **Defaults add nothing.** A fresh install must behave exactly as the bare CLI would —
+    /// the panel's options extend Claude Code's behaviour, they never silently replace it.
+    #[test]
+    fn default_options_pass_no_extra_flags() {
+        let a = args("t", &Options::default());
+        for flag in [
+            "--model",
+            "--permission-mode",
+            "--continue",
+            "--add-dir",
+            "--allowedTools",
+            "--disallowedTools",
+        ] {
+            assert!(!a.contains(&flag.to_string()), "{flag} leaked: {a:?}");
+        }
+    }
+
+    /// Each option becomes its flag.
+    #[test]
+    fn options_become_flags() {
+        let a = args(
+            "t",
+            &Options {
+                model: Model::Sonnet,
+                permission: Permission::AcceptEdits,
+                continue_session: true,
+                add_dirs: vec![r"C:\other".to_string()],
+                allowed_tools: vec!["Edit".to_string(), "Bash(git *)".to_string()],
+                disallowed_tools: vec!["WebFetch".to_string()],
+            },
+        );
+        let pair = |k: &str| {
+            a.iter()
+                .position(|x| x == k)
+                .and_then(|i| a.get(i + 1))
+                .cloned()
+        };
+        assert_eq!(pair("--model").as_deref(), Some("sonnet"));
+        assert_eq!(pair("--permission-mode").as_deref(), Some("acceptEdits"));
+        assert!(a.contains(&"--continue".to_string()));
+        assert_eq!(pair("--add-dir").as_deref(), Some(r"C:\other"));
+        // ONE argument, space-separated: a per-tool argv entry would split `Bash(git *)` at its
+        // space into two tools that mean nothing.
+        assert_eq!(pair("--allowedTools").as_deref(), Some("Edit Bash(git *)"));
+        assert_eq!(pair("--disallowedTools").as_deref(), Some("WebFetch"));
+    }
+
+    /// A bracketed tool pattern survives splitting.
+    ///
+    /// `Bash(git *)` contains a space, so a naive whitespace split yields `Bash(git` and `*)` —
+    /// neither of which names a tool, and the restriction then silently permits everything.
+    #[test]
+    fn a_bracketed_tool_pattern_is_not_split_at_its_space() {
+        assert_eq!(
+            split_tools("Edit Bash(git *) Read"),
+            vec!["Edit", "Bash(git *)", "Read"]
+        );
+        assert_eq!(split_tools(""), Vec::<String>::new());
+        assert_eq!(split_tools("   "), Vec::<String>::new());
+        // Nested and unbalanced brackets do not panic or swallow the rest of the list.
+        assert_eq!(split_tools("A(b (c)) D"), vec!["A(b (c))", "D"]);
+        assert_eq!(split_tools("A(b D"), vec!["A(b D"]);
+    }
+
+    /// A persisted value this build doesn't recognise falls back to the SAFE end.
+    #[test]
+    fn an_unknown_persisted_option_falls_back_safely() {
+        assert_eq!(Model::from_slug("gpt-9"), Model::Default);
+        assert_eq!(Permission::from_slug("nonsense"), Permission::Default);
+        // The one that matters: a config naming the permissive mode must not enable it.
+        assert_eq!(
+            Permission::from_slug("bypassPermissions"),
+            Permission::Default,
+            "a config naming the bypass mode must fall back to asking"
+        );
+    }
+
+    /// **`bypassPermissions` is not reachable from the UI.**
+    ///
+    /// It lets an agent take every action without asking, in a real project, with no gate
+    /// anywhere in this app. Spec 00's "no unattended *approval*" non-goal is about exactly
+    /// that judgement, and a one-click path to it in a side menu is not a considered decision.
+    #[test]
+    fn the_bypass_permission_mode_is_not_offered() {
+        for p in Permission::ALL {
+            assert_ne!(p.flag(), Some("bypassPermissions"), "{p:?}");
+        }
+        // And no combination of the offered options can produce the flag value.
+        for p in Permission::ALL {
+            let a = args(
+                "t",
+                &Options {
+                    permission: p,
+                    ..Options::default()
+                },
+            );
+            assert!(
+                !a.iter().any(|x| x == "bypassPermissions"),
+                "{p:?} produced it: {a:?}"
+            );
+        }
     }
 }

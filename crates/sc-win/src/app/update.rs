@@ -248,6 +248,78 @@ impl App {
             // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
             Message::RunIterate => self.start(RunKind::StagedBuild),
             Message::ClaudeInputChanged(s) => self.claude_input = s,
+            Message::ToggleClaudeMenu => {
+                self.claude_menu = !self.claude_menu;
+                // A stale filter would hide most of the menu the next time it opens, which
+                // reads as options having disappeared.
+                self.claude_filter.clear();
+            }
+            Message::ClaudeFilterChanged(s) => self.claude_filter = s,
+            Message::CycleClaudeModel => {
+                let all = sc_win::claudecode::Model::ALL;
+                let i = all
+                    .iter()
+                    .position(|m| *m == self.cfg.claude.model)
+                    .unwrap_or(0);
+                self.cfg.claude.model = all[(i + 1) % all.len()];
+                self.cfg.save_config();
+            }
+            Message::CycleClaudePermission => {
+                let all = sc_win::claudecode::Permission::ALL;
+                let i = all
+                    .iter()
+                    .position(|p| *p == self.cfg.claude.permission)
+                    .unwrap_or(0);
+                self.cfg.claude.permission = all[(i + 1) % all.len()];
+                self.cfg.save_config();
+            }
+            Message::ToggleClaudeContinue => {
+                self.cfg.claude.continue_session = !self.cfg.claude.continue_session;
+                self.cfg.save_config();
+            }
+            Message::AttachActiveFile => {
+                // Append the open file's path to the prompt rather than reading its contents:
+                // Claude Code has its own Read tool and its own context management, so handing
+                // it a path lets it fetch what it needs. Pasting the file would duplicate work
+                // and blow the prompt on a large file.
+                if let Some(f) = self.panes.focused().selected_file.clone() {
+                    if !self.claude_input.is_empty() && !self.claude_input.ends_with(' ') {
+                        self.claude_input.push(' ');
+                    }
+                    self.claude_input.push('@');
+                    self.claude_input.push_str(&f);
+                    self.claude_menu = false;
+                }
+            }
+            Message::AddClaudeDir => {
+                self.claude_menu = false;
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    let d = dir.to_string_lossy().to_string();
+                    if !self.cfg.claude.add_dirs.contains(&d) {
+                        self.cfg.claude.add_dirs.push(d);
+                        self.cfg.save_config();
+                    }
+                }
+            }
+            Message::RemoveClaudeDir(i) => {
+                if i < self.cfg.claude.add_dirs.len() {
+                    self.cfg.claude.add_dirs.remove(i);
+                    self.cfg.save_config();
+                }
+            }
+            Message::ClaudeAllowedChanged(s) => {
+                self.cfg.claude.allowed_tools = sc_win::claudecode::split_tools(&s);
+                self.cfg.save_config();
+            }
+            Message::ClaudeDisallowedChanged(s) => {
+                self.cfg.claude.disallowed_tools = sc_win::claudecode::split_tools(&s);
+                self.cfg.save_config();
+            }
+            Message::ClearClaudeRun => {
+                self.claude_feed.clear();
+                self.claude_input.clear();
+                self.claude_menu = false;
+            }
             Message::RunClaudeCode => {
                 self.open_menu = None;
                 // Guarded even though the panel only exists when available: a queued Task or a
