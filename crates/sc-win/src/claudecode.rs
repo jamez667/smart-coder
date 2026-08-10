@@ -234,8 +234,15 @@ pub enum Line {
     Event(AgentEvent),
     /// The run ended. `ok` is Claude Code's own verdict; `summary` its closing text.
     Done { ok: bool, summary: String },
-    /// Nothing the UI needs — a rate-limit notice, a thinking block, an unknown line.
+    /// A line we know about and deliberately don't show — a rate-limit notice, say.
+    ///
+    /// Distinct from [`Line::Unknown`] on purpose: the caller counts unknowns to report format
+    /// drift, and folding the expected-but-uninteresting lines in with them means crying wolf
+    /// on every single run, which trains the user to ignore the one report that matters.
     Ignored,
+    /// A line this build does not understand — malformed, or a type added since. Counted and
+    /// reported, because a format change that silently halves the feed should be visible.
+    Unknown,
 }
 
 /// Translate one line of `--output-format stream-json` into UI events, with tool paths made
@@ -286,7 +293,7 @@ pub fn parse_line(line: &str) -> Vec<Line> {
         return Vec::new();
     }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-        return vec![Line::Ignored];
+        return vec![Line::Unknown];
     };
     match v.get("type").and_then(|t| t.as_str()) {
         // The init banner names the session and the tools. Used only to open the feed with the
@@ -312,8 +319,10 @@ pub fn parse_line(line: &str) -> Vec<Line> {
                 .to_string();
             vec![Line::Done { ok, summary }]
         }
-        // `rate_limit_event` and anything else new: not an error, just not ours.
-        _ => vec![Line::Ignored],
+        // Known, and deliberately not shown: a rate-limit notice is normal traffic.
+        Some("rate_limit_event") => vec![Line::Ignored],
+        // Anything else: not an error, but worth counting — it may be a type added since.
+        _ => vec![Line::Unknown],
     }
 }
 
@@ -505,19 +514,34 @@ mod tests {
     /// line. This is the test that earns the right to run a foreign format at all.
     #[test]
     fn an_unparseable_or_unknown_line_is_ignored_not_fatal() {
-        assert_eq!(parse_line("not json at all"), vec![Line::Ignored]);
+        // UNKNOWN — counted and reported, because it may be format drift.
+        assert_eq!(parse_line("not json at all"), vec![Line::Unknown]);
         assert_eq!(
             parse_line(r#"{"type":"assistant","messa"#),
-            vec![Line::Ignored]
+            vec![Line::Unknown]
         );
-        assert_eq!(parse_line(RATE_LIMIT), vec![Line::Ignored]);
         assert_eq!(
             parse_line(r#"{"type":"some_future_event","payload":1}"#),
-            vec![Line::Ignored]
+            vec![Line::Unknown]
         );
         // Blank lines are not even worth counting as skipped.
         assert!(parse_line("").is_empty());
         assert!(parse_line("   ").is_empty());
+    }
+
+    /// **A rate-limit notice is normal traffic, not format drift.**
+    ///
+    /// It appears on essentially every run. Counting it as "unrecognised" put a warning at the
+    /// end of every single run — and a warning that always fires is one nobody reads, which
+    /// would cost us the one report that actually matters.
+    #[test]
+    fn a_known_but_uninteresting_line_is_not_counted_as_drift() {
+        assert_eq!(parse_line(RATE_LIMIT), vec![Line::Ignored]);
+        assert_ne!(
+            parse_line(RATE_LIMIT),
+            vec![Line::Unknown],
+            "must not be reported as unrecognised"
+        );
     }
 
     /// A `thinking` block is dropped: the feed shows what the agent did, not what it mused.

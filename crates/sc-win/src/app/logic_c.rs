@@ -673,7 +673,25 @@ impl App {
                     // kinds can never be live together — `start()` refuses while a session
                     // exists — so this is a routing choice, not a race.
                     if self.claude_run {
-                        self.claude_feed.extend(agent_rows(&e));
+                        // Drop the token/budget bookkeeping. `agent_rows` renders a run header
+                        // and a per-turn header carrying prompt sizes, which are OUR context
+                        // manager's numbers — Claude Code manages its own, so we report 0, and
+                        // "budget 0 tok" / "turn 0 (0 tok)" is a row that says nothing. The
+                        // prompt is echoed when Run is pressed, which is the header that helps.
+                        let keep = !matches!(
+                            e,
+                            sc_core::AgentEvent::RunStarted { .. }
+                                | sc_core::AgentEvent::ModelTurn { .. }
+                        );
+                        if keep {
+                            self.claude_feed.extend(agent_rows(&e));
+                        } else if let sc_core::AgentEvent::ModelTurn { raw, .. } = &e {
+                            // Keep the model's PROSE, which is the actual answer — just not the
+                            // turn header wrapped around it.
+                            if !raw.trim().is_empty() {
+                                self.claude_feed.push(Row::ok("💬", raw.trim().to_string()));
+                            }
+                        }
                     } else {
                         self.rows.extend(agent_rows(&e));
                     }
@@ -710,12 +728,23 @@ impl App {
                 UiEvent::Done { ok, summary } => {
                     // The closing line goes in the panel too, so a Claude run ends visibly
                     // rather than just stopping.
+                    //
+                    // UNLESS it merely repeats the last thing already shown. Claude Code's final
+                    // `result` carries the same text as its closing assistant turn, so printing
+                    // both showed the whole answer twice — for smart-coder's own agent the two
+                    // genuinely differ, which is why the general path prints both.
                     if self.claude_run {
-                        self.claude_feed.push(if ok {
-                            Row::ok("✓", summary.clone())
-                        } else {
-                            Row::err("✗", summary.clone())
-                        });
+                        let dupe = self
+                            .claude_feed
+                            .last()
+                            .is_some_and(|r| summary.trim() == r.text.trim());
+                        if !dupe {
+                            self.claude_feed.push(if ok {
+                                Row::ok("✓", summary.clone())
+                            } else {
+                                Row::err("✗", summary.clone())
+                            });
+                        }
                     }
                     self.finish_run(ok, &summary);
                     self.session = None;

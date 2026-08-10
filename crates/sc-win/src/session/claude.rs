@@ -107,7 +107,10 @@ pub(super) fn run_claude_code(
                     let _ = tx.send(UiEvent::Agent(ev));
                 }
                 Line::Done { ok, summary } => done = Some((ok, summary)),
-                Line::Ignored => skipped += 1,
+                // Known-and-uninteresting: not counted. Counting these would report "lines
+                // skipped" on every run, and a warning that always fires is one nobody reads.
+                Line::Ignored => {}
+                Line::Unknown => skipped += 1,
             }
         }
     }

@@ -332,9 +332,24 @@ impl App {
                 // put the composer's text back, so pressing Run here cannot silently rewrite
                 // what the user had typed over there.
                 let composer = std::mem::replace(&mut self.intent, self.claude_input.clone());
-                self.claude_feed.clear();
+                // The feed ACCUMULATES across runs — it reads as a conversation, which is what
+                // a panel with an input box looks like it should be. Clearing on every Run made
+                // it a single-shot viewer that threw away the exchange you were reading, and
+                // there is already a "Clear this conversation" menu item for when you want that.
+                //
+                // Echo the prompt first, so the feed says what was ASKED and not only what the
+                // agent did. Without it a scrolled-back feed is a list of tool calls with no
+                // question attached to them.
+                let asked = self.claude_input.clone();
+                if !self.claude_feed.is_empty() {
+                    self.claude_feed.push(Row::ok(" ", String::new()));
+                }
+                self.claude_feed.push(Row::ok("❯", asked));
                 self.start(RunKind::ClaudeCode);
                 self.intent = composer;
+                // The prompt has been sent and is now in the feed; leaving it in the box means
+                // the next Run silently re-sends it.
+                self.claude_input.clear();
             }
             Message::Tick => {
                 self.pump();
