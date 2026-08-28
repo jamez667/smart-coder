@@ -18,7 +18,7 @@ use sc_proto::Result;
 use sc_tools::{Journal, ToolOutcome, ToolRegistry};
 
 pub use config::{AgentConfig, AgentReport};
-use config::{FOCUS_TASK_PREFIX, TASK_PREFIX};
+use config::{FOCUS_TASK_PREFIX, TASK_PREFIX, TASK_PREFIX_SHELL};
 
 use crate::event::{AgentEvent, EventSink, NullSink};
 use crate::metrics::ToolCallMetrics;
@@ -124,10 +124,12 @@ pub fn run_agent_observed(
     // When the agent is scoped to focus files, the loop pins their live contents
     // every turn — so the system prompt must NOT tell the model to read first
     // (that just traps a tiny model in a read loop). Lead with "edit" instead.
-    let prefix = if cfg.focus_files.is_empty() {
-        TASK_PREFIX
-    } else {
+    let prefix = if !cfg.focus_files.is_empty() {
         FOCUS_TASK_PREFIX
+    } else if cfg.permission.allow_shell {
+        TASK_PREFIX_SHELL
+    } else {
+        TASK_PREFIX
     };
     let mut system = format!("{prefix}{}", strategy.system_preamble(registry));
     if let Some(suffix) = &cfg.system_suffix {

@@ -139,7 +139,11 @@ pub(super) fn dispatch(
         }
         "run_command" => {
             let cmd = call.str("command").unwrap_or_default();
-            let r = sc_verify::run_command(workspace, cmd);
+            // Honour the configured sandbox, exactly as `run_verification` does below.
+            // This called the Host-pinned wrapper, so a shell command ran on the host
+            // while the tests it was investigating ran in the container — a different
+            // OS, a different filesystem, and none of the project's dependencies.
+            let r = sc_verify::run_command_in(sandbox, workspace, cmd);
             ToolOutcome::Observation(format!(
                 "run_command {cmd:?} exited {}:\n{}",
                 r.code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),

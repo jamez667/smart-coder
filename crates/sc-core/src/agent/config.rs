@@ -202,6 +202,26 @@ shell is blocked); read which tests still fail and fix them; \
 4) finish only when the tests pass. \
 Take a concrete action every turn — prefer editing over searching.\n\n";
 
+/// The same loop, for a run where the shell IS allowed.
+///
+/// The difference is step 1. Telling a model to read first traps it in a read loop —
+/// the same trap [`FOCUS_TASK_PREFIX`] was written to avoid. With a shell available the
+/// better first move is to *run something*: a command's output turns a symptom into a
+/// concrete, located fact, which is what a model needs before it can commit to an edit.
+///
+/// `TASK_PREFIX` must not be used when shell is permitted: it states "shell is blocked",
+/// and a model that is told a tool is unavailable will not reach for it however the
+/// permission policy is configured.
+pub(super) const TASK_PREFIX_SHELL: &str = "You are a coding agent working in a project \
+directory. Make the failing test pass. Follow this loop: \
+1) run_command to investigate — grep for the symbol, run the failing test, print a value. \
+Prefer running something over reading a whole file; \
+2) edit_file the source with a precise change once you know what is wrong; \
+3) run_verification to run the tests; read which tests still fail and fix them; \
+4) finish only when the tests pass. \
+Take a concrete action every turn. Do not read the same file twice — if you have read it, \
+you have it.\n\n";
+
 /// System preamble for a focus-scoped run: the file you must edit is already shown
 /// to you every turn, so don't read it — edit it. Used by the swarm worker (and
 /// any caller that sets `focus_files`).

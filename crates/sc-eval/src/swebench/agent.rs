@@ -87,7 +87,25 @@ impl<'a> SweAgentSolver<'a> {
             // the live guard against editing them, not merely defence in depth. The
             // `git diff` check after the solve is the backstop, since matching here is
             // exact-string rather than glob.
-            permission: PermissionPolicy::with_frozen(instance.test_files.clone()),
+            //
+            // `allow_shell` is ON, which reverses an earlier decision here. Shell was
+            // denied to stop a model `git checkout`-ing its way to a false pass — but
+            // denying it also removes the one thing that turns a SYMPTOM into a
+            // DIAGNOSIS. Measured on this instance: offered read+edit only, Tiel picks
+            // read 15/16 and edits 1/16; offered read+edit+shell it picks shell 14/16,
+            // with targeted greps. The published Pi transcripts that scored 12/25 on
+            // SWE-bench-Live show the same profile — bash outnumbers read 3-4x, and the
+            // edit lands on the turn straight after a command's output makes the bug
+            // concrete.
+            //
+            // The false-pass risk is handled where it belongs: the harness re-runs the
+            // tests itself, in a container the agent's own workspace cannot reach, so
+            // nothing the model does locally can fake a green run.
+            permission: PermissionPolicy {
+                allow_shell: true,
+                frozen_paths: instance.test_files.clone(),
+                ..Default::default()
+            },
             ..AgentConfig::default()
         }
     }
@@ -215,16 +233,24 @@ mod tests {
         assert!(i.contains("t.py"), "names the readable test file: {i}");
     }
 
-    /// Shell stays denied inside a scored eval — the agent verifies through
-    /// `run_verification`, which is not shell-gated.
+    /// The agent gets a shell, and the tests stay frozen.
+    ///
+    /// Shell is what converts a symptom into a diagnosis: running a command makes the
+    /// bug concrete in a way that re-reading a file does not. Measured on
+    /// `pylint-dev__pylint-6506` — read+edit only: read 15/16, edit 1/16; with a shell
+    /// offered: shell 14/16. Cheating is prevented by re-running the tests in a
+    /// container the agent's workspace cannot reach, not by withholding the tool.
     #[test]
-    fn the_agent_gets_no_shell_and_the_tests_are_frozen() {
+    fn the_agent_gets_a_shell_and_the_tests_are_frozen() {
         let b = dummy();
         let s = SweAgentSolver::new(&b);
         let c = s.config_for(&instance(), Path::new("/tmp/ws"));
-        assert!(!c.permission.allow_shell);
-        assert!(c.permission.shell_allowlist.is_empty());
-        assert_eq!(c.permission.frozen_paths, ["t.py"]);
+        assert!(c.permission.allow_shell, "shell is how it diagnoses");
+        assert_eq!(
+            c.permission.frozen_paths,
+            ["t.py"],
+            "the tests are still not editable"
+        );
         assert!(c.verify_command.is_some());
     }
 
