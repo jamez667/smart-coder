@@ -26,12 +26,14 @@
 //! - **green-after-solve** — [`score::SweScore::resolved`], SWE-bench's own strict
 //!   definition.
 
+pub mod agent;
 pub mod container;
 pub mod instance;
 pub mod runner;
 pub mod score;
 pub mod solver;
 
+pub use agent::SweAgentSolver;
 pub use instance::{Subset, SweInstance};
 pub use runner::{run_instance, InstanceRun, SolveReport, SweSolver};
 pub use score::SweScore;

@@ -18,6 +18,7 @@ path = "src/main.rs"
 sc-proto = { path = "../sc-proto" }
 sc-model = { path = "../sc-model" }
 sc-core = { path = "../sc-core" }
+sc-tools = { path = "../sc-tools" }
 sc-verify = { path = "../sc-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }

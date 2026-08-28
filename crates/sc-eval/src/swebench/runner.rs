@@ -108,12 +108,22 @@ fn run_instance_inner(
     solver: &dyn SweSolver,
     started: Instant,
 ) -> Result<InstanceRun> {
-    let container = InstanceContainer::start(&instance.instance_id, &instance.image())?;
+    // The workspace comes first: the container is named after it, so that the agent's
+    // own `run_verification` (which addresses a container by a hash of its workspace
+    // path) reaches THIS container and runs the real test suite in the real
+    // environment. See `InstanceContainer::session_name_for`.
+    let ws = TempWorkspace::new(&instance.instance_id)
+        .map_err(|e| DcError::Eval(format!("workspace: {e}")))?;
+    let src = ws.path().join("src");
+    std::fs::create_dir_all(&src).map_err(|e| DcError::Eval(format!("src dir: {e}")))?;
+    let container = InstanceContainer::start_named(
+        &InstanceContainer::session_name_for(&src),
+        &instance.image(),
+        ws.path(),
+    )?;
 
     // 1. Apply the test patch. This is what turns the base commit red: the image ships
     //    the *old* tests, and the patch rewrites them to expect the fixed behaviour.
-    let ws = TempWorkspace::new(&instance.instance_id)
-        .map_err(|e| DcError::Eval(format!("workspace: {e}")))?;
     let patch_path = ws.path().join("test.patch");
     std::fs::write(&patch_path, &instance.test_patch)
         .map_err(|e| DcError::Eval(format!("writing test patch: {e}")))?;
@@ -152,8 +162,6 @@ fn run_instance_inner(
     }
 
     // 3. Hand the agent the source subtree only. The tests stay in the container.
-    let src = ws.path().join("src");
-    std::fs::create_dir_all(&src).map_err(|e| DcError::Eval(format!("src dir: {e}")))?;
     container.copy_out(&format!("{TESTBED}/{}", instance.src_dir), &src)?;
 
     let solve_err = solver.solve(instance, &src).err();
