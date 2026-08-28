@@ -277,6 +277,20 @@ pub fn run_agent_observed(
         }
 
         let mut req = GenerateRequest::new(built.messages);
+        // The reply budget the prompt was sized against (spec 05) must also be the
+        // reply budget the request asks for. It was subtracted from the prompt but
+        // never applied here, so every turn silently used `GenerateRequest`'s 1024
+        // default however `response_reserve_tokens` was configured.
+        //
+        // That truncates a REASONING model mid-thought. Measured on Tiel-35B-A3B,
+        // five identical single-edit requests at max_tokens 1024: four emitted the
+        // call after 131-289 completion tokens, the fifth ran to the cap and returned
+        // NOTHING (`finish_reason: length`, no tool_calls). A truncated turn produces
+        // no call at all, which the loop reads as the model declining to act -- so a
+        // model that reasons long looks like a model that will not edit. Reads are
+        // short and always survived; edits carry the reasoning plus an old_str/new_str
+        // payload and did not.
+        req.max_tokens = cfg.response_reserve_tokens;
         strategy.prepare_request(&mut req, registry);
         // Stream the turn when enabled, emitting a ContentDelta per token so a UI can show the
         // reply (incl. a file edit being written) appear live. Falls back to blocking generate

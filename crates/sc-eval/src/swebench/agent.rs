@@ -22,6 +22,8 @@ use super::runner::{pytest_command, SolveReport, SweSolver};
 /// - **`observation_line_cap`** — 40 lines truncates a pytest failure mid-traceback,
 ///   amputating the assertion that names the bug.
 /// - **`read_file_line_cap`** — real modules run past 400 lines.
+/// - **`response_reserve_tokens`** — 1024 truncates a reasoning model mid-thought, and
+///   a truncated turn emits no tool call at all.
 /// - **`verify_command`** — this is what lets the agent run the tests itself, through
 ///   `run_verification`, *without* shell access. Shell stays denied: granting it inside
 ///   a scored eval invites the model to `git checkout` its way to a false pass.
@@ -59,6 +61,12 @@ impl<'a> SweAgentSolver<'a> {
             verbose: self.verbose,
             observation_line_cap: 200,
             read_file_line_cap: 800,
+            // A reasoning model spends tokens thinking before it emits the call, and a
+            // truncated turn yields NO call -- indistinguishable from declining to act.
+            // Measured on Tiel-35B-A3B: at 1024, one edit request in five ran to the cap
+            // and returned nothing. The prompt budget gives this back (32k window), so
+            // buy the headroom.
+            response_reserve_tokens: 4096,
             // The agent runs the tests through `run_verification`, never the shell —
             // and it runs them for real, in the instance container, against the same
             // node ids the harness will score. `sandbox` below is what makes that
