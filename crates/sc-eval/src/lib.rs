@@ -15,9 +15,11 @@ pub mod fsutil;
 pub mod report;
 pub mod runner;
 pub mod solver;
+pub mod swebench;
 pub mod task;
 
 pub use report::Report;
 pub use runner::{run_suite, run_task, Outcome, TaskResult};
 pub use solver::{AgentSolver, FileSolver, FnSolver, NoopSolver, Solver};
+pub use swebench::{run_instance, InstanceRun, Subset, SweInstance, SweScore, SweSolver};
 pub use task::{EvalTask, TaskSuite};
