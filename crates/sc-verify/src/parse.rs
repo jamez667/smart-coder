@@ -186,15 +186,41 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
         // editing store/service in circles (observed live: S2-todo-board, double url_prefix).
         attach_route_not_found_hint(output, &mut cases);
 
+        // `-rA` short-summary passes: `PASSED path::test`, one per line, status
+        // FIRST. The verbose scan above cannot see these — it matches the status as
+        // a *suffix* (`path::test PASSED`), which is what `-v` emits. Without this
+        // arm the passing tests are invisible and only failures are ever named.
+        //
+        // That matters beyond cosmetics: scoring a run that must prove specific
+        // named tests still pass (SWE-bench's PASS_TO_PASS) needs the passes BY
+        // NAME, and the placeholder synthesis below cannot supply them. Keep `-rA`
+        // in any command whose passes are checked individually.
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("PASSED ") {
+                let name = name.trim();
+                if is_pytest_node(name) {
+                    cases.push(TestCase {
+                        name: name.to_string(),
+                        passed: true,
+                        message: None,
+                    });
+                }
+            }
+        }
+
         // Add placeholder passes from the summary so passed/total is meaningful
-        // (e.g. "2 failed, 1 passed in 0.05s").
-        if let Some(passed) = pytest_summary_passed(output) {
-            for i in 0..passed {
-                cases.push(TestCase {
-                    name: format!("(passed #{})", i + 1),
-                    passed: true,
-                    message: None,
-                });
+        // (e.g. "2 failed, 1 passed in 0.05s"). Skipped when the loop above already
+        // named them, so real names are never diluted by anonymous stand-ins.
+        if !cases.iter().any(|c| c.passed) {
+            if let Some(passed) = pytest_summary_passed(output) {
+                for i in 0..passed {
+                    cases.push(TestCase {
+                        name: format!("(passed #{})", i + 1),
+                        passed: true,
+                        message: None,
+                    });
+                }
             }
         }
     }
@@ -488,6 +514,54 @@ FAILED test_calc.py::test_ten_is_even - assert False is True
             .iter()
             .any(|c| c.message.as_deref() == Some("assert False is True")));
         assert!(!report.all_green());
+    }
+
+    /// `-rA` names the passes as well as the failures, and scoring a run against a
+    /// list of test ids needs both. Real output, captured from the SWE-bench image for
+    /// `pylint-dev__pylint-6506` with its test patch applied: the two rewritten tests
+    /// fail, the other six still pass.
+    ///
+    /// Before the `PASSED ` arm this returned 2 cases and `passed_count() == 0` — the
+    /// six passes were invisible, because the status is a PREFIX here and the verbose
+    /// scan matches it as a suffix.
+    #[test]
+    fn pytest_short_summary_names_the_passes_not_just_the_failures() {
+        let out = "=========================== short test summary info ============================
+PASSED tests/config/test_config.py::test_can_read_toml_env_variable
+PASSED tests/config/test_config.py::test_unknown_message_id
+PASSED tests/config/test_config.py::test_unknown_confidence
+PASSED tests/config/test_config.py::test_unknown_yes_no
+PASSED tests/config/test_config.py::test_unknown_py_version
+PASSED tests/config/test_config.py::test_short_verbose
+FAILED tests/config/test_config.py::test_unknown_option_name - pylint.config....
+FAILED tests/config/test_config.py::test_unknown_short_option_name - pylint.c...
+2 failed, 6 passed, 1 warning in 0.13s
+";
+        let r = parse("python -m pytest -rA --tb=no -q", out, false);
+        assert_eq!(r.cases.len(), 8, "every test is named: {:?}", r.cases);
+        assert_eq!(r.passed_count(), 6);
+
+        // By name, not by count — that is the whole point of the arm.
+        let passed: Vec<&str> = r
+            .cases
+            .iter()
+            .filter(|c| c.passed)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(passed.contains(&"tests/config/test_config.py::test_short_verbose"));
+        assert!(
+            !passed.iter().any(|n| n.starts_with("(passed #")),
+            "real names must not be diluted by placeholders: {passed:?}"
+        );
+
+        let failed: Vec<&str> = r.failed().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            failed,
+            [
+                "tests/config/test_config.py::test_unknown_option_name",
+                "tests/config/test_config.py::test_unknown_short_option_name",
+            ]
+        );
     }
 
     #[test]
