@@ -303,8 +303,20 @@ pub(super) fn looks_like_test_command(cmd: Option<&str>) -> bool {
 }
 
 /// Does an observation read like a failure the model must react to?
+///
+/// **Only the status line is examined, never the payload.** Every tool answers with a
+/// status line and then, often, the thing it fetched — and real source is full of the
+/// words this looks for. Scanning the whole observation marked
+/// `read_file pylint/config/exceptions.py (23 lines): ...` as a failure purely because
+/// the file it returned defines exception classes. Measured on qwen3-coder-30b: three
+/// of four reads in a run were flagged, the model was told its successful reads had
+/// failed, and it re-read the same files instead of editing. Files with no such word
+/// (`pylint/__init__.py`) read clean, which is what made the correlation obvious.
+///
+/// The status line is authored by the harness, so matching against it is matching
+/// against something we control rather than against arbitrary user code.
 pub(super) fn looks_like_failure(obs: &str) -> bool {
-    let l = obs.to_ascii_lowercase();
+    let l = obs.lines().next().unwrap_or_default().to_ascii_lowercase();
     // A green verification says "all N passed ✓"; a red one says "K failed".
     // "passed" with no "failed" must NOT read as a failure, so check failure
     // markers but exclude the all-passed phrasing.
@@ -328,6 +340,52 @@ mod tests {
     use std::sync::Mutex;
 
     use super::super::test_util::temp_dir;
+
+    /// The regression: real source is full of the words this heuristic looks for, so
+    /// scanning the payload made a *successful* read of an exceptions module report as
+    /// a failure. Only the status line — which the harness itself writes — is examined.
+    #[test]
+    fn a_successful_read_of_error_handling_code_is_not_a_failure() {
+        let obs = concat!(
+            "read_file pylint/config/exceptions.py (23 lines):\n",
+            "class _UnrecognizedOptionError(Exception):\n",
+            "    \"\"\"Raised if an unrecognized option is encountered.\"\"\"\n",
+            "class ArgumentPreprocessingError(Exception):\n",
+            "    \"\"\"Raised if an error occurs during argument pre-processing.\"\"\"",
+        );
+        assert!(
+            !looks_like_failure(obs),
+            "reading a file that mentions errors is not an error"
+        );
+
+        // A test file naming the behaviour under test — the thing a model most needs
+        // to read when it has been asked to make that test pass.
+        let obs = concat!(
+            "read_file tests/config/test_config.py (111 lines):\n",
+            "with pytest.raises(_UnrecognizedOptionError):",
+        );
+        assert!(!looks_like_failure(obs));
+    }
+
+    #[test]
+    fn a_real_failure_status_line_still_reads_as_one() {
+        assert!(looks_like_failure(
+            "read_file nope.py error: The system cannot find the path specified."
+        ));
+        assert!(looks_like_failure("search_code \"foo\": no matches"));
+        assert!(looks_like_failure(
+            "run_verification: 2 failed, 6 passed:\nFAILED tests/x.py::test_a"
+        ));
+        assert!(looks_like_failure("edit_file x.py rejected: frozen path"));
+    }
+
+    /// A green verification carries "passed" and no failure marker.
+    #[test]
+    fn a_green_verification_is_not_a_failure() {
+        assert!(!looks_like_failure(
+            "run_verification: all 8 test(s) passed"
+        ));
+    }
     use super::super::AgentConfig;
 
     #[test]
