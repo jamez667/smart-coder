@@ -53,7 +53,7 @@ impl<'a> SweAgentSolver<'a> {
         self
     }
 
-    fn config(&self, instance: &SweInstance, workspace: &Path) -> AgentConfig {
+    pub fn config_for(&self, instance: &SweInstance, workspace: &Path) -> AgentConfig {
         AgentConfig {
             max_steps: self.max_steps,
             verbose: self.verbose,
@@ -75,8 +75,10 @@ impl<'a> SweAgentSolver<'a> {
                 workspace,
                 instance.image(),
             )),
-            // Defence in depth. The test files are not on the host at all, so this can
-            // only matter if a future change starts copying them out.
+            // The tests ARE on the host now (the model must read them), so this is
+            // the live guard against editing them, not merely defence in depth. The
+            // `git diff` check after the solve is the backstop, since matching here is
+            // exact-string rather than glob.
             permission: PermissionPolicy::with_frozen(instance.test_files.clone()),
             ..AgentConfig::default()
         }
@@ -84,16 +86,17 @@ impl<'a> SweAgentSolver<'a> {
 
     /// What the model is asked to do.
     ///
-    /// The upstream issue text, plus the one thing it cannot discover for itself: the
-    /// tests are not in this directory, so it must fix the source rather than look for
-    /// something to edit into passing.
-    fn instruction(&self, instance: &SweInstance) -> String {
+    /// The upstream issue text, the tests that must pass, and where to read them.
+    /// Naming the test FILES matters: reading the failing test is the model's first
+    /// and best move, and it should not have to discover the path.
+    pub fn instruction_for(&self, instance: &SweInstance) -> String {
         format!(
             "Fix the following issue in this codebase.\n\n\
              {}\n\n\
-             The failing tests are NOT in this directory and you cannot edit them. \
-             They exercise this source, so fix the source. The tests that must pass \
-             are:\n{}\n",
+             These tests must pass:\n{}\n\n\
+             You can READ the tests ({}) to see exactly what behaviour is expected, \
+             but you must NOT edit them — fix the source so the tests pass as \
+             written.\n",
             instance.problem_statement.trim(),
             instance
                 .fail_to_pass
@@ -101,6 +104,7 @@ impl<'a> SweAgentSolver<'a> {
                 .map(|t| format!("  - {t}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            instance.test_files.join(", "),
         )
     }
 }
@@ -135,8 +139,13 @@ impl SweSolver for SweAgentSolver<'_> {
     }
 
     fn solve(&self, instance: &SweInstance, workspace: &Path) -> Result<()> {
-        let cfg = self.config(instance, workspace);
-        let report = run_agent(self.backend, &self.instruction(instance), workspace, &cfg)?;
+        let cfg = self.config_for(instance, workspace);
+        let report = run_agent(
+            self.backend,
+            &self.instruction_for(instance),
+            workspace,
+            &cfg,
+        )?;
         // Keep the whole report, not just the metrics: `stop_reason` and `steps` are
         // what make an unresolved instance diagnosable rather than merely a zero.
         *self.last.borrow_mut() = Some(SolveReport {
@@ -189,10 +198,13 @@ mod tests {
     fn the_instruction_carries_the_issue_and_names_the_tests() {
         let b = dummy();
         let s = SweAgentSolver::new(&b);
-        let i = s.instruction(&instance());
+        let i = s.instruction_for(&instance());
         assert!(i.contains("Widgets explode"));
         assert!(i.contains("t.py::test_frob"));
-        assert!(i.contains("cannot edit them"), "{i}");
+        assert!(i.contains("NOT edit them"), "{i}");
+        // The test file is named so the model knows where to look — withholding it
+        // was what made the task near-unsolvable.
+        assert!(i.contains("t.py"), "names the readable test file: {i}");
     }
 
     /// Shell stays denied inside a scored eval — the agent verifies through
@@ -201,7 +213,7 @@ mod tests {
     fn the_agent_gets_no_shell_and_the_tests_are_frozen() {
         let b = dummy();
         let s = SweAgentSolver::new(&b);
-        let c = s.config(&instance(), Path::new("/tmp/ws"));
+        let c = s.config_for(&instance(), Path::new("/tmp/ws"));
         assert!(!c.permission.allow_shell);
         assert!(c.permission.shell_allowlist.is_empty());
         assert_eq!(c.permission.frozen_paths, ["t.py"]);
@@ -243,7 +255,7 @@ mod tests {
     fn the_budgets_are_raised_above_the_toy_task_defaults() {
         let d = AgentConfig::default();
         let b = dummy();
-        let c = SweAgentSolver::new(&b).config(&instance(), Path::new("/tmp/ws"));
+        let c = SweAgentSolver::new(&b).config_for(&instance(), Path::new("/tmp/ws"));
         assert!(c.max_steps > d.max_steps);
         assert!(c.observation_line_cap > d.observation_line_cap);
         assert!(c.read_file_line_cap > d.read_file_line_cap);

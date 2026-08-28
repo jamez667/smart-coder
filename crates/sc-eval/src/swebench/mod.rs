@@ -20,9 +20,12 @@
 //! - **verify-red-first** — the image ships the *old* tests; applying the instance's
 //!   test patch is what turns it red. An instance already green at setup is reported
 //!   as unusable, never as solved ([`score::SweScore::is_red_start`]).
-//! - **frozen contract tests** — enforced structurally: only the source subtree is
-//!   copied to the host, so the agent never has a test file to edit. Asserted anyway
-//!   with a `git diff` after the solve.
+//! - **frozen contract tests** — the agent CAN read the failing tests (it must: they
+//!   are the specification) but must not edit them. Enforced by
+//!   `PermissionPolicy::with_frozen` in the loop and a `git diff` after the solve.
+//!   An earlier design here withheld the tests entirely to make the freeze
+//!   structural; that made the task near-unsolvable and is recorded in
+//!   [`runner::run_instance`].
 //! - **green-after-solve** — [`score::SweScore::resolved`], SWE-bench's own strict
 //!   definition.
 

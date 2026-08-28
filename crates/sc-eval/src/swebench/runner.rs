@@ -75,8 +75,8 @@ pub fn pytest_command(tests: &[String]) -> String {
 /// Solves an instance by editing the source tree at `workspace`.
 pub trait SweSolver {
     fn name(&self) -> &str;
-    /// Attempt the fix. `workspace` holds only the source subtree — the tests are not
-    /// there and cannot be edited.
+    /// Attempt the fix. `workspace` holds the source subtree plus the failing test
+    /// files, which may be read but must not be edited.
     fn solve(&self, instance: &SweInstance, workspace: &std::path::Path) -> Result<()>;
     /// Diagnostics from the most recent solve, when the solver is model-driven.
     fn last_report(&self) -> Option<SolveReport> {
@@ -161,8 +161,31 @@ fn run_instance_inner(
         ));
     }
 
-    // 3. Hand the agent the source subtree only. The tests stay in the container.
+    // 3. Hand the agent the source subtree AND the failing tests.
+    //
+    // The tests are read-only, not invisible. Withholding them (an earlier design
+    // here, meant to make the freeze structural) makes the task close to
+    // unsolvable: the model is asked to satisfy `test_unknown_option_name`, tries to
+    // read it, is told the path does not exist, searches for it, gets no matches, and
+    // is left guessing at the expected behaviour from the issue text alone. Traced on
+    // qwen3-coder-30b: turn 7 read_file on the test -> "cannot find the path", turn 11
+    // search_code -> "no matches", then it thrashed until the stall detector stopped
+    // it. Every real SWE-bench scaffold shows the model the tests.
+    //
+    // Freezing is enforced instead by `PermissionPolicy::with_frozen` in the loop and
+    // the `git diff` check below — the same belt-and-braces the original `run_task`
+    // uses for its contract tests.
     container.copy_out(&format!("{TESTBED}/{}", instance.src_dir), &src)?;
+    for f in &instance.test_files {
+        // Only the files the scored node ids name, not the whole test tree: pylint's
+        // `tests/functional/s/symlink/` holds symlinks that make `docker cp` fail on
+        // Windows ("a required privilege is not held by the client").
+        if let Some(parent) = std::path::Path::new(f).parent() {
+            std::fs::create_dir_all(src.join(parent))
+                .map_err(|e| DcError::Eval(format!("test dir: {e}")))?;
+        }
+        container.copy_out(&format!("{TESTBED}/{f}"), &src.join(f))?;
+    }
 
     let solve_err = solver.solve(instance, &src).err();
     let report = solver.last_report();
