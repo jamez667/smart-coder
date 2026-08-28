@@ -113,6 +113,34 @@ models if desired. This is the mechanism behind the **orchestrator vs. worker**
 split in the swarm — the orchestrator is just a larger profile (up to the 12B
 ceiling) and workers are tiny profiles ([08](08-orchestration-and-swarm.md)).
 
+## Where the models actually run
+
+This spec defines the *abstraction*; it deliberately says nothing about how any
+given model is served. On this rig, they are served by
+**[`smart-coder-ops`](../../../smart-coder-ops)** — a sibling repo holding the
+llama.cpp backends as a Docker Compose stack, kept out of this tree so swapping
+models or tuning the rig never churns the source.
+
+| Service (profile) | Backend | Endpoint |
+|---|---|---|
+| `sc-coder30b` (`coder30b`) | `qwen3-coder-30b-a3b` MoE across both GPUs — the daily driver | `:11435` |
+| `sc-qwen8b-pool` / `-pool2` (`pool8b`) | Two Qwen3-8B pools, one per GPU — the parallel MCP swarm | `:11439`, `:11440` |
+
+```powershell
+cd ../smart-coder-ops
+docker compose --profile coder30b up --build --wait   # blocks until serving
+```
+
+Nothing starts without a profile, and the profiles compete for the same VRAM —
+run one or the other, never both. See that repo's `README.md` for the GPU split,
+VRAM budgets and the autoheal watchdog.
+
+**smart-coder itself has no knowledge of any of this.** It sees an
+OpenAI-compatible URL from `%APPDATA%\smart-coder\config.json` (or
+`SC_BASE_URL`/`SC_MODEL`) and nothing more — which is the point of the trait
+above. Note that config may name a *stale* port; the ops compose file is the
+authority on what is actually listening.
+
 ## Tiered model assignment
 
 Named profiles enable the most important routing decision in `smart-coder`:
