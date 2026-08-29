@@ -63,12 +63,25 @@ impl InstanceContainer {
             "bash".into(),
             image.into(),
             "-c".into(),
-            // `/workspace` -> `/testbed` so `sc_verify::Sandbox::Session` works
-            // unmodified: it execs with `-w /workspace`, which these images do not
-            // have, and that is a hard failure ("chdir to cwd failed"), not a
-            // fallback. A symlink is cheaper and less invasive than teaching
-            // sc-verify a second working directory.
-            format!("ln -sfn {TESTBED} /workspace && sleep infinity"),
+            // `/workspace` -> the HOST workspace, not `/testbed`.
+            //
+            // `sc_verify::Sandbox::Session` execs with `-w /workspace`, which these
+            // images do not have — a hard failure ("chdir to cwd failed"), so the
+            // symlink has to exist. Pointing it at `/testbed` was the obvious choice
+            // and the wrong one: the agent EDITS the host copy, so its `run_command`
+            // was inspecting a different, pristine copy of the repo. Writing a
+            // sentinel through the file tools and then asking the shell for it
+            // returned "No such file or directory".
+            //
+            // A model whose shell cannot see its own edits cannot verify its work, and
+            // nothing in the prompt tells it so. Pointing `/workspace` at the mount
+            // makes `run_command` and `read_file`/`edit_file` agree on one filesystem.
+            // The harness's own scoring still runs against `/testbed`, which is what
+            // keeps a false pass impossible.
+            format!(
+                "ln -sfn {}/src /workspace && sleep infinity",
+                Self::HOST_MOUNT
+            ),
         ]
     }
 

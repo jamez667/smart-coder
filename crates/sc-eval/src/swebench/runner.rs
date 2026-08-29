@@ -15,7 +15,7 @@ use crate::fsutil::TempWorkspace;
 /// PASS_TO_PASS needs them by name; a quieter flag makes every expected pass look
 /// `missing` and every instance score unresolved. Do not "tidy" this to `-v` — that
 /// puts the status last, and the parser reads these as a prefix.
-pub const PYTEST_FLAGS: &str = "-rA --tb=no -q -p no:cacheprovider";
+pub const PYTEST_FLAGS: &str = "-rA --tb=line -p no:cacheprovider";
 
 /// How long any single command inside the container may take.
 const TIMEOUT_SECS: u64 = 900;
