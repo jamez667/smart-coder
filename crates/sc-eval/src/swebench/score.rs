@@ -31,6 +31,26 @@ impl SweScore {
         self.f2p_failed.is_empty() && self.p2p_broken.is_empty() && self.missing.is_empty()
     }
 
+    /// [`Self::resolved`], ignoring ids that were *already* missing before the agent
+    /// ran — but no others.
+    ///
+    /// An id absent at setup is absent because it does not exist: a few upstream rows
+    /// carry parametrised ids that were split on whitespace, so
+    /// `test_warns_for_empty_password[-Your` names no test and never can. Counting
+    /// those against the model denies work it actually did — `pypa__twine-1225` scored
+    /// `F2P 3/3  P2P 198/198  MISSING 18`, every real test passing, and was reported
+    /// unresolved purely on 18 unfindable strings.
+    ///
+    /// An id that goes missing only AFTER the solve is a different thing entirely —
+    /// the model broke collection, and that must still fail. So `already_missing` comes
+    /// from the red check, and anything beyond it still counts.
+    pub fn resolved_excluding(&self, already_missing: &[String]) -> bool {
+        let pre: BTreeSet<&str> = already_missing.iter().map(String::as_str).collect();
+        self.f2p_failed.is_empty()
+            && self.p2p_broken.is_empty()
+            && self.missing.iter().all(|m| pre.contains(m.as_str()))
+    }
+
     /// Score a parsed test report against what the instance expects.
     ///
     /// `report` must come from a `pytest -rA` run — see [`super::runner::PYTEST_FLAGS`].
@@ -207,6 +227,48 @@ mod tests {
         let s = SweScore::grade(&instance(), &report(&[("t.py::fix_a", false)]));
         assert!(!s.resolved());
         assert_eq!(s.missing.len(), 3);
+    }
+
+    /// An id that could never be found must not deny the model a solve it earned.
+    ///
+    /// `pypa__twine-1225` scored `F2P 3/3  P2P 198/198  MISSING 18` — every real test
+    /// passing — and reported unresolved on 18 whitespace-split fragments that name no
+    /// test in any version of the repo.
+    #[test]
+    fn ids_already_missing_at_setup_do_not_deny_a_solve() {
+        let i = SweInstance {
+            fail_to_pass: vec!["t.py::fix_a".into()],
+            pass_to_pass: vec!["t.py::keep_a".into(), "t.py::gone[split".into()],
+            ..instance()
+        };
+        let already = vec!["t.py::gone[split".to_string()];
+        let after = SweScore::grade(
+            &i,
+            &report(&[("t.py::fix_a", true), ("t.py::keep_a", true)]),
+        );
+        assert!(!after.resolved(), "strict form still counts it");
+        assert!(
+            after.resolved_excluding(&already),
+            "but an id that never existed does not: {after:?}"
+        );
+    }
+
+    /// An id that goes missing DURING the solve is the model breaking collection, and
+    /// must still fail — otherwise a run that destroys the test file scores clean.
+    #[test]
+    fn an_id_that_goes_missing_during_the_solve_still_fails() {
+        let i = SweInstance {
+            fail_to_pass: vec!["t.py::fix_a".into()],
+            pass_to_pass: vec!["t.py::keep_a".into(), "t.py::keep_b".into()],
+            ..instance()
+        };
+        // Nothing was missing at setup; keep_b vanished afterwards.
+        let after = SweScore::grade(
+            &i,
+            &report(&[("t.py::fix_a", true), ("t.py::keep_a", true)]),
+        );
+        assert_eq!(after.missing, ["t.py::keep_b"]);
+        assert!(!after.resolved_excluding(&[]), "a new disappearance fails");
     }
 
     /// A `missing` id at setup must not throw the whole instance away.

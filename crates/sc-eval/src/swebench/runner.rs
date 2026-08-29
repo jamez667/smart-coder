@@ -269,7 +269,10 @@ fn run_instance_inner(
     Ok(InstanceRun {
         instance_id: instance.instance_id.clone(),
         repo: instance.repo.clone(),
-        resolved: score.resolved() && tampered.is_none(),
+        // Ids that were already unfindable at setup do not count against the model —
+        // see `SweScore::resolved_excluding`. Anything that went missing DURING the
+        // solve still does.
+        resolved: score.resolved_excluding(&red.missing) && tampered.is_none(),
         score,
         harness_error: solve_err.map(|e| e.to_string()),
         tampered,
