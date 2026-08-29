@@ -147,6 +147,49 @@ fn edit_file_rejects_missing_anchor() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// A MULTI-LINE ambiguous anchor must still show the model where the matches are.
+///
+/// The old filter was `line.contains(old_str)`, which can never be true when `old_str`
+/// spans lines — no single line holds a newline. The message promised "copy a line
+/// from below verbatim" and then showed nothing. Observed live on
+/// `wireservice__csvkit-1281`: eight consecutive rejections on the same anchor, each
+/// followed by an empty list.
+#[test]
+fn edit_file_shows_context_for_an_ambiguous_multiline_anchor() {
+    let ws = temp_dir("edit-amb-multi");
+    // The two-line anchor appears twice; the lines around it differ.
+    std::fs::write(
+        ws.join("a.py"),
+        "def one():
+    val = 1
+    return val
+
+def two():
+    val = 1
+    return val
+",
+    )
+    .unwrap();
+    let e = call(json!({
+        "tool":"edit_file","path":"a.py",
+        "old_str":"    val = 1
+    return val",
+        "new_str":"    val = 2
+    return val"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("ambiguous"), "got: {o}");
+    assert!(
+        o.contains("line 1: def one():") && o.contains("line 5: def two():"),
+        "both matches shown WITH the neighbouring line that tells them apart: {o}"
+    );
+    // Untouched — never edits on ambiguity.
+    assert!(std::fs::read_to_string(ws.join("a.py"))
+        .unwrap()
+        .contains("val = 1"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[test]
 fn edit_file_rejects_ambiguous_anchor() {
     let ws = temp_dir("edit-amb");

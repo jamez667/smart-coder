@@ -445,17 +445,43 @@ fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &
             };
         }
 
-        // Couldn't disambiguate automatically — show each matching line with its
-        // number so the model can copy a longer, unique anchor.
+        // Couldn't disambiguate automatically — show each match in context so the model
+        // can copy a longer, unique anchor.
+        //
+        // Matched on the anchor's FIRST line, not the whole anchor. `line.contains(
+        // old_str)` can never be true for a multi-line `old_str` — no single line holds
+        // a `\n` — so the message promised "copy a line from below verbatim" and then
+        // showed nothing at all. Observed live on wireservice__csvkit-1281: eight
+        // consecutive rejections on the same anchor, each followed by an empty list,
+        // before the model found its own way out.
+        let first = old_str.lines().next().unwrap_or(old_str).trim();
         let mut shown = Vec::new();
         for (i, line) in lines.iter().enumerate() {
-            if line.contains(old_str) {
-                shown.push(format!("  line {}: {}", i + 1, line));
+            if !first.is_empty() && line.contains(first) {
+                // A line either side, so a repeated line can be told apart by what
+                // surrounds it — which is the whole task here.
+                let lo = i.saturating_sub(1);
+                let hi = (i + 2).min(lines.len());
+                for (n, l) in lines[lo..hi].iter().enumerate() {
+                    shown.push(format!("  line {}: {}", lo + n + 1, l));
+                }
+                shown.push(String::from("  ---"));
             }
+        }
+        if shown.is_empty() {
+            // Nothing matched even the first line: the anchor is not in the file in any
+            // recognisable form, so show the file rather than an empty promise.
+            return format!(
+                "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches) but \
+                 no single line of it could be located to show you. Here is the CURRENT file — \
+                 pick your anchor from these exact lines:\n{}",
+                number_lines(content)
+            );
         }
         return format!(
             "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches). \
-             Pick a UNIQUE anchor — copy a whole distinct line (or two) from below verbatim:\n{}",
+             Pick a UNIQUE anchor — copy a whole distinct line (or two) from below verbatim, \
+             including a neighbouring line if that is what makes it unique:\n{}",
             shown.join("\n")
         );
     }

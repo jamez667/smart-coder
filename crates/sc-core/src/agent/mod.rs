@@ -414,11 +414,19 @@ pub fn run_agent_observed(
                     // immediate-repeat guard misses interleaved re-reads (read a, read b, read
                     // a). Redirect it to the shown copy instead of spending a turn on the read.
                     let path = call.str("path").unwrap_or_default().to_string();
+                    // Only name a tool the model can actually call. A trimmed registry
+                    // (spec 04/08 — fewer choices, more action) may not carry
+                    // `edit_lines`, and steering to a tool that is not offered wastes
+                    // the turn and teaches the model to distrust the harness.
+                    let how = if registry.get("edit_lines").is_some() {
+                        "prefer `edit_lines` (give the line numbers shown, no snippet to copy)"
+                    } else {
+                        "use `edit_file` with a short, unique anchor"
+                    };
                     let obs = format!(
                         "`{path}` is ALREADY SHOWN IN FULL above with LINE NUMBERS and updates \
-                         after each edit — you do not need to read it. Edit it directly: prefer \
-                         `edit_lines` (give the line numbers shown, no snippet to copy). Make your \
-                         next change now."
+                         after each edit — you do not need to read it. Edit it directly: {how}. \
+                         Make your next change now."
                     );
                     (obs, action, false, tool, arg)
                 } else {
@@ -577,15 +585,22 @@ pub fn run_agent_observed(
                 // multi-line `edit_file` `old_str` as JSON and mangling it. Steer to `edit_lines`
                 // (line numbers, no old_str) so the encoding problem disappears.
                 if malformed_streak >= 2 {
-                    detail.push_str(
+                    // Again, only if the registry actually has it — see the
+                    // read-redirect above.
+                    detail.push_str(if registry.get("edit_lines").is_some() {
                         "\n\nYou have produced an unparseable reply more than once — this usually \
                          happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
                          hard to encode as JSON. STOP using edit_file for this. Use `edit_lines` \
                          instead: {\"tool\":\"edit_lines\",\"path\":\"<file>\",\"start\":<n>,\
                          \"end\":<m>,\"new_text\":\"<the replacement>\"}. It takes the LINE NUMBERS \
                          shown in the file view (no snippet to copy), so the reply stays short and \
-                         valid.",
-                    );
+                         valid."
+                    } else {
+                        "\n\nYou have produced an unparseable reply more than once — this usually \
+                         happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
+                         hard to encode as JSON. Keep `old_str` SHORT: one or two distinct lines \
+                         are enough to anchor on, and the reply stays valid."
+                    });
                     interv.count += 1;
                 }
                 sink.record(&AgentEvent::RepairTriggered {
