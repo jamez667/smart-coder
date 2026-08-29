@@ -27,16 +27,31 @@ impl Benchmark {
         }
     }
 
-    /// Shell prefix that puts `python` on PATH inside the image, if one is needed.
+    /// Shell prefix that puts the project's `python` on PATH inside the image.
     ///
-    /// SWE-bench images need conda activating and their `sh` is dash, which has no
-    /// `source` — hence `.` rather than `source`. SWE-bench-Live images need nothing.
+    /// SWE-bench images are uniform: conda, env `testbed`. Their `sh` is dash, which
+    /// has no `source`, hence `.`.
+    ///
+    /// SWE-bench-Live images are **not** uniform — they are built per project, so the
+    /// environment is whatever that project uses. Most put the deps in the system
+    /// Python and need no prefix; `run-llama/llama_deploy` manages its own with poetry,
+    /// where the system Python has poetry's dependencies and not the project's, so a
+    /// bare `python -m pytest` fails with "No module named pytest" and every test
+    /// reports `missing`. Hence the shell probe: use `poetry run` when there is a
+    /// `poetry.lock` and poetry is installed, otherwise nothing.
+    ///
+    /// Probing beats a per-repo table because the next Live repo added will be some
+    /// other tool again (uv, pipenv, tox); this at least fails loudly rather than
+    /// silently scoring zero.
     pub fn python_prefix(self) -> &'static str {
         match self {
             Benchmark::SweBench => {
                 ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && "
             }
-            Benchmark::SweBenchLive => "",
+            Benchmark::SweBenchLive => {
+                "if [ -f poetry.lock ] && command -v poetry >/dev/null 2>&1; then \
+                 SC_PY='poetry run'; else SC_PY=''; fi; "
+            }
         }
     }
 }

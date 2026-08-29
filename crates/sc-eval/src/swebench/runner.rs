@@ -99,7 +99,10 @@ pub fn pytest_command(tests: &[String]) -> String {
         .map(|f| format!("'{f}'"))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("python -m pytest {PYTEST_FLAGS} {args}")
+    // `$SC_PY` is set by `Benchmark::python_prefix` — empty when the image's system
+    // Python already has the project's dependencies, `poetry run` when it does not.
+    // Unquoted so an empty value expands to nothing rather than an empty argument.
+    format!("$SC_PY python -m pytest {PYTEST_FLAGS} {args}")
 }
 
 /// Solves an instance by editing the source tree at `workspace`.
@@ -210,13 +213,22 @@ fn run_instance_inner(
     container.copy_out(&format!("{TESTBED}/{}", instance.src_dir), &src)?;
     for f in &instance.test_files {
         // Only the files the scored node ids name, not the whole test tree: pylint's
-        // `tests/functional/s/symlink/` holds symlinks that make `docker cp` fail on
-        // Windows ("a required privilege is not held by the client").
-        if let Some(parent) = std::path::Path::new(f).parent() {
-            std::fs::create_dir_all(src.join(parent))
-                .map_err(|e| DcError::Eval(format!("test dir: {e}")))?;
+        // `tests/functional/s/symlink/` holds symlinks that need special handling on
+        // Windows (see `InstanceContainer::copy_out`).
+        //
+        // Skip anything the source copy already brought over. Some repos keep their
+        // tests INSIDE the source subtree — `kubernetes-client/python` has
+        // `kubernetes/base/config/*_test.py` under `src_dir: kubernetes` — and copying
+        // again fails with "Cannot create a file when that file already exists"
+        // (os error 183), which failed the whole instance.
+        let dest = src.join(f);
+        if dest.exists() {
+            continue;
         }
-        container.copy_out(&format!("{TESTBED}/{f}"), &src.join(f))?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| DcError::Eval(format!("test dir: {e}")))?;
+        }
+        container.copy_out(&format!("{TESTBED}/{f}"), &dest)?;
     }
 
     let solve_err = solver.solve(instance, &src).err();
@@ -232,7 +244,8 @@ fn run_instance_inner(
         Some((p, _)) => format!("{TESTBED}/{p}"),
         None => TESTBED.to_string(),
     };
-    container.copy_in(&src.join(leaf), &parent)?;
+    // Streamed, not `docker cp`: see `InstanceContainer::copy_dir_in`.
+    container.copy_dir_in(&src, leaf, &parent)?;
 
     // 5. Freeze check: did the agent change a test file?
     //

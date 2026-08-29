@@ -152,23 +152,98 @@ impl InstanceContainer {
         Ok(())
     }
 
-    /// Copy a path out of the container onto the host.
+    /// Copy a directory tree from the host back into the container, via a tar stream.
     ///
-    /// Only ever the source subtree, never the whole repo: pylint's
-    /// `tests/functional/s/symlink/` holds symlinks that make `docker cp` fail on
-    /// Windows ("a required privilege is not held by the client"), and leaving the
-    /// test tree in the container is what makes the frozen-test invariant structural
-    /// rather than merely policed.
-    pub fn copy_out(&self, src: &str, host: &Path) -> Result<()> {
+    /// **Not `docker cp`**, which replaces whole paths: the host copy has real
+    /// directories where the container has symlinks (see [`Self::copy_out`] on `-h`),
+    /// so it fails with `cannot overwrite non-directory "/testbed/kubernetes/config"
+    /// with directory`. Extracting a tar merges entry by entry and writes *through* the
+    /// container's symlinks, leaving its structure intact and only updating file
+    /// contents — which is all the agent changed.
+    pub fn copy_dir_in(&self, host_dir: &Path, leaf: &str, dest_parent: &str) -> Result<()> {
+        let tar = Command::new("tar")
+            .arg("cf")
+            .arg("-")
+            .arg("-C")
+            .arg(host_dir)
+            .arg(leaf)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| DcError::Eval(format!("host tar: {e}")))?;
+
         let out = Command::new("docker")
-            .arg("cp")
-            .arg(format!("{}:{src}", self.name))
-            .arg(host)
+            .arg("exec")
+            .arg("-i")
+            .arg(&self.name)
+            .arg("bash")
+            .arg("-c")
+            .arg(format!("tar xf - -C '{dest_parent}'"))
+            .stdin(
+                tar.stdout
+                    .ok_or_else(|| DcError::Eval("tar stdout".into()))?,
+            )
             .output()
-            .map_err(|e| DcError::Eval(format!("docker cp out: {e}")))?;
+            .map_err(|e| DcError::Eval(format!("docker exec tar in: {e}")))?;
         if !out.status.success() {
             return Err(DcError::Eval(format!(
-                "copying {src} out: {}",
+                "copying {} back: {}",
+                host_dir.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Copy a path out of the container onto the host, via a tar stream.
+    ///
+    /// **Not `docker cp`.** On Windows that tries to recreate a symlink as a real
+    /// filesystem symlink, which needs a privilege an ordinary user does not have:
+    /// `kubernetes-client/python` keeps four symlinked directories inside `kubernetes/`
+    /// and the whole instance failed with "a required privilege is not held by the
+    /// client". Piping `tar` through and extracting on the host keeps symlinks as tar
+    /// entries, which extract without elevation. Measured on that image: `docker cp`
+    /// fails, the tar stream extracts 41MB cleanly.
+    ///
+    /// `tar -h` (dereference) is needed as well: a plain stream preserves the symlink
+    /// as a symlink, and extracting *that* on Windows hits the same privilege wall —
+    /// "Cannot create symlink to 'base/dynamic'". Dereferencing writes real
+    /// directories instead. In this repo the links point inside the same subtree
+    /// (`kubernetes/config` -> `base/config`), so it duplicates content already in the
+    /// copy rather than pulling anything new in; measured, the tree extracts at 44MB.
+    ///
+    /// The cost is that an agent edit under a dereferenced path lands in the copy, not
+    /// the link target, so the copy-back writes a real directory over the container's
+    /// symlink. That is a change in shape the harness does not reconcile — acceptable
+    /// only because the fix is scored by running the tests, not by diffing the tree.
+    pub fn copy_out(&self, src: &str, host: &Path) -> Result<()> {
+        let (parent, leaf) = src.rsplit_once('/').unwrap_or((".", src));
+        let tar = Command::new("docker")
+            .args(Self::exec_args(
+                &self.name,
+                &format!("cd '{parent}' && tar chf - '{leaf}'"),
+            ))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| DcError::Eval(format!("docker exec tar: {e}")))?;
+
+        std::fs::create_dir_all(host)
+            .map_err(|e| DcError::Eval(format!("creating {}: {e}", host.display())))?;
+        let out = Command::new("tar")
+            .arg("xf")
+            .arg("-")
+            .arg("-C")
+            .arg(host)
+            .stdin(
+                tar.stdout
+                    .ok_or_else(|| DcError::Eval("tar stdout".into()))?,
+            )
+            .output()
+            .map_err(|e| DcError::Eval(format!("host tar: {e}")))?;
+        if !out.status.success() {
+            return Err(DcError::Eval(format!(
+                "extracting {src}: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
