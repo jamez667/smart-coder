@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use sc_core::{run_agent, AgentConfig};
+use sc_core::AgentConfig;
 use sc_model::ModelBackend;
 use sc_proto::Result;
 use sc_tools::PermissionPolicy;
@@ -24,9 +24,10 @@ use super::runner::{pytest_command, SolveReport, SweSolver};
 /// - **`read_file_line_cap`** — real modules run past 400 lines.
 /// - **`response_reserve_tokens`** — 1024 truncates a reasoning model mid-thought, and
 ///   a truncated turn emits no tool call at all.
-/// - **`verify_command`** — this is what lets the agent run the tests itself, through
-///   `run_verification`, *without* shell access. Shell stays denied: granting it inside
-///   a scored eval invites the model to `git checkout` its way to a false pass.
+/// - **`verify_command`** — lets the agent run the tests itself, for real, in the
+///   instance container.
+/// - **`permission.allow_shell`** — ON, and the tool set is cut to six. Both are
+///   measured: see [`swebench_registry`] and the note on `permission` below.
 pub struct SweAgentSolver<'a> {
     backend: &'a dyn ModelBackend,
     max_steps: usize,
@@ -122,7 +123,9 @@ impl<'a> SweAgentSolver<'a> {
              These tests must pass:\n{}\n\n\
              You can READ the tests ({}) to see exactly what behaviour is expected, \
              but you must NOT edit them — fix the source so the tests pass as \
-             written.\n",
+             written.\n\n\
+             run_command already starts in the repository root: use plain relative \
+             paths like `{}/...` and do NOT `cd` anywhere first.\n",
             instance.problem_statement.trim(),
             instance
                 .fail_to_pass
@@ -131,8 +134,50 @@ impl<'a> SweAgentSolver<'a> {
                 .collect::<Vec<_>>()
                 .join("\n"),
             instance.test_files.join(", "),
+            instance.src_dir,
         )
     }
+}
+
+/// The tools a SWE-bench run gets: investigate, change, verify, stop.
+///
+/// The default registry offers sixteen, and the count itself changes the model's
+/// behaviour. Measured on `pylint-dev__pylint-6506` (n=12, identical prompt, the only
+/// variable is the tool list):
+///
+/// | tools offered | `run_command` chosen |
+/// |---|---|
+/// | these six | 12/12 |
+/// | these six + `search_code` | 10/12 |
+/// | all sixteen | 3/12 (`search_code` 6, `read_file` 3) |
+///
+/// With sixteen the model scatters across the read-shaped tools and never runs
+/// anything — which is the whole failure, since running a command is what turns a
+/// symptom into a located fact. `registry.rs` already records the principle on
+/// `minimal_worker_registry`: *"Fewer choices = a dumb model that acts instead of
+/// dithering between twelve options."* This is that, measured.
+///
+/// Six is not a magic number — it is Pi's four (read/write/edit/bash) plus our
+/// `run_verification` and `finish`. Adding a seventh cost 2/12; the redundant edit
+/// variants (`edit_lines`, `edit_function`, `append_file`) and the retrieval tools
+/// (`find_symbol`, `list_dir`) are what a shell already does.
+pub fn swebench_registry() -> sc_tools::ToolRegistry {
+    const KEEP: [&str; 6] = [
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_command",
+        "run_verification",
+        "finish",
+    ];
+    let specs: Vec<sc_tools::ToolSpec> = sc_tools::default_registry()
+        .specs()
+        .iter()
+        .filter(|s| KEEP.contains(&s.name))
+        .cloned()
+        .collect();
+    debug_assert_eq!(specs.len(), KEEP.len(), "a kept tool is missing by name");
+    sc_tools::ToolRegistry::new(specs)
 }
 
 /// Wrap the agent's test command so it measures what the agent actually did.
@@ -166,8 +211,14 @@ impl SweSolver for SweAgentSolver<'_> {
 
     fn solve(&self, instance: &SweInstance, workspace: &Path) -> Result<()> {
         let cfg = self.config_for(instance, workspace);
-        let report = run_agent(
+        // `run_agent` would use the full sixteen-tool registry; see
+        // [`swebench_registry`] for why that stops the model running anything.
+        let registry = swebench_registry();
+        let strategy = sc_core::select_strategy(&self.backend.capabilities());
+        let report = sc_core::run_agent_with(
             self.backend,
+            &registry,
+            strategy.as_ref(),
             &self.instruction_for(instance),
             workspace,
             &cfg,
