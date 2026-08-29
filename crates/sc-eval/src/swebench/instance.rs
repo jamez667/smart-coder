@@ -2,10 +2,53 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Which benchmark an instance came from.
+///
+/// They differ in two ways that matter to the runner, and in nothing else: who
+/// publishes the images, and how Python is reached inside them. Everything else — the
+/// red-first invariant, the F2P/P2P grading, the frozen tests — is identical, so this
+/// is a two-field difference rather than a second harness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Benchmark {
+    /// `princeton-nlp/SWE-bench_Lite`. Images under `swebench/`, conda env `testbed`.
+    #[default]
+    SweBench,
+    /// `SWE-bench-Live/SWE-bench-Live`. Images under `starryzhang/`, plain system
+    /// Python at `/usr/local/bin` with no environment to activate.
+    SweBenchLive,
+}
+
+impl Benchmark {
+    pub fn image_owner(self) -> &'static str {
+        match self {
+            Benchmark::SweBench => "swebench",
+            Benchmark::SweBenchLive => "starryzhang",
+        }
+    }
+
+    /// Shell prefix that puts `python` on PATH inside the image, if one is needed.
+    ///
+    /// SWE-bench images need conda activating and their `sh` is dash, which has no
+    /// `source` — hence `.` rather than `source`. SWE-bench-Live images need nothing.
+    pub fn python_prefix(self) -> &'static str {
+        match self {
+            Benchmark::SweBench => {
+                ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && "
+            }
+            Benchmark::SweBenchLive => "",
+        }
+    }
+}
+
 /// A single SWE-bench task: a real bug in a real repository, with the tests that
 /// prove it fixed and the tests that prove nothing else broke.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SweInstance {
+    /// Which benchmark this row came from. Defaults to `SweBench` so existing
+    /// vendored files load unchanged.
+    #[serde(default)]
+    pub benchmark: Benchmark,
     /// e.g. `pylint-dev__pylint-6506`.
     pub instance_id: String,
     /// e.g. `pylint-dev/pylint`.
@@ -54,6 +97,15 @@ impl Subset {
         Subset::parse(include_str!("../../../../evals/swebench/lite-subset.json"))
     }
 
+    /// The SWE-bench-**Live** subset, also compiled in.
+    ///
+    /// A different benchmark from Lite — newer issues, drawn from recent GitHub
+    /// activity to limit training contamination. Kept in its own file (and reported
+    /// under its own `source`) precisely so the two can never be averaged together.
+    pub fn bundled_live() -> sc_proto::Result<Subset> {
+        Subset::parse(include_str!("../../../../evals/swebench/live-subset.json"))
+    }
+
     pub fn get(&self, instance_id: &str) -> Option<&SweInstance> {
         self.instances.iter().find(|i| i.instance_id == instance_id)
     }
@@ -68,10 +120,14 @@ impl SweInstance {
     /// did, and using theirs is both less work and more faithful.
     ///
     /// The tag mangles `__` to `_1776_` (SWE-bench's own convention — a Docker tag
-    /// cannot carry every character an instance id can).
+    /// cannot carry every character an instance id can). The Docker Hub *owner*
+    /// differs per benchmark, so it travels with the instance rather than being
+    /// hardcoded: SWE-bench publishes under `swebench/`, SWE-bench-Live under
+    /// `starryzhang/`.
     pub fn image(&self) -> String {
         format!(
-            "swebench/sweb.eval.x86_64.{}:latest",
+            "{}/sweb.eval.x86_64.{}:latest",
+            self.benchmark.image_owner(),
             self.instance_id.replace("__", "_1776_")
         )
     }
@@ -91,6 +147,7 @@ mod tests {
     #[test]
     fn the_image_tag_mangles_the_double_underscore() {
         let i = SweInstance {
+            benchmark: Benchmark::SweBench,
             instance_id: "pylint-dev__pylint-6506".into(),
             repo: "pylint-dev/pylint".into(),
             base_commit: "x".into(),

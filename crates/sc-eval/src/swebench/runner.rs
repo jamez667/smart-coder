@@ -162,7 +162,9 @@ fn run_instance_inner(
     //    and an uncommitted test patch would show up as the harness tampering with its
     //    own tests. Committing makes the patched tree the baseline the agent is
     //    measured against.
+    let py = instance.benchmark.python_prefix();
     let (ok, out) = container.exec(&in_testbed(
+        py,
         concat!(
             "git apply /tmp/test.patch && ",
             "git -c user.email=eval@sc -c user.name=sc-eval ",
@@ -181,7 +183,7 @@ fn run_instance_inner(
     // 2. Red check. An instance that is already green here is broken, not easy — and
     //    scoring it as solved would be the worst possible failure of this harness.
     let cmd = pytest_command(&instance.all_tests());
-    let (_, out) = container.exec(&in_testbed(&cmd, TIMEOUT_SECS))?;
+    let (_, out) = container.exec(&in_testbed(py, &cmd, TIMEOUT_SECS))?;
     let red = SweScore::grade(instance, &sc_verify::parse(&cmd, &out, false));
     if !red.is_red_start() {
         return Ok(InstanceRun::failed(
@@ -232,12 +234,26 @@ fn run_instance_inner(
     };
     container.copy_in(&src.join(leaf), &parent)?;
 
-    // 5. Freeze check. The tests were never on the host, so this can only trip if the
-    //    agent reached them another way — but an invariant that is merely structural
-    //    and never asserted is one nobody notices losing.
+    // 5. Freeze check: did the agent change a test file?
+    //
+    //    Compared by CONTENT, not by git's index. In most repos the tests sit outside
+    //    `src_dir` and never reach the host at all, but some keep them inside it
+    //    (`cyclotruc/gitingest` has `src/gitingest/tests/`), so the copy-out/copy-back
+    //    round-trips them. `git diff --name-only` alone then reports a file as modified
+    //    on a stat change with identical bytes — measured: the NOOP solver, which
+    //    writes nothing, was reported as tampering with `test_clone.py`, and a run
+    //    where the model had legitimately passed every test scored unresolved.
+    //
+    //    `--stat` after `update-index --refresh` compares content, and
+    //    `--ignore-all-space` absorbs the line-ending churn a Windows host adds on the
+    //    way through. A real edit still shows up; a byte-identical round-trip does not.
     let paths = instance.test_files.join(" ");
     let (_, diff) = container.exec(&in_testbed(
-        &format!("git diff --name-only -- {paths}"),
+        py,
+        &format!(
+            "git update-index -q --refresh -- {paths} >/dev/null 2>&1; \
+             git diff --name-only --ignore-all-space -- {paths}"
+        ),
         120,
     ))?;
     let tampered = diff
@@ -247,7 +263,7 @@ fn run_instance_inner(
         .map(str::to_string);
 
     // 6. Green check.
-    let (_, out) = container.exec(&in_testbed(&cmd, TIMEOUT_SECS))?;
+    let (_, out) = container.exec(&in_testbed(py, &cmd, TIMEOUT_SECS))?;
     let score = SweScore::grade(instance, &sc_verify::parse(&cmd, &out, false));
 
     Ok(InstanceRun {

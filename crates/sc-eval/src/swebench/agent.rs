@@ -74,6 +74,7 @@ impl<'a> SweAgentSolver<'a> {
             // true; without it this would execute on a Windows host with no Python
             // and the model would be flying blind.
             verify_command: Some(verify_script(
+                instance.benchmark.python_prefix(),
                 &instance.src_dir,
                 &pytest_command(&instance.fail_to_pass),
             )),
@@ -192,14 +193,14 @@ pub fn swebench_registry() -> sc_tools::ToolRegistry {
 /// 2. **Activate conda.** `Sandbox::Session` execs with `sh -c`, and `sh` here is dash,
 ///    which has no `source`. Without it `python` is the system one, missing every
 ///    pinned dependency.
-fn verify_script(src_dir: &str, cmd: &str) -> String {
+fn verify_script(py_prefix: &str, src_dir: &str, cmd: &str) -> String {
     let leaf = src_dir.rsplit('/').next().unwrap_or(src_dir);
     let dest = match src_dir.rsplit_once('/') {
         Some((parent, _)) => format!("/testbed/{parent}"),
         None => "/testbed".to_string(),
     };
     format!(
-        "cp -r {mount}/src/{leaf} {dest}/ &&          . /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && {cmd}",
+        "cp -r {mount}/src/{leaf} {dest}/ && {py_prefix}{cmd}",
         mount = super::container::InstanceContainer::HOST_MOUNT,
     )
 }
@@ -241,10 +242,12 @@ impl SweSolver for SweAgentSolver<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::instance::Benchmark;
     use super::*;
 
     fn instance() -> SweInstance {
         SweInstance {
+            benchmark: Benchmark::SweBench,
             instance_id: "x__y-1".into(),
             repo: "x/y".into(),
             base_commit: "c".into(),
@@ -311,7 +314,11 @@ mod tests {
     /// change to the workspace")`, on an instance the gold patch resolves.
     #[test]
     fn verification_syncs_the_agents_edits_before_running_tests() {
-        let script = verify_script("pylint", "python -m pytest -rA 'x::y'");
+        let script = verify_script(
+            super::super::instance::Benchmark::SweBench.python_prefix(),
+            "pylint",
+            "python -m pytest -rA 'x::y'",
+        );
         assert!(
             script.starts_with("cp -r /hostws/src/pylint /testbed/"),
             "the edits are copied in first: {script}"
@@ -328,7 +335,11 @@ mod tests {
     /// A nested subtree (`src/flask`) lands beside its siblings, not on top of them.
     #[test]
     fn a_nested_source_dir_is_copied_to_its_parent() {
-        let script = verify_script("src/flask", "pytest");
+        let script = verify_script(
+            super::super::instance::Benchmark::SweBench.python_prefix(),
+            "src/flask",
+            "pytest",
+        );
         assert!(
             script.starts_with("cp -r /hostws/src/flask /testbed/src/"),
             "{script}"

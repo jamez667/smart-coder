@@ -14,16 +14,17 @@ use sc_proto::{DcError, Result};
 /// Where every official SWE-bench image keeps the repository.
 pub const TESTBED: &str = "/testbed";
 
-/// Activate the image's conda env, then run `cmd` in the repo.
+/// Put Python on PATH for this benchmark's images, then run `cmd` in the repo.
 ///
-/// `sh` in these images is dash, which has no `source` — use `.` and `bash -c`.
-/// `timeout` bounds it *inside* the container: killing the host process would leave
-/// the container up and the pytest orphaned.
-pub fn in_testbed(cmd: &str, timeout_secs: u64) -> String {
-    format!(
-        ". /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && \
-         cd {TESTBED} && timeout {timeout_secs} {cmd}"
-    )
+/// `prefix` comes from [`super::instance::Benchmark::python_prefix`] — conda activation
+/// for SWE-bench, nothing for SWE-bench-Live, whose images carry a plain system Python.
+/// `sh` in these images is dash, which has no `source`, so the prefix uses `.` and
+/// everything runs under `bash -c`.
+///
+/// `timeout` bounds the command *inside* the container: killing the host process would
+/// leave the container up and the pytest orphaned.
+pub fn in_testbed(prefix: &str, cmd: &str, timeout_secs: u64) -> String {
+    format!("{prefix}cd {TESTBED} && timeout {timeout_secs} {cmd}")
 }
 
 /// A running container for one instance, removed on drop.
@@ -37,11 +38,6 @@ impl InstanceContainer {
         &self.name
     }
 
-    /// `docker run -d --name <n> <image> sleep infinity`.
-    ///
-    /// Long-lived rather than one `docker run --rm` per command: an instance is
-    /// verified many times over an agent run, and re-entering a 2.8GB image each time
-    /// would dominate the measurement.
     /// Where the host workspace is mounted inside the container.
     ///
     /// The agent edits on the host but its tests run in here, so without a shared view
@@ -50,6 +46,11 @@ impl InstanceContainer {
     /// model that cannot make progress, and it is why this mount exists.
     pub const HOST_MOUNT: &'static str = "/hostws";
 
+    /// `docker run -d --name <n> <image> sleep infinity`.
+    ///
+    /// Long-lived rather than one `docker run --rm` per command: an instance is
+    /// verified many times over an agent run, and re-entering a multi-GB image each
+    /// time would dominate the measurement.
     pub fn start_args(name: &str, image: &str, host_ws: &Path) -> Vec<String> {
         vec![
             "run".into(),
@@ -191,7 +192,11 @@ mod tests {
 
     #[test]
     fn the_script_activates_conda_and_bounds_itself() {
-        let s = in_testbed("python -m pytest", 300);
+        let s = in_testbed(
+            super::super::instance::Benchmark::SweBench.python_prefix(),
+            "python -m pytest",
+            300,
+        );
         assert!(s.contains("conda activate testbed"));
         assert!(s.contains("cd /testbed"));
         assert!(s.contains("timeout 300 python -m pytest"));

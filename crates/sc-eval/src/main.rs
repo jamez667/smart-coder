@@ -3,7 +3,7 @@
 //! Two suites:
 //!
 //!     sc-eval [SUITE_TOML]              the red->green demo suite (FileSolver)
-//!     sc-eval --swebench --url <U> --model <M> [--only <ID>] [--json <PATH>]
+//!     sc-eval --swebench [--live] --url <U> --model <M> [--only <ID>] [--json <PATH>]
 //!
 //! The SWE-bench path runs the real agent loop against a live backend, one instance
 //! per container. See [`sc_eval::swebench`] for what is and is not measured.
@@ -61,7 +61,13 @@ fn swebench(args: &[String]) -> ExitCode {
     let only = flag(args, "--only");
     let json_out = flag(args, "--json");
 
-    let subset = match Subset::bundled() {
+    // Which benchmark. They are different measurements and never mix.
+    let live = args.iter().any(|a| a == "--live");
+    let subset = match if live {
+        Subset::bundled_live()
+    } else {
+        Subset::bundled()
+    } {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");

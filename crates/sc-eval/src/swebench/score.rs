@@ -109,11 +109,13 @@ impl SweScore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::instance::Benchmark;
     use super::*;
     use sc_verify::{TestCase, TestReport};
 
     fn instance() -> SweInstance {
         SweInstance {
+            benchmark: Benchmark::SweBench,
             instance_id: "x__y-1".into(),
             repo: "x/y".into(),
             base_commit: "c".into(),

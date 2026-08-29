@@ -1,0 +1,57 @@
+{
+  "source": "SWE-bench-Live/SWE-bench-Live",
+  "split": "lite",
+  "total_in_split": 300,
+  "note": "A hand-picked subset of SWE-bench-Live, NOT the whole split, and a DIFFERENT benchmark from SWE-bench Lite. Scores are not comparable to either full split.",
+  "instances": [
+    {
+      "benchmark": "swe-bench-live",
+      "instance_id": "cyclotruc__gitingest-94",
+      "repo": "cyclotruc/gitingest",
+      "base_commit": "2125765025c65fdd2aec89856bdc095dfb0fc826",
+      "problem_statement": " Git Ingest request fails on web if the input repo url starts with \"http://\" instead of \"https://\"\nI think it might be related to `_parse_url` in `parse_query.py` explicitly checking for `\"https://\"`. Was this intended?\r\n![Screenshot 2024-12-31 190644](https://github.com/user-attachments/assets/621649c8-a942-4478-904f-1287305d5a09)\r\n\n",
+      "test_patch": "diff --git a/src/gitingest/tests/test_parse_query.py b/src/gitingest/tests/test_parse_query.py\nindex 8ce3ff00..b6b20389 100644\n--- a/src/gitingest/tests/test_parse_query.py\n+++ b/src/gitingest/tests/test_parse_query.py\n@@ -4,7 +4,7 @@\n from gitingest.parse_query import _parse_patterns, _parse_url, parse_query\n \n \n-def test_parse_url_valid() -> None:\n+def test_parse_url_valid_https() -> None:\n     test_cases = [\n         \"https://github.com/user/repo\",\n         \"https://gitlab.com/user/repo\",\n@@ -17,6 +17,19 @@ def test_parse_url_valid() -> None:\n         assert result[\"url\"] == url\n \n \n+def test_parse_url_valid_http() -> None:\n+    test_cases = [\n+        \"http://github.com/user/repo\",\n+        \"http://gitlab.com/user/repo\",\n+        \"http://bitbucket.org/user/repo\",\n+    ]\n+    for url in test_cases:\n+        result = _parse_url(url)\n+        assert result[\"user_name\"] == \"user\"\n+        assert result[\"repo_name\"] == \"repo\"\n+        assert result[\"slug\"] == \"user-repo\"\n+\n+\n def test_parse_url_invalid() -> None:\n     url = \"https://only-domain.com\"\n     with pytest.raises(ValueError, match=\"Invalid repository URL\"):\n",
+      "fail_to_pass": [
+        "src/gitingest/tests/test_parse_query.py::test_parse_url_valid_http"
+      ],
+      "pass_to_pass": [
+        "src/gitingest/tests/test_clone.py::test_clone_repo_with_commit",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_without_commit",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_nonexistent_repository",
+        "src/gitingest/tests/test_clone.py::test_check_repo_exists",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_invalid_url",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_invalid_local_path",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_with_custom_branch",
+        "src/gitingest/tests/test_clone.py::test_git_command_failure",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_default_shallow_clone",
+        "src/gitingest/tests/test_clone.py::test_clone_repo_commit_without_branch",
+        "src/gitingest/tests/test_clone.py::test_check_repo_exists_with_redirect",
+        "src/gitingest/tests/test_ingest.py::test_scan_directory",
+        "src/gitingest/tests/test_ingest.py::test_extract_files_content",
+        "src/gitingest/tests/test_parse_query.py::test_parse_url_valid_https",
+        "src/gitingest/tests/test_parse_query.py::test_parse_url_invalid",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_basic",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_include_pattern",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_invalid_pattern",
+        "src/gitingest/tests/test_parse_query.py::test_parse_url_with_subpaths",
+        "src/gitingest/tests/test_parse_query.py::test_parse_url_invalid_repo_structure",
+        "src/gitingest/tests/test_parse_query.py::test_parse_patterns_valid",
+        "src/gitingest/tests/test_parse_query.py::test_parse_patterns_invalid_characters",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_with_large_file_size",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_empty_patterns",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_include_and_ignore_overlap",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_local_path",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_relative_path",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_empty_source",
+        "src/gitingest/tests/test_parse_query.py::test_parse_url_branch_and_commit_distinction",
+        "src/gitingest/tests/test_parse_query.py::test_parse_query_uuid_uniqueness"
+      ],
+      "src_dir": "src/gitingest",
+      "test_files": [
+        "src/gitingest/tests/test_clone.py",
+        "src/gitingest/tests/test_ingest.py",
+        "src/gitingest/tests/test_parse_query.py"
+      ]
+    }
+  ]
+}
