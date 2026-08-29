@@ -30,8 +30,23 @@ API = (
 
 # The source subtree handed to the agent, per repo. Only this is copied to the host,
 # which is what keeps the test tree out of reach. Add a repo here before vendoring it.
+# Derived from each instance's gold patch (the directory the real fix touches), not
+# guessed. Repos whose fix lands in a single top-level module, or whose tests import
+# from a sibling package the patch does not touch, are deliberately absent — the
+# copy-out/copy-back model needs one subtree that contains the change.
 SRC_DIR = {
     "cyclotruc/gitingest": "src/gitingest",
+    "dynaconf/dynaconf": "dynaconf",
+    "jazzband/tablib": "src/tablib",
+    "run-llama/llama_deploy": "llama_deploy",
+    "instructlab/instructlab": "src/instructlab",
+    "pypa/twine": "twine",
+    "huggingface/smolagents": "src/smolagents",
+    "projectmesa/mesa": "mesa",
+    "hiyouga/LLaMA-Factory": "src/llamafactory",
+    "stanfordnlp/dspy": "dspy",
+    "wireservice/csvkit": "csvkit",
+    "kubernetes-client/python": "kubernetes",
 }
 
 
