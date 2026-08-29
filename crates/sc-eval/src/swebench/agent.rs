@@ -65,9 +65,20 @@ impl<'a> SweAgentSolver<'a> {
             // A reasoning model spends tokens thinking before it emits the call, and a
             // truncated turn yields NO call -- indistinguishable from declining to act.
             // Measured on Tiel-35B-A3B: at 1024, one edit request in five ran to the cap
-            // and returned nothing. The prompt budget gives this back (32k window), so
-            // buy the headroom.
-            response_reserve_tokens: 4096,
+            // and returned nothing.
+            //
+            // 4096 was still not enough. On projectmesa__mesa-2632 (hex-grid neighbour
+            // offsets -- a geometry problem it reasons through at length) 54 turns died
+            // this way: working turns replied in 54-161 characters, failing ones ran to
+            // ~10,200 and stopped mid-sentence, at the identical length again and again.
+            // The harness then told it "no JSON tool object found in your reply", which
+            // reads as the model misbehaving when it was cut off.
+            //
+            // Prompts here peak near 10k tokens against a 32k window, so 12288 still
+            // leaves ~10k of slack. Spend the window on the reply: a truncated turn is
+            // worth nothing, and this model's replies are either ~100 characters or a
+            // long think, with very little in between.
+            response_reserve_tokens: 12288,
             // The agent runs the tests through `run_verification`, never the shell —
             // and it runs them for real, in the instance container, against the same
             // node ids the harness will score. `sandbox` below is what makes that
@@ -125,8 +136,10 @@ impl<'a> SweAgentSolver<'a> {
              You can READ the tests ({}) to see exactly what behaviour is expected, \
              but you must NOT edit them — fix the source so the tests pass as \
              written.\n\n\
-             run_command already starts in the repository root: use plain relative \
-             paths like `{}/...` and do NOT `cd` anywhere first.\n",
+             You are already in the working directory, which holds `{}/` (the source \
+             you must change) and the test files above. run_command, read_file and \
+             edit_file all use these same plain relative paths — do NOT `cd` anywhere \
+             and do not prefix an absolute path.\n",
             instance.problem_statement.trim(),
             instance
                 .fail_to_pass
@@ -135,7 +148,15 @@ impl<'a> SweAgentSolver<'a> {
                 .collect::<Vec<_>>()
                 .join("\n"),
             instance.test_files.join(", "),
-            instance.src_dir,
+            // The LEAF, not `src_dir`. The workspace holds the copied subtree at its
+            // root, so `src/tablib` in the repo is just `tablib/` here — telling the
+            // model otherwise sent it hunting with `cd /root`, `pwd && ls && find`,
+            // `cd /hostws/src`, burning turns rediscovering where it already was.
+            instance
+                .src_dir
+                .rsplit('/')
+                .next()
+                .unwrap_or(&instance.src_dir),
         )
     }
 }

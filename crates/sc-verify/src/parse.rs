@@ -317,6 +317,46 @@ fn attach_pytest_failure_exceptions(output: &str, cases: &mut [TestCase]) {
         }
         // The test name in the detail header is the last `::` segment.
         let short = case.name.rsplit("::").next().unwrap_or(&case.name);
+
+        // `--tb=line` has NO `____ name ____` block — one line per failure, shaped
+        // `/path/to/test_x.py:844: AssertionError: assert 'a' == 'b'`. That is the
+        // whole point of the flag (the summary line truncates the reason to terminal
+        // width, so the model saw only `Assert...`), so read it before looking for a
+        // block that will not be there. Matched on the test's FILE, since the line
+        // names the file and line number rather than the test.
+        //
+        // ...but ONLY when there is no block. A block carries the captured traceback,
+        // and digging the ROOT cause out of that beats the one-liner:
+        // `assert 500 == 200` becomes `AttributeError: 'Flask' object has no attribute
+        // 'render_template'`. This is the fallback for when no block exists.
+        let has_block = lines.iter().any(|l| {
+            let t = l.trim_matches('_').trim();
+            (t == short || t.starts_with(&format!("{short} "))) && l.trim_start().starts_with('_')
+        });
+        let file = case.name.split("::").next().unwrap_or("");
+        if !has_block && !file.is_empty() {
+            let hit = lines
+                .iter()
+                .map(|l| l.trim())
+                // The line names this test's file and carries a named exception.
+                .find(|t| {
+                    t.contains(file)
+                        && (t.contains("Error") || t.contains("Exception"))
+                        && t.contains(": ")
+                });
+            // Keep from `<line>: ` onward so the model gets
+            // `AssertionError: assert 'a' == 'b'` without the absolute path.
+            if let Some(detail) = hit
+                .and_then(|t| t.split_once(".py:"))
+                .map(|(_, rest)| rest.split_once(": ").map(|(_, m)| m).unwrap_or(rest).trim())
+            {
+                if !detail.is_empty() {
+                    case.message = Some(detail.to_string());
+                    continue;
+                }
+            }
+        }
+
         // Find the `____ <short> ____` failure block header.
         let Some(start) = lines.iter().position(|l| {
             let t = l.trim_matches('_').trim();
@@ -590,6 +630,29 @@ ERROR test_run.py
             "the exception is attached, not the bare placeholder"
         );
         assert!(!report.all_green());
+    }
+
+    /// `--tb=line` gives one line per failure and no `____ name ____` block. The
+    /// summary line truncates the reason to terminal width, so without reading the
+    /// `--tb=line` line the model gets `Assert...` and nothing else.
+    ///
+    /// Real output from stanfordnlp__dspy-1651, where the truncated form cost the model
+    /// all 60 of its steps: the full text names the bug outright.
+    #[test]
+    fn tb_line_gives_the_assertion_the_summary_truncates() {
+        let out = "/testbed/tests/functional/test_functional.py:844: AssertionError: assert 'I am a benigh signature.' == 'I am a malicious signature.'
+=========================== short test summary info ============================
+FAILED tests/functional/test_functional.py::test_save_type_predictor - Assert...
+1 failed, 37 passed in 4.21s
+";
+        let report = parse("python -m pytest -rA --tb=line", out, false);
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1, "{:?}", report.cases);
+        let msg = failed[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("benigh") && msg.contains("malicious"),
+            "the whole assertion must survive, got: {msg:?}"
+        );
     }
 
     #[test]
