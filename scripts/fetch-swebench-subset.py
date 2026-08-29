@@ -69,38 +69,24 @@ def fetch_all() -> list[dict]:
     return rows
 
 
-def clean_ids(node_ids: list[str]) -> list[str]:
-    """Drop entries that are not pytest node ids.
-
-    Some upstream rows carry pytest *progress output* in FAIL_TO_PASS/PASS_TO_PASS —
-    `pytest-dev__pytest-5227` has `"["`, `"[100%]"` and
-    `"[100%]------------------------------"` among its 34 PASS_TO_PASS entries. Scoring
-    counts any id it cannot find as `missing`, so three lines of terminal noise make an
-    otherwise-fine instance permanently unresolvable.
-    """
-    return [
-        n
-        for n in node_ids
-        if "::" in n
-        and not n.lstrip().startswith("[")
-        # Balanced brackets. A parametrised id whose parameter contains a SPACE was
-        # split on whitespace upstream, leaving fragments like
-        # `test_locate_app[cliapp.factory-` and `create_app2("foo",`. pytest ABORTS on
-        # an unknown id -- "no tests ran" -- so one fragment zeroes the whole instance,
-        # which is how flask-5063 and pytest-11143 reported all 56 / all 12 tests
-        # MISSING. They cannot be reassembled reliably, so drop them.
-        and n.count("[") == n.count("]")
-    ]
-
-
 def test_files(node_ids: list[str]) -> list[str]:
-    """The distinct files named by a set of pytest node ids."""
-    return sorted({n.split("::", 1)[0] for n in clean_ids(node_ids)})
+    """The distinct files named by a set of pytest node ids.
+
+    Only used to decide which files to copy out for the agent to read, so entries that
+    are not node ids are skipped here — that is a local decision about file copying and
+    does not touch the scored id lists.
+    """
+    return sorted({n.split("::", 1)[0] for n in node_ids if "::" in n})
 
 
 def convert(row: dict) -> dict:
-    f2p = clean_ids(json.loads(row["FAIL_TO_PASS"]))
-    p2p = clean_ids(json.loads(row["PASS_TO_PASS"]))
+    # Vendored EXACTLY as published — no filtering, no repair. A benchmark you have
+    # edited cannot be compared to anyone else's run of it. Malformed ids upstream
+    # (whitespace-split parametrised ids, stray `[100%]` progress output) are handled
+    # by the RUNNER, which passes test files to pytest rather than ids: an id that does
+    # not exist is then simply never matched. See `swebench::runner::pytest_command`.
+    f2p = json.loads(row["FAIL_TO_PASS"])
+    p2p = json.loads(row["PASS_TO_PASS"])
     repo = row["repo"]
     if repo not in SRC_DIR:
         raise SystemExit(f"no src_dir mapping for {repo} — add one to SRC_DIR")

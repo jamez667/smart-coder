@@ -59,17 +59,47 @@ impl InstanceRun {
     }
 }
 
-/// The pytest command for a set of node ids.
+/// The pytest command for a set of node ids: run their FILES, not the ids.
 ///
-/// Node ids are single-quoted: parametrised tests carry `[]`, which an unquoted shell
-/// would glob-expand.
+/// **This is what keeps the benchmark unmodified.** Passing ids directly puts every one
+/// on the command line, and pytest ABORTS on a single id it cannot resolve — "no tests
+/// ran" — so one bad argument zeroes the whole instance. Some upstream rows carry ids
+/// that were split on whitespace, leaving fragments like
+/// `test_locate_app[cliapp.factory-`, plus stray progress output like `[100%]`. Under
+/// the id-passing form those made four instances unscoreable, which is what tempted an
+/// earlier version of this harness to *filter the dataset*. That was the wrong fix: a
+/// benchmark you have edited is no longer comparable to anyone else's run of it.
+///
+/// Running the files instead is what the official SWE-bench harness does. An id that
+/// does not exist is then simply never seen in the output and scores as `missing`,
+/// which is correct and local to that one test — every other id still scores normally,
+/// and the vendored instances stay byte-for-byte as published.
+///
+/// Files are single-quoted (paths can contain shell metacharacters) and deduplicated:
+/// 115 ids across two files is two arguments.
+///
+/// The cost is running the file's other tests too, which is a little slower and is why
+/// [`PYTEST_FLAGS`] keeps `-rA` — scoring reads the named results out of the output and
+/// ignores the rest.
 pub fn pytest_command(tests: &[String]) -> String {
-    let ids = tests
+    let mut files: Vec<&str> = tests
         .iter()
-        .map(|t| format!("'{t}'"))
+        // An entry with no `::` is not a node id — upstream progress output like
+        // `[100%]` — and naming it would put the junk back on the command line, which
+        // is the abort this function exists to avoid. Skipping it here changes no
+        // score: the id is still in the instance and still counts as `missing`.
+        .filter(|t| t.contains("::"))
+        .map(|t| t.split("::").next().unwrap_or(t))
+        .filter(|f| !f.is_empty())
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    let args = files
+        .iter()
+        .map(|f| format!("'{f}'"))
         .collect::<Vec<_>>()
         .join(" ");
-    format!("python -m pytest {PYTEST_FLAGS} {ids}")
+    format!("python -m pytest {PYTEST_FLAGS} {args}")
 }
 
 /// Solves an instance by editing the source tree at `workspace`.
@@ -242,16 +272,35 @@ mod tests {
     #[test]
     fn the_pytest_command_keeps_the_flags_that_name_passes() {
         let c = pytest_command(&["t.py::a".into(), "t.py::b".into()]);
+        // `-rA` is what makes the PASSES appear by name in the output, which is how
+        // PASS_TO_PASS is scored once the ids are no longer on the command line.
         assert!(c.contains("-rA"), "-rA names the passes: {c}");
-        assert!(c.contains("'t.py::a'"), "node ids are quoted: {c}");
-        assert!(c.contains("'t.py::b'"));
+        assert!(c.contains("'t.py'"), "the file is quoted: {c}");
     }
 
-    /// Node ids carry `[]` (parametrised tests); unquoted they would be glob-expanded
-    /// by the shell before pytest ever saw them.
+    /// The whole point: a malformed id must not be able to abort the run.
+    ///
+    /// Upstream rows carry ids that were split on whitespace (`...factory-`) and stray
+    /// progress output (`[100%]`). Passing ids directly, pytest aborts on the first one
+    /// it cannot resolve and NOTHING runs. Passing files, the junk never reaches the
+    /// command line and every real test still scores.
     #[test]
-    fn parametrised_node_ids_survive_the_shell() {
-        let c = pytest_command(&["t.py::test[compound-model6]".into()]);
-        assert!(c.contains("'t.py::test[compound-model6]'"), "{c}");
+    fn malformed_ids_do_not_reach_the_command_line() {
+        let c = pytest_command(&[
+            "tests/test_cli.py::TestRoutes::test_host".into(),
+            "tests/test_cli.py::test_locate_app[cliapp.factory-".into(),
+            "[100%]".into(),
+        ]);
+        assert!(c.contains("'tests/test_cli.py'"), "{c}");
+        assert!(!c.contains("factory-"), "no fragment on the line: {c}");
+        assert!(!c.contains("100%"), "no progress output on the line: {c}");
+    }
+
+    /// One file, however many ids name it.
+    #[test]
+    fn the_files_are_deduplicated() {
+        let c = pytest_command(&["a.py::one".into(), "a.py::two".into(), "b.py::three".into()]);
+        assert_eq!(c.matches("'a.py'").count(), 1, "{c}");
+        assert!(c.contains("'b.py'"), "{c}");
     }
 }

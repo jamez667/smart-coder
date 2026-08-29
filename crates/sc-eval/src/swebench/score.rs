@@ -73,12 +73,22 @@ impl SweScore {
     }
 
     /// Whether this looks like the RED state the harness requires before solving:
-    /// every F2P failing, every P2P already passing.
+    /// every F2P failing, and no P2P already broken.
     ///
     /// A run that is already green before the agent touches it is a broken instance,
     /// not an easy one, and must never be reported as solved.
+    ///
+    /// `missing` is deliberately NOT consulted. An id absent at setup is absent because
+    /// it does not exist in the repository — a handful of upstream rows carry ids that
+    /// were split on whitespace — and it will be absent at the green check too, where
+    /// [`Self::resolved`] still counts it against the model. Excluding the whole
+    /// instance for it discards every other test as well: `pallets__flask-5063` scored
+    /// `F2P 0/2  P2P 52/52  MISSING 2` and was thrown away over those two.
+    ///
+    /// The invariant that matters is unchanged — an F2P that already passes, or a P2P
+    /// that is already broken, still makes the instance unusable.
     pub fn is_red_start(&self) -> bool {
-        self.f2p_passed.is_empty() && self.p2p_broken.is_empty() && self.missing.is_empty()
+        self.f2p_passed.is_empty() && self.p2p_broken.is_empty() && !self.f2p_failed.is_empty()
     }
 
     pub fn line(&self) -> String {
@@ -195,6 +205,45 @@ mod tests {
         let s = SweScore::grade(&instance(), &report(&[("t.py::fix_a", false)]));
         assert!(!s.resolved());
         assert_eq!(s.missing.len(), 3);
+    }
+
+    /// A `missing` id at setup must not throw the whole instance away.
+    ///
+    /// `pallets__flask-5063` carries two ids that were split on whitespace upstream.
+    /// They can never be found, and `resolved()` still counts them against the model —
+    /// but excluding the instance over them discarded its other 54 tests too.
+    #[test]
+    fn a_permanently_missing_id_does_not_make_the_instance_unusable() {
+        let i = SweInstance {
+            fail_to_pass: vec!["t.py::fix_a".into(), "t.py::fix_b".into()],
+            pass_to_pass: vec!["t.py::keep_a".into(), "t.py::gone[split".into()],
+            ..instance()
+        };
+        // Setup: both fixes fail, the real keep passes, the malformed id is absent.
+        let red = SweScore::grade(
+            &i,
+            &report(&[
+                ("t.py::fix_a", false),
+                ("t.py::fix_b", false),
+                ("t.py::keep_a", true),
+            ]),
+        );
+        assert_eq!(red.missing, ["t.py::gone[split"]);
+        assert!(red.is_red_start(), "usable despite the missing id: {red:?}");
+        // But it still counts against resolution.
+        assert!(!red.resolved());
+    }
+
+    /// If NOTHING was verified, the instance is unusable — an empty red check is not a
+    /// red check.
+    #[test]
+    fn an_instance_whose_fixes_all_went_missing_is_unusable() {
+        let red = SweScore::grade(&instance(), &report(&[]));
+        assert!(red.f2p_failed.is_empty());
+        assert!(
+            !red.is_red_start(),
+            "nothing ran, so nothing was proven red"
+        );
     }
 
     #[test]
