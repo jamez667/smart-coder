@@ -231,7 +231,18 @@ fn run_instance_inner(
     // Freezing is enforced instead by `PermissionPolicy::with_frozen` in the loop and
     // the `git diff` check below — the same belt-and-braces the original `run_task`
     // uses for its contract tests.
-    container.copy_out(&format!("{TESTBED}/{}", instance.src_dir), &src)?;
+    // `copy_out` names where the entry LANDS, so the destination carries the leaf:
+    // `src_dir` "pylint" lands at `<ws>/src/pylint`, "src/gitingest" at
+    // `<ws>/src/gitingest`.
+    let src_leaf = instance
+        .src_dir
+        .rsplit('/')
+        .next()
+        .unwrap_or(&instance.src_dir);
+    container.copy_out(
+        &format!("{TESTBED}/{}", instance.src_dir),
+        &src.join(src_leaf),
+    )?;
     for f in &instance.test_files {
         // Only the files the scored node ids name, not the whole test tree: pylint's
         // `tests/functional/s/symlink/` holds symlinks that need special handling on

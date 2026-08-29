@@ -197,6 +197,11 @@ impl InstanceContainer {
 
     /// Copy a path out of the container onto the host, via a tar stream.
     ///
+    /// `host` is where the copied entry LANDS, not a directory to drop it in:
+    /// `copy_out("/testbed/pylint", ws.join("src/pylint"))`. Both callers must agree,
+    /// and they did not — one passed the containing directory, which put every test
+    /// file inside a directory named after itself.
+    ///
     /// **Not `docker cp`.** On Windows that tries to recreate a symlink as a real
     /// filesystem symlink, which needs a privilege an ordinary user does not have:
     /// `kubernetes-client/python` keeps four symlinked directories inside `kubernetes/`
@@ -228,13 +233,21 @@ impl InstanceContainer {
             .spawn()
             .map_err(|e| DcError::Eval(format!("docker exec tar: {e}")))?;
 
-        std::fs::create_dir_all(host)
-            .map_err(|e| DcError::Eval(format!("creating {}: {e}", host.display())))?;
+        // `host` names where the copied entry should LAND, so tar extracts into its
+        // parent — tar already writes the leaf itself. Creating `host` as a directory
+        // instead makes a directory named after the file, with the real file inside it:
+        // `read_file tests/data/test_mm_plugin.py` then failed with "Access is denied"
+        // (os error 5, which is what Windows returns for reading a directory), and the
+        // agent could not read the very test it was asked to satisfy. Measured on
+        // hiyouga__llama-factory-7505: three denied reads across one run.
+        let extract_into = host.parent().unwrap_or(host);
+        std::fs::create_dir_all(extract_into)
+            .map_err(|e| DcError::Eval(format!("creating {}: {e}", extract_into.display())))?;
         let out = Command::new("tar")
             .arg("xf")
             .arg("-")
             .arg("-C")
-            .arg(host)
+            .arg(extract_into)
             .stdin(
                 tar.stdout
                     .ok_or_else(|| DcError::Eval("tar stdout".into()))?,
