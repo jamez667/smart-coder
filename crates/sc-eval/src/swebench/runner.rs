@@ -189,11 +189,32 @@ fn run_instance_inner(
     let (_, out) = container.exec(&in_testbed(py, &cmd, TIMEOUT_SECS))?;
     let red = SweScore::grade(instance, &sc_verify::parse(&cmd, &out, false));
     if !red.is_red_start() {
-        return Ok(InstanceRun::failed(
-            instance,
-            format!("not red at setup ({}) — instance unusable", red.line()),
-            started,
-        ));
+        // Name the offending tests. A bare "not red at setup" cost hours of manual
+        // bisecting to find out *which* test was wrong and whether it was our fault:
+        // an F2P that already passes usually means the test patch did not take, while
+        // a P2P already failing is nearly always the published image (dynaconf-1241
+        // reads DOTENV_INT from a `.env` the image never shipped; llama_deploy-384
+        // raises ModuleNotFoundError on an optional dependency).
+        let mut why = format!("not red at setup ({})", red.line());
+        if !red.f2p_passed.is_empty() {
+            why.push_str(&format!(
+                " — F2P already passing: {}",
+                red.f2p_passed.join(", ")
+            ));
+        }
+        if !red.p2p_broken.is_empty() {
+            let shown: Vec<&str> = red.p2p_broken.iter().take(3).map(String::as_str).collect();
+            why.push_str(&format!(
+                " — P2P already failing: {}{}",
+                shown.join(", "),
+                if red.p2p_broken.len() > 3 {
+                    format!(" (+{} more)", red.p2p_broken.len() - 3)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        return Ok(InstanceRun::failed(instance, why, started));
     }
 
     // 3. Hand the agent the source subtree AND the failing tests.
