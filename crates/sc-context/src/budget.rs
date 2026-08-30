@@ -117,15 +117,39 @@ fn truncate_middle(text: &str, target_tokens: usize, counter: &TokenCounter) -> 
         // Too few lines to middle-truncate by line — fall back to a char-level head+tail cut so a
         // large single-block observation still shrinks (else the prompt can't be made to fit).
         let chars: Vec<char> = text.chars().collect();
-        // ~4 chars/token; keep half the budget as head, half as tail.
-        let keep = (target_tokens.saturating_mul(4)).min(chars.len());
+        // Budget the MARKER first, then MEASURE -- do not estimate.
+        //
+        // Two bugs lived here. The keep was `target * 4` chars while
+        // `estimate_tokens` charges 3.5, so every shrink landed ABOVE the target;
+        // and the marker's own cost was never counted, which dominates at a small
+        // target. Either way the result exceeded the target, the caller's shrink
+        // loop saw `after >= before`, broke out to avoid spinning, and the prompt
+        // went to the server over budget -- 30,668 tokens against a 12,288 budget,
+        // rejected with HTTP 400 as "exceeds the available context size".
+        //
+        // Any chars-per-token constant is approximate, and one that lands high does
+        // not merely waste room: it stops the caller converging. So halve the kept
+        // content until the measured candidate actually fits.
+        let marker_cost = counter.count(marker);
+        let content_tokens = target_tokens.saturating_sub(marker_cost);
+        let mut keep = (content_tokens.saturating_mul(3)).min(chars.len());
         if keep + marker.len() >= chars.len() {
             return text.to_string();
         }
-        let half = keep / 2;
-        let head: String = chars[..half].iter().collect();
-        let tail: String = chars[chars.len() - (keep - half)..].iter().collect();
-        return format!("{head}{marker}{tail}");
+        loop {
+            let half = keep / 2;
+            let head: String = chars[..half].iter().collect();
+            let tail: String = chars[chars.len() - (keep - half)..].iter().collect();
+            let candidate = format!("{head}{marker}{tail}");
+            // `keep == 0` is the floor: the marker alone. That may still exceed a
+            // target smaller than the marker itself, which is unachievable by
+            // construction -- but it is strictly smaller than the input, so the
+            // caller's loop still makes progress.
+            if keep == 0 || counter.count(&candidate) <= target_tokens {
+                return candidate;
+            }
+            keep /= 2;
+        }
     }
     // Grow head and tail line counts until we'd exceed the budget, then step back one.
     let mut head = 0usize;
@@ -494,5 +518,91 @@ mod tests {
         assert_eq!(built.messages[0].content, "system");
         assert_eq!(built.messages[1].content, "task");
         assert_eq!(built.messages[2].content, "retrieved");
+    }
+
+    /// **The builder must fit the budget, even when everything is sacred.**
+    ///
+    /// A single huge unbreakable observation -- one long line, no newlines to cut
+    /// on -- takes the char-level fallback in `truncate_middle`. That fallback used
+    /// to land above its target, so the shrink loop gave up and the prompt was sent
+    /// over budget: 30,668 tokens against 12,288, rejected with HTTP 400.
+    #[test]
+    fn a_huge_single_line_sacred_segment_is_still_made_to_fit() {
+        let c = counter();
+        let b = ContextBuilder::new(&c, 200);
+
+        // One line, far over budget, in a sacred zone: nothing may be evicted and
+        // there are no line breaks to truncate on.
+        let built = b.build(vec![
+            Segment::system(Zone::System, "sys"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::RecentObservation, "x".repeat(20_000)),
+        ]);
+
+        assert!(
+            built.tokens_used <= built.budget,
+            "assembled {} tokens against a {}-token budget",
+            built.tokens_used,
+            built.budget
+        );
+    }
+
+    /// The same for a multi-line file, which takes the line-based path.
+    #[test]
+    fn a_huge_focus_file_is_still_made_to_fit() {
+        let c = counter();
+        let b = ContextBuilder::new(&c, 300);
+
+        let file: String = (0..2_000)
+            .map(|i| format!("let value_{i} = compute_something({i});\n"))
+            .collect();
+        let built = b.build(vec![
+            Segment::system(Zone::System, "sys"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::FocusFile, file),
+        ]);
+
+        assert!(
+            built.tokens_used <= built.budget,
+            "assembled {} tokens against a {}-token budget",
+            built.tokens_used,
+            built.budget
+        );
+    }
+
+    /// `truncate_middle` must land at or below its target whenever that is
+    /// achievable -- i.e. once the target can pay for the marker.
+    ///
+    /// Landing above is what made the shrink loop give up (`after >= before`), so
+    /// this is not a rounding nicety: it is the difference between the prompt
+    /// converging and being sent over budget.
+    #[test]
+    fn truncate_middle_does_not_overshoot_an_achievable_target() {
+        let c = counter();
+        let marker_cost =
+            c.count("\n… (file truncated in the middle to fit the context window) …\n");
+
+        // No newlines: forces the char-level fallback, which is where the bug was.
+        let blob = "abcdefghij".repeat(3_000);
+        for target in [50usize, 200, 1000] {
+            assert!(
+                target > marker_cost,
+                "premise: the target can pay for the marker"
+            );
+            let got = truncate_middle(&blob, target, &c);
+            assert!(
+                c.count(&got) <= target,
+                "target {target}, got {} tokens",
+                c.count(&got)
+            );
+        }
+
+        // Below the marker's own cost the best it can do is the marker -- but it
+        // must still SHRINK, or the caller's loop stalls.
+        let tiny = truncate_middle(&blob, 5, &c);
+        assert!(
+            c.count(&tiny) < c.count(&blob),
+            "must always make progress, even on an impossible target"
+        );
     }
 }
