@@ -90,6 +90,16 @@ execution:
 
 - Policies are configurable (e.g. `--yolo` to pre-approve, or an allowlist of
   safe commands). Defaults are conservative.
+- Headless harnesses (`sc-eval`, the SWE-bench path) run with `allow_shell`
+  pre-approved — the same posture as `--yolo`, since there is no human to
+  confirm. This reverses an earlier decision to deny shell there: denying it also
+  removes the one thing that turns a *symptom* into a *diagnosis*. Measured on
+  one instance, a model offered read+edit only picks read 15/16 and edits 1/16;
+  offered read+edit+shell it picks shell 14/16 with targeted greps, and the edit
+  lands the turn after a command's output makes the bug concrete. The
+  contract-test freeze is **not** relaxed alongside it, and the harness
+  re-verifies after the run in a container the agent cannot reach, so shell
+  access cannot buy a false pass.
 - The gate is enforced by the harness, **outside** the model's control — the
   model can't grant itself permission.
 - All actions are **sandboxed to the workspace root**; path traversal outside it

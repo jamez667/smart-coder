@@ -542,6 +542,22 @@ pub fn run_agent_observed(
                                 // detail counts as green (the "no command" message
                                 // isn't a pass).
                                 let configured = cfg.verify_command.is_some();
+                                // The model asked to run the tests and there were no
+                                // tests to run. That records as `green: false`, which
+                                // is indistinguishable from a failing suite -- so a
+                                // harness that forgot to configure verification scores
+                                // as a model that could not make the tests pass. Task
+                                // runs sat in exactly this state: `verify_command` was
+                                // None, so the agent edited blind and every attempt to
+                                // check its own work came back as a failure it caused.
+                                if !configured {
+                                    sink.record(&AgentEvent::HarnessFault {
+                                        kind: FaultKind::VerifyUnavailable,
+                                        detail: "the model called `run_verification` but no                                                  verify command is configured; its result                                                  cannot count as green"
+                                            .to_string(),
+                                        step: step + 1,
+                                    });
+                                }
                                 let green = configured && !looks_like_failure(&o);
                                 sink.record(&AgentEvent::Verification {
                                     green,

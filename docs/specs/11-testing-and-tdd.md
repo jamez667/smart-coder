@@ -56,6 +56,13 @@ the code is written tests nothing — this catches tautological/vacuous tests a
 small model is prone to writing, and proves the test is actually wired to the
 behavior. Only a genuinely-red test may proceed to GREEN.
 
+Every harness verification run is bounded by a timeout (300s in `sc-eval`); the
+code being verified was written by a model, so non-termination is a routine
+outcome rather than an exotic one. A timed-out verification is scored red, and
+the whole process tree is killed — not just the shell the harness spawned, whose
+children would otherwise survive it and block the harness on their inherited
+handles.
+
 ## Where TDD lives in the system
 
 TDD is woven through the specs, not bolted on:
@@ -100,7 +107,12 @@ prevented. The harness defends the integrity of the signal:
 - **Frozen contract tests** — edits to approved test files are blocked for
   workers; an attempt is flagged to the orchestrator/human, never silently
   allowed. (`edit_file` on a contract-test path is denied by the permission
-  layer, [04](04-tools.md).)
+  layer, [04](04-tools.md).) The freeze is enforced twice, independently: the
+  permission layer denies the edit tools up front, and the harness re-hashes
+  every contract test after the solve and scores any change as tampering
+  regardless of whether the suite went green. The second check is load-bearing
+  because shell access lets a model reach a frozen file without going through a
+  denied tool.
 - **No special-casing the test** — heuristics flag implementations that hardcode
   the exact expected value / detect the test environment; suspicious diffs
   escalate.

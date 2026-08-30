@@ -230,3 +230,56 @@ fn reports_a_harness_fault_when_the_reply_was_truncated() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **The second detector must be seen to fire.**
+///
+/// A model that calls `run_verification` with no verify command configured gets a
+/// "no command" message, and the loop records `green: false` -- indistinguishable
+/// from a suite that genuinely failed. Task runs sat in exactly this state: the
+/// config left `verify_command` as None, so the agent edited blind and every attempt
+/// to check its own work was scored as its own failure.
+#[test]
+fn reports_a_harness_fault_when_verification_is_not_configured() {
+    let ws = temp("noverify");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let backend = Scripted::new(vec![
+        r#"{"tool":"run_verification"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    // The default config is the point: `verify_command` is None in it.
+    let cfg = AgentConfig::default();
+    assert!(
+        cfg.verify_command.is_none(),
+        "this test is about the unconfigured case"
+    );
+    run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        &ParseRepair,
+        "check it",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::HarnessFault {
+                kind: FaultKind::VerifyUnavailable,
+                ..
+            }
+        )),
+        "an unconfigured verification must raise a harness fault, got: {events:#?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

@@ -480,7 +480,10 @@ capture, and this removes the load-bearing cases from its shoulders.
   small-model behavior.
   - **SWE-bench is the post-M3 feasibility check, not a current target.** Our
     `sc-eval` red→green machinery already mirrors SWE-bench's
-    `FAIL_TO_PASS`/`PASS_TO_PASS` split, but three preconditions must land first
+    `FAIL_TO_PASS`/`PASS_TO_PASS` split — and since the fixed task suite now runs
+    on the same measured agent settings as the SWE-bench path (step cap, response
+    reserve, observation and read caps), a harness change is measured the same way
+    on both — but three preconditions must land first
     or a run measures missing infrastructure, not the model: **(1)** per-task
     environment isolation (Docker images with pinned deps); **(2)** the retrieval
     index + context budgeter (M2 / `sc-index`) so a 4B model can navigate a large

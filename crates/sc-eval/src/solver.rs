@@ -101,6 +101,53 @@ where
     }
 }
 
+/// The agent settings a task run actually needs, layered over `base`.
+///
+/// **`AgentConfig::default()` is tuned for toy tasks and was proven wrong against
+/// real ones four separate times.** Task runs used it anyway -- `with_config`
+/// existed and nothing called it -- so every measurement made on the SWE-bench path
+/// was silently absent here. The numbers below are that path's, and each was paid
+/// for:
+///
+/// * **steps 25 -> 40.** Pooled across every run, solves landed at step 33, 35 and
+///   48. A 25-step cap throws those away and reports them as failures.
+/// * **reserve 1024 -> 12288.** A reasoning model spends tokens thinking before it
+///   emits the call, and a truncated turn yields NO call -- indistinguishable from
+///   declining to act. At 1024 one edit request in five returned nothing at all.
+/// * **observation cap 40 -> 200.** Forty lines amputates a pytest traceback right
+///   where the assertion is.
+/// * **read cap 400 -> 800.** The model must read the failing test; clipping it
+///   mid-file is the harness hiding the answer.
+///
+/// It also fixes something worse than a bad number: `verify_command` was `None`, so
+/// **the agent could not run the task's tests at all.** It edited blind and the
+/// harness graded it afterwards. `contract_tests` become `frozen_paths` for the same
+/// reason the SWE-bench path freezes test files -- the cheapest way to pass is to
+/// edit the test.
+fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
+    AgentConfig {
+        max_steps: 40,
+        response_reserve_tokens: 12288,
+        observation_line_cap: 200,
+        read_file_line_cap: 800,
+        // The agent can finally check its own work. Without this it edits blind.
+        verify_command: Some(task.verify_cmd.clone()),
+        permission: sc_tools::PermissionPolicy {
+            // Shell is what turns a SYMPTOM into a DIAGNOSIS: offered read+edit only,
+            // one measured model picks read 15/16 and edits 1/16; with shell it picks
+            // shell 14/16, with targeted greps, and the edit lands the turn after the
+            // output makes the bug concrete. The false-pass risk (a model
+            // `git checkout`-ing its way to green) is handled where it belongs -- the
+            // harness re-verifies after the solve.
+            allow_shell: true,
+            // A solver that edits the contract test has not solved anything.
+            frozen_paths: task.contract_tests.clone(),
+            ..base.permission.clone()
+        },
+        ..base
+    }
+}
+
 /// The real solver: runs the `sc_core` agent loop, driven by a model backend, to
 /// turn the red workspace green. This is what scores an actual model on the suite.
 pub struct AgentSolver<'a> {
@@ -141,8 +188,12 @@ impl Solver for AgentSolver<'_> {
              Make that command exit 0. Do not edit any test files.",
             task.description, task.verify_cmd
         );
+        // Per-task settings layered over whatever this solver was built with, so a
+        // caller that passed an explicit config (verbosity, a sandbox) keeps it while
+        // the task still supplies its own verify command and frozen tests.
+        let cfg = task_config(self.cfg.clone(), task);
         // Backend errors (e.g. model unavailable) surface as a SolverError outcome.
-        let report = run_agent(self.backend, &instruction, workspace, &self.cfg)?;
+        let report = run_agent(self.backend, &instruction, workspace, &cfg)?;
         self.last.set(Some(report.metrics));
         Ok(())
     }
@@ -202,10 +253,16 @@ mod tests {
         );
     }
 
-    /// If the model cheats by rewriting the contract test, the harness must catch
-    /// it as tampering even though the suite would then "pass".
+    /// The contract test is frozen at the TOOL layer, so the edit never lands.
+    ///
+    /// This is the first of two independent defences. It used to be the only place
+    /// tampering was checked and it was checked only after the fact -- the write
+    /// succeeded and the harness noticed afterwards. Denying it up front is better,
+    /// but it is not sufficient on its own: `allow_shell` is on, so a model can still
+    /// reach the file through a command. The post-hoc backstop below covers that,
+    /// and the two are asserted separately so neither can quietly stop working.
     #[test]
-    fn agent_solver_cannot_cheat_by_editing_the_test() {
+    fn agent_solver_is_denied_when_it_tries_to_edit_the_test() {
         let fixture = TempWorkspace::new("agent-cheat").unwrap();
         std::fs::write(fixture.path().join("impl.sh"), "is_even() { return 1; }\n").unwrap();
         std::fs::write(
@@ -228,6 +285,66 @@ mod tests {
         ]);
 
         let result = run_task(&task, &AgentSolver::new(&backend));
-        assert_eq!(result.outcome.symbol(), "TAMPER");
+        // Denied at the tool, so the run cannot reach a green -- and crucially it is
+        // NOT scored as solved. The exact non-green outcome is not the point; that
+        // the cheat did not work is.
+        assert_ne!(
+            result.outcome.symbol(),
+            "PASS",
+            "editing the contract test must never score as solved"
+        );
+        // And the file is untouched, which is the actual guarantee.
+        let after = std::fs::read_to_string(fixture.path().join("test.sh")).unwrap();
+        assert!(
+            after.contains("is_even 4"),
+            "the frozen contract test must survive the run, got: {after:?}"
+        );
+    }
+
+    /// The post-hoc backstop: tampering that gets PAST the tool layer is still caught.
+    ///
+    /// `frozen_paths` denies the edit tools, but `allow_shell` is on -- deliberately,
+    /// because shell is what turns a symptom into a diagnosis -- so a model can still
+    /// reach the contract test through a command. Driving that path directly (rather
+    /// than through a denied tool) keeps the hash check honest: without it, a suite
+    /// could report a clean pass on a rewritten test.
+    #[test]
+    fn tampering_that_evades_the_tool_layer_is_still_caught() {
+        let fixture = TempWorkspace::new("agent-tamper").unwrap();
+        std::fs::write(
+            fixture.path().join("impl.sh"),
+            "is_even() { return 1; }
+",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.path().join("test.sh"),
+            ". ./impl.sh
+is_even 4 || exit 1
+exit 0
+",
+        )
+        .unwrap();
+        let task = EvalTask {
+            id: "even".into(),
+            description: "cheater".into(),
+            fixture: fixture.path().to_path_buf(),
+            verify_cmd: "sh test.sh".into(),
+            contract_tests: vec!["test.sh".into()],
+            solution: None,
+        };
+
+        // A solver that overwrites the contract test outright, as a shell command
+        // could. It "passes" its own verification and must still be scored TAMPER.
+        let cheat = FnSolver::new("cheat", |_task, ws: &Path| {
+            std::fs::write(
+                ws.join("test.sh"),
+                "exit 0
+",
+            )?;
+            Ok(())
+        });
+
+        assert_eq!(run_task(&task, &cheat).outcome.symbol(), "TAMPER");
     }
 }

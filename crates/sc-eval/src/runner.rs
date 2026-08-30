@@ -13,7 +13,9 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::fsutil::{copy_dir_recursive, hash_file, TempWorkspace};
 use crate::solver::Solver;
@@ -68,14 +70,93 @@ pub struct TaskResult {
 ///
 /// The verifier's stdout/stderr is captured (not inherited) so the harness's own
 /// report isn't polluted by the *intentional* red-first failures.
-fn verify(workspace: &Path, cmd: &str) -> std::io::Result<bool> {
-    let output = Command::new("sh")
-        .arg("-c")
+fn verify(workspace: &Path, cmd: &str, timeout: Duration) -> std::io::Result<bool> {
+    // `sh` was hardcoded here, so on Windows -- the machine this is developed on --
+    // verification depended on a POSIX shell being on PATH. When it was not, every
+    // task scored as failing to go green, which is indistinguishable from a solver
+    // that produced nothing. `sc_verify::build_command` already branches on the
+    // platform, so use the same shell selection the rest of the harness does.
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut child = Command::new(shell)
+        .arg(flag)
         .arg(cmd)
         .current_dir(workspace)
-        .output()?;
-    Ok(output.status.success())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    // Bounded, because the thing being verified is code a MODEL wrote. An infinite
+    // loop in a solution used to hang the whole suite with no output -- indefinitely,
+    // in CI. A timeout is a failed verification, not a crash: the task scores red,
+    // which is the honest answer.
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if Instant::now() >= deadline {
+            kill_tree(&mut child);
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
+
+/// Kill a timed-out verify command *and everything it spawned*.
+///
+/// `Child::kill` only kills the shell. The shell's own children survive it, and
+/// since they inherit its handles, the follow-up `wait()` then blocks on them --
+/// so the naive "kill then wait" pair hangs on exactly the input it exists to
+/// handle. Found the honest way: this function's own test spun forever and left an
+/// orphaned `PING` running after the harness had supposedly killed it.
+///
+/// A verify command is a test runner, so it almost always has children (a `cargo`
+/// that spawned a test binary, a `sh` that spawned `pytest`). Killing the tree is
+/// the normal case here, not an edge case.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+
+    #[cfg(windows)]
+    {
+        // `/T` is the whole point: terminate this pid and every descendant.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(unix)]
+    {
+        // Negating the pid signals the process GROUP. The shell is its own group
+        // leader here, so this reaches the children it spawned.
+        let _ = Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    // Direct kill too, in case the platform helper is unavailable, then reap. By now
+    // the descendants are gone, so this cannot block the way the old pair did.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// How long a task's verify command may run before it is treated as failed.
+///
+/// Generous, because a real test suite on a cold cargo cache is slow; the point is
+/// only to bound a solution that never terminates.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Snapshot the contents of each contract-test file (None == missing).
 fn snapshot_contracts(workspace: &Path, contracts: &[String]) -> BTreeMap<String, Option<u64>> {
@@ -114,7 +195,7 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     }
 
     // (1) verify-red-first: the unsolved fixture must fail.
-    match verify(ws.path(), &task.verify_cmd) {
+    match verify(ws.path(), &task.verify_cmd, VERIFY_TIMEOUT) {
         Ok(true) => return result(Outcome::NotRedFirst),
         Ok(false) => {}
         Err(e) => {
@@ -141,7 +222,7 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     }
 
     // (3) green after solve.
-    match verify(ws.path(), &task.verify_cmd) {
+    match verify(ws.path(), &task.verify_cmd, VERIFY_TIMEOUT) {
         Ok(true) => result_with_metrics(Outcome::Pass),
         Ok(false) => result_with_metrics(Outcome::StillRed),
         Err(e) => result_with_metrics(Outcome::HarnessError(format!(
@@ -265,5 +346,35 @@ mod tests {
             run_task(&task, &NoopSolver).outcome,
             Outcome::HarnessError(_)
         ));
+    }
+
+    /// A verify command that never terminates must score red, not hang the suite.
+    ///
+    /// The thing being verified is code a MODEL wrote, so a non-terminating solution
+    /// is a routine outcome rather than an exotic one. Unbounded `.output()` used to
+    /// park the whole run here with no output at all.
+    #[test]
+    fn a_verify_command_that_never_ends_is_a_failure_not_a_hang() {
+        let ws = crate::fsutil::TempWorkspace::new("verify-timeout").unwrap();
+        // Portable spin: both `cmd` and `sh` understand an infinite loop via ping/sleep,
+        // but the simplest cross-platform one is a busy conditional that never exits.
+        let forever = if cfg!(windows) {
+            "ping -t 127.0.0.1"
+        } else {
+            "while :; do :; done"
+        };
+
+        let start = Instant::now();
+        let green = verify(ws.path(), forever, Duration::from_millis(300)).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            !green,
+            "a command that never exits has not verified anything"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "should be killed at the deadline, took {elapsed:?}"
+        );
     }
 }
