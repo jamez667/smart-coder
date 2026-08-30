@@ -39,7 +39,19 @@ impl<'a> SweAgentSolver<'a> {
     pub fn new(backend: &'a dyn ModelBackend) -> Self {
         Self {
             backend,
-            max_steps: 60,
+            // 40, from the step counts of every run so far: 36 solves and 55 failures.
+            //
+            //   cap  solves kept  solves lost  wasted steps saved
+            //    31           33            3                 295
+            //    40           35            1                 137
+            //    60           36            0                   0
+            //
+            // Solves cluster low — the median is 12 and more than half land under 15 —
+            // while failures grind on to the cap. 40 gives back most of that wasted
+            // time for one solve out of 36. Do not cut it to ~30 on the strength of a
+            // single run: an earlier look at one run suggested nothing solved past 35,
+            // and pooling the rest found solves at 33, 35 and 48.
+            max_steps: 40,
             verbose: false,
             last: RefCell::new(None),
         }
