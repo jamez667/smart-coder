@@ -62,6 +62,31 @@ impl Report {
                 _ => String::new(),
             };
             let _ = writeln!(s, "  [{}] {}{}", r.outcome.symbol(), r.id, detail);
+            // On anything but a pass, say what the run actually did. A bare
+            // STILL-RED reads the same whether the model exhausted its steps,
+            // stopped early believing it was done, or edited confidently and got
+            // the logic wrong -- three problems with three different fixes.
+            if !matches!(r.outcome, Outcome::Pass) {
+                if let Some(run) = &r.run {
+                    let selfv = match run.self_verified {
+                        Some(true) => ", agent thought it was GREEN",
+                        Some(false) => ", agent knew it was red",
+                        None => "",
+                    };
+                    let _ = writeln!(
+                        s,
+                        "         {} steps, stopped: {}{}{}",
+                        run.steps,
+                        run.stop_reason,
+                        selfv,
+                        if run.interventions > 0 {
+                            format!(", {} interventions", run.interventions)
+                        } else {
+                            String::new()
+                        }
+                    );
+                }
+            }
         }
         let _ = write!(
             s,
@@ -95,6 +120,7 @@ mod tests {
             solver: "t".into(),
             outcome,
             metrics: None,
+            run: None,
         }
     }
 
@@ -104,6 +130,7 @@ mod tests {
             solver: "agent".into(),
             outcome,
             metrics: Some(metrics),
+            run: None,
         }
     }
 

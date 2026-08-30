@@ -29,6 +29,35 @@ pub trait Solver {
     fn last_metrics(&self) -> Option<ToolCallMetrics> {
         None
     }
+
+    /// Why the most recent [`Solver::solve`] ended, when the solver is model-driven.
+    ///
+    /// **A bare STILL-RED is not diagnosable.** It reads the same whether the model
+    /// ran out of steps, stopped early believing it was done, or edited confidently
+    /// and got the logic wrong -- three different problems with three different
+    /// fixes. The agent already computes all of this; the solver used to discard
+    /// everything but the call counts.
+    fn last_run(&self) -> Option<RunInfo> {
+        None
+    }
+}
+
+/// The diagnostic tail of a model-driven solve.
+#[derive(Debug, Clone)]
+pub struct RunInfo {
+    /// Model turns taken, against the step cap.
+    pub steps: usize,
+    /// Why the loop stopped, rendered.
+    pub stop_reason: String,
+    /// Whether the agent's OWN verification was green when it stopped. `None` when
+    /// no verify command was configured.
+    ///
+    /// Worth reporting next to the harness's verdict: agent-green plus harness-red
+    /// means the two disagree, which is a harness bug (a stale workspace, a
+    /// different command) far more often than a model that lied.
+    pub self_verified: Option<bool>,
+    /// How many times the harness intervened to recover the run.
+    pub interventions: usize,
 }
 
 /// Applies a task's known-good `solution` directory over the workspace.
@@ -155,6 +184,10 @@ pub struct AgentSolver<'a> {
     cfg: AgentConfig,
     /// Metrics from the most recent solve, for the runner to report.
     last: Cell<Option<ToolCallMetrics>>,
+    /// Why the most recent solve ended -- the difference between a diagnosable
+    /// failure and a bare STILL-RED. `RefCell` rather than `Cell` because
+    /// `RunInfo` is not `Copy`.
+    last_run: std::cell::RefCell<Option<RunInfo>>,
 }
 
 impl<'a> AgentSolver<'a> {
@@ -163,6 +196,7 @@ impl<'a> AgentSolver<'a> {
             backend,
             cfg: AgentConfig::default(),
             last: Cell::new(None),
+            last_run: std::cell::RefCell::new(None),
         }
     }
 
@@ -171,6 +205,7 @@ impl<'a> AgentSolver<'a> {
             backend,
             cfg,
             last: Cell::new(None),
+            last_run: std::cell::RefCell::new(None),
         }
     }
 }
@@ -195,11 +230,21 @@ impl Solver for AgentSolver<'_> {
         // Backend errors (e.g. model unavailable) surface as a SolverError outcome.
         let report = run_agent(self.backend, &instruction, workspace, &cfg)?;
         self.last.set(Some(report.metrics));
+        self.last_run.replace(Some(RunInfo {
+            steps: report.steps,
+            stop_reason: format!("{:?}", report.stop_reason),
+            self_verified: report.verified,
+            interventions: report.interventions,
+        }));
         Ok(())
     }
 
     fn last_metrics(&self) -> Option<ToolCallMetrics> {
         self.last.get()
+    }
+
+    fn last_run(&self) -> Option<RunInfo> {
+        self.last_run.borrow().clone()
     }
 }
 

@@ -64,6 +64,10 @@ pub struct TaskResult {
     pub outcome: Outcome,
     /// Tool-call validity metrics, when the solver is model-driven (spec 07).
     pub metrics: Option<sc_core::ToolCallMetrics>,
+    /// Why a model-driven solve ended. Reported on failures, where "STILL-RED" on
+    /// its own cannot distinguish running out of steps from stopping early from
+    /// simply being wrong.
+    pub run: Option<crate::solver::RunInfo>,
 }
 
 /// Run `verify_cmd` inside `workspace`. `Ok(true)` == exit 0 == green.
@@ -209,6 +213,7 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
         solver: solver.name().to_string(),
         outcome,
         metrics: None,
+        run: None,
     };
     // Like `result`, but attaches the solver's tool-call metrics (post-solve).
     let result_with_metrics = |outcome| TaskResult {
@@ -216,6 +221,7 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
         solver: solver.name().to_string(),
         outcome,
         metrics: solver.last_metrics(),
+        run: solver.last_run(),
     };
 
     // Materialize the fixture into an isolated, self-cleaning workspace.
