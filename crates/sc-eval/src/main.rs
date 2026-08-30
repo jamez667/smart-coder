@@ -3,6 +3,7 @@
 //! Two suites:
 //!
 //!     sc-eval [SUITE_TOML]              the red->green demo suite (FileSolver)
+//!     sc-eval --agent [SUITE_TOML] [--url <U>] [--model <M>]   the same suite, real model
 //!     sc-eval --swebench [--live] --url <U> --model <M> [--only <ID>] [--json <PATH>]
 //!
 //! The SWE-bench path runs the real agent loop against a live backend, one instance
@@ -11,12 +12,15 @@
 use std::process::ExitCode;
 
 use sc_eval::swebench::{run_instance, InstanceRun, Subset, SweAgentSolver};
-use sc_eval::{run_suite, FileSolver, Report, TaskSuite};
+use sc_eval::{run_suite, AgentSolver, FileSolver, Report, TaskSuite};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--swebench") {
         return swebench(&args);
+    }
+    if args.iter().any(|a| a == "--agent") {
+        return agent_suite(&args);
     }
     demo_suite(&args)
 }
@@ -160,5 +164,46 @@ fn swebench(args: &[String]) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Score a REAL MODEL on the fixed task suite.
+///
+/// This entry point did not exist, and its absence hid a bug: `AgentSolver` was
+/// reachable from no binary at all, so nothing ever ran the task path against a
+/// model. `AgentSolver::with_config` sat unused and task runs quietly used
+/// `AgentConfig::default()` -- values tuned for toy tasks -- while every measurement
+/// was being made on the SWE-bench path instead. A path with no entry point does not
+/// get exercised, and a path that does not get exercised rots.
+fn agent_suite(args: &[String]) -> ExitCode {
+    let url = flag(args, "--url").unwrap_or("http://localhost:11436/v1");
+    let model = flag(args, "--model").unwrap_or("tiel-coder-35b");
+    let suite_path = args
+        .iter()
+        .find(|a| !a.starts_with("--") && a.ends_with(".toml"))
+        .cloned()
+        .unwrap_or_else(|| "evals/suite.toml".to_string());
+
+    println!(
+        "smart-coder eval harness\n  solver: agent ({model} @ {url})\n  suite: {suite_path}\n"
+    );
+
+    let suite = match TaskSuite::load(std::path::Path::new(&suite_path)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let backend = sc_model::OpenAiBackend::new(url, model);
+    let solver = AgentSolver::new(&backend);
+    let report = Report::new(run_suite(&suite.tasks, &solver));
+    println!("{}", report.summary());
+
+    if report.all_passed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
