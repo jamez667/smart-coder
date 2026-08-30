@@ -285,6 +285,17 @@ pub(super) fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
 /// can never see lines 51+ of a file it must edit. A bare re-read (same path, no
 /// window, or the identical window) still dedups, which is the case we want to nudge.
 pub(super) fn key_arg(call: &sc_tools::ValidatedCall) -> String {
+    // `run_command`'s parameter is `command`, which was not in the list below — so
+    // every shell call hashed to the SAME empty key. Two genuinely different
+    // commands looked like a repeat (a false stall), and a model looping on one
+    // command looked no different from one making progress.
+    //
+    // Normalized through `strip_leading_cd` for the same reason the dispatch does
+    // it: `cd /a && ls` and `cd /b && ls` both execute as plain `ls`, so they are
+    // the same action and must hash alike, or the detector misses a real loop.
+    if let Some(cmd) = call.str("command") {
+        return sc_verify::strip_leading_cd(cmd).trim().to_string();
+    }
     for k in ["path", "query", "name"] {
         if let Some(v) = call.str(k) {
             let start = call.int("start");
@@ -515,6 +526,53 @@ mod tests {
             name: "read_file".to_string(),
             args,
         }
+    }
+
+    /// Shell commands must hash by what they RUN.
+    ///
+    /// `key_arg` looked only at `path`/`query`/`name`, and `run_command`'s parameter
+    /// is `command` -- so every shell call hashed to the same empty key. Two
+    /// different commands read as a repeat (a false stall), and a model genuinely
+    /// looping on one command was indistinguishable from one making progress.
+    #[test]
+    fn key_arg_distinguishes_shell_commands() {
+        use crate::recovery::action_hash;
+
+        let ls = run_command_call("ls -la");
+        let build = run_command_call("cargo test");
+        assert_ne!(
+            key_arg(&ls),
+            key_arg(&build),
+            "different commands must be different actions"
+        );
+        assert_ne!(
+            action_hash("run_command", &key_arg(&ls)),
+            action_hash("run_command", &key_arg(&build)),
+            "different commands must not hash as a repeat"
+        );
+        assert!(!key_arg(&ls).is_empty(), "a shell call must have a key");
+    }
+
+    /// Two commands that EXECUTE identically must hash identically.
+    ///
+    /// The dispatch strips a leading `cd`, so `cd /a && ls` and `cd /b && ls` both
+    /// run as plain `ls`. If the key kept the raw text, a model looping on one
+    /// command while varying the directory would slip past the stall detector.
+    #[test]
+    fn key_arg_normalizes_a_leading_cd_so_a_real_loop_is_caught() {
+        use crate::recovery::action_hash;
+
+        let a = run_command_call("cd /somewhere && ls");
+        let b = run_command_call("cd /elsewhere && ls");
+        let bare = run_command_call("ls");
+
+        assert_eq!(key_arg(&a), key_arg(&b), "same command, different cd");
+        assert_eq!(key_arg(&a), key_arg(&bare), "and the same as no cd at all");
+        assert_eq!(
+            action_hash("run_command", &key_arg(&a)),
+            action_hash("run_command", &key_arg(&bare)),
+            "a repeat must be visible to the stall detector"
+        );
     }
 
     #[test]
