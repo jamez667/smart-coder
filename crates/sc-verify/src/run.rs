@@ -169,6 +169,83 @@ pub fn posix_sh_available() -> bool {
     })
 }
 
+/// Rewrite a workspace path into a form the chosen shell will actually accept.
+///
+/// **The model should never have to get this right.** It knows the workspace by an
+/// absolute host path, and on Windows that path is full of backslashes -- which
+/// `sh -c` eats as escape characters: `C:\Users\mail` arrives as `C:Usersmail`, the
+/// command fails with "No such file or directory", and a model that now believes it
+/// is lost starts INVENTING plausible directories. Measured on one run: six
+/// consecutive `cd /c/Users/mail/Projects/...` attempts at a path that never
+/// existed. That reads as a hallucinating model; it begins as an escaping bug.
+///
+/// Converts `C:\Users\mail\ws` to `/c/Users/mail/ws` for a POSIX shell (the MSYS
+/// convention Git Bash understands), and leaves the path alone for `cmd` and on
+/// POSIX hosts, where it is already correct.
+pub fn shell_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().into_owned();
+    let (shell, _) = host_shell();
+    if shell != "sh" || !raw.contains('\\') {
+        return raw;
+    }
+    // `C:\a\b` -> `/c/a/b`. Anything without a drive letter just gets its
+    // separators flipped, which is what a POSIX shell wants either way.
+    let unix = raw.replace('\\', "/");
+    let bytes = unix.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        format!("/{drive}{}", &unix[2..])
+    } else {
+        unix
+    }
+}
+
+/// Strip a leading `cd <somewhere> &&` from a model-authored command.
+///
+/// The harness already runs every command with the workspace as its working
+/// directory, so a `cd` is at best redundant and at worst -- see [`shell_path`] --
+/// the start of a spiral. Rather than telling the model not to do it and hoping,
+/// remove the class of error: drop the `cd`, keep the rest, and let it run where it
+/// was always going to run.
+///
+/// Only strips a `cd` in the FIRST position, and only when followed by `&&` or `;`.
+/// A `cd` deeper in a pipeline is deliberate -- `(cd sub && make)` is a real thing a
+/// command might want -- and is left alone.
+pub fn strip_leading_cd(command: &str) -> &str {
+    let t = command.trim_start();
+    let rest = match t.strip_prefix("cd ") {
+        Some(r) => r,
+        None => return command,
+    };
+    // Find the first `&&` or `;` at the top level; everything before it is the cd.
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ';' if depth == 0 => return rest[i + 1..].trim_start(),
+                '&' if depth == 0 && bytes.get(i + 1) == Some(&b'&') => {
+                    return rest[i + 2..].trim_start()
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    // A bare `cd <path>` with nothing after it: there is no command left to run, so
+    // keep it as-is and let the shell report whatever it reports. Rewriting it to
+    // empty would turn a visible mistake into a silent success.
+    command
+}
+
 /// Build the OS command that runs `command` in `workspace` under `sandbox`. Pure (no
 /// I/O) so the Docker argument construction is host-testable without Docker present.
 fn build_command(sandbox: &Sandbox, workspace: &Path, command: &str) -> Command {
@@ -498,5 +575,64 @@ mod tests {
                 "a POSIX shell is present and must be preferred"
             );
         }
+    }
+
+    /// A model-authored `cd` into the workspace must not reach the shell.
+    ///
+    /// The command already runs there. On Windows the absolute path it names is full
+    /// of backslashes that `sh -c` eats as escapes, so the cd fails with "No such
+    /// file or directory" and the model -- now believing it is lost -- starts
+    /// inventing directories. Six consecutive invented paths in one measured run.
+    #[test]
+    fn a_leading_cd_is_stripped_so_the_command_runs_where_it_already_is() {
+        let win = "cd C:\\ws\\sub && cargo test";
+        assert_eq!(strip_leading_cd(win), "cargo test");
+
+        assert_eq!(strip_leading_cd("cd /tmp/whatever && ls -la"), "ls -la");
+        // `;` separates too.
+        assert_eq!(strip_leading_cd("cd /tmp; echo hi"), "echo hi");
+        // Leading whitespace is not a hiding place.
+        assert_eq!(strip_leading_cd("   cd /tmp && pwd"), "pwd");
+    }
+
+    /// Only a LEADING cd is removed. A cd inside a subshell is deliberate.
+    #[test]
+    fn a_deliberate_cd_inside_the_command_is_left_alone() {
+        // Building in a subdirectory is a real thing a command may want to do.
+        let sub = "(cd vendor && make) && cargo test";
+        assert_eq!(strip_leading_cd(sub), sub);
+
+        // Not a cd at all.
+        assert_eq!(strip_leading_cd("cargo test"), "cargo test");
+        // `cdr` is not `cd`.
+        assert_eq!(strip_leading_cd("cdr foo && bar"), "cdr foo && bar");
+        // A bare cd with nothing after it is left as-is: rewriting it to empty would
+        // turn a visible mistake into a silent success.
+        assert_eq!(strip_leading_cd("cd /tmp"), "cd /tmp");
+    }
+
+    /// A workspace path handed to a POSIX shell must survive it.
+    ///
+    /// This is the deterministic half: the harness converts the path, so the model
+    /// never has to know which shell it got or how to escape for it.
+    #[test]
+    fn a_windows_path_is_converted_for_a_posix_shell() {
+        let converted = shell_path(Path::new("C:\\Users\\mail\\ws"));
+        if host_shell().0 == "sh" {
+            assert_eq!(converted, "/c/Users/mail/ws");
+            assert!(
+                !converted.contains('\\'),
+                "no backslash may survive: {converted}"
+            );
+        } else {
+            // Under `cmd` the native form is already correct.
+            assert!(converted.contains('\\'), "cmd keeps the native form");
+        }
+    }
+
+    /// A path that is already POSIX is returned untouched, on any host.
+    #[test]
+    fn a_posix_path_is_left_alone() {
+        assert_eq!(shell_path(Path::new("/tmp/ws")), "/tmp/ws");
     }
 }

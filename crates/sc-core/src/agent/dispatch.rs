@@ -138,7 +138,14 @@ pub(super) fn dispatch(
             ToolOutcome::Observation(sc_index::find_symbol(workspace, name))
         }
         "run_command" => {
-            let cmd = call.str("command").unwrap_or_default();
+            // Drop a leading `cd <somewhere> &&`. The command already runs with the
+            // workspace as its cwd, so the cd is redundant at best -- and on Windows
+            // the absolute path it names is full of backslashes that `sh -c` eats as
+            // escapes, so the cd FAILS, and a model that now believes it is lost
+            // starts inventing directories: six consecutive `cd /c/Users/mail/
+            // Projects/...` attempts at a path that never existed, in one measured
+            // run. Removing the class of error beats asking the model not to make it.
+            let cmd = sc_verify::strip_leading_cd(call.str("command").unwrap_or_default());
             // Honour the configured sandbox, exactly as `run_verification` does below.
             // This called the Host-pinned wrapper, so a shell command ran on the host
             // while the tests it was investigating ran in the container — a different
