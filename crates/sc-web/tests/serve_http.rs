@@ -58,6 +58,8 @@ fn http_get(addr: &str, path: &str) -> (u16, String) {
 #[test]
 fn events_route_requires_the_token() {
     let token = "test-token-abc";
+    let ws = std::env::temp_dir().join(format!("sc-web-serve-{}", std::process::id()));
+    std::fs::create_dir_all(&ws).unwrap();
     let spec = WebRun {
         backend: finishing_backend(),
         advisor: None::<
@@ -70,7 +72,14 @@ fn events_route_requires_the_token() {
             on_device: false,
         }),
         instruction: "noop".to_string(),
-        workspace: std::env::temp_dir(),
+        // NOT `temp_dir()` itself. Prompt assembly walks the workspace before the
+        // loop emits its first event, so handing it the shared system temp means
+        // walking every file any process has ever left there -- 61,928 of them on
+        // the machine this was found on. The run never reached `RunStarted`, the
+        // feed stayed empty for all 1000 polls, and the test failed on an assert
+        // about the FEED while the actual fault was the workspace. An empty dir of
+        // our own keeps the assembly cost fixed and the test hermetic.
+        workspace: ws.clone(),
         config: sc_core::AgentConfig::default(),
     };
 
@@ -141,4 +150,5 @@ fn events_route_requires_the_token() {
     assert!(saw_run_started, "feed should carry the RunStarted event");
     assert!(done, "run should reach done (Stopped drains the feed)");
     handle.join().unwrap();
+    let _ = std::fs::remove_dir_all(&ws);
 }
