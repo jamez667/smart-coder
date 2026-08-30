@@ -873,9 +873,9 @@ mod tests {
                 if n == 0 {
                     Err(sc_proto::DcError::Backend("Loading model".to_string()))
                 } else {
-                    Ok(GenerateResponse {
-                        content: "# Specs\nrecovered after the blip".to_string(),
-                    })
+                    Ok(GenerateResponse::new(
+                        "# Specs\nrecovered after the blip".to_string(),
+                    ))
                 }
             }
         }

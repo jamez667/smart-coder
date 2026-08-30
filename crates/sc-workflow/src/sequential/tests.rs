@@ -63,7 +63,7 @@ impl ModelBackend for SpyBackend {
             }
             _ => "{\"tool\":\"finish\"}".to_string(),
         };
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::new(content))
     }
 }
 

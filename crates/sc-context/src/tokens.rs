@@ -91,9 +91,7 @@ mod tests {
             }
         }
         fn generate(&self, _req: &GenerateRequest) -> Result<GenerateResponse> {
-            Ok(GenerateResponse {
-                content: String::new(),
-            })
+            Ok(GenerateResponse::new(String::new()))
         }
         fn count_tokens(&self, text: &str) -> Option<usize> {
             Some(text.split_whitespace().count()) // 1 token per word — distinctive

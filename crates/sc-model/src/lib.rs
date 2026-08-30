@@ -96,9 +96,51 @@ impl GenerateRequest {
 }
 
 /// One generation result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GenerateResponse {
     pub content: String,
+    /// Why the server stopped generating, verbatim, when it says so.
+    ///
+    /// **Without this the harness cannot tell "the model finished" from "we cut it
+    /// off".** A reply truncated at `max_tokens` arrives as ordinary content with no
+    /// tool call in it, which reads exactly like a model that declined to act — that
+    /// confusion cost 54 dead turns on one SWE-bench instance and took a transcript
+    /// dig to find. With it, the loop can say so on the first turn.
+    ///
+    /// `None` means *unknown*, never "not truncated": backends that do not report it
+    /// and the streaming path both leave it unset, so a detector must not read `None`
+    /// as healthy. `Some("length")` is the truncation case.
+    ///
+    /// Defaulted so the many `GenerateResponse::new(content)` literals across the
+    /// workspace's test mocks keep compiling — only a backend that actually learns the
+    /// reason needs to set it.
+    #[doc(hidden)]
+    pub finish_reason: Option<String>,
+}
+
+impl GenerateResponse {
+    /// A response carrying only content.
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            finish_reason: None,
+        }
+    }
+
+    /// The same, plus the server's stop reason.
+    pub fn with_finish_reason(content: impl Into<String>, reason: Option<String>) -> Self {
+        Self {
+            content: content.into(),
+            finish_reason: reason,
+        }
+    }
+
+    /// Did the server stop because it hit the token cap?
+    ///
+    /// False when the reason is unknown — see [`Self::finish_reason`].
+    pub fn was_truncated(&self) -> bool {
+        self.finish_reason.as_deref() == Some("length")
+    }
 }
 
 /// The health of an inference backend, as seen by a lightweight probe.
@@ -230,7 +272,7 @@ impl ModelBackend for MockBackend {
 
     fn generate(&self, _req: &GenerateRequest) -> Result<GenerateResponse> {
         match self.responses.borrow_mut().pop_front() {
-            Some(content) => Ok(GenerateResponse { content }),
+            Some(content) => Ok(GenerateResponse::new(content)),
             None => Err(DcError::Backend(
                 "mock backend script exhausted (more generate() calls than scripted responses)"
                     .to_string(),
@@ -357,9 +399,7 @@ mod tests {
                 .last()
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
-            Ok(GenerateResponse {
-                content: last.to_uppercase(),
-            })
+            Ok(GenerateResponse::new(last.to_uppercase()))
         });
 
         assert_eq!(backend.name(), "echo");
@@ -381,11 +421,7 @@ mod tests {
     fn callback_backend_is_usable_through_the_trait_object() {
         // Confirms the seam works behind `&dyn ModelBackend`, which is how the
         // agent loop holds whatever backend it's handed.
-        let backend = CallbackBackend::new("ok", seam_caps(), |_r| {
-            Ok(GenerateResponse {
-                content: "ok".into(),
-            })
-        });
+        let backend = CallbackBackend::new("ok", seam_caps(), |_r| Ok(GenerateResponse::new("ok")));
         let dynamic: &dyn ModelBackend = &backend;
         let req = GenerateRequest::new(vec![Message::user("x")]);
         assert_eq!(dynamic.generate(&req).unwrap().content, "ok");

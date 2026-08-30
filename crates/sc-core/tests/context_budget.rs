@@ -46,7 +46,7 @@ impl ModelBackend for EightKReader {
         } else {
             s.remove(0)
         };
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::new(content))
     }
 }
 
@@ -126,9 +126,7 @@ fn find_symbol_tool_resolves_through_the_loop() {
             }
         }
         fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
-            Ok(GenerateResponse {
-                content: self.0.borrow_mut().remove(0),
-            })
+            Ok(GenerateResponse::new(self.0.borrow_mut().remove(0)))
         }
     }
     let backend = FindThenFinish(std::cell::RefCell::new(vec![

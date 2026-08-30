@@ -46,14 +46,10 @@ impl ModelBackend for Scripted {
         let mut scripts = self.scripts.lock().unwrap();
         for (key, queue) in scripts.iter_mut() {
             if instr.contains(key.as_str()) && !queue.is_empty() {
-                return Ok(GenerateResponse {
-                    content: queue.remove(0),
-                });
+                return Ok(GenerateResponse::new(queue.remove(0)));
             }
         }
-        Ok(GenerateResponse {
-            content: r#"{"tool":"finish"}"#.to_string(),
-        })
+        Ok(GenerateResponse::new(r#"{"tool":"finish"}"#.to_string()))
     }
 }
 

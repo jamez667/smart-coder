@@ -224,7 +224,7 @@ fn call_kotlin_generate(
         .map_err(|e| DcError::Backend(format!("reading onGenerate result: {e}")))?
         .into();
 
-    Ok(GenerateResponse { content: text })
+    Ok(GenerateResponse::new(text))
 }
 
 fn new_string_or_null(env: &mut JNIEnv, s: &str) -> jstring {

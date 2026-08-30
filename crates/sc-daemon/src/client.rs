@@ -421,9 +421,7 @@ mod tests {
             }
         }
         fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
-            Ok(GenerateResponse {
-                content: self.0.clone(),
-            })
+            Ok(GenerateResponse::new(self.0.clone()))
         }
     }
 

@@ -373,9 +373,7 @@ mod tests {
         }
         fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
             *self.calls.lock().unwrap() += 1;
-            Ok(GenerateResponse {
-                content: self.body.clone(),
-            })
+            Ok(GenerateResponse::new(self.body.clone()))
         }
     }
 
@@ -666,9 +664,7 @@ mod tests {
                 }
             }
             fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
-                Ok(GenerateResponse {
-                    content: String::new(),
-                })
+                Ok(GenerateResponse::new(String::new()))
             }
         }
 

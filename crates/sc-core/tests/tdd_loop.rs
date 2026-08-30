@@ -40,7 +40,7 @@ impl ModelBackend for Scripted {
         } else {
             s.remove(0)
         };
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::new(content))
     }
 }
 

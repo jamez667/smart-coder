@@ -77,7 +77,7 @@ fn diagnosis_fires_on_a_test_stall_then_is_bounded() {
         } else {
             r#"{"tool":"write_file","path":"a.txt","content":"x"}"#.to_string()
         };
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::new(content))
     });
 
     let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
@@ -173,7 +173,7 @@ fn a_referenced_plan_is_pinned_so_the_model_never_re_reads_it() {
         } else {
             r#"{"tool":"finish"}"#.to_string()
         };
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::new(content))
     });
 
     let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
@@ -256,9 +256,9 @@ fn no_diagnosis_when_the_flag_is_off_or_no_verify_command() {
             on_device: false,
         };
         let backend = CallbackBackend::new("looper", caps, |_req: &GenerateRequest| {
-            Ok(GenerateResponse {
-                content: r#"{"tool":"read_file","path":"a.txt"}"#.to_string(),
-            })
+            Ok(GenerateResponse::new(
+                r#"{"tool":"read_file","path":"a.txt"}"#.to_string(),
+            ))
         });
         let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
         let sink = crate::event::FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
@@ -622,9 +622,7 @@ fn stops_at_the_step_budget() {
     // A backend that never finishes: always asks to read the same file.
     let read = json!({"tool":"read_file","path":"x"}).to_string();
     let backend = scripted_backend("looper", move |_req| {
-        Ok(GenerateResponse {
-            content: read.clone(),
-        })
+        Ok(GenerateResponse::new(read.clone()))
     });
 
     let cfg = AgentConfig {
@@ -719,9 +717,7 @@ fn no_advisor_self_recovers_before_giving_up() {
     // on the first one — but still terminate once the recovery budget is spent.
     let read = json!({"tool":"read_file","path":"f.txt"}).to_string();
     let backend = scripted_backend("self-recover-looper", move |_req| {
-        Ok(GenerateResponse {
-            content: read.clone(),
-        })
+        Ok(GenerateResponse::new(read.clone()))
     });
 
     #[derive(Default)]

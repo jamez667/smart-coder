@@ -52,15 +52,11 @@ impl ModelBackend for ScriptedReviewer {
         self.seen.lock().unwrap().push(prompt.clone());
         for (key, reply) in &self.replies {
             if prompt.contains(key.as_str()) {
-                return Ok(GenerateResponse {
-                    content: reply.clone(),
-                });
+                return Ok(GenerateResponse::new(reply.clone()));
             }
         }
         // Unscripted: found nothing. The common case for a real reviewer.
-        Ok(GenerateResponse {
-            content: "[]".to_string(),
-        })
+        Ok(GenerateResponse::new("[]".to_string()))
     }
 }
 

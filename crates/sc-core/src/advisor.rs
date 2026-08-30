@@ -104,9 +104,9 @@ mod tests {
                 }
             }
             fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse> {
-                Ok(GenerateResponse {
-                    content: req.messages.last().unwrap().content.clone(),
-                })
+                Ok(GenerateResponse::new(
+                    req.messages.last().unwrap().content.clone(),
+                ))
             }
         }
         let advice = consult(&Echo, &predicament()).unwrap();

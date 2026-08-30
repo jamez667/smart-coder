@@ -317,7 +317,9 @@ impl OpenAiBackend {
                 }
             }
         }
-        Ok(GenerateResponse { content: full })
+        // `finish_reason` stays None: the SSE chunks carry it but the delta parser only
+        // pulls content. None means "unknown", never "not truncated".
+        Ok(GenerateResponse::new(full))
     }
 }
 
@@ -350,6 +352,11 @@ struct WireResponse {
 #[derive(Deserialize)]
 struct WireChoice {
     message: WireResponseMessage,
+    /// "stop", "tool_calls", or "length" when the reply was cut off at `max_tokens`.
+    /// Kept because a truncated reply is indistinguishable from a short one by its
+    /// content alone -- see `GenerateResponse::finish_reason`.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -570,12 +577,12 @@ impl OpenAiBackend {
             ))
         })?;
 
-        let message = parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message)
-            .ok_or_else(|| DcError::Backend(format!("{} returned no choices", self.endpoint())))?;
+        let choice =
+            parsed.choices.into_iter().next().ok_or_else(|| {
+                DcError::Backend(format!("{} returned no choices", self.endpoint()))
+            })?;
+        let finish_reason = choice.finish_reason;
+        let message = choice.message;
 
         // Prefer a native tool call (normalized to the uniform string shape); else
         // plain text content; else the reasoning block (thinking models that ran
@@ -591,7 +598,7 @@ impl OpenAiBackend {
             }
         };
 
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::with_finish_reason(content, finish_reason))
     }
 }
 
@@ -682,6 +689,59 @@ mod tests {
         assert!(compact.contains("\"role\":\"system\""), "got: {raw}");
         assert!(compact.contains("\"role\":\"user\""), "got: {raw}");
         assert!(compact.contains("\"content\":\"sayhi\""), "got: {raw}");
+    }
+
+    /// A reply cut off at `max_tokens` must be distinguishable from a short one.
+    ///
+    /// Without `finish_reason` the two are identical on the wire once you look only
+    /// at `content`, and the agent loop reports the truncation as the model declining
+    /// to emit a tool call -- which cost 54 dead turns on one SWE-bench instance
+    /// before anyone read the transcript. Pinned so the field cannot be quietly
+    /// dropped again in a refactor of the choice unpacking.
+    #[test]
+    fn reports_when_the_server_truncated_the_reply() {
+        let (base, _rx) = stub_server(
+            r#"{"choices":[{"message":{"role":"assistant","content":"the fix is to "},"finish_reason":"length"}]}"#,
+        );
+
+        let backend = OpenAiBackend::new(base, "gemma4:e4b");
+        let resp = backend
+            .generate(&GenerateRequest::new(vec![Message::user("explain")]))
+            .unwrap();
+
+        assert_eq!(resp.finish_reason.as_deref(), Some("length"));
+        assert!(resp.was_truncated(), "a `length` stop is a truncation");
+    }
+
+    /// The ordinary case, and the reason `was_truncated` is not `finish_reason.is_some()`.
+    #[test]
+    fn a_normal_stop_is_not_a_truncation() {
+        let (base, _rx) = stub_server(
+            r#"{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#,
+        );
+
+        let resp = OpenAiBackend::new(base, "gemma4:e4b")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+
+        assert_eq!(resp.finish_reason.as_deref(), Some("stop"));
+        assert!(!resp.was_truncated());
+    }
+
+    /// Servers that omit the field must still parse. `None` means *unknown*, and
+    /// `was_truncated` reports false -- callers that need certainty check the
+    /// `Option` itself.
+    #[test]
+    fn a_missing_finish_reason_parses_as_unknown() {
+        let (base, _rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#);
+
+        let resp = OpenAiBackend::new(base, "gemma4:e4b")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+
+        assert_eq!(resp.finish_reason, None);
+        assert!(!resp.was_truncated());
     }
 
     #[test]

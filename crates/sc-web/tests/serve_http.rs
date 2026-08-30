@@ -25,9 +25,9 @@ fn finishing_backend(
         on_device: false,
     };
     CallbackBackend::new("finisher", caps, |_req| {
-        Ok(GenerateResponse {
-            content: "{\"tool\":\"finish\",\"reason\":\"done\"}".to_string(),
-        })
+        Ok(GenerateResponse::new(
+            "{\"tool\":\"finish\",\"reason\":\"done\"}".to_string(),
+        ))
     })
 }
 

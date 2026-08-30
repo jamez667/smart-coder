@@ -37,7 +37,7 @@ impl ModelBackend for Scripted {
                 .cloned()
                 .unwrap_or_else(|| r#"{"tool":"finish"}"#.into())
         };
-        Ok(GenerateResponse { content })
+        Ok(GenerateResponse::new(content))
     }
 }
 

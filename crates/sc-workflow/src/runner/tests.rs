@@ -131,14 +131,10 @@ impl ModelBackend for PhaseScripted {
         let replies = self.replies.lock().unwrap();
         for (key, body) in replies.iter() {
             if instr.contains(key) {
-                return Ok(GenerateResponse {
-                    content: body.to_string(),
-                });
+                return Ok(GenerateResponse::new(body.to_string()));
             }
         }
-        Ok(GenerateResponse {
-            content: "(nothing)".to_string(),
-        })
+        Ok(GenerateResponse::new("(nothing)".to_string()))
     }
 }
 

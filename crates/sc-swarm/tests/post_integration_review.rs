@@ -62,16 +62,12 @@ impl ModelBackend for Scripted {
         let mut replies = self.replies.lock().unwrap();
         for (key, queue) in replies.iter_mut() {
             if prompt.contains(key.as_str()) && !queue.is_empty() {
-                return Ok(GenerateResponse {
-                    content: queue.remove(0),
-                });
+                return Ok(GenerateResponse::new(queue.remove(0)));
             }
         }
         // A reviewer that isn't scripted found nothing; a worker that isn't
         // scripted proposes nothing new.
-        Ok(GenerateResponse {
-            content: "[]".to_string(),
-        })
+        Ok(GenerateResponse::new("[]".to_string()))
     }
 }
 
@@ -756,9 +752,7 @@ fn the_reviewer_sees_the_integrated_diff_and_the_repo_map_the_worker_never_had()
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
-            Ok(GenerateResponse {
-                content: "[]".into(),
-            })
+            Ok(GenerateResponse::new("[]"))
         }
     }
 
