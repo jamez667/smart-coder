@@ -38,6 +38,7 @@ pub(super) fn assemble_segments(
     plan_render: String,
     history: &[TurnRecord],
     recent: &[Message],
+    registry: &sc_tools::ToolRegistry,
 ) -> (Vec<Segment>, Vec<String>) {
     // Compact older turns; keep the recent ones verbatim.
     let (older, _recent_records) = sc_context::split_for_compaction(history, cfg.keep_recent_turns);
@@ -114,7 +115,7 @@ pub(super) fn assemble_segments(
     // the view never goes stale after an edit (the failure mode that traps a
     // tiny model into re-applying its own first edit). This is the live anchor
     // the model copies `old_str` from.
-    let focus = render_focus_files(workspace, &cfg.focus_files);
+    let focus = render_focus_files(workspace, &cfg.focus_files, registry);
     if !focus.is_empty() {
         // SACRED (Zone::FocusFile): the file being edited must never be evicted/clipped, or the
         // model edits a truncated view and can't anchor its `old_str`. This is the anchor the
@@ -207,6 +208,7 @@ mod tests {
             String::new(),
             &[],
             &[],
+            &sc_tools::default_registry(),
         );
         assert!(
             pinned.contains(&"PLAN-lakes.md".to_string()),

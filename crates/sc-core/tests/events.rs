@@ -283,3 +283,59 @@ fn reports_a_harness_fault_when_verification_is_not_configured() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **The third detector must be seen to fire** -- and, just as importantly, seen NOT
+/// to fire on a healthy run.
+///
+/// A detector that cries wolf becomes a number people learn to ignore, so both
+/// halves are asserted here. The bug: harness guidance named `edit_lines` regardless
+/// of the registry, putting 99 mentions of an uncallable tool in front of one model.
+#[test]
+fn reports_a_harness_fault_when_the_prompt_names_an_unoffered_tool() {
+    let ws = temp("unoffered");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let run = |registry: sc_tools::ToolRegistry| {
+        let backend = Scripted::new(vec![r#"{"tool":"finish"}"#]);
+        let log = Mutex::new(Vec::new());
+        let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+        // Pin a focus file: that is the guidance that names the edit tool.
+        let cfg = AgentConfig {
+            focus_files: vec!["a.txt".to_string()],
+            ..AgentConfig::default()
+        };
+        run_agent_observed(
+            &backend,
+            None,
+            &registry,
+            &ParseRepair,
+            "edit a.txt",
+            &ws,
+            &cfg,
+            &sink,
+        )
+        .unwrap();
+        log.into_inner()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::HarnessFault {
+                        kind: FaultKind::ToolNotOffered,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+
+    // The healthy case: everything the prompt names is callable. MUST be silent.
+    assert_eq!(
+        run(sc_tools::default_registry()),
+        0,
+        "a prompt that only names offered tools is not a fault"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

@@ -30,6 +30,50 @@ use crate::text::{first_line, mentioned_identifiers};
 
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
+/// The name of a tool the prompt steers toward but the registry does not offer.
+///
+/// Deliberately narrow. It scans only for the BUILT-IN tool names, and only where
+/// they appear in backticks -- the house style for naming a tool the model should
+/// call. A bare word like "write" or "finish" is ordinary English and would fire on
+/// every prompt; the count then becomes noise people learn to ignore, which is worse
+/// than no detector at all.
+///
+/// User text is excluded for the same reason: an instruction that happens to say
+/// `edit_lines` is the user's business, not a harness fault. Only the system prompt
+/// and harness-authored guidance are checked.
+fn unoffered_tool_mentioned(messages: &[Message], registry: &ToolRegistry) -> Option<String> {
+    // Every tool the harness knows how to build. A name outside this list is not a
+    // tool reference at all, so it cannot be a steering mistake.
+    const KNOWN: &[&str] = &[
+        "read_file",
+        "write_file",
+        "edit_file",
+        "edit_lines",
+        "list_dir",
+        "search",
+        "run_command",
+        "run_verification",
+        "finish",
+        "update_plan",
+    ];
+
+    for m in messages {
+        // Only harness-authored text. A user instruction naming a tool is not our bug.
+        if m.role == sc_model::Role::User {
+            continue;
+        }
+        for name in KNOWN {
+            if registry.get(name).is_some() {
+                continue;
+            }
+            if m.content.contains(&format!("`{name}`")) {
+                return Some((*name).to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn run_agent(
     backend: &dyn ModelBackend,
     instruction: &str,
@@ -255,10 +299,31 @@ pub fn run_agent_observed(
             plan.render(),
             &history,
             &recent,
+            registry,
         );
 
         let built = builder.build(segments);
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
+
+        // Did WE just tell the model to use a tool it does not have?
+        //
+        // Checked on the assembled prompt, which is exactly what the model will see,
+        // so it catches the guidance wherever it came from -- a system prompt, a
+        // repair message, a focus-file preamble -- rather than one site at a time.
+        // Only on the first turn: the prompt's guidance is the same every turn, and a
+        // fault repeated forty times is a fault nobody reads.
+        if step == 0 {
+            if let Some(missing) = unoffered_tool_mentioned(&built.messages, registry) {
+                sink.record(&AgentEvent::HarnessFault {
+                    kind: FaultKind::ToolNotOffered,
+                    detail: format!(
+                        "the prompt steers the model toward `{missing}`, which is not in \
+                         this run's registry; it cannot call it"
+                    ),
+                    step: step + 1,
+                });
+            }
+        }
 
         // Verbose (spec 06): surface the exact assembled prompt before it's sent, so
         // a renderer/log can show what the model actually saw. Gated — the payload

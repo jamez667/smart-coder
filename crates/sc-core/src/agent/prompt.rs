@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use sc_index::Boosts;
+use sc_tools::ToolRegistry;
 
 /// Read every on-disk source file (excluding tests/caches) as a [`crate::diagnose::SourceFile`]
 /// for the diagnostic pass. A pathologically large file is skipped so one blob can't blow the
@@ -136,15 +137,39 @@ pub(super) fn render_progress_ledger(workspace: &Path) -> String {
 /// Render the current contents of the focused files for the retrieved zone, with
 /// line numbers so a small model can copy an exact, unique `old_str`. Re-read from
 /// the workspace each turn, so it always reflects edits already made.
-pub(super) fn render_focus_files(workspace: &Path, files: &[String]) -> String {
+pub(super) fn render_focus_files(
+    workspace: &Path,
+    files: &[String],
+    registry: &ToolRegistry,
+) -> String {
     if files.is_empty() {
         return String::new();
     }
-    let mut s = String::from(
-        "The file to edit, with 1-based LINE NUMBERS (updates after each edit). To change a large \
-         file, PREFER `edit_lines` — give the start/end line numbers shown here and the new text; \
-         you do NOT need to copy the old text exactly (which is error-prone on a big file). The \
-         line-number prefix `N| ` is NOT part of the file — never include it in new_text.\n",
+    // Only steer toward a tool the model was actually GIVEN.
+    //
+    // This paragraph named `edit_lines` unconditionally, because it had no way to see
+    // the registry. Against a trimmed registry that omits it, one run put 99 mentions
+    // of `edit_lines` in front of a model holding six tools, none of them that one --
+    // so the harness spent the run steering toward something that could not be called.
+    // That is worse than saying nothing: the model burns turns trying.
+    let mut s =
+        String::from("The file to edit, with 1-based LINE NUMBERS (updates after each edit). ");
+    if registry.get("edit_lines").is_some() {
+        s.push_str(
+            "To change a large file, PREFER `edit_lines` - give the start/end line numbers \
+             shown here and the new text; you do NOT need to copy the old text exactly \
+             (which is error-prone on a big file). ",
+        );
+    } else {
+        // Without line-range editing the anchor has to be exact, so say so rather than
+        // leaving the model to find out by failing.
+        s.push_str(
+            "Copy your `old_str` anchor VERBATIM from the lines below - it must match \
+             exactly once. ",
+        );
+    }
+    s.push_str(
+        "The line-number prefix `N| ` is NOT part of the file - never include it in new_text.\n",
     );
     let mut any = false;
     for f in files {
@@ -247,6 +272,49 @@ mod tests {
         assert_eq!(got, vec!["pkg.py", "service.py", "store.py"]);
         // The focused file itself is never in its own imports.
         assert!(!got.contains(&"app.py".to_string()));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Guidance must never name a tool the model was not given.
+    ///
+    /// The focus-file preamble said "PREFER `edit_lines`" unconditionally, because it
+    /// could not see the registry. Against the trimmed six-tool registry the
+    /// SWE-bench path uses, that put 99 mentions of an uncallable tool in front of
+    /// one model -- the harness steering it toward something that did not exist.
+    #[test]
+    fn focus_guidance_only_names_edit_lines_when_it_is_offered() {
+        let ws = temp_dir("focus-guidance");
+        std::fs::write(ws.join("a.rs"), "fn main() {}\n").unwrap();
+        let files = vec!["a.rs".to_string()];
+
+        // Full registry: the line-range advice is genuine, so it should appear.
+        let full = sc_tools::default_registry();
+        assert!(full.get("edit_lines").is_some(), "premise of this test");
+        let with = render_focus_files(&ws, &files, &full);
+        assert!(
+            with.contains("edit_lines"),
+            "offered => advise it, got: {with}"
+        );
+
+        // Trimmed registry without it: the advice must be gone, not merely softened.
+        let trimmed = sc_tools::ToolRegistry::new(
+            full.specs()
+                .iter()
+                .filter(|s| s.name != "edit_lines")
+                .cloned()
+                .collect(),
+        );
+        let without = render_focus_files(&ws, &files, &trimmed);
+        assert!(
+            !without.contains("edit_lines"),
+            "not offered => never mention it, got: {without}"
+        );
+        // And it still says how to anchor an edit, rather than going silent.
+        assert!(
+            without.contains("VERBATIM"),
+            "should still explain exact anchoring, got: {without}"
+        );
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

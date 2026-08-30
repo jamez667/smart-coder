@@ -894,3 +894,50 @@ fn repeated_create_file_clash_is_steered_to_write_file() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// The `ToolNotOffered` detector, both directions.
+///
+/// Driven through the helper rather than a contrived prompt, because the real
+/// prompts are now correct -- `system_preamble` and `render_focus_files` both take
+/// the registry. This pins the detector itself so it still works when the next piece
+/// of guidance forgets to ask.
+#[test]
+fn unoffered_tool_detector_fires_only_on_harness_text_naming_a_missing_tool() {
+    use sc_model::{Message, Role};
+
+    let full = sc_tools::default_registry();
+    let trimmed = sc_tools::ToolRegistry::new(
+        full.specs()
+            .iter()
+            .filter(|s| s.name != "edit_lines")
+            .cloned()
+            .collect(),
+    );
+
+    // Harness text steering toward a tool that is gone: a fault.
+    let steering = vec![Message::system(
+        "To change a large file, PREFER `edit_lines`.",
+    )];
+    assert_eq!(
+        unoffered_tool_mentioned(&steering, &trimmed).as_deref(),
+        Some("edit_lines")
+    );
+
+    // The same text when the tool IS offered: not a fault.
+    assert_eq!(unoffered_tool_mentioned(&steering, &full), None);
+
+    // A USER instruction naming it is not our bug -- the user may say anything.
+    let user_said = vec![Message::user("please use `edit_lines` for this")];
+    assert_eq!(unoffered_tool_mentioned(&user_said, &trimmed), None);
+
+    // A bare word without backticks is ordinary English, not a tool reference.
+    // Firing here would put a fault on nearly every prompt.
+    let prose = vec![Message::system("Edit lines carefully and then finish.")];
+    assert_eq!(unoffered_tool_mentioned(&prose, &trimmed), None);
+
+    // A name that is not a tool at all is never a fault.
+    let unrelated = vec![Message::system("see `Cargo.toml` and `README.md`")];
+    assert_eq!(unoffered_tool_mentioned(&unrelated, &trimmed), None);
+
+    let _ = Role::System;
+}
