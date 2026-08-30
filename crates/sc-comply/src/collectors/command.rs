@@ -8,9 +8,10 @@
 //! silent skip would read as a clean result, which is exactly the lie the
 //! status lattice exists to prevent.
 //!
-//! Command construction is pure (returns a `std::process::Command` without
-//! spawning), following `sc-verify`'s discipline, so the argument shape is
-//! testable without executing anything.
+//! Command construction returns a `std::process::Command` without spawning the
+//! pack's command, following `sc-verify`'s discipline, so the argument shape is
+//! testable without running the check. (On Windows it does probe once for a POSIX
+//! shell — see `build_command`.)
 
 use std::path::Path;
 use std::process::Command;
@@ -29,10 +30,29 @@ pub struct CommandCollector;
 
 /// Build the OS command that runs `command` in `workspace`.
 ///
-/// Pure — no I/O — so tests can assert the argument shape without spawning a
-/// process, which is what keeps this suite platform-independent.
+/// Not quite pure: on Windows it probes once for a POSIX shell (see below). It
+/// still spawns nothing for the *pack's* command, so tests can assert the argument
+/// shape without running the check itself.
 pub fn build_command(workspace: &Path, command: &str) -> Command {
-    let (shell, flag) = if cfg!(windows) {
+    // Prefer a POSIX shell, on every platform. Pack checks are written POSIX --
+    // `test -f x && grep -q y x`, pipes, `2>/dev/null` -- and `cmd` rejects those
+    // outright, so a pack that passes on the Linux CI box fails on a Windows
+    // desktop with a shell error that reads as a failed CHECK. An audit that
+    // reports non-compliance because of the host's shell is worse than useless.
+    //
+    // Deliberately duplicated from `sc_verify::host_shell` rather than shared:
+    // taking a dependency on the verification crate to answer "which shell" would
+    // couple the compliance engine to the agent stack. If a third site ever needs
+    // this, that is the point to lift it into `sc-proto`.
+    let posix = Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let (shell, flag) = if cfg!(windows) && !posix {
         ("cmd", "/C")
     } else {
         ("sh", "-c")
@@ -183,8 +203,8 @@ mod tests {
 
     #[test]
     fn builds_a_shell_command_without_spawning_it() {
-        // Pure construction, per sc-verify's discipline: assert the shape, do
-        // not execute. Spawning here is what makes a suite platform-dependent.
+        // Assert the shape; do not run the pack's command. (The shell probe itself
+        // does spawn `sh -c 'exit 0'` once — that is not the check.)
         let cmd = build_command(Path::new("/ws"), "cargo audit");
         let program = cmd.get_program().to_string_lossy().into_owned();
         let args: Vec<String> = cmd
@@ -192,12 +212,19 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
 
-        if cfg!(windows) {
-            assert_eq!(program, "cmd");
-            assert_eq!(args, vec!["/C".to_string(), "cargo audit".to_string()]);
+        // Pack checks are written POSIX, so a POSIX shell is preferred wherever one
+        // exists — including Windows, where this repo already requires one. `cmd`
+        // is only the fallback when there is genuinely no `sh`, and it would fail
+        // most packs' `test -f x && grep -q y x` shapes anyway.
+        let (want_shell, want_flag) = if program == "cmd" {
+            ("cmd", "/C")
         } else {
-            assert_eq!(program, "sh");
-            assert_eq!(args, vec!["-c".to_string(), "cargo audit".to_string()]);
+            ("sh", "-c")
+        };
+        assert_eq!(program, want_shell);
+        assert_eq!(args, vec![want_flag.to_string(), "cargo audit".to_string()]);
+        if !cfg!(windows) {
+            assert_eq!(program, "sh", "POSIX hosts always use sh");
         }
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/ws")));
     }

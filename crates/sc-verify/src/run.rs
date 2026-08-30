@@ -140,16 +140,62 @@ pub struct CommandResult {
     pub output: String,
 }
 
+/// The shell the harness runs host commands through, as `(program, flag)`.
+///
+/// Public because every caller must make the SAME choice: the eval runner
+/// duplicated this logic once and the two drifted, leaving the agent's own
+/// `run_command` on `cmd` after the verifier had been fixed.
+pub fn host_shell() -> (&'static str, &'static str) {
+    if cfg!(windows) && !posix_sh_available() {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    }
+}
+
+/// Is a POSIX shell on PATH? Probed once; the answer cannot change mid-process.
+pub fn posix_sh_available() -> bool {
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
 /// Build the OS command that runs `command` in `workspace` under `sandbox`. Pure (no
 /// I/O) so the Docker argument construction is host-testable without Docker present.
 fn build_command(sandbox: &Sandbox, workspace: &Path, command: &str) -> Command {
     match sandbox {
         Sandbox::Host => {
-            let (shell, flag) = if cfg!(windows) {
-                ("cmd", "/C")
-            } else {
-                ("sh", "-c")
-            };
+            // Prefer a POSIX shell, on every platform.
+            //
+            // Models write POSIX. Measured on the `rust-two-stage` rung, four runs:
+            // the FIRST command of every run was POSIX (`ls && cat test.rs
+            // 2>/dev/null | head -100`) and every one exited 255 under `cmd` with
+            // "The system cannot find the path specified" -- because `2>/dev/null`
+            // is not a `cmd` construct. The model then spent its budget probing the
+            // shell (`echo $OS`, `ls -la`, `which rustc`, `./t.exe`) instead of the
+            // bug, tripped the stall detector three times, and the rung came out
+            // 50/50 across runs depending on whether it happened to land the fix
+            // before the budget went. The score looked like model flakiness; it was
+            // the harness handing it a shell it does not write for.
+            //
+            // `cmd` also cannot run a local binary at all: it has no `.` on PATH, so
+            // both `./t.exe` and bare `t.exe` fail. Every "compile then run the test"
+            // command -- the normal shape of verifying your own work -- was broken.
+            //
+            // This repo already requires a POSIX `sh` on Windows (`scripts/check.ps1`
+            // prepends Git's `usr\bin` when it is absent), so preferring it follows
+            // the established convention. `cmd` stays as the fallback so a machine
+            // without `sh` still runs something.
+            let (shell, flag) = host_shell();
             let mut c = Command::new(shell);
             c.arg(flag).arg(command).current_dir(workspace);
             c
@@ -392,5 +438,65 @@ mod tests {
         let green = run_verification(&ws, "exit 0");
         assert!(green.all_green());
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// **The shell the agent gets must understand what models write.**
+    ///
+    /// Models write POSIX. On the `rust-two-stage` rung the FIRST command of every
+    /// run was `ls && cat test.rs 2>/dev/null | head -100`, and under `cmd` every
+    /// one exited 255 -- `2>/dev/null` is not a `cmd` construct. The model then
+    /// spent its budget probing the shell instead of the bug and the rung scored
+    /// 50/50 across runs, which read as model flakiness.
+    ///
+    /// This is the third time this bug has been fixed. It came back because the
+    /// choice was duplicated; `host_shell` is now the only place it is made.
+    #[test]
+    fn the_host_shell_runs_posix_redirection() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-posix-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // The exact shape that was failing: a redirection `cmd` cannot parse.
+        let r = run_command(&ws, "echo hello 2>/dev/null");
+        assert!(r.ok, "POSIX redirection must run, got {:?}", r);
+        assert!(r.output.contains("hello"), "got {:?}", r.output);
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A local binary must be runnable by the path a model writes.
+    ///
+    /// `cmd` has no `.` on PATH, so BOTH `./t.exe` and bare `t.exe` fail there --
+    /// which broke every "compile, then run the test binary" command, the normal
+    /// shape of an agent verifying its own work.
+    #[test]
+    fn the_host_shell_can_run_a_local_script_by_relative_path() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-relpath-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("hi.sh"), "#!/bin/sh\necho ran\n").unwrap();
+
+        let r = run_command(&ws, "sh ./hi.sh");
+        assert!(r.ok, "a relative-path invocation must work, got {:?}", r);
+        assert!(r.output.contains("ran"), "got {:?}", r.output);
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Both callers must make the same choice, or they drift -- which is exactly
+    /// how the agent's `run_command` stayed on `cmd` after the verifier was fixed.
+    #[test]
+    fn host_shell_is_the_single_source_of_truth() {
+        let (shell, flag) = host_shell();
+        assert!(
+            (shell == "sh" && flag == "-c") || (shell == "cmd" && flag == "/C"),
+            "unexpected shell pair: {shell} {flag}"
+        );
+        // On a machine with a POSIX sh -- which this repo requires on Windows too --
+        // it must be the one chosen.
+        if posix_sh_available() {
+            assert_eq!(
+                shell, "sh",
+                "a POSIX shell is present and must be preferred"
+            );
+        }
     }
 }

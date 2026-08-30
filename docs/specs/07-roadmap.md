@@ -478,6 +478,14 @@ capture, and this removes the load-bearing cases from its shoulders.
 - A **fixed task suite** (sample repos + graded tasks) as the regression
   benchmark; tracked from M1 so harness changes are measured against real
   small-model behavior.
+  - `sc-eval --agent` takes `--only <ID>`, `--repeat <N>` and `--log <DIR>`: one
+    task, run N times, each run's `AgentEvent` stream teed to its own NDJSON
+    file. This is how a rung that passes on one run and fails the next gets
+    *investigated* rather than merely re-scored — without the stream the report
+    says STILL-RED and the turns that produced it are gone. It earned its place
+    immediately: the first capture showed every run's opening command failing
+    under the wrong shell, a harness bug that had been reading as model
+    flakiness ([04](04-tools.md)).
   - **SWE-bench is the post-M3 feasibility check, not a current target.** Our
     `sc-eval` red→green machinery already mirrors SWE-bench's
     `FAIL_TO_PASS`/`PASS_TO_PASS` split — and since the fixed task suite now runs

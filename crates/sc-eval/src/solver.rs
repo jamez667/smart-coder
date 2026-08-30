@@ -188,6 +188,13 @@ pub struct AgentSolver<'a> {
     /// failure and a bare STILL-RED. `RefCell` rather than `Cell` because
     /// `RunInfo` is not `Copy`.
     last_run: std::cell::RefCell<Option<RunInfo>>,
+    /// Optional observer for the agent's event stream.
+    ///
+    /// Without this a task run is a black box: the report says STILL-RED and the
+    /// turns that produced it are gone. That is fine for scoring and useless for
+    /// debugging a rung that passes on one run and fails the next, where the whole
+    /// question is what the model did differently.
+    sink: Option<&'a dyn sc_core::EventSink>,
 }
 
 impl<'a> AgentSolver<'a> {
@@ -197,6 +204,7 @@ impl<'a> AgentSolver<'a> {
             cfg: AgentConfig::default(),
             last: Cell::new(None),
             last_run: std::cell::RefCell::new(None),
+            sink: None,
         }
     }
 
@@ -206,7 +214,15 @@ impl<'a> AgentSolver<'a> {
             cfg,
             last: Cell::new(None),
             last_run: std::cell::RefCell::new(None),
+            sink: None,
         }
+    }
+
+    /// Tee every agent event to `sink` -- the run log that makes a flaky rung
+    /// investigable rather than merely reportable.
+    pub fn with_sink(mut self, sink: &'a dyn sc_core::EventSink) -> Self {
+        self.sink = Some(sink);
+        self
     }
 }
 
@@ -228,7 +244,25 @@ impl Solver for AgentSolver<'_> {
         // the task still supplies its own verify command and frozen tests.
         let cfg = task_config(self.cfg.clone(), task);
         // Backend errors (e.g. model unavailable) surface as a SolverError outcome.
-        let report = run_agent(self.backend, &instruction, workspace, &cfg)?;
+        // Route through the observed entry point when a sink is attached, so the
+        // event stream is available; otherwise keep the plain call.
+        let report = match self.sink {
+            Some(sink) => {
+                let registry = sc_tools::default_registry();
+                let strategy = sc_core::select_strategy(&self.backend.capabilities());
+                sc_core::run_agent_observed(
+                    self.backend,
+                    None,
+                    &registry,
+                    strategy.as_ref(),
+                    &instruction,
+                    workspace,
+                    &cfg,
+                    sink,
+                )?
+            }
+            None => run_agent(self.backend, &instruction, workspace, &cfg)?,
+        };
         self.last.set(Some(report.metrics));
         self.last_run.replace(Some(RunInfo {
             steps: report.steps,

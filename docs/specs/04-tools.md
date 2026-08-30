@@ -67,6 +67,16 @@ Kept deliberately small. Each does one thing.
   predictably. Returns **structured per-test pass/fail + failure messages**, not
   a raw log — the spine of the TDD loop ([11](11-testing-and-tdd.md)).
 
+Both execute through a POSIX `sh -c` on **every** platform, falling back to
+`cmd /C` only when no `sh` is on PATH. Models write POSIX: measured on the
+`rust-two-stage` eval rung, the first command of every run used `2>/dev/null`,
+which `cmd` cannot parse, and the model then spent its budget probing the shell
+instead of the bug — 12 stalls and 83 turns across four runs, against 0 and 15
+once the shell matched. `cmd` also has no `.` on PATH, so both `./binary` and
+bare `binary` fail there, breaking the compile-then-run shape of self-verification.
+The choice is made in exactly one place (`sc_verify::host_shell`); duplicating it
+is what let this regress twice.
+
 ### Version control (Mutating)
 - `git_status` / `git_diff` (ReadOnly) — ground the model in actual repo state.
 - `git_commit` — Confirm-gated; never auto-pushes in v1.

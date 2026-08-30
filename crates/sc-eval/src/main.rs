@@ -4,6 +4,7 @@
 //!
 //!     sc-eval [SUITE_TOML]              the red->green demo suite (FileSolver)
 //!     sc-eval --agent [SUITE_TOML] [--url <U>] [--model <M>]   the same suite, real model
+//!             [--only <ID>] [--repeat <N>] [--log <DIR>]      one task, N times, streamed
 //!     sc-eval --swebench [--live] --url <U> --model <M> [--only <ID>] [--json <PATH>]
 //!
 //! The SWE-bench path runs the real agent loop against a live backend, one instance
@@ -196,12 +197,59 @@ fn agent_suite(args: &[String]) -> ExitCode {
         }
     };
 
-    let backend = sc_model::OpenAiBackend::new(url, model);
-    let solver = AgentSolver::new(&backend);
-    let report = Report::new(run_suite(&suite.tasks, &solver));
-    println!("{}", report.summary());
+    // `--only <ID>` narrows to one task, and `--repeat <N>` runs the selection N
+    // times. Together they are how you investigate a rung that passes on one run
+    // and fails the next: the same task, several times, with the stream captured.
+    let only = flag(args, "--only");
+    let repeat: usize = flag(args, "--repeat")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let tasks: Vec<_> = match only {
+        Some(id) => suite.tasks.iter().filter(|t| t.id == id).cloned().collect(),
+        None => suite.tasks.clone(),
+    };
+    if tasks.is_empty() {
+        eprintln!("error: no task matched --only {}", only.unwrap_or(""));
+        return ExitCode::FAILURE;
+    }
 
-    if report.all_passed() {
+    let backend = sc_model::OpenAiBackend::new(url, model);
+    let mut all_passed = true;
+    for round in 1..=repeat {
+        if repeat > 1 {
+            println!("--- run {round}/{repeat} ---");
+        }
+        // One log file per run, so runs of the same task stay separable.
+        let log = flag(args, "--log").map(|dir| {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = std::fs::create_dir_all(dir);
+            std::path::PathBuf::from(dir).join(format!("run-{stamp}-{round}.ndjson"))
+        });
+        let file = log.as_ref().and_then(|p| match std::fs::File::create(p) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("warning: could not open {}: {e}", p.display());
+                None
+            }
+        });
+        let sink = file.map(sc_core::JsonLinesSink::new);
+
+        let solver = match &sink {
+            Some(s) => AgentSolver::new(&backend).with_sink(s),
+            None => AgentSolver::new(&backend),
+        };
+        let report = Report::new(run_suite(&tasks, &solver));
+        println!("{}", report.summary());
+        if let Some(p) = &log {
+            println!("  log: {}", p.display());
+        }
+        all_passed &= report.all_passed();
+    }
+
+    if all_passed {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

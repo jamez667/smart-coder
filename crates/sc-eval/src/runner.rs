@@ -80,24 +80,10 @@ fn verify(workspace: &Path, cmd: &str, timeout: Duration) -> std::io::Result<boo
     // task scored as failing to go green, which is indistinguishable from a solver
     // that produced nothing. `sc_verify::build_command` already branches on the
     // platform, so use the same shell selection the rest of the harness does.
-    // Prefer a POSIX shell, on every platform.
-    //
-    // Task `verify_cmd`s are POSIX-shaped by convention -- the suite has shipped
-    // `sh test.sh` since M1, and `./binary` is how you run a local artifact. Under
-    // `cmd` neither works: `cmd` has no `.` on PATH, so `./t.exe` and even `t.exe`
-    // both fail with "not recognized", which reads as a broken test rather than a
-    // shell mismatch.
-    //
-    // This repo already requires a POSIX `sh` on Windows for exactly this reason
-    // (`scripts/check.ps1` prepends Git's `usr\bin` when it is missing), so
-    // preferring it here follows the established convention rather than inventing a
-    // second one. `cmd` remains the fallback so a machine without `sh` still runs
-    // *something* instead of failing to spawn.
-    let (shell, flag) = if cfg!(windows) && !posix_sh_available() {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
+    // Shell selection lives in `sc_verify` -- one decision, one place. It was
+    // duplicated here first, which is how the agent's own `run_command` kept using
+    // `cmd` after this function had been fixed.
+    let (shell, flag) = sc_verify::host_shell();
     let mut child = Command::new(shell)
         .arg(flag)
         .arg(cmd)
@@ -167,22 +153,6 @@ fn kill_tree(child: &mut std::process::Child) {
     // the descendants are gone, so this cannot block the way the old pair did.
     let _ = child.kill();
     let _ = child.wait();
-}
-
-/// Is a POSIX shell on PATH? Probed once; the answer cannot change mid-run.
-fn posix_sh_available() -> bool {
-    use std::sync::OnceLock;
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
 }
 
 /// How long a task's verify command may run before it is treated as failed.

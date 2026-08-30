@@ -167,6 +167,15 @@ When disabled, such checks yield `Unknown` with a stated reason and the
 capability is named in the report — never silently skipped, because a silent
 skip reads as clean.
 
+`command-exit-code` runs through a POSIX `sh` wherever one exists, on every
+platform, falling back to `cmd` only on a Windows host with no `sh` on PATH. Pack
+commands are written POSIX (`test -f x && grep -q y x`, pipes, `2>/dev/null`),
+which `cmd` rejects outright — so without the preference a pack that passes on
+Linux CI fails on a Windows desktop with a shell error that reads as a failed
+*check* rather than as `Error`. That fallback is the one case where a check's
+outcome depends on the host, and a pack relying on POSIX syntax should expect
+`Error` there rather than a verdict.
+
 SARIF output covers only `Gap` findings that carry a `file:line` anchor.
 Unknowns are excluded deliberately: a code-scanning UI has no way to render "we
 could not tell", so emitting them would collapse the distinction the lattice
