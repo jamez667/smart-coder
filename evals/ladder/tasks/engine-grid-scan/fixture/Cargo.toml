@@ -1,0 +1,9 @@
+[package]
+name = "void_grid_task"
+version = "0.1.0"
+edition = "2021"
+
+# The engine's real vector type. Kept because the module under test uses it —
+# stripping it would change the code the model is asked to work on.
+[dependencies]
+glam = { version = "0.29", features = ["bytemuck"] }

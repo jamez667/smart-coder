@@ -57,3 +57,11 @@ web/playwright-report/
 evals/ladder/**/*.exe
 evals/ladder/**/*.pdb
 evals/ladder/**/*.rcgu.o
+
+# Cargo-based ladder fixtures build in place when run by hand: target/ is noise.
+# Their Cargo.lock, though, must be TRACKED -- the fixture verifies with
+# `cargo test --offline` in a fresh workspace, so without a lock it re-resolves
+# every run and a dependency bump would silently change what the model is scored
+# on. Re-included here because the repo-wide rule above ignores all lock files.
+evals/ladder/**/target/
+!evals/ladder/**/Cargo.lock

@@ -168,3 +168,83 @@ verify_cmd = "rustc --test --edition 2021 -o t_wired.exe test.rs && ./t_wired.ex
 contract_tests = ["test.rs"]
 tags = ["rung:engine-two-layer", "lang:rust", "source:void-claim"]
 timeout_secs = 180
+
+# The hardest rung: one feature, two call sites, a real cargo crate.
+#
+# Everything above is a single file. This is a crate with the engine's real `glam`
+# dependency (TileGrid uses DVec2; stripping it would change the code under test),
+# a lib with four modules, and an integration test — so `cargo test` is the verify
+# command, as it would be in the real repo. Affordable because glam is already in
+# the local cargo cache: a cold build here is ~4 seconds, against minutes for the
+# full engine.
+#
+# What makes it hard is not the algorithm. The flood-fill already exists, correct,
+# in `floor.rs`. The work is recognising it is a property of a GRID rather than of
+# a station, moving it without changing its behaviour, and then using it from two
+# consumers that never shared code before. A model that only edits the file the
+# tests name will fail: the tests demand the primitive on TileGrid AND both
+# wrappers delegating to it.
+
+[[tasks]]
+id = "engine-grid-scan"
+description = """
+This crate is a slice of a real game. `tilegrid.rs` is the engine's generic \
+`TileGrid<T>`; `floor.rs` (a station interior) and `module.rs` (a ship module) \
+each own one and wrap it.
+
+`Floor` has two grid scans written directly against itself: `find_first` (first \
+tile of a kind, row-major) and `tile_regions` (contiguous tiles of a kind grouped \
+into rectangles by a 4-connected flood-fill). `Module` has neither, though it is \
+the same kind of grid and needs the same queries.
+
+Lift both into `TileGrid` as `find_first` and `regions`, then use them from BOTH \
+consumers: `Floor::find_first` and `Floor::tile_regions` must keep their exact \
+current names and behaviour but delegate to the engine, and `Module` must gain \
+`find_first` and `tile_regions` doing the same.
+
+`cargo test` must pass. Do not edit tests/contract.rs."""
+fixture = "tasks/engine-grid-scan/fixture"
+solution = "tasks/engine-grid-scan/solution"
+verify_cmd = "cargo test --offline -q"
+contract_tests = ["tests/contract.rs"]
+tags = ["rung:engine-multi-site", "lang:rust", "source:void-claim"]
+timeout_secs = 300
+
+# Harder still: a feature that cannot be copied from anywhere.
+#
+# `engine-grid-scan` asks for a MOVE -- the flood-fill already exists and is
+# correct, so the work is recognising where it belongs. This one asks for code
+# that is not in the crate at all: a type-erased, generational-index ECS query
+# with an exclusion term, matching the borrow discipline of the `iter2` beside it
+# (raw-pointer collect, then safe refs). Three type parameters, one of which may
+# have no storage at all.
+#
+# The two consumers each hand-roll the same O(n*m) workaround -- collect the
+# marked set, then `contains` per candidate -- so the duplication is real and the
+# fix is one query used twice. The recycled-slot test is the trap: `despawn`
+# clears component slots, and a solver who reasons about generations without
+# reading `despawn` will get it wrong in a way the happy-path tests miss.
+
+[[tasks]]
+id = "engine-ecs-query"
+description = """
+This crate is a slice of a real game engine. `world.rs` is a generational-index \
+ECS with type-erased component storage; `physics.rs` and `render.rs` are two \
+systems that query it.
+
+The ECS can express "entities with A and B" (`iter2`) but not "entities with A \
+and B but NOT C". Both systems want the second: physics must skip `Frozen` \
+entities, render must skip `Hidden` ones. Each works around it the same way — \
+collect every marked entity into a Vec, then `contains` it for each candidate.
+
+Add `World::iter2_without::<A, B, C>()`, yielding `(EntityId, &A, &B)` for every \
+live entity holding A and B but not C, and use it in BOTH systems in place of \
+their hand-rolled filters. Match the liveness and generation rules of `iter2`.
+
+`cargo test` must pass. Do not edit tests/contract.rs."""
+fixture = "tasks/engine-ecs-query/fixture"
+solution = "tasks/engine-ecs-query/solution"
+verify_cmd = "cargo test --offline -q"
+contract_tests = ["tests/contract.rs"]
+tags = ["rung:engine-novel-generic", "lang:rust", "source:void-claim"]
+timeout_secs = 300
