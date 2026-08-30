@@ -180,6 +180,14 @@ pub enum FaultKind {
     /// directories across 185 files of a subset, and every run read them as
     /// "failed read" and moved on.
     UnreadablePath,
+    /// The prompt budget is zero or smaller than the reply reserve, so the context
+    /// builder has no ceiling to work toward.
+    ///
+    /// Does not fail loudly on its own -- it silently stops constraining anything,
+    /// and the prompt grows until the SERVER rejects it with a context-size error
+    /// that reads as a model problem. Caused by a backend left at its conservative
+    /// default context while the config reserves a large reply.
+    ContextBudgetUnusable,
     /// The verify command cannot run -- its binary is not on PATH.
     ///
     /// A missing `pytest` scores as the model failing to make tests pass, which is
@@ -196,6 +204,7 @@ impl FaultKind {
             Self::ToolNotOffered => "tool not offered",
             Self::EmptyGuidance => "empty guidance",
             Self::UnreadablePath => "unreadable path",
+            Self::ContextBudgetUnusable => "context budget unusable",
             Self::VerifyUnavailable => "verify unavailable",
         }
     }

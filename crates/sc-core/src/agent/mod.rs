@@ -206,6 +206,32 @@ pub fn run_agent_observed(
         prompt_budget: budget,
     });
 
+    // A zero or nonsensical budget means the run is doomed before the first turn.
+    //
+    // `prompt_budget` is `max_context * fraction - response_reserve`, saturating. If
+    // the reserve exceeds the usable window the result is ZERO -- and a zero budget
+    // does not fail loudly, it just stops constraining anything: nothing is evicted
+    // because there is no ceiling to evict toward, and the prompt grows until the
+    // SERVER rejects it. Seen as "request (33164 tokens) exceeds the available
+    // context size (32768)" -- a backend error that reads as a model problem and is
+    // entirely the harness's doing, caused by a backend left at its 8192 default
+    // while the config reserved 12288 for the reply.
+    if budget == 0 {
+        sink.record(&AgentEvent::HarnessFault {
+            kind: FaultKind::ContextBudgetUnusable,
+            detail: format!(
+                "prompt budget is 0: the model reports a {}-token context, of which \
+                 {:.0}% is usable, but {} are reserved for the reply. Nothing will be \
+                 evicted and the request will grow until the server rejects it. Detect \
+                 the server's real context, or lower `response_reserve_tokens`.",
+                caps.max_context_tokens,
+                cfg.effective_context_fraction * 100.0,
+                cfg.response_reserve_tokens
+            ),
+            step: 0,
+        });
+    }
+
     // PLAN (spec 03): decompose the task up front, grounded in the repo map. The
     // harness owns the plan; the model only ever sees a compact rendering.
     let mut plan = if cfg.plan_first {
@@ -395,7 +421,9 @@ pub fn run_agent_observed(
             sink.record(&AgentEvent::HarnessFault {
                 kind: FaultKind::ReplyTruncated,
                 detail: format!(
-                    "the reply stopped at the {}-token cap after {} chars;                      any tool call it was about to emit was cut off.                      Raise `response_reserve_tokens` if this repeats.",
+                    "the reply stopped at the {}-token cap after {} chars; any tool call \
+                     it was about to emit was cut off. Raise `response_reserve_tokens` \
+                     if this repeats, or the model is not converging on a call.",
                     cfg.response_reserve_tokens,
                     resp.content.len()
                 ),
@@ -618,7 +646,9 @@ pub fn run_agent_observed(
                                 if !configured {
                                     sink.record(&AgentEvent::HarnessFault {
                                         kind: FaultKind::VerifyUnavailable,
-                                        detail: "the model called `run_verification` but no                                                  verify command is configured; its result                                                  cannot count as green"
+                                        detail: "the model called `run_verification` but no \
+                                                 verify command is configured; its result \
+                                                 cannot count as green"
                                             .to_string(),
                                         step: step + 1,
                                     });

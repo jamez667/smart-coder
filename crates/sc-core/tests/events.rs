@@ -339,3 +339,82 @@ fn reports_a_harness_fault_when_the_prompt_names_an_unoffered_tool() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **A zero prompt budget must be reported before the first turn.**
+///
+/// `prompt_budget` saturates: reserve more for the reply than the usable window
+/// holds and it comes out ZERO. That does not fail loudly -- it stops constraining
+/// anything, and the prompt grows until the SERVER rejects it with a context-size
+/// error that reads as a model problem. Measured on a real run: a backend left at
+/// its 8192 default with a 12288-token reply reserve produced
+/// "request (33164 tokens) exceeds the available context size (32768)".
+#[test]
+fn reports_a_harness_fault_when_the_prompt_budget_is_zero() {
+    let ws = temp("nobudget");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let backend = Scripted::new(vec![r#"{"tool":"finish"}"#]);
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+
+    // Scripted reports an 8192-token window; reserve more of it than 75% leaves.
+    let cfg = AgentConfig {
+        response_reserve_tokens: 12_288,
+        ..AgentConfig::default()
+    };
+    run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "do a thing",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let fault = events.iter().find_map(|e| match e {
+        AgentEvent::HarnessFault {
+            kind: FaultKind::ContextBudgetUnusable,
+            detail,
+            ..
+        } => Some(detail.clone()),
+        _ => None,
+    });
+    let detail = fault.expect("a zero budget must raise a harness fault");
+    // The detail must name both numbers, so the transcript says what to change.
+    assert!(detail.contains("8192"), "should name the window: {detail}");
+    assert!(
+        detail.contains("12288"),
+        "should name the reserve: {detail}"
+    );
+
+    // And a HEALTHY budget must stay silent -- a detector that always fires is noise.
+    let log2 = Mutex::new(Vec::new());
+    let sink2 = FnSink(|e: &AgentEvent| log2.lock().unwrap().push(e.clone()));
+    run_agent_observed(
+        &Scripted::new(vec![r#"{"tool":"finish"}"#]),
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "do a thing",
+        &ws,
+        &AgentConfig::default(),
+        &sink2,
+    )
+    .unwrap();
+    assert!(
+        !log2.into_inner().unwrap().iter().any(|e| matches!(
+            e,
+            AgentEvent::HarnessFault {
+                kind: FaultKind::ContextBudgetUnusable,
+                ..
+            }
+        )),
+        "a workable budget is not a fault"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

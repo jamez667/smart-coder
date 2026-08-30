@@ -213,7 +213,15 @@ fn agent_suite(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let backend = sc_model::OpenAiBackend::new(url, model);
+    // `with_detected_context` adopts the server's real n_ctx. Without it the backend
+    // assumes 8192, and since `task_config` reserves 12288 tokens for the reply,
+    // `prompt_budget` saturates to ZERO -- no ceiling, nothing evicted, and the
+    // prompt grows until the SERVER rejects it. That surfaced as
+    // "request (33164 tokens) exceeds the available context size (32768)", which
+    // reads as a model problem and is entirely ours.
+    let backend = sc_model::OpenAiBackend::new(url, model)
+        .with_detected_context()
+        .with_native_tools();
     let mut all_passed = true;
     for round in 1..=repeat {
         if repeat > 1 {
