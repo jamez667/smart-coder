@@ -108,3 +108,63 @@ verify_cmd = "rustc --test --edition 2021 -o t_invariant.exe test.rs && ./t_inva
 contract_tests = ["test.rs"]
 tags = ["rung:invariant", "lang:rust"]
 timeout_secs = 120
+
+# --- Real-codebase rung -----------------------------------------------------
+#
+# The rungs above are purpose-built fixtures. This one is a VERBATIM copy of a
+# module from a real game engine (void-claim's `void_engine::pathfind`, 144 lines,
+# its own comments and formatting intact), and the task is to ADD functionality
+# rather than repair a planted bug.
+#
+# It uses only std, so it verifies with bare `rustc` in seconds. The engine it
+# came from pulls wgpu/winit and takes 30s warm and minutes cold -- and the harness
+# copies each fixture to a fresh workspace with no target/ dir, so a real cargo
+# build would dominate the run and the model verifies repeatedly.
+
+[[tasks]]
+id = "engine-diagonal-path"
+description = """
+`pathfind.rs` is the void_engine grid A* module. It is 4-connected: units move \
+orthogonally only, so a diagonal run costs two steps per cell.
+
+Add a new public function `astar_bool_grid_8` that does the same job but \
+8-connected — the four orthogonal steps plus the four diagonals — with the same \
+signature and the same conventions as `astar_bool_grid` (path excludes the start, \
+includes the goal, empty Vec when start == goal, None when unreachable). Every \
+step costs the same, whether orthogonal or diagonal.
+
+Leave the existing functions working exactly as they are. The tests in test.rs \
+specify the behaviour; make them pass."""
+fixture = "tasks/engine-diagonal-path/fixture"
+solution = "tasks/engine-diagonal-path/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_engine.exe test.rs && ./t_engine.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:engine-additive", "lang:rust", "source:void-claim"]
+timeout_secs = 180
+
+[[tasks]]
+id = "engine-diagonal-wired"
+description = """
+Two layers of a real game: `pathfind.rs` is the engine's generic grid A* kernel, \
+and `nav.rs` is the game-side module that wraps it with tile-source impls \
+(`astar_grid`, `astar_grid_exterior`). Both are 4-connected today.
+
+Add 8-connected (diagonal) movement to BOTH layers:
+
+  1. `astar_tile_grid_8` in pathfind.rs — like `astar_tile_grid`, but with the \
+     four diagonal steps as well as the four orthogonal ones. Every step costs \
+     the same. Honour `extra_blocked` exactly as the 4-connected one does.
+  2. `astar_grid_exterior_8` in nav.rs — like `astar_grid_exterior`, but using \
+     the new engine function. Keep the out-of-bounds start clamping.
+
+A unit has width, so it must not squeeze diagonally through the seam between two \
+walls that touch only at a corner.
+
+Leave the existing 4-connected functions behaving exactly as they do now. The \
+tests in test.rs specify all of this; make them pass."""
+fixture = "tasks/engine-diagonal-wired/fixture"
+solution = "tasks/engine-diagonal-wired/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_wired.exe test.rs && ./t_wired.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:engine-two-layer", "lang:rust", "source:void-claim"]
+timeout_secs = 180
