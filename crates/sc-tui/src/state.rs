@@ -41,6 +41,13 @@ pub struct TuiState {
     pub valid_calls: usize,
     pub invalid_calls: usize,
     pub interventions: usize,
+    /// How many times the harness degraded its own input or output this run.
+    ///
+    /// Tracked separately from `invalid_calls` on purpose: that counter blames the
+    /// model for malformed output, and a truncated reply lands there too while
+    /// being entirely our doing. Splitting them is the whole point -- a run showing
+    /// "12 invalid, 11 faults" is a harness bug, not a bad model.
+    pub harness_faults: usize,
     /// Set once the run stops; `None` while it's live.
     pub stop: Option<StopReason>,
 }
@@ -146,6 +153,13 @@ impl TuiState {
                     LineKind::Error
                 };
                 self.push(kind, format!("⊨ verify: {summary}"));
+            }
+            AgentEvent::HarnessFault { kind, detail, .. } => {
+                self.harness_faults += 1;
+                self.push(
+                    LineKind::Error,
+                    format!("🔧 harness fault ({}): {detail}", kind.label()),
+                );
             }
             AgentEvent::Stalled { trigger } => {
                 self.push(LineKind::Stall, format!("⚠ stalled: {trigger}"));

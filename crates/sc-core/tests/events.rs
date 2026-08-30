@@ -4,7 +4,9 @@
 
 use std::sync::Mutex;
 
-use sc_core::{run_agent_observed, AgentConfig, AgentEvent, FnSink, ParseRepair, StopReason};
+use sc_core::{
+    run_agent_observed, AgentConfig, AgentEvent, FaultKind, FnSink, ParseRepair, StopReason,
+};
 use sc_model::{Capabilities, GenerateRequest, GenerateResponse, ModelBackend, ToolCalling};
 use sc_proto::Result;
 use sc_tools::default_registry;
@@ -140,5 +142,91 @@ fn emits_stall_and_stop_when_looping_without_advisor() {
             reason: StopReason::Stalled(_)
         })
     ));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A backend whose first reply is cut off at the token cap, exactly as a server
+/// reports it: content with no tool call in it, plus `finish_reason: "length"`.
+struct Truncating(std::cell::RefCell<usize>);
+
+impl ModelBackend for Truncating {
+    fn name(&self) -> &str {
+        "truncating"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        let mut n = self.0.borrow_mut();
+        *n += 1;
+        Ok(if *n == 1 {
+            // What a real truncated turn looks like: mid-sentence, no JSON.
+            GenerateResponse::with_finish_reason(
+                "Looking at the file, I think the fix is to ",
+                Some("length".into()),
+            )
+        } else {
+            GenerateResponse::with_finish_reason(r#"{"tool":"finish"}"#, Some("stop".into()))
+        })
+    }
+}
+
+/// **The detector must be seen to fire.**
+///
+/// A truncated turn carries no tool call, so the loop's repair path reports "no JSON
+/// tool object in your reply" -- blaming the model for a cap *we* set. That
+/// misattribution cost 54 dead turns on one SWE-bench instance. The fault event is
+/// the whole fix: it must appear, on the turn it happened, naming the cap.
+#[test]
+fn reports_a_harness_fault_when_the_reply_was_truncated() {
+    let ws = temp("truncated");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    run_agent_observed(
+        &Truncating(std::cell::RefCell::new(0)),
+        None,
+        &registry,
+        &ParseRepair,
+        "read a.txt",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let fault = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::HarnessFault { kind, detail, step } => Some((*kind, detail.clone(), *step)),
+            _ => None,
+        })
+        .expect("a truncated reply must raise a harness fault");
+
+    assert_eq!(fault.0, FaultKind::ReplyTruncated);
+    assert_eq!(fault.2, 1, "raised on the turn it happened, not at the end");
+    // The detail must name the cap, so the transcript says what to change.
+    assert!(
+        fault
+            .1
+            .contains(&AgentConfig::default().response_reserve_tokens.to_string()),
+        "detail should name the token cap, got: {}",
+        fault.1
+    );
+
+    // And only the truncated turn raises one -- the clean `stop` turn must not.
+    let count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::HarnessFault { .. }))
+        .count();
+    assert_eq!(count, 1, "a normal stop is not a fault");
+
     let _ = std::fs::remove_dir_all(&ws);
 }

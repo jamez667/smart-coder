@@ -87,6 +87,12 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
                 vec![Row::err(icon, text)]
             }
         }
+        // Flagged as an error row because it is one -- ours. The wrench distinguishes
+        // it at a glance from the model's own failures above.
+        HarnessFault { kind, detail, .. } => vec![Row::err(
+            "🔧",
+            format!("harness fault ({}): {detail}", kind.label()),
+        )],
         Stalled { trigger } => vec![Row::err("⚠", format!("stalled: {trigger}"))],
         Advice { trigger, advice } => vec![Row::ok("☎", format!("advisor ({trigger}): {advice}"))],
         Diagnosis { trigger, report } => {

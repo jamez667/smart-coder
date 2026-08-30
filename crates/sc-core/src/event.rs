@@ -116,8 +116,89 @@ pub enum AgentEvent {
     /// full text so far this turn (a renderer replaces its live bubble). Superseded by the
     /// terminal `ChatMessage` when the turn completes.
     ChatDelta { cumulative: String },
+    /// **The harness degraded its own input or output, and knows it.**
+    ///
+    /// Distinct from every other event here: the rest report what the *model* did,
+    /// this one reports what *we* did to it. Every harness bug found so far was
+    /// first misread as the model failing -- a reply cut off at the token cap looks
+    /// like a model that declined to act; a test file delivered as a directory looks
+    /// like a model that ignored the test. Each cost an afternoon of transcript
+    /// reading, and only the ones somebody happened to look at were ever found.
+    ///
+    /// A run that emits these says "3 harness faults" instead of a silent zero, so
+    /// the misattribution is visible on the first turn rather than the fiftieth.
+    HarnessFault {
+        kind: FaultKind,
+        /// What specifically happened, with the numbers -- "reply stopped at the
+        /// 4096-token cap". Rendered verbatim, so it must stand alone.
+        detail: String,
+        /// The step it happened on, for lining up against the rest of the stream.
+        step: usize,
+    },
     /// The run ended. Carries the structured reason.
     Stopped { reason: StopReason },
+}
+
+/// The kinds of self-inflicted damage the harness can recognize.
+///
+/// Each variant exists because it was a real bug that shipped, not because it was
+/// imagined: the doc comment on each names the failure it would have caught. A kind
+/// with no observed firing is not a detector, so each must be forced in a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FaultKind {
+    /// The model's reply was cut off at the token cap, so whatever it was about to
+    /// say -- often the tool call itself -- never arrived.
+    ///
+    /// Reported by the backend as `finish_reason: "length"`. Before that was
+    /// plumbed through, this cost 54 turns of "no JSON tool object in your reply"
+    /// on a single instance, each one blaming the model for our truncation.
+    ReplyTruncated,
+    /// A tool's observation was clipped by `observation_line_cap` before the model
+    /// saw it, so it decided on partial evidence.
+    ///
+    /// This is *usually correct* -- capping a 10,000-line file is the whole point.
+    /// It earns a fault only when the clipped tail plausibly carried the answer;
+    /// see the emit site for the threshold. Fires on everything and the count
+    /// becomes noise people learn to ignore.
+    ObservationTruncated,
+    /// Harness-authored text named a tool the model was never offered.
+    ///
+    /// Steering a model toward a tool absent from its registry is worse than
+    /// silence: it spends turns trying to call something that cannot exist. One
+    /// run put 99 mentions of `edit_lines` in front of a model holding six tools,
+    /// none of them that one.
+    ToolNotOffered,
+    /// An error message promised the model context and then showed none.
+    ///
+    /// The ambiguous-anchor message said "the anchor matched multiple places" and
+    /// listed zero of them, eight times in a row. A model cannot disambiguate from
+    /// an empty list, so it guessed, and the guesses looked like incompetence.
+    EmptyGuidance,
+    /// A read failed on a path the harness itself put there.
+    ///
+    /// Never the model's fault by construction. Test files were once delivered as
+    /// directories across 185 files of a subset, and every run read them as
+    /// "failed read" and moved on.
+    UnreadablePath,
+    /// The verify command cannot run -- its binary is not on PATH.
+    ///
+    /// A missing `pytest` scores as the model failing to make tests pass, which is
+    /// indistinguishable from a wrong patch if you only read the score.
+    VerifyUnavailable,
+}
+
+impl FaultKind {
+    /// A short, stable label for rendering and for grouping counts.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReplyTruncated => "reply truncated",
+            Self::ObservationTruncated => "observation truncated",
+            Self::ToolNotOffered => "tool not offered",
+            Self::EmptyGuidance => "empty guidance",
+            Self::UnreadablePath => "unreadable path",
+            Self::VerifyUnavailable => "verify unavailable",
+        }
+    }
 }
 
 /// Something that observes the event stream. The default `record` is a no-op so
@@ -254,6 +335,12 @@ impl<W: Write> TranscriptSink<W> {
             }
             AgentEvent::Diagnosis { trigger, report } => {
                 format!("** DIAGNOSIS ({trigger}):\n{report}\n")
+            }
+            // Rendered into the transcript deliberately: a fault is context the model
+            // needs. "your last reply was cut off" explains the repair prompt it is
+            // about to get, and reads very differently from silence.
+            AgentEvent::HarnessFault { kind, detail, .. } => {
+                format!("** HARNESS FAULT ({}): {detail}\n", kind.label())
             }
             AgentEvent::Stopped { reason } => format!("** STOPPED: {reason:?}\n"),
             // Not surfaced in a prompt transcript (covered by the reply / prompt blocks; a

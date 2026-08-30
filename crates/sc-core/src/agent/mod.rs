@@ -20,7 +20,7 @@ use sc_tools::{Journal, ToolOutcome, ToolRegistry};
 pub use config::{AgentConfig, AgentReport};
 use config::{FOCUS_TASK_PREFIX, TASK_PREFIX, TASK_PREFIX_SHELL};
 
-use crate::event::{AgentEvent, EventSink, NullSink};
+use crate::event::{AgentEvent, EventSink, FaultKind, NullSink};
 use crate::metrics::ToolCallMetrics;
 use crate::plan::PlanState;
 use crate::planner::make_plan;
@@ -318,6 +318,25 @@ pub fn run_agent_observed(
             prompt_tokens: built.tokens_used,
             raw: resp.content.clone(),
         });
+
+        // Say so when the reply was OUR fault, not the model's.
+        //
+        // The comment on `max_tokens` above explains the mechanism; this reports it.
+        // A truncated turn usually carries no tool call, and the decode below is about
+        // to feed back "no JSON tool object in your reply" -- which reads as a model
+        // refusing to act and sent one investigation 54 turns down the wrong path.
+        // With this, the transcript says the cap was hit, on the turn it was hit.
+        if resp.was_truncated() {
+            sink.record(&AgentEvent::HarnessFault {
+                kind: FaultKind::ReplyTruncated,
+                detail: format!(
+                    "the reply stopped at the {}-token cap after {} chars;                      any tool call it was about to emit was cut off.                      Raise `response_reserve_tokens` if this repeats.",
+                    cfg.response_reserve_tokens,
+                    resp.content.len()
+                ),
+                step: step + 1,
+            });
+        }
 
         // Decode the tool call.
         // Decode the tool call. If extraction fails but the model replied with a fenced code

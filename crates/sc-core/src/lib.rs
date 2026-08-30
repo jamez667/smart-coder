@@ -31,7 +31,8 @@ pub use agent::{
 pub use confirm::{AutoDeny, Confirmation, Confirmer};
 pub use diagnose::{diagnose_failure, diagnosis_observation, SourceFile};
 pub use event::{
-    AgentEvent, EventSink, FnSink, JsonLinesSink, NullSink, PromptMessage, TeeSink, TranscriptSink,
+    AgentEvent, EventSink, FaultKind, FnSink, JsonLinesSink, NullSink, PromptMessage, TeeSink,
+    TranscriptSink,
 };
 pub use metrics::ToolCallMetrics;
 pub use plan::{PlanState, Step, StepStatus};

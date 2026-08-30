@@ -114,6 +114,9 @@ fn fmt_event(e: &AgentEvent) -> String {
                 if *green { "GREEN" } else { "RED" }
             )
         }
+        AgentEvent::HarnessFault { kind, detail, .. } => {
+            format!("  🔧 harness fault ({}): {detail}", kind.label())
+        }
         AgentEvent::Stalled { trigger } => format!("  ⚠ stalled: {trigger}"),
         AgentEvent::Advice { advice, .. } => format!("  💡 {advice}"),
         AgentEvent::Diagnosis { report, .. } => format!("  🔬 {report}"),

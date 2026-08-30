@@ -114,6 +114,15 @@ fn print_event(ev: &sc_core::AgentEvent) {
         Verification { green, summary, .. } => {
             println!("▸ verify  {} {summary}", if *green { "✓" } else { "✗" });
         }
+        // The step is printed here (unlike the live views, which already have it in
+        // context) because replay is where you go to line a fault up against the turn
+        // that caused it.
+        HarnessFault { kind, detail, step } => {
+            println!(
+                "  🔧 harness fault ({}) @ step {step}: {detail}",
+                kind.label()
+            );
+        }
         Stalled { trigger } => {
             println!("  ⚠ stalled: {trigger}");
         }
