@@ -316,7 +316,20 @@ impl<'a> ContextBuilder<'a> {
             };
             let over = running - self.budget;
             let before = cost(&segments[idx]);
-            let target = before.saturating_sub(over + 64);
+            // Shrink toward what this segment must give up, but NEVER ask for zero.
+            //
+            // `before - over` goes negative -- and saturates to 0 -- whenever the
+            // overage exceeds this one segment, which is the normal case when the
+            // prompt is over budget by more than its largest piece. `truncate_middle`
+            // treats a target of 0 as "no limit given" and returns the text
+            // unchanged, so the loop saw `after >= before`, gave up, and sent the
+            // prompt whole: measured 33,080 tokens against a 12,288 budget, rejected
+            // by the server as over-context.
+            //
+            // Halving instead means each pass makes real progress and the loop
+            // converges over several segments rather than demanding one segment
+            // absorb the entire overage.
+            let target = before.saturating_sub(over + 64).max(before / 2).max(1);
             segments[idx].text = truncate_middle(&segments[idx].text, target, self.counter);
             let after = cost(&segments[idx]);
             if after >= before {
@@ -603,6 +616,46 @@ mod tests {
         assert!(
             c.count(&tiny) < c.count(&blob),
             "must always make progress, even on an impossible target"
+        );
+    }
+
+    /// **The assembled prompt must fit, no matter how the overage is distributed.**
+    ///
+    /// This is the shape that broke live: a big focus file plus MANY recent
+    /// observations, so the total is over budget by far more than any single
+    /// segment. The shrink loop computed `target = before - over`, which saturates
+    /// to 0 whenever the overage exceeds that segment -- and `truncate_middle`
+    /// treats 0 as "no limit", returning the text unchanged. The loop then saw
+    /// `after >= before`, gave up, and sent the prompt whole: 33,080 tokens against
+    /// a 12,288 budget, rejected by the server as over-context and reported as the
+    /// model's failure.
+    #[test]
+    fn a_prompt_over_budget_by_more_than_its_largest_segment_still_fits() {
+        let c = counter();
+        let b = ContextBuilder::new(&c, 12_288);
+        let mut segs = vec![
+            Segment::system(Zone::System, "sys ".repeat(500)),
+            Segment::user(Zone::TaskAnchor, "task ".repeat(2000)),
+            Segment::user(
+                Zone::FocusFile,
+                "line of code
+"
+                .repeat(3000),
+            ),
+        ];
+        for _ in 0..20 {
+            segs.push(Segment::user(Zone::RecentObservation, "obs ".repeat(800)));
+        }
+        let built = b.build(segs);
+        eprintln!(
+            "BUILT tokens_used={} budget={}",
+            built.tokens_used, built.budget
+        );
+        assert!(
+            built.tokens_used <= built.budget,
+            "{} > {}",
+            built.tokens_used,
+            built.budget
         );
     }
 }
