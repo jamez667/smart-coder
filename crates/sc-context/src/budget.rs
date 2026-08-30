@@ -177,6 +177,11 @@ pub fn prompt_budget(
     effective.saturating_sub(response_reserve)
 }
 
+/// Per-message chat-template cost, re-exported for the cost function above.
+fn sc_context_message_overhead() -> usize {
+    crate::tokens::MESSAGE_OVERHEAD_TOKENS
+}
+
 /// Assembles segments into a budgeted prompt (spec 05).
 pub struct ContextBuilder<'a> {
     counter: &'a TokenCounter<'a>,
@@ -200,7 +205,12 @@ impl<'a> ContextBuilder<'a> {
         // order within a zone.
         segments.sort_by_key(|s| s.zone);
 
-        let cost = |s: &Segment| self.counter.count(&s.text);
+        // Cost a segment as the REQUEST will carry it: its text plus the chat
+        // template markup wrapped around every message. Omitting the wrapper is
+        // how a prompt the harness measured at 26,516 tokens reached the server as
+        // 34,237 and was rejected -- the budget was being enforced against a
+        // number that did not exist.
+        let cost = |s: &Segment| self.counter.count(&s.text) + sc_context_message_overhead();
         let total: usize = segments.iter().map(cost).sum();
 
         let mut dropped = Vec::new();
@@ -267,7 +277,18 @@ impl<'a> ContextBuilder<'a> {
                 })
                 .map(|(i, _)| i);
             let Some(idx) = pick else {
-                break; // nothing left big enough to shrink; send it and let the backend cope
+                // Nothing left big enough to shrink. "Send it and let the backend
+                // cope" was the old behaviour here, and the backend does NOT cope:
+                // it returns HTTP 400 and the whole turn is lost, which the runner
+                // reports as a solver error and reads as the model's fault.
+                //
+                // Reaching here means the sacred content alone exceeds the budget
+                // even after every truncatable zone was clipped -- so the budget is
+                // too small for the task, not the prompt too large. There is nothing
+                // more this function can drop; the caller is told by `tokens_used`
+                // exceeding `budget` in the returned context, and the agent loop
+                // raises a harness fault on it.
+                break;
             };
             let over = running - self.budget;
             let before = cost(&segments[idx]);
@@ -324,10 +345,15 @@ mod tests {
     #[test]
     fn evicts_lowest_priority_first_under_pressure() {
         let c = counter();
-        // Budget only big enough for the sacred zones + maybe a bit.
+        // Budget only big enough for the sacred zones + maybe a bit. Each message
+        // also carries the chat template's per-message markup, which the builder
+        // charges because the SERVER does -- so the budget must cover it too, or
+        // this asks the impossible rather than testing eviction order.
+        let per_msg = crate::tokens::MESSAGE_OVERHEAD_TOKENS;
         let sacred_cost = crate::tokens::estimate_tokens("you are an agent")
             + crate::tokens::estimate_tokens("fix the bug")
-            + crate::tokens::estimate_tokens("last tool output");
+            + crate::tokens::estimate_tokens("last tool output")
+            + 3 * per_msg;
         let b = ContextBuilder::new(&c, sacred_cost + 2);
 
         let big_history = "summary ".repeat(50);

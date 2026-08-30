@@ -331,6 +331,26 @@ pub fn run_agent_observed(
         let built = builder.build(segments);
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
 
+        // The assembled prompt did not fit, and there was nothing left to drop.
+        //
+        // The builder evicts non-sacred zones and then truncates the truncatable
+        // sacred ones; reaching here means even the irreducible content is over
+        // budget. Sending it anyway gets an HTTP 400 that costs the whole turn and
+        // reads as the model failing -- measured: 26,516 estimated, 34,237 counted
+        // by the server, request rejected. Say so instead, on the turn it happens.
+        if built.tokens_used > built.budget {
+            sink.record(&AgentEvent::HarnessFault {
+                kind: FaultKind::PromptOverBudget,
+                detail: format!(
+                    "the assembled prompt is {} tokens against a {}-token budget and \
+                     could not be shrunk further; the backend may reject this turn. \
+                     Raise the model's context, or lower `response_reserve_tokens`.",
+                    built.tokens_used, built.budget
+                ),
+                step: step + 1,
+            });
+        }
+
         // Did WE just tell the model to use a tool it does not have?
         //
         // Checked on the assembled prompt, which is exactly what the model will see,
@@ -630,6 +650,26 @@ pub fn run_agent_observed(
                             }
                         }
                         ToolOutcome::Observation(o) => {
+                            // The harness killed something for running too long.
+                            //
+                            // Reported as a harness event because the harness is what
+                            // noticed and what intervened, even though the cause is
+                            // usually the model's: code that compiles and then loops
+                            // forever. Without this the intervention is invisible --
+                            // the observation just says the command failed, and a run
+                            // that lost four minutes to a spinning binary looks the
+                            // same as one that got a compile error.
+                            if o.contains("[harness] command exceeded its") {
+                                sink.record(&AgentEvent::HarnessFault {
+                                    kind: FaultKind::CommandTimedOut,
+                                    detail: format!(
+                                        "`{}` was killed for exceeding its time limit; \
+                                         the code it ran probably does not terminate",
+                                        arg
+                                    ),
+                                    step: step + 1,
+                                });
+                            }
                             if tool == "run_verification" {
                                 // Only a *configured* verification with real test
                                 // detail counts as green (the "no command" message

@@ -188,6 +188,22 @@ pub enum FaultKind {
     /// that reads as a model problem. Caused by a backend left at its conservative
     /// default context while the config reserves a large reply.
     ContextBudgetUnusable,
+    /// A command the model ran had to be killed for exceeding its time limit.
+    ///
+    /// Usually the model's fault -- code that compiles and then loops forever --
+    /// but it is reported as a harness event because the harness is what noticed
+    /// and what intervened. Before the limit existed, this looked like nothing at
+    /// all: an eval sat wedged for 34 minutes with the model idle, one test binary
+    /// spinning, and no output anywhere saying so.
+    CommandTimedOut,
+    /// The assembled prompt exceeds its budget and could not be shrunk further.
+    ///
+    /// The builder evicts non-sacred zones then truncates the truncatable sacred
+    /// ones; when even the irreducible content is over budget it used to send the
+    /// request anyway and "let the backend cope". The backend does not cope -- it
+    /// returns HTTP 400, the turn is lost, and the runner reports a solver error
+    /// that reads as the model's fault.
+    PromptOverBudget,
     /// The verify command cannot run -- its binary is not on PATH.
     ///
     /// A missing `pytest` scores as the model failing to make tests pass, which is
@@ -205,6 +221,8 @@ impl FaultKind {
             Self::EmptyGuidance => "empty guidance",
             Self::UnreadablePath => "unreadable path",
             Self::ContextBudgetUnusable => "context budget unusable",
+            Self::CommandTimedOut => "command timed out",
+            Self::PromptOverBudget => "prompt over budget",
             Self::VerifyUnavailable => "verify unavailable",
         }
     }

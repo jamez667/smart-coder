@@ -44,7 +44,14 @@ impl<'a> TokenCounter<'a> {
 /// longer than a character. We estimate from character count at ~3.5 chars/token
 /// (BPE-ish for code, which has many short tokens: punctuation, brackets, short
 /// identifiers) and round **up**, then add 1 so empty-ish strings still cost a
-/// little. This reliably sits at or above real counts for code and prose.
+/// little.
+///
+/// **This counts TEXT, not a request.** A chat request wraps every message in
+/// template markup -- role headers, turn delimiters, a generation prompt -- that
+/// the server tokenizes too and this function never sees. Measured against
+/// llama.cpp: a prompt this estimated at 26,516 tokens was counted by the server
+/// at 34,237, a 23% undercount, and the request was rejected. Callers sizing a
+/// REQUEST must add [`MESSAGE_OVERHEAD_TOKENS`] per message on top.
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
@@ -54,6 +61,15 @@ pub fn estimate_tokens(text: &str) -> usize {
     // ceil(chars / 3.5) == ceil(chars * 2 / 7)
     (chars * 2).div_ceil(7) + 1
 }
+
+/// Per-message cost of the chat template, in tokens.
+///
+/// Every message in a chat request carries markup the model tokenizes but the
+/// message text does not contain: a role header, a turn delimiter, and for the
+/// final message a generation prompt. The exact shape is template-specific, so
+/// this is a deliberate over-estimate -- being wrong high costs a little prompt
+/// room, being wrong low costs the whole request with an HTTP 400.
+pub const MESSAGE_OVERHEAD_TOKENS: usize = 8;
 
 #[cfg(test)]
 mod tests {

@@ -8,6 +8,8 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use crate::parse::parse;
 use crate::report::TestReport;
@@ -316,28 +318,150 @@ pub fn run_command(workspace: &Path, command: &str) -> CommandResult {
 /// Run `command` in `workspace` under `sandbox`. Combined stdout/stderr captured; a
 /// spawn failure (e.g. Docker not installed) is a non-ok result, never a panic.
 pub fn run_command_in(sandbox: &Sandbox, workspace: &Path, command: &str) -> CommandResult {
-    match build_command(sandbox, workspace, command).output() {
-        Ok(out) => {
-            let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
-            let err = String::from_utf8_lossy(&out.stderr);
-            if !err.is_empty() {
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&err);
+    run_command_bounded(sandbox, workspace, command, COMMAND_TIMEOUT)
+}
+
+/// How long any harness-spawned command may run before it is killed.
+///
+/// **The code being run was written by a model, so non-termination is a routine
+/// outcome, not an exotic one.** Measured: a model wrote a change that compiled
+/// and then looped forever; `.output()` blocked, and the eval sat wedged for 34
+/// minutes before anyone looked -- the model idle, one `t_two_stage.exe` spinning,
+/// and nothing in the logs saying so.
+///
+/// Generous, because a real build on a cold cache is slow. The point is only to
+/// bound something that never finishes.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// [`run_command_in`] with an explicit deadline.
+///
+/// A timeout is a FAILED command, not a crash: the caller gets `ok: false` and an
+/// output that says what happened, so the model can read it and try something
+/// else. Silently returning success would be far worse than hanging.
+pub fn run_command_bounded(
+    sandbox: &Sandbox,
+    workspace: &Path,
+    command: &str,
+    timeout: Duration,
+) -> CommandResult {
+    let mut cmd = build_command(sandbox, workspace, command);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult {
+                ok: false,
+                code: None,
+                output: format!("failed to spawn {command:?}: {e}"),
             }
+        }
+    };
+
+    // Drain both pipes on their own threads. A child that fills a pipe buffer
+    // blocks on the write, so polling `try_wait` without reading would deadlock on
+    // exactly the chatty command most likely to be slow.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(p, &mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(p, &mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {}
+            Err(_) => break None,
+        }
+        if Instant::now() >= deadline {
+            kill_tree(&mut child);
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let mut output = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
+    let err = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
+    if !err.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&err);
+    }
+
+    match status {
+        Some(st) => CommandResult {
+            ok: st.success(),
+            code: st.code(),
+            output,
+        },
+        None => {
+            // Say so in the output: the model reads this, and "timed out" is
+            // actionable where a silent empty result is not.
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "[harness] command exceeded its {}s limit and was killed",
+                timeout.as_secs()
+            ));
             CommandResult {
-                ok: out.status.success(),
-                code: out.status.code(),
+                ok: false,
+                code: None,
                 output,
             }
         }
-        Err(e) => CommandResult {
-            ok: false,
-            code: None,
-            output: format!("failed to spawn {command:?}: {e}"),
-        },
     }
+}
+
+/// Kill a timed-out command *and everything it spawned*.
+///
+/// `Child::kill` reaches only the shell. Its children survive, and because they
+/// hold the inherited handles the follow-up `wait()` then blocks on them -- so the
+/// naive kill-then-wait pair hangs on exactly the input it exists to handle. A
+/// harness command is usually a shell that spawned a compiler that spawned a test
+/// binary, so killing the tree is the normal case here, not an edge case.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(unix)]
+    {
+        // Negating the pid signals the process GROUP, reaching the children.
+        let _ = Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Run the verification `command` on the host and parse it into a [`TestReport`].
@@ -634,5 +758,88 @@ mod tests {
     #[test]
     fn a_posix_path_is_left_alone() {
         assert_eq!(shell_path(Path::new("/tmp/ws")), "/tmp/ws");
+    }
+
+    /// **A command that never ends must not hang the harness.**
+    ///
+    /// The code a harness runs was written by a model, so non-termination is a
+    /// routine outcome. Measured before this existed: a model wrote a change that
+    /// compiled and then looped forever, `.output()` blocked, and an eval sat
+    /// wedged for 34 minutes -- the model idle, one test binary spinning, and
+    /// nothing anywhere saying so.
+    #[test]
+    fn a_command_that_never_ends_is_killed_and_reported() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-forever-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let forever = if cfg!(windows) {
+            "ping -t 127.0.0.1"
+        } else {
+            "while :; do :; done"
+        };
+
+        let start = Instant::now();
+        let r = run_command_bounded(&Sandbox::Host, &ws, forever, Duration::from_millis(400));
+        let elapsed = start.elapsed();
+
+        assert!(!r.ok, "a killed command has not succeeded");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "must be killed at the deadline, took {elapsed:?}"
+        );
+        // The model reads this output; "timed out" is actionable, silence is not.
+        assert!(
+            r.output.contains("exceeded its"),
+            "must say what happened, got: {:?}",
+            r.output
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The deadline must not cost output. A command that finishes normally keeps
+    /// its stdout, which the threaded pipe drain is there to guarantee.
+    #[test]
+    fn a_normal_command_still_returns_its_output() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-normal-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let r = run_command_bounded(&Sandbox::Host, &ws, "echo hello", Duration::from_secs(30));
+        assert!(r.ok, "got {r:?}");
+        assert!(r.output.contains("hello"), "got {:?}", r.output);
+        assert_eq!(r.code, Some(0));
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// A chatty command must not deadlock on a full pipe buffer.
+    ///
+    /// Polling `try_wait` while nothing reads the pipes would hang the moment the
+    /// child fills one -- and the chattiest commands are exactly the slow builds
+    /// this timeout exists for.
+    #[test]
+    fn a_command_with_a_lot_of_output_does_not_deadlock() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-chatty-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // Well past a typical 64KB pipe buffer. Branch on the shell we ACTUALLY
+        // get, not on the platform: `host_shell` prefers `sh` wherever one exists,
+        // including on Windows, so a `cfg!(windows)` branch here would hand cmd
+        // syntax to sh and silently measure nothing.
+        let cmd = if host_shell().0 == "cmd" {
+            "for /L %i in (1,1,4000) do @echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        } else {
+            "i=0; while [ $i -lt 4000 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done"
+        };
+
+        let start = Instant::now();
+        let r = run_command_bounded(&Sandbox::Host, &ws, cmd, Duration::from_secs(60));
+        assert!(
+            start.elapsed() < Duration::from_secs(55),
+            "should finish well inside the deadline, not be killed by it"
+        );
+        assert!(r.output.len() > 64_000, "got {} bytes", r.output.len());
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }
