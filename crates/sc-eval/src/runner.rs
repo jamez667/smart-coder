@@ -76,7 +76,20 @@ fn verify(workspace: &Path, cmd: &str, timeout: Duration) -> std::io::Result<boo
     // task scored as failing to go green, which is indistinguishable from a solver
     // that produced nothing. `sc_verify::build_command` already branches on the
     // platform, so use the same shell selection the rest of the harness does.
-    let (shell, flag) = if cfg!(windows) {
+    // Prefer a POSIX shell, on every platform.
+    //
+    // Task `verify_cmd`s are POSIX-shaped by convention -- the suite has shipped
+    // `sh test.sh` since M1, and `./binary` is how you run a local artifact. Under
+    // `cmd` neither works: `cmd` has no `.` on PATH, so `./t.exe` and even `t.exe`
+    // both fail with "not recognized", which reads as a broken test rather than a
+    // shell mismatch.
+    //
+    // This repo already requires a POSIX `sh` on Windows for exactly this reason
+    // (`scripts/check.ps1` prepends Git's `usr\bin` when it is missing), so
+    // preferring it here follows the established convention rather than inventing a
+    // second one. `cmd` remains the fallback so a machine without `sh` still runs
+    // *something* instead of failing to spawn.
+    let (shell, flag) = if cfg!(windows) && !posix_sh_available() {
         ("cmd", "/C")
     } else {
         ("sh", "-c")
@@ -152,11 +165,34 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Is a POSIX shell on PATH? Probed once; the answer cannot change mid-run.
+fn posix_sh_available() -> bool {
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
 /// How long a task's verify command may run before it is treated as failed.
 ///
 /// Generous, because a real test suite on a cold cargo cache is slow; the point is
 /// only to bound a solution that never terminates.
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The verify timeout for one task: its own, or the default.
+fn task_timeout(task: &EvalTask) -> Duration {
+    task.timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(VERIFY_TIMEOUT)
+}
 
 /// Snapshot the contents of each contract-test file (None == missing).
 fn snapshot_contracts(workspace: &Path, contracts: &[String]) -> BTreeMap<String, Option<u64>> {
@@ -195,7 +231,7 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     }
 
     // (1) verify-red-first: the unsolved fixture must fail.
-    match verify(ws.path(), &task.verify_cmd, VERIFY_TIMEOUT) {
+    match verify(ws.path(), &task.verify_cmd, task_timeout(task)) {
         Ok(true) => return result(Outcome::NotRedFirst),
         Ok(false) => {}
         Err(e) => {
@@ -222,7 +258,7 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     }
 
     // (3) green after solve.
-    match verify(ws.path(), &task.verify_cmd, VERIFY_TIMEOUT) {
+    match verify(ws.path(), &task.verify_cmd, task_timeout(task)) {
         Ok(true) => result_with_metrics(Outcome::Pass),
         Ok(false) => result_with_metrics(Outcome::StillRed),
         Err(e) => result_with_metrics(Outcome::HarnessError(format!(
@@ -266,6 +302,8 @@ mod tests {
             verify_cmd: "sh test.sh".into(),
             contract_tests: vec!["test.sh".into()],
             solution: None,
+            tags: Vec::new(),
+            timeout_secs: None,
         };
         (dir, task)
     }
@@ -316,6 +354,8 @@ mod tests {
             verify_cmd: "sh test.sh".into(),
             contract_tests: vec![],
             solution: None,
+            tags: Vec::new(),
+            timeout_secs: None,
         };
         assert_eq!(run_task(&task, &NoopSolver).outcome, Outcome::NotRedFirst);
     }
@@ -341,6 +381,8 @@ mod tests {
             verify_cmd: "sh test.sh".into(),
             contract_tests: vec![],
             solution: None,
+            tags: Vec::new(),
+            timeout_secs: None,
         };
         assert!(matches!(
             run_task(&task, &NoopSolver).outcome,

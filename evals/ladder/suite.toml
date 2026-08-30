@@ -1,0 +1,64 @@
+# The capability ladder. Three rungs, same KIND of bug, different amounts of help.
+#
+# What varies between rungs is ONLY the `description` — the fixture bugs are all
+# small, local, single-expression fixes. That is deliberate. Across every SWE-bench
+# run we did, patch size did NOT predict whether a model solved an instance (the
+# reliably-solved set spans 2-15 changed lines; the never-solved one is 10). What
+# predicted it was whether the task text NAMED THE FIX or only the symptom: on one
+# instance, 16/16 edits when the text named it versus 1/16 when it did not, same
+# file, same tools, same model.
+#
+# So the ladder grades diagnostic distance, not code volume:
+#
+#   stated       the text names the fix. Tests transcription, not diagnosis.
+#   located      the text names the symptom and the function. Tests local reasoning.
+#   symptomatic  the text names only the observable failure. Tests diagnosis.
+#
+# Expect stated >= located >= symptomatic. A model scoring BETTER on symptomatic
+# means the grading is wrong, not that the model is unusual.
+#
+# Rust only, and dependency-free single-file `rustc --test`: CI installs no Python
+# and no crate registry, and a gate that cannot run everywhere is a gate somebody
+# disables. See docs/specs/11-testing-and-tdd.md.
+
+[[tasks]]
+id = "rust-stated"
+description = """
+In lib.rs, `max_run` computes the largest sum of any contiguous run, but the \
+running total is wrong: `here = here.max(v)` discards the accumulated sum instead \
+of extending it. It should be `here = v.max(here + v)` — either start a new run at \
+v, or extend the previous one by v. Make that change so the tests pass."""
+fixture = "tasks/rust-stated/fixture"
+solution = "tasks/rust-stated/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_stated.exe test.rs && ./t_stated.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:stated", "lang:rust"]
+timeout_secs = 120
+
+[[tasks]]
+id = "rust-located"
+description = """
+In lib.rs, `insert` merges overlapping intervals into a sorted, non-overlapping \
+set. Intervals are half-open — `[1,3)` and `[3,6)` share no point and must NOT \
+merge — but `insert` merges them anyway. The bug is in the disjointness test \
+inside the loop. Fix it so the tests pass."""
+fixture = "tasks/rust-located/fixture"
+solution = "tasks/rust-located/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_located.exe test.rs && ./t_located.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:located", "lang:rust"]
+timeout_secs = 120
+
+[[tasks]]
+id = "rust-symptomatic"
+description = """
+The rolling-window type in lib.rs returns its readings in the wrong order. Pushing \
+1 then 2 into a window of capacity 3 should give [1, 2], but it does not. A full \
+window reports its readings correctly, so this only shows up before the window \
+fills. Find the cause and fix it so the tests pass."""
+fixture = "tasks/rust-symptomatic/fixture"
+solution = "tasks/rust-symptomatic/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_symptomatic.exe test.rs && ./t_symptomatic.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:symptomatic", "lang:rust"]
+timeout_secs = 120

@@ -50,3 +50,10 @@ web/playwright-report/
 # `docs/specs/`; this directory is per-run working state that gets swept into
 # whatever commit happens next (it once did — see fbdd34a).
 /specs/
+
+# Ladder fixtures compile in place (single-file `rustc --test`), so a manual run
+# leaves binaries and debug info beside the sources. The harness copies fixtures
+# to a temp workspace and never builds here, but a hand-run does.
+evals/ladder/**/*.exe
+evals/ladder/**/*.pdb
+evals/ladder/**/*.rcgu.o

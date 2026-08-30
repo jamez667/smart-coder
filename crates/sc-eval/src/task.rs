@@ -28,6 +28,19 @@ pub struct EvalTask {
     /// an absolute path by [`TaskSuite::load`].
     #[serde(default)]
     pub solution: Option<PathBuf>,
+    /// Free-form labels for grouping results, e.g. `["rung:symptomatic", "lang:rust"]`.
+    ///
+    /// The ladder needs these: a single pass/fail total says a model scored 4/6 but
+    /// not *which* rung it fell off, and the rung is the whole measurement. Additive
+    /// and untyped on purpose -- a new axis should not need a schema change.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Per-task override for the verify timeout, in seconds.
+    ///
+    /// The default is generous enough for a cold cargo build; a task that should be
+    /// fast can say so, and catch a runaway sooner.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// A suite of tasks, loaded from a TOML file.

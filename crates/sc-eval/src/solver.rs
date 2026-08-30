@@ -231,6 +231,8 @@ mod tests {
             verify_cmd: "sh test.sh".into(),
             contract_tests: vec!["test.sh".into()],
             solution: None,
+            tags: Vec::new(),
+            timeout_secs: None,
         };
 
         // Script the "model": write the correct impl, then finish.
@@ -277,6 +279,8 @@ mod tests {
             verify_cmd: "sh test.sh".into(),
             contract_tests: vec!["test.sh".into()],
             solution: None,
+            tags: Vec::new(),
+            timeout_secs: None,
         };
 
         let backend = MockBackend::new([
@@ -332,6 +336,8 @@ exit 0
             verify_cmd: "sh test.sh".into(),
             contract_tests: vec!["test.sh".into()],
             solution: None,
+            tags: Vec::new(),
+            timeout_secs: None,
         };
 
         // A solver that overwrites the contract test outright, as a shell command
