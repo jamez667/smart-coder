@@ -62,3 +62,49 @@ verify_cmd = "rustc --test --edition 2021 -o t_symptomatic.exe test.rs && ./t_sy
 contract_tests = ["test.rs"]
 tags = ["rung:symptomatic", "lang:rust"]
 timeout_secs = 120
+
+# --- The harder rungs -------------------------------------------------------
+#
+# The three above all share a weakness: the failing test points straight at the
+# buggy file, so "read the test, read the file it names, fix it" is enough. Both
+# models cleared them 3/3, which means they measure a floor, not a ceiling.
+#
+# These three break that assumption in the three ways real debugging does.
+
+[[tasks]]
+id = "rust-misdirected"
+description = """
+`cargo test` fails on `a_url_value_survives_intact`. A config value that is a URL \
+with a `#` fragment comes back truncated. Find the cause and fix it so the tests \
+pass."""
+fixture = "tasks/rust-misdirected/fixture"
+solution = "tasks/rust-misdirected/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_misdirected.exe test.rs && ./t_misdirected.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:misdirected", "lang:rust"]
+timeout_secs = 120
+
+[[tasks]]
+id = "rust-two-stage"
+description = """
+The version comparator says `1.4` and `1.4.0` are different versions. They are the \
+same version — a missing component counts as zero. Fix it so the tests pass."""
+fixture = "tasks/rust-two-stage/fixture"
+solution = "tasks/rust-two-stage/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_two_stage.exe test.rs && ./t_two_stage.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:two-stage", "lang:rust"]
+timeout_secs = 120
+
+[[tasks]]
+id = "rust-invariant"
+description = """
+The LRU cache returns a value it should have evicted: after reading a key to make \
+it recent, the wrong entry is dropped on the next insert. Find the cause and fix \
+it so the tests pass."""
+fixture = "tasks/rust-invariant/fixture"
+solution = "tasks/rust-invariant/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_invariant.exe test.rs && ./t_invariant.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:invariant", "lang:rust"]
+timeout_secs = 120
