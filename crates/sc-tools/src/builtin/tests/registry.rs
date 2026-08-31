@@ -65,3 +65,40 @@ fn rejects_path_traversal() {
     }
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// No tool description may name ANOTHER tool.
+///
+/// The registry gets trimmed -- a scored task run offers six of these, not all
+/// sixteen -- so a description that points at a sibling tool is steering the
+/// model toward something it may have no way to call. `read_file` used to say
+/// "after `search_code` gives you a line number", and a trimmed run has no
+/// `search_code`; the model then guessed at parameters and lost the turn
+/// ("tool read_file has no parameter end").
+///
+/// A description may name its OWN parameters; those always exist.
+#[test]
+fn no_tool_description_names_another_tool() {
+    let reg = default_registry();
+    let names: Vec<&str> = reg.specs().iter().map(|s| s.name).collect();
+    for spec in reg.specs() {
+        let own: Vec<String> = spec
+            .params
+            .iter()
+            .map(|p| format!("`{}`", p.name))
+            .collect();
+        for other in &names {
+            if *other == spec.name {
+                continue;
+            }
+            let token = format!("`{other}`");
+            if own.contains(&token) {
+                continue;
+            }
+            assert!(
+                !spec.description.contains(&token),
+                "`{}`'s description names `{other}`, which a trimmed registry may not offer",
+                spec.name
+            );
+        }
+    }
+}

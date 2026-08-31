@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::path::Path;
 
-use sc_core::{run_agent, AgentConfig, ToolCallMetrics};
+use sc_core::{AgentConfig, ToolCallMetrics};
 use sc_model::ModelBackend;
 use sc_proto::{DcError, Result};
 
@@ -159,6 +159,20 @@ fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
         response_reserve_tokens: 12288,
         observation_line_cap: 200,
         read_file_line_cap: 800,
+        // Hold enough turns to keep a MULTI-FILE task in view.
+        //
+        // The default of 3 is sized for a one-file fix. A task spanning four files
+        // cannot hold them: by the time the fourth is read the first has been
+        // compacted to a summary, so the model reads it again -- and again. Measured
+        // on `engine-grid-scan`, four source files: three complete read cycles
+        // before the first edit, 25 reads against 2 edits, and the prompt visibly
+        // SHRINKING between turns (6,722 then 5,412) while less than half the
+        // 12,288-token budget was in use. It was not thrashing; the harness was
+        // discarding what it had just handed over.
+        //
+        // 10 turns is ~7k tokens on the observed traces, comfortably inside budget,
+        // and the budgeter still evicts if a task runs bigger than that.
+        keep_recent_turns: 10,
         // The agent can finally check its own work. Without this it edits blind.
         verify_command: Some(task.verify_cmd.clone()),
         permission: sc_tools::PermissionPolicy {
@@ -175,6 +189,36 @@ fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
         },
         ..base
     }
+}
+
+/// The tools a task run offers: six, not sixteen.
+///
+/// **Measured, on the SWE-bench path: six tools got `run_command` 12/12; the full
+/// sixteen got 3/12.** More choices produce more deliberation and fewer actions --
+/// a model given a large menu reads and re-reads instead of editing. That finding
+/// shaped `swebench_registry` and was then not applied here, so task runs kept the
+/// full default while the numbers beside them were tuned.
+///
+/// Same six, and deliberately not shared with `swebench_registry`: that one is
+/// pinned to what the benchmark measured and must not drift because this one
+/// changed.
+fn task_registry() -> sc_tools::ToolRegistry {
+    const KEEP: [&str; 6] = [
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_command",
+        "run_verification",
+        "finish",
+    ];
+    let specs: Vec<sc_tools::ToolSpec> = sc_tools::default_registry()
+        .specs()
+        .iter()
+        .filter(|s| KEEP.contains(&s.name))
+        .cloned()
+        .collect();
+    debug_assert_eq!(specs.len(), KEEP.len(), "a kept tool is missing by name");
+    sc_tools::ToolRegistry::new(specs)
 }
 
 /// The real solver: runs the `sc_core` agent loop, driven by a model backend, to
@@ -246,23 +290,22 @@ impl Solver for AgentSolver<'_> {
         // Backend errors (e.g. model unavailable) surface as a SolverError outcome.
         // Route through the observed entry point when a sink is attached, so the
         // event stream is available; otherwise keep the plain call.
-        let report = match self.sink {
-            Some(sink) => {
-                let registry = sc_tools::default_registry();
-                let strategy = sc_core::select_strategy(&self.backend.capabilities());
-                sc_core::run_agent_observed(
-                    self.backend,
-                    None,
-                    &registry,
-                    strategy.as_ref(),
-                    &instruction,
-                    workspace,
-                    &cfg,
-                    sink,
-                )?
-            }
-            None => run_agent(self.backend, &instruction, workspace, &cfg)?,
-        };
+        // The SAME registry and strategy on both paths -- attaching a log must not
+        // change what the model is offered, or the run you debug is not the run you
+        // scored. The no-sink path used to fall through to `run_agent`, which builds
+        // the full 16-tool default.
+        let registry = task_registry();
+        let strategy = sc_core::select_strategy(&self.backend.capabilities());
+        let report = sc_core::run_agent_observed(
+            self.backend,
+            None,
+            &registry,
+            strategy.as_ref(),
+            &instruction,
+            workspace,
+            &cfg,
+            self.sink.unwrap_or(&sc_core::NullSink),
+        )?;
         self.last.set(Some(report.metrics));
         self.last_run.replace(Some(RunInfo {
             steps: report.steps,
@@ -342,6 +385,7 @@ mod tests {
     /// but it is not sufficient on its own: `allow_shell` is on, so a model can still
     /// reach the file through a command. The post-hoc backstop below covers that,
     /// and the two are asserted separately so neither can quietly stop working.
+
     #[test]
     fn agent_solver_is_denied_when_it_tries_to_edit_the_test() {
         let fixture = TempWorkspace::new("agent-cheat").unwrap();
@@ -381,6 +425,36 @@ mod tests {
         assert!(
             after.contains("is_even 4"),
             "the frozen contract test must survive the run, got: {after:?}"
+        );
+    }
+
+    /// A task run offers the measured SIX tools, not the default sixteen.
+    ///
+    /// Measured on the SWE-bench path: six tools got `run_command` 12/12 while the
+    /// full sixteen got 3/12. A large menu produces deliberation instead of action,
+    /// and the observable symptom is a model reading the same files repeatedly
+    /// without ever editing. That finding shaped `swebench_registry` and was then
+    /// not applied here -- task runs kept the default while the numbers beside them
+    /// were tuned.
+    #[test]
+    fn a_task_run_offers_the_measured_six_tools() {
+        let r = task_registry();
+        let mut names: Vec<&str> = r.specs().iter().map(|s| s.name).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "edit_file",
+                "finish",
+                "read_file",
+                "run_command",
+                "run_verification",
+                "write_file",
+            ]
+        );
+        assert!(
+            sc_tools::default_registry().specs().len() > names.len(),
+            "premise: the default really is larger"
         );
     }
 

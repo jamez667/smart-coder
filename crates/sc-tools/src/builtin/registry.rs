@@ -12,9 +12,13 @@ pub fn default_registry() -> ToolRegistry {
     ToolRegistry::new(vec![
         ToolSpec {
             name: "read_file",
+            // Names no OTHER tool. The registry may be trimmed (a task run offers six
+            // of these, not all sixteen), and steering toward a tool the model does not
+            // have wastes the turn and teaches it to distrust the harness. This used to
+            // point at `search_code`, which a trimmed run has no way to call.
             description: "Read a UTF-8 text file. Optionally pass `start` (1-based line) and \
-                          `limit` (line count) to read just a window — after `search_code` gives \
-                          you a line number, read a chunk around it instead of the whole file.",
+                          `limit` (line count) to read just a window of it rather than the \
+                          whole file.",
             params: vec![
                 ParamSpec::new(
                     "path",

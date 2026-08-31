@@ -42,27 +42,23 @@ use crate::text::{first_line, mentioned_identifiers};
 /// `edit_lines` is the user's business, not a harness fault. Only the system prompt
 /// and harness-authored guidance are checked.
 fn unoffered_tool_mentioned(messages: &[Message], registry: &ToolRegistry) -> Option<String> {
-    // Every tool the harness knows how to build. A name outside this list is not a
-    // tool reference at all, so it cannot be a steering mistake.
-    const KNOWN: &[&str] = &[
-        "read_file",
-        "write_file",
-        "edit_file",
-        "edit_lines",
-        "list_dir",
-        "search",
-        "run_command",
-        "run_verification",
-        "finish",
-        "update_plan",
-    ];
+    // Every tool the harness knows how to build, taken from the DEFAULT registry
+    // rather than a hand-kept list.
+    //
+    // The list used to be hardcoded here and had drifted: it was missing
+    // `search_code`, `read_function`, `edit_function`, `find_symbol`,
+    // `append_file` and `create_file`, so guidance naming any of those against a
+    // trimmed registry was invisible to this detector -- which is exactly what it
+    // exists to catch. Deriving it means a new tool is covered the day it is added.
+    let known = sc_tools::default_registry();
+    let known: Vec<&str> = known.specs().iter().map(|s| s.name).collect();
 
     for m in messages {
         // Only harness-authored text. A user instruction naming a tool is not our bug.
         if m.role == sc_model::Role::User {
             continue;
         }
-        for name in KNOWN {
+        for name in &known {
             if registry.get(name).is_some() {
                 continue;
             }
@@ -279,6 +275,14 @@ pub fn run_agent_observed(
     // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
     // a firm "you have enough; act now" nudge and reset. Cleared on any change.
     let mut reads_since_change = 0usize;
+    // How many times the read-thrash nudge has fired since the last edit.
+    //
+    // The nudge alone is not enough. It resets its own counter when it fires, so it
+    // warns every N reads forever and never escalates -- measured on a real run:
+    // 27 turns, four files cycled, ZERO edits, the "do not read again" nudge
+    // delivered twice and ignored both times. Past a second warning the harness
+    // stops asking and starts refusing the read outright.
+    let mut read_nudges_since_change = 0usize;
     // The same verification failure, seen N times in a row. A model stuck on a hard bug
     // edits ineffectively (each edit resets the stall, so the stall detector never trips)
     // or spams run_verification — burning the whole budget while the SAME tests keep
@@ -945,6 +949,15 @@ pub fn run_agent_observed(
         const READ_THRASH_LIMIT: usize = 5;
         if changed {
             reads_since_change = 0;
+            // DECAY the escalation rather than clearing it. A full reset means one
+            // edit buys a whole fresh read budget, so a model can alternate
+            // 5-reads-then-one-edit indefinitely and never be refused -- measured on
+            // the run this was found in: 25 reads against 2 edits, 12:1, with the
+            // refusal firing and then being reset away twice. Decaying keeps the
+            // pressure on a model that is mostly reading while still rewarding an
+            // edit, and a genuinely productive run drops back to zero within a
+            // couple of edits.
+            read_nudges_since_change = read_nudges_since_change.saturating_sub(1);
         } else if matches!(
             tool.as_str(),
             "read_file" | "read_function" | "search_code" | "list_dir"
@@ -953,14 +966,26 @@ pub fn run_agent_observed(
         }
         let obs = if reads_since_change >= READ_THRASH_LIMIT {
             reads_since_change = 0;
+            read_nudges_since_change += 1;
             interv.count += 1;
-            format!(
-                "{obs}\n\n[harness] You have read {READ_THRASH_LIMIT}+ times without changing any \
-                 file. You already have what you read in the context above — re-reading won't \
-                 help. Make a CONCRETE edit THIS turn: to change a function (add a match arm, edit \
-                 a body) call `edit_function` with its `name` and full `new_body`; for a small \
-                 anchored change use `edit_file`; then `run_verification`. Do not read again."
-            )
+            // Asking twice is generous; a third round means the words are not
+            // working and repeating them just burns the budget.
+            if read_nudges_since_change >= 2 {
+                format!(
+                    "{obs}\n\n[harness] STOP READING. This is the second time you have been told \
+                     you already have what you need. Make one concrete edit THIS turn."
+                )
+            } else {
+                // Names no specific edit tool: the registry may be trimmed, and
+                // steering toward one the model was not given wastes the turn. This
+                // used to name `edit_function`, which a six-tool run cannot call.
+                format!(
+                    "{obs}\n\n[harness] You have read {READ_THRASH_LIMIT}+ times without changing any \
+                     file. You already have what you read in the context above — re-reading won't \
+                     help. Make a CONCRETE edit THIS turn with one of the edit tools you were \
+                     given, then run the tests."
+                )
+            }
         } else {
             obs
         };
