@@ -58,6 +58,20 @@ pub struct RunInfo {
     pub self_verified: Option<bool>,
     /// How many times the harness intervened to recover the run.
     pub interventions: usize,
+    /// The largest reply the model produced, in tokens.
+    ///
+    /// Reported so `response_reserve_tokens` can be checked against reality. The
+    /// reserve is subtracted from the prompt budget on EVERY turn, so an
+    /// over-generous one silently costs context all run -- and it is a per-model
+    /// number: measured on the same ten rungs, one model peaked at 1,328 tokens
+    /// and another at 14,202.
+    pub peak_reply_tokens: usize,
+    /// Harness faults raised during the solve, by kind.
+    ///
+    /// Surfaced in the report because a run that degraded its own input must not
+    /// print like a clean one -- these were emitted to the event stream from the
+    /// start and visible only by parsing an NDJSON log by hand.
+    pub harness_faults: Vec<(sc_core::FaultKind, usize)>,
 }
 
 /// Applies a task's known-good `solution` directory over the workspace.
@@ -156,7 +170,30 @@ where
 fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
     AgentConfig {
         max_steps: 40,
-        response_reserve_tokens: 12288,
+        // 4096, down from 12288 -- MEASURED, not guessed.
+        //
+        // The reserve is subtracted from the prompt budget on EVERY turn, so an
+        // over-generous one costs context on every request of the run. 12288 was
+        // sized for a model that rambles: on the same ten rungs, Qwen3-30B peaked
+        // at 14,202 tokens in a single reply (and truncated 16 times anyway), while
+        // Tiel peaked at 1,328 across a complete 10/10 run. One constant cannot be
+        // right for both -- it was simultaneously far too large for one and too
+        // small for the other.
+        //
+        // 6144, arrived at by MEASURING rather than by one sample. 4096 looked
+        // generous against a 1,328-token peak from one run -- and then a run with
+        // the bigger context produced a 3,473-token reply and truncated twice. A
+        // model given more room to read writes longer replies, so the reserve
+        // cannot be sized from a run taken at a different budget.
+        //
+        // 6144 is ~1.8x the largest reply yet observed. The prompt budget is 32k x
+        // 0.75 - 6144 = 18,432 tokens, still 50% more than the 12,288 it replaced,
+        // at no VRAM cost.
+        //
+        // Do not tune this by eye: `largest reply: N tokens` in the suite summary is
+        // the number to size against, and any reply that does hit the cap raises
+        // HarnessFault::ReplyTruncated, which the summary now prints loudly.
+        response_reserve_tokens: 6144,
         observation_line_cap: 200,
         read_file_line_cap: 800,
         // Hold enough turns to keep a MULTI-FILE task in view.
@@ -312,6 +349,8 @@ impl Solver for AgentSolver<'_> {
             stop_reason: format!("{:?}", report.stop_reason),
             self_verified: report.verified,
             interventions: report.interventions,
+            peak_reply_tokens: report.peak_reply_tokens,
+            harness_faults: report.harness_faults.clone(),
         }));
         Ok(())
     }

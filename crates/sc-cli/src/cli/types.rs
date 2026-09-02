@@ -1,9 +1,16 @@
 //! The parsed-invocation types: what the user asked for, and with what config.
 
-/// Default OpenAI-compatible endpoint: Ollama's compat server on localhost.
-pub const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
-/// Default model — the project's primary small-model target (spec 00).
-pub const DEFAULT_MODEL: &str = "gemma4:e4b";
+/// Default OpenAI-compatible endpoint: the `sc-tiel30b` llama.cpp server.
+pub const DEFAULT_BASE_URL: &str = "http://localhost:11436/v1";
+/// Default model — the best-measured local coder.
+///
+/// Tiel-Coder-35B against Qwen3-Coder-30B (q3_k_m), same harness, ten ladder
+/// rungs: **10/10 vs 6/10**, 61 turns vs 206, and zero harness faults vs sixteen
+/// truncated replies. Generation speed is a wash (110.9 vs 107.6 tok/s) -- the
+/// gap is that the 30B emits ~4.7x the tokens for less work, much of it long
+/// replies that never reach a tool call, so it is roughly 5x the wall clock per
+/// task.
+pub const DEFAULT_MODEL: &str = "tiel-coder-35b";
 
 /// What the user asked the CLI to do.
 #[derive(Debug, Clone, PartialEq, Eq)]

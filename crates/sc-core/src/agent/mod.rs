@@ -245,6 +245,8 @@ pub fn run_agent_observed(
     let mut history: Vec<TurnRecord> = Vec::new();
     let mut recent: Vec<Message> = Vec::new();
     let mut peak_prompt_tokens = 0usize;
+    // Largest reply seen, so the reply reserve can be checked against reality.
+    let mut peak_reply_tokens = 0usize;
     let mut journal = Journal::new();
     let mut stall_detector = StallDetector::default();
     // The harness's in-loop intervention bookkeeping: the running intervention count, the
@@ -311,6 +313,8 @@ pub fn run_agent_observed(
                 steps: step,
                 metrics,
                 peak_prompt_tokens,
+                peak_reply_tokens,
+                harness_faults: runlog.lock().fault_counts(),
                 prompt_budget: budget,
                 verified: None,
                 change_summary: journal.change_summary(),
@@ -428,6 +432,7 @@ pub fn run_agent_observed(
         };
         // Emit the model's full raw output for this turn (spec 06 — show what the
         // model actually said).
+        peak_reply_tokens = peak_reply_tokens.max(counter.count(&resp.content));
         sink.record(&AgentEvent::ModelTurn {
             step: step + 1,
             prompt_tokens: built.tokens_used,
@@ -534,6 +539,8 @@ pub fn run_agent_observed(
                                 &journal,
                                 metrics,
                                 peak_prompt_tokens,
+                                peak_reply_tokens,
+                                runlog.lock().fault_counts(),
                                 budget,
                                 interv.count,
                             ));
@@ -632,6 +639,8 @@ pub fn run_agent_observed(
                                         steps: step + 1,
                                         metrics,
                                         peak_prompt_tokens,
+                                        peak_reply_tokens,
+                                        harness_faults: runlog.lock().fault_counts(),
                                         prompt_budget: budget,
                                         verified,
                                         change_summary: journal.change_summary(),
@@ -715,6 +724,8 @@ pub fn run_agent_observed(
                                         steps: step + 1,
                                         metrics,
                                         peak_prompt_tokens,
+                                        peak_reply_tokens,
+                                        harness_faults: runlog.lock().fault_counts(),
                                         prompt_budget: budget,
                                         verified: Some(true),
                                         change_summary: journal.change_summary(),
@@ -1027,6 +1038,8 @@ pub fn run_agent_observed(
                         steps: step + 1,
                         metrics,
                         peak_prompt_tokens,
+                        peak_reply_tokens,
+                        harness_faults: runlog.lock().fault_counts(),
                         prompt_budget: budget,
                         verified: Some(true),
                         change_summary: journal.change_summary(),
@@ -1087,6 +1100,8 @@ pub fn run_agent_observed(
                     &journal,
                     metrics,
                     peak_prompt_tokens,
+                    peak_reply_tokens,
+                    runlog.lock().fault_counts(),
                     budget,
                     interv.count,
                 ));
@@ -1097,6 +1112,9 @@ pub fn run_agent_observed(
     sink.record(&AgentEvent::Stopped {
         reason: StopReason::BudgetExhausted,
     });
+    // Bound before the call: taking the lock inline makes the guard a temporary of
+    // the tail expression, which outlives `runlog` itself.
+    let faults = runlog.lock().fault_counts();
     Ok(stopped(
         StopReason::BudgetExhausted,
         cfg.max_steps,
@@ -1106,6 +1124,8 @@ pub fn run_agent_observed(
         &journal,
         metrics,
         peak_prompt_tokens,
+        peak_reply_tokens,
+        faults,
         budget,
         interv.count,
     ))

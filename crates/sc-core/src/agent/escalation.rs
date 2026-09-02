@@ -97,6 +97,8 @@ pub(super) fn stopped(
     journal: &Journal,
     metrics: ToolCallMetrics,
     peak_prompt_tokens: usize,
+    peak_reply_tokens: usize,
+    harness_faults: Vec<(crate::event::FaultKind, usize)>,
     prompt_budget: usize,
     interventions: usize,
 ) -> AgentReport {
@@ -105,6 +107,8 @@ pub(super) fn stopped(
         steps,
         metrics,
         peak_prompt_tokens,
+        peak_reply_tokens,
+        harness_faults,
         prompt_budget,
         verified: verify_command
             .as_ref()

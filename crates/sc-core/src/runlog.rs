@@ -66,6 +66,25 @@ impl RunLog {
     }
 
     /// Every verification event, in order — for tracing how the suite evolved over the run.
+    /// Harness faults seen this run, by kind, most frequent first.
+    ///
+    /// The faults were always on the stream and never counted anywhere a caller
+    /// could reach, so a run that degraded its own input printed exactly like a
+    /// clean one and the only way to find out was to parse the log by hand.
+    pub fn fault_counts(&self) -> Vec<(crate::event::FaultKind, usize)> {
+        let mut counts: Vec<(crate::event::FaultKind, usize)> = Vec::new();
+        for e in self.events() {
+            if let AgentEvent::HarnessFault { kind, .. } = e {
+                match counts.iter_mut().find(|(k, _)| k == kind) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((*kind, 1)),
+                }
+            }
+        }
+        counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        counts
+    }
+
     pub fn verifications(&self) -> Vec<&AgentEvent> {
         self.events
             .iter()

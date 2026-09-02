@@ -39,7 +39,13 @@ fn doctor_report_shows_reachable_status_and_budget() {
     let caps = cli.backend().capabilities();
     let report = doctor_report(&cli, &caps, &Ok(()));
     assert!(report.contains("reachable ✓"), "got: {report}");
-    assert!(report.contains("8192 tokens"), "got: {report}");
+    // The budget is whatever the backend advertises, NOT a fixed number: `backend()`
+    // probes the live server for its real `n_ctx`, so this asserted 8192 only while
+    // the default endpoint had nothing listening on it. Asserting the line exists
+    // keeps the report's shape pinned without making the test depend on which model
+    // happens to be loaded.
+    assert!(report.contains("context budget:"), "got: {report}");
+    assert!(report.contains("tokens"), "got: {report}");
     assert!(report.contains(DEFAULT_MODEL), "got: {report}");
 }
 

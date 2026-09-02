@@ -6,6 +6,7 @@ use std::sync::Arc;
 use sc_tools::PermissionPolicy;
 
 use crate::confirm::Confirmer;
+use crate::event::FaultKind;
 use crate::metrics::ToolCallMetrics;
 use crate::recovery::StopReason;
 
@@ -179,6 +180,23 @@ pub struct AgentReport {
     /// it was kept under (spec 05 — the window is a hard-budgeted resource).
     pub peak_prompt_tokens: usize,
     pub prompt_budget: usize,
+    /// The largest REPLY the model produced, in tokens.
+    ///
+    /// Reported so `response_reserve_tokens` can be checked against reality rather
+    /// than guessed. The reserve is subtracted from the prompt budget every turn, so
+    /// an over-generous one silently costs context on every single request --
+    /// measured, Tiel's largest reply across a full ten-rung run was 1,328 tokens
+    /// against a 12,288 reserve, while a rambling model on the same suite hit
+    /// 14,202. It is a per-MODEL number and nobody could see it.
+    pub peak_reply_tokens: usize,
+    /// Harness faults raised during the run, by kind.
+    ///
+    /// **A run that degraded its own input must not look like a clean one.** These
+    /// were emitted to the event stream from the start and never counted here, so
+    /// the only way to see them was to parse an NDJSON log by hand -- a run with
+    /// sixteen truncated replies printed exactly like a run with none. Counting
+    /// them means the report can say so.
+    pub harness_faults: Vec<(FaultKind, usize)>,
     /// Whether the configured verification command was green at `finish` (spec 11
     /// — the whole-suite gate). `None` if no `verify_command` was configured.
     pub verified: Option<bool>,

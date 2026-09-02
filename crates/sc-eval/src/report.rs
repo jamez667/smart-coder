@@ -106,6 +106,56 @@ impl Report {
                 m.valid_rate() * 100.0
             );
         }
+        // The largest reply any task produced, against the reserve set aside for it.
+        //
+        // `response_reserve_tokens` is subtracted from the prompt budget EVERY turn,
+        // so an over-generous reserve costs context on every request of the run. It
+        // is a per-model number and was previously invisible: on the same ten rungs
+        // one model peaked at 1,328 tokens and another at 14,202, both charged the
+        // same 12,288.
+        if let Some(peak) = self
+            .results
+            .iter()
+            .filter_map(|r| r.run.as_ref().map(|x| x.peak_reply_tokens))
+            .max()
+        {
+            if peak > 0 {
+                let _ = write!(s, "\nlargest reply: {peak} tokens");
+            }
+        }
+
+        // HARNESS FAULTS, loudly.
+        //
+        // A run that degraded its own input must not print like a clean one. These
+        // events existed from the start and were reachable only by parsing an NDJSON
+        // log by hand, so a suite with sixteen truncated replies -- every one a lost
+        // turn -- printed exactly like a suite with none. Aggregated across tasks and
+        // marked, because the whole point is that it should be hard to miss.
+        let mut totals: Vec<(sc_core::FaultKind, usize)> = Vec::new();
+        for r in &self.results {
+            for (kind, n) in r.run.iter().flat_map(|x| x.harness_faults.iter()) {
+                match totals.iter_mut().find(|(k, _)| k == kind) {
+                    Some((_, t)) => *t += n,
+                    None => totals.push((*kind, *n)),
+                }
+            }
+        }
+        if !totals.is_empty() {
+            totals.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            let total: usize = totals.iter().map(|(_, n)| n).sum();
+            let _ = write!(
+                s,
+                "\n\n!! {total} HARNESS FAULT(S) - this run was degraded:"
+            );
+            for (kind, n) in &totals {
+                let _ = write!(s, "\n     {n:>3}x {}", kind.label());
+            }
+            let _ = write!(
+                s,
+                "\n   A fault means the HARNESS damaged the model's input or output. \
+                 Treat the scores above as a lower bound until these are gone."
+            );
+        }
         s
     }
 }
