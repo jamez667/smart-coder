@@ -100,7 +100,7 @@ execution:
 
 - Policies are configurable (e.g. `--yolo` to pre-approve, or an allowlist of
   safe commands). Defaults are conservative.
-- Headless harnesses (`sc-eval`, the SWE-bench path) run with `allow_shell`
+- Headless harnesses (`sc-eval`) run with `allow_shell`
   pre-approved — the same posture as `--yolo`, since there is no human to
   confirm. This reverses an earlier decision to deny shell there: denying it also
   removes the one thing that turns a *symptom* into a *diagnosis*. Measured on

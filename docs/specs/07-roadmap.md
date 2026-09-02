@@ -486,20 +486,22 @@ capture, and this removes the load-bearing cases from its shoulders.
     immediately: the first capture showed every run's opening command failing
     under the wrong shell, a harness bug that had been reading as model
     flakiness ([04](04-tools.md)).
-  - **SWE-bench is the post-M3 feasibility check, not a current target.** Our
-    `sc-eval` red→green machinery already mirrors SWE-bench's
-    `FAIL_TO_PASS`/`PASS_TO_PASS` split — and since the fixed task suite now runs
-    on the same measured agent settings as the SWE-bench path (step cap, response
-    reserve, observation and read caps), a harness change is measured the same way
-    on both — but three preconditions must land first
-    or a run measures missing infrastructure, not the model: **(1)** per-task
-    environment isolation (Docker images with pinned deps); **(2)** the retrieval
-    index + context budgeter (M2 / `sc-index`) so a 4B model can navigate a large
-    unfamiliar repo; **(3)** structured `run_verification` with pytest parsing
-    (M3, [04](04-tools.md)). Sequence: a `sc-eval` SWE-bench *adapter* + a tiny
-    pure-Python Docker subset once M2/M3 are in, then **SWE-bench Lite/Verified**
-    as the real benchmark. Expect low absolute scores — purpose-built 7B coders
-    sit ~18–23% ([10](10-prior-art.md)); the value is the *relative* signal across
-    harness changes, not the headline number.
+  - **SWE-bench was tried and dropped.** The adapter was built, ran against two
+    local models, and was removed. It cost 126 GB of per-instance Docker images
+    and minutes per instance, and the comparison it promised never materialised:
+    the published result we wanted to measure against used an unreleased instance
+    list with zero overlap with ours, so the numbers were never comparable.
+    Meanwhile every harness bug it surfaced was found faster on the in-house
+    ladder, which runs the same red→green machinery in seconds.
+
+    What it did leave behind is kept: the measured agent settings it produced
+    (step cap 40, response reserve, observation and read caps, the six-tool
+    registry) now live on the task path in `sc-eval`'s `task_config`, and the
+    reasoning for each is recorded there. The `FAIL_TO_PASS`/`PASS_TO_PASS`
+    discipline it validated is what `evals/ladder/` enforces.
+
+    If an outside-comparison number is ever wanted again, the adapter is
+    recoverable from git history — but the lesson is that a benchmark you cannot
+    line up against someone else's run is an expensive way to measure yourself.
 - Determinism/replay maintained at every milestone for debuggability
   ([03](03-agent-loop.md)).
