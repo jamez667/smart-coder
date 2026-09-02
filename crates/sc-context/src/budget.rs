@@ -198,7 +198,21 @@ pub fn prompt_budget(
     response_reserve: usize,
 ) -> usize {
     let effective = (max_context_tokens as f64 * effective_fraction) as usize;
-    effective.saturating_sub(response_reserve)
+    // The reserve may never take more than HALF the usable window.
+    //
+    // A reserve sized for a 32k model is catastrophic on an 8k one: 8192 * 0.75 is
+    // 6144, so a 6144-token reserve leaves a budget of ZERO -- and a zero budget does
+    // not fail loudly, it stops constraining anything, and the prompt grows until the
+    // server rejects it. That bug was fixed once by detecting the backend's real
+    // window, and then reintroduced the moment the reserve default was raised to suit
+    // the model actually in use.
+    //
+    // Capping here rather than at each call site means no caller can recreate it: the
+    // reserve is a REQUEST, the window is the constraint, and the constraint wins. A
+    // model whose replies genuinely need more than half its window needs a bigger
+    // window, not a bigger reserve.
+    let capped_reserve = response_reserve.min(effective / 2);
+    effective.saturating_sub(capped_reserve)
 }
 
 /// Per-message chat-template cost, re-exported for the cost function above.
@@ -361,8 +375,26 @@ mod tests {
     fn prompt_budget_applies_fraction_and_reserve() {
         // 8192 * 0.75 = 6144, minus 1024 reserve = 5120.
         assert_eq!(prompt_budget(8192, 0.75, 1024), 5120);
-        // Reserve larger than effective clamps to 0, never underflows.
-        assert_eq!(prompt_budget(1000, 0.5, 9999), 0);
+    }
+
+    /// **A reserve can never consume the window.**
+    ///
+    /// It used to clamp to 0, and a zero budget does not fail loudly -- it stops
+    /// constraining anything, nothing is evicted, and the prompt grows until the
+    /// server rejects it. That is not a theoretical case: a reserve sized for a 32k
+    /// model (6144) applied to an 8k one gives 8192 * 0.75 - 6144 = exactly 0.
+    #[test]
+    fn the_reserve_can_never_take_the_whole_window() {
+        // The 32k-sized reserve against a small window: half the usable space is
+        // kept for the prompt rather than none of it.
+        assert_eq!(prompt_budget(8192, 0.75, 6144), 3072);
+        // An absurd reserve is capped, not honoured.
+        assert_eq!(prompt_budget(1000, 0.5, 9999), 250);
+        // Every window leaves a usable prompt budget.
+        for window in [4096usize, 8192, 16384, 32768, 128_000] {
+            let b = prompt_budget(window, 0.75, 6144);
+            assert!(b > 0, "window {window} produced a zero budget");
+        }
     }
 
     #[test]

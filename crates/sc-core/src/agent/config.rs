@@ -140,13 +140,32 @@ impl std::fmt::Debug for AgentConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
+        // MEASURED, not guessed. These were the "toy task" defaults, and each was
+        // proven wrong against real work -- but only the eval path was ever fixed, so
+        // `sc-cli run` (the production path) kept shipping values the evals had
+        // already shown to fail. Raising them here means every caller inherits what
+        // was measured; a caller that genuinely wants less can still say so.
         Self {
-            max_steps: 25,
+            // Pooled across runs, solves landed at step 33, 35 and 48. A 25-step cap
+            // discards those and reports them as failures.
+            max_steps: 40,
             effective_context_fraction: 0.75,
-            response_reserve_tokens: 1024,
-            observation_line_cap: 40,
-            read_file_line_cap: 400,
-            keep_recent_turns: 3,
+            // A reasoning model spends tokens before it emits the call, and a
+            // truncated turn yields NO call -- indistinguishable from declining to
+            // act. At 1024, one edit request in five returned nothing at all.
+            // 6144 is ~1.8x the largest reply observed across a full ten-rung run.
+            response_reserve_tokens: 6144,
+            // 40 lines amputates a test traceback exactly where the assertion is.
+            observation_line_cap: 200,
+            // The model must read the failing test; clipping it mid-file is the
+            // harness hiding the answer.
+            read_file_line_cap: 800,
+            // 3 turns cannot hold a multi-file task: on a four-file task the first
+            // file is compacted to a summary before the fourth is read, so the model
+            // re-reads it forever. Measured on one rung: 87 turns -> 24, reads 59 ->
+            // 13, stalls 3 -> 0, with the EDIT COUNT UNCHANGED at 11 -- every extra
+            // read was the harness discarding what it had just handed over.
+            keep_recent_turns: 10,
             repo_map_top_k: 30,
             permission: PermissionPolicy::default(),
             verify_command: None,
