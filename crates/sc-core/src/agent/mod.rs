@@ -446,7 +446,21 @@ pub fn run_agent_observed(
         // to feed back "no JSON tool object in your reply" -- which reads as a model
         // refusing to act and sent one investigation 54 turns down the wrong path.
         // With this, the transcript says the cap was hit, on the turn it was hit.
-        if resp.was_truncated() {
+        // `finish_reason: "length"` alone is not proof, so require the reply to have
+        // ACTUALLY run long.
+        //
+        // llama.cpp reports `length` when a grammar-constrained decode stops cleanly
+        // at the end of a well-formed object, so a complete 20-character
+        // `{"tool":"edit_file"}` was being reported as truncated at a 6144-token cap
+        // -- with the server's own log saying `truncated = 0`. A detector that fires
+        // on a healthy turn is the noise the fault count exists to avoid: it makes
+        // "2 harness faults" mean nothing.
+        //
+        // Half the cap is deliberately generous. A genuine truncation runs to the
+        // cap, so it clears this easily; the false positives are all short replies
+        // that reached a natural stop.
+        let ran_long = counter.count(&resp.content) > cfg.response_reserve_tokens / 2;
+        if resp.was_truncated() && ran_long {
             sink.record(&AgentEvent::HarnessFault {
                 kind: FaultKind::ReplyTruncated,
                 detail: format!(

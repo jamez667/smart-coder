@@ -165,8 +165,15 @@ impl ModelBackend for Truncating {
         *n += 1;
         Ok(if *n == 1 {
             // What a real truncated turn looks like: mid-sentence, no JSON.
+            // A LONG reply that stopped mid-sentence. Length matters: `finish_reason:
+            // "length"` alone is not proof of truncation -- llama.cpp reports it when
+            // a grammar-constrained decode stops cleanly at a well-formed object too,
+            // so the detector also requires the reply to have actually run long.
             GenerateResponse::with_finish_reason(
-                "Looking at the file, I think the fix is to ",
+                format!(
+                    "Looking at the file, I think the fix is to {}",
+                    "reason about this at length. ".repeat(400)
+                ),
                 Some("length".into()),
             )
         } else {
@@ -397,6 +404,68 @@ fn a_reserve_larger_than_the_window_cannot_zero_the_budget() {
             }
         )),
         "with the cap in place the condition cannot arise"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A SHORT well-formed reply reporting `length` is not a truncation.
+///
+/// llama.cpp reports `finish_reason: "length"` when a grammar-constrained decode
+/// stops cleanly at the end of a well-formed object. Measured on a real run: a
+/// complete 20-character `{"tool":"edit_file"}` was reported as "truncated at the
+/// 6144-token cap", with the server's own log saying `truncated = 0`. A detector
+/// that fires on a healthy turn is exactly the noise the fault count exists to
+/// avoid -- it makes "2 harness faults" mean nothing.
+#[test]
+fn a_short_complete_reply_reporting_length_is_not_a_truncation() {
+    let ws = temp("shortlength");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    struct ShortLength;
+    impl ModelBackend for ShortLength {
+        fn name(&self) -> &str {
+            "short-length"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                max_context_tokens: 8_192,
+                tool_calling: ToolCalling::None,
+                on_device: false,
+            }
+        }
+        fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+            // Complete and well-formed, and the server still says "length".
+            Ok(GenerateResponse::with_finish_reason(
+                r#"{"tool":"finish"}"#,
+                Some("length".into()),
+            ))
+        }
+    }
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    run_agent_observed(
+        &ShortLength,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "do a thing",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        !log.into_inner().unwrap().iter().any(|e| matches!(
+            e,
+            AgentEvent::HarnessFault {
+                kind: FaultKind::ReplyTruncated,
+                ..
+            }
+        )),
+        "a complete short reply must not be reported as truncated"
     );
 
     let _ = std::fs::remove_dir_all(&ws);
