@@ -291,6 +291,7 @@ impl OpenAiBackend {
         // ends it. We pull `choices[0].delta.content` from each chunk and stream it out.
         let reader = std::io::BufReader::new(resp.body_mut().as_reader());
         let mut full = String::new();
+        let mut finish_reason: Option<String> = None;
         for line in reader.lines() {
             // Cooperative cancel: if the caller flagged a stop, quit reading and drop the
             // reader/connection so the request aborts. Return the partial text gathered so far.
@@ -301,7 +302,14 @@ impl OpenAiBackend {
             }
             let line = match line {
                 Ok(l) => l,
-                Err(_) => break,
+                // A read error mid-stream is NOT the model stopping. Record it as a
+                // truncation so the caller can tell a dropped connection from a
+                // reply that genuinely ended -- otherwise a half-written tool call
+                // reads as malformed JSON from the model.
+                Err(_) => {
+                    finish_reason = Some("error".to_string());
+                    break;
+                }
             };
             let payload = match line.strip_prefix("data:") {
                 Some(p) => p.trim(),
@@ -310,6 +318,12 @@ impl OpenAiBackend {
             if payload == "[DONE]" {
                 break;
             }
+            // The stop reason arrives on its own chunk, usually the last one before
+            // [DONE] and usually with an empty delta -- so it must be read separately
+            // from the content, not inside the `if let Some(delta)` below.
+            if let Some(r) = parse_stream_finish_reason(payload) {
+                finish_reason = Some(r);
+            }
             if let Some(delta) = parse_stream_delta(payload) {
                 if !delta.is_empty() {
                     full.push_str(&delta);
@@ -317,10 +331,30 @@ impl OpenAiBackend {
                 }
             }
         }
-        // `finish_reason` stays None: the SSE chunks carry it but the delta parser only
-        // pulls content. None means "unknown", never "not truncated".
-        Ok(GenerateResponse::new(full))
+        // Streaming now reports its stop reason like the non-streaming path.
+        //
+        // It used to hardcode `None`, which meant `was_truncated()` was ALWAYS false
+        // while streaming -- so `HarnessFault::ReplyTruncated` could never fire there.
+        // That mattered: `sc-iterate` (the desktop and web interactive path) sets
+        // `stream = true` unconditionally, so the GUI was blind to the exact failure
+        // the eval had been hardened against, where a reply cut off at the token cap
+        // reads as a model declining to act.
+        Ok(GenerateResponse::with_finish_reason(full, finish_reason))
     }
+}
+
+/// Pull `choices[0].finish_reason` out of one SSE chunk, when it carries one.
+///
+/// Arrives on its own chunk near the end of the stream, normally with an empty
+/// delta, so it is read separately from the content. `Some("length")` is the
+/// truncation case the loop needs to see.
+fn parse_stream_finish_reason(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    v.get("choices")?
+        .get(0)?
+        .get("finish_reason")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Pull the content delta out of one SSE chunk's JSON: `choices[0].delta.content`. Returns
@@ -645,6 +679,37 @@ mod tests {
     /// A throwaway one-shot HTTP/1.1 server: accepts a single connection, hands
     /// the raw request back over a channel, and replies with `response`. Enough to
     /// exercise the adapter end-to-end with no external deps or network.
+    /// Like [`stub_server`] but with a caller-chosen content type, for serving an
+    /// SSE stream rather than a JSON body.
+    fn stub_server_raw(
+        response: &'static str,
+        content_type: &'static str,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let raw = drain_http_request(&mut sock);
+            let _ = tx.send(raw);
+            let reply = format!(
+                "HTTP/1.1 200 OK
+Content-Type: {content_type}
+Content-Length: {}
+Connection: close
+
+{}",
+                response.len(),
+                response
+            );
+            sock.write_all(reply.as_bytes()).unwrap();
+            sock.flush().unwrap();
+        });
+
+        (format!("http://{addr}/v1"), rx)
+    }
+
     fn stub_server(response: &'static str) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -894,6 +959,74 @@ mod tests {
 
         let raw = rx.recv().unwrap();
         assert!(!raw.contains("tool_choice"), "must not force tools: {raw}");
+    }
+
+    /// The whole streaming path must carry the stop reason through, not just the
+    /// parser. Pins the CALL SITE: a unit test on `parse_stream_finish_reason`
+    /// still passes if the loop stops calling it.
+    #[test]
+    fn a_streamed_truncation_reaches_the_caller() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"the fix is \"}}]}\n\
+                   \n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\
+                   \n\
+                   data: [DONE]\n\n";
+        let (base, _rx) = stub_server_raw(sse, "text/event-stream");
+
+        let backend = OpenAiBackend::new(base, "gemma4:e4b");
+        let mut seen = String::new();
+        let resp = backend
+            .generate_streaming(
+                &GenerateRequest::new(vec![Message::user("explain")]),
+                &mut |d: &str| seen.push_str(d),
+            )
+            .unwrap();
+
+        assert_eq!(resp.content, "the fix is ");
+        assert_eq!(seen, "the fix is ", "deltas still reach the callback");
+        assert!(
+            resp.was_truncated(),
+            "a streamed `length` stop must reach the caller, or ReplyTruncated \
+             can never fire on the GUI path"
+        );
+    }
+
+    /// **Streaming must report its stop reason, or truncation is invisible there.**
+    ///
+    /// The delta parser only ever read content, so `finish_reason` was hardcoded
+    /// `None` on the streaming path and `was_truncated()` was always false --
+    /// `HarnessFault::ReplyTruncated` could not fire. `sc-iterate` (the desktop and
+    /// web interactive path) sets `stream = true` unconditionally, so the GUI was
+    /// blind to the exact failure the eval had been hardened against.
+    #[test]
+    fn a_finish_chunk_yields_its_stop_reason() {
+        // The truncation case: the reply was cut off at the token cap.
+        assert_eq!(
+            parse_stream_finish_reason(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#)
+                .as_deref(),
+            Some("length")
+        );
+        // The ordinary case.
+        assert_eq!(
+            parse_stream_finish_reason(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+                .as_deref(),
+            Some("stop")
+        );
+        // A content chunk carries no stop reason -- it must not be mistaken for one.
+        assert_eq!(
+            parse_stream_finish_reason(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#),
+            None
+        );
+        // An explicit null (llama.cpp sends these on every content chunk) is not a
+        // reason either.
+        assert_eq!(
+            parse_stream_finish_reason(
+                r#"{"choices":[{"delta":{"content":"x"},"finish_reason":null}]}"#
+            ),
+            None
+        );
+        // Garbage doesn't panic.
+        assert_eq!(parse_stream_finish_reason("not json"), None);
     }
 
     #[test]
