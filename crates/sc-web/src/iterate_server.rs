@@ -259,16 +259,26 @@ where
         // summary onto the hub as a terminal note so the phone shows it after `Stopped`.
         let summary = match result {
             Ok(report) => {
-                let outcome =
-                    sc_iterate::finish_summary(&report, &touched, &dirty_at_start, &spec.workspace);
+                let outcome = sc_iterate::finish_summary(
+                    &report,
+                    &touched,
+                    dirty_at_start.as_ref(),
+                    &spec.workspace,
+                );
                 outcome.summary
             }
             Err(e) => {
-                let safe: Vec<String> = touched
-                    .iter()
-                    .filter(|f| !dirty_at_start.contains(*f))
-                    .cloned()
-                    .collect();
+                // Revert only what we KNOW was clean. `None` means git could not be
+                // asked, and treating unknown as clean here would `git checkout --`
+                // the user's own uncommitted work -- see `git_dirty_files`.
+                let safe: Vec<String> = match dirty_at_start.as_ref() {
+                    Some(dirty) => touched
+                        .iter()
+                        .filter(|f| !dirty.contains(*f))
+                        .cloned()
+                        .collect(),
+                    None => Vec::new(),
+                };
                 sc_iterate::git_revert_files(&spec.workspace, &safe);
                 format!(
                     "iterate failed: {e} (reverted {} clean file(s))",

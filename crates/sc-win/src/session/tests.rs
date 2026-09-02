@@ -35,6 +35,47 @@ fn sandbox_verify_hint_flags_cargo_in_a_python_image() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **Unknown dirty state must revert NOTHING.**
+///
+/// `git_dirty_files` used to swallow every failure and return an empty set, which is
+/// indistinguishable from a clean tree. The revert path partitions on
+/// `!dirty.contains(f)`, so an unreadable git state classed EVERY touched file as
+/// safe and `git checkout --` destroyed the user's own uncommitted work -- silently,
+/// irreversibly, and reported as the harness tidying up after itself. An
+/// `index.lock` held by a concurrent git (the GUI runs one) is enough to trigger it.
+#[test]
+fn an_unreadable_git_state_reverts_nothing() {
+    // Not a git repo at all: `git status` fails, which is the shape of every other
+    // failure too (lock contention, spawn error, non-zero exit).
+    let dir = std::env::temp_dir().join(format!("sc-win-nogit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mine.txt"), "MY UNCOMMITTED WORK\n").unwrap();
+
+    let dirty = sc_iterate::git_dirty_files(&dir);
+    assert!(
+        dirty.is_none(),
+        "an unreadable git state must be None, not empty"
+    );
+
+    // The caller's rule: with `None`, nothing is safe to revert.
+    let touched = ["mine.txt".to_string()];
+    let safe: Vec<String> = match dirty.as_ref() {
+        Some(d) => touched
+            .iter()
+            .filter(|f| !d.contains(*f))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    assert!(
+        safe.is_empty(),
+        "unknown state must revert nothing, got {safe:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn sandbox_verify_hint_generic_when_not_the_rust_pyenv_case() {
     // Host sandbox (or a non-Rust project) ⇒ a generic "check it runs there" message, not the
@@ -72,13 +113,15 @@ fn git_revert_restores_a_clean_file_and_dirty_detection_protects_uncommitted() {
 
     // Tree is clean now.
     assert!(
-        sc_iterate::git_dirty_files(&dir).is_empty(),
+        sc_iterate::git_dirty_files(&dir)
+            .expect("git is answerable here")
+            .is_empty(),
         "clean after commit"
     );
 
     // User has uncommitted work in b.txt; a.txt is clean.
     std::fs::write(dir.join("b.txt"), "MY UNCOMMITTED WORK\n").unwrap();
-    let dirty = sc_iterate::git_dirty_files(&dir);
+    let dirty = sc_iterate::git_dirty_files(&dir).expect("git is answerable here");
     assert!(dirty.contains("b.txt"), "b.txt seen dirty: {dirty:?}");
     assert!(!dirty.contains("a.txt"), "a.txt still clean");
 
@@ -120,8 +163,10 @@ fn git_helpers_are_safe_outside_a_repo() {
     let dir = std::env::temp_dir().join(format!("dc-nogit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // Not a git repo → dirty set empty, revert reports false (caller warns).
-    assert!(sc_iterate::git_dirty_files(&dir).is_empty());
+    // Not a git repo → dirty state UNKNOWN (not "empty"), revert reports false.
+    // Empty would mean "nothing was dirty", which the caller reads as "everything is
+    // safe to revert" -- see `an_unreadable_git_state_reverts_nothing`.
+    assert!(sc_iterate::git_dirty_files(&dir).is_none());
     assert!(!sc_iterate::git_revert_files(&dir, &["x.txt".to_string()]));
     // Empty list is a no-op success.
     assert!(sc_iterate::git_revert_files(&dir, &[]));

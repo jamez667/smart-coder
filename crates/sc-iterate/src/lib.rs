@@ -73,11 +73,20 @@ pub fn apply_iterate_overrides(
 /// `/`-separated), per `git status --porcelain`. Empty if the tree is clean or this
 /// isn't a git repo. Captured at run start so we know which files we must NOT
 /// auto-revert (reverting a file that was already dirty would destroy the user's work).
-pub fn git_dirty_files(workspace: &Path) -> BTreeSet<String> {
+pub fn git_dirty_files(workspace: &Path) -> Option<BTreeSet<String>> {
     let out = git(workspace).arg("status").arg("--porcelain").output();
     let mut set = BTreeSet::new();
-    if let Ok(o) = out {
-        if o.status.success() {
+    // `None` on failure, NOT an empty set.
+    //
+    // This used to swallow every error, and an empty set is indistinguishable from a
+    // genuinely clean tree. The caller partitions the agent's touched files with
+    // `!dirty_at_start.contains(f)` and `git checkout --`s the "safe" half -- so a
+    // failed `git status` (an `index.lock` held by the GUI running git concurrently,
+    // a non-zero exit, a spawn error) classed EVERY file as safe and destroyed the
+    // user's own uncommitted work. Silent, irreversible, and reported as the harness
+    // tidying up after itself.
+    match out {
+        Ok(o) if o.status.success() => {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
                 // Porcelain: "XY <path>" (path starts at column 3); handle rename "-> ".
                 let path = line.get(3..).unwrap_or("").trim();
@@ -86,9 +95,10 @@ pub fn git_dirty_files(workspace: &Path) -> BTreeSet<String> {
                     set.insert(path.trim_matches('"').replace('\\', "/"));
                 }
             }
+            Some(set)
         }
+        _ => None,
     }
-    set
 }
 
 /// Revert `files` (workspace-relative) to their committed state via `git checkout --`.
@@ -164,12 +174,15 @@ pub struct IterateOutcome {
 pub fn finish_summary(
     report: &AgentReport,
     touched: &[String],
-    dirty_at_start: &BTreeSet<String>,
+    // Files already dirty before the run, or `None` if git could not be asked.
+    // `None` means UNKNOWN, which must never be treated as clean: the revert below
+    // would then delete the user's own uncommitted work.
+    dirty_at_start: Option<&BTreeSet<String>>,
     workspace: &Path,
 ) -> IterateOutcome {
     let clean_touched: Vec<String> = touched
         .iter()
-        .filter(|f| !dirty_at_start.contains(*f))
+        .filter(|f| !dirty_at_start.is_some_and(|d| d.contains(*f)))
         .cloned()
         .collect();
     let comment_only =
@@ -194,10 +207,15 @@ pub fn finish_summary(
     }
 
     // Failure → revert the agent's mess, but only files that were CLEAN before the run.
-    let (safe, unsafe_dirty): (Vec<String>, Vec<String>) = touched
-        .iter()
-        .cloned()
-        .partition(|f| !dirty_at_start.contains(f));
+    // Revert ONLY when we know what was dirty beforehand.
+    //
+    // With `None` -- git could not be asked -- every touched file would look clean
+    // and be reverted, taking the user's own uncommitted edits with it. Leaving the
+    // agent's mess in place is recoverable; deleting someone's work is not.
+    let (safe, unsafe_dirty): (Vec<String>, Vec<String>) = match dirty_at_start {
+        Some(dirty) => touched.iter().cloned().partition(|f| !dirty.contains(f)),
+        None => (Vec::new(), touched.to_vec()),
+    };
     let reverted = git_revert_files(workspace, &safe);
     let base = match (report.finished, report.verified) {
         (true, Some(false)) => "stopped — the change didn't compile".to_string(),

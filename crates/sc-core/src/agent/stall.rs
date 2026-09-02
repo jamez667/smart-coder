@@ -20,7 +20,8 @@ use crate::recovery::{Progress, StallDetector};
 use crate::runlog::RunLogSink;
 
 use super::escalation::{
-    escalate, recent_tools, self_recovery_directive, DIAGNOSIS_LIMIT, SELF_RECOVERY_LIMIT,
+    escalate, recent_tools, self_recovery_directive, ADVISOR_LIMIT, DIAGNOSIS_LIMIT,
+    SELF_RECOVERY_LIMIT,
 };
 use super::prompt::gather_sources;
 use super::window::push_observation;
@@ -36,6 +37,16 @@ pub(super) struct Interventions {
     pub(super) diagnoses: usize,
     /// Advisor-free self-recovery directives issued, bounded by [`SELF_RECOVERY_LIMIT`].
     pub(super) self_recoveries: usize,
+    /// Advisor consultations, bounded by [`ADVISOR_LIMIT`].
+    ///
+    /// This rung was the ONLY unbounded one: the diagnosis rung above it checks
+    /// `DIAGNOSIS_LIMIT` and the self-recovery rung below it checks
+    /// `SELF_RECOVERY_LIMIT`, but a successful advisor call just reset the stall and
+    /// returned `Recovered` with nothing counting it. So a run with an advisor
+    /// configured consulted the senior on EVERY stall until `max_steps` -- unbounded
+    /// spend on the expensive T1 model -- and `StopReason::Stalled` was unreachable
+    /// for that configuration.
+    pub(super) advisor_nudges: usize,
     /// The previous turn's action hash, used by the repeat-dedup guard. Cleared to `None` on a
     /// recovery so the next (steered) action is never mistaken for a repeat.
     pub(super) prev_action: Option<u64>,
@@ -117,10 +128,26 @@ pub(super) fn handle_stall(
     // Junior asks senior for a nudge (spec 02). With no advisor (the single-model setup), the
     // harness steers the model back in-band a bounded number of times before giving up — a
     // capable model just needs a firm directive, not a senior.
-    match escalate(advisor, instruction, plan, history, stuck) {
+    let advice = if interv.advisor_nudges < ADVISOR_LIMIT {
+        escalate(advisor, instruction, plan, history, stuck)
+    } else {
+        // Budget spent: fall through to the bounded self-recovery rung rather than
+        // consulting the senior again.
+        None
+    };
+    match advice {
         Some(advice) => {
+            interv.advisor_nudges += 1;
             interv.count += 1;
             stall.reset();
+            // Clear the repeat-dedup guard, exactly as the diagnosis and
+            // self-recovery rungs do. Without this the advisor's steer was routinely
+            // masked: the model's next action after advice usually hashes the same as
+            // the pre-stall one (it re-reads the file the advisor pointed at), so the
+            // dedup guard discarded the observation and replaced it with a generic
+            // "you already have that" nudge -- paying for a T1 call and then throwing
+            // its effect away.
+            interv.prev_action = None;
             sink.record(&AgentEvent::Advice {
                 trigger: stuck.to_string(),
                 advice: advice.clone(),

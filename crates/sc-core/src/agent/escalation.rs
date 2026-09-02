@@ -18,6 +18,13 @@ use super::AgentReport;
 /// How many times the harness self-recovers from a stall WITHOUT an advisor before giving up.
 pub(super) const SELF_RECOVERY_LIMIT: usize = 2;
 
+/// How many times the advisor (the senior T1 model) may be consulted in one run.
+///
+/// Bounded like its two sibling rungs, and for the same reason: each call costs a
+/// full generation on the expensive model. Left unbounded, a stalling run consulted
+/// the senior on every stall until the step cap.
+pub(super) const ADVISOR_LIMIT: usize = 3;
+
 /// How many root-cause diagnoses the harness runs per run before falling through to the
 /// generic recovery ladder. Bounded like [`SELF_RECOVERY_LIMIT`]: each costs a suite run +
 /// model call, and a model that ignored two pointed diagnoses won't be saved by a third.

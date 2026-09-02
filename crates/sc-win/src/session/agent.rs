@@ -145,7 +145,7 @@ pub fn run_iterate(
     match result {
         Ok(report) => {
             let outcome =
-                sc_iterate::finish_summary(&report, &touched, &dirty_at_start, &workspace);
+                sc_iterate::finish_summary(&report, &touched, dirty_at_start.as_ref(), &workspace);
             let _ = ev_tx.send(UiEvent::Done {
                 ok: outcome.ok,
                 summary: outcome.summary,
@@ -154,11 +154,17 @@ pub fn run_iterate(
         Err(e) => {
             // A hard error mid-run: revert the files that were CLEAN before the run (never
             // ones the user had uncommitted work in).
-            let safe: Vec<String> = touched
-                .iter()
-                .filter(|f| !dirty_at_start.contains(*f))
-                .cloned()
-                .collect();
+            // Only what we KNOW was clean. `None` means git could not be asked, and
+            // treating unknown as clean would revert the user's own uncommitted work
+            // -- the exact thing the comment above promises never to do.
+            let safe: Vec<String> = match dirty_at_start.as_ref() {
+                Some(dirty) => touched
+                    .iter()
+                    .filter(|f| !dirty.contains(*f))
+                    .cloned()
+                    .collect(),
+                None => Vec::new(),
+            };
             sc_iterate::git_revert_files(&workspace, &safe);
             let _ = ev_tx.send(UiEvent::Failed(format!(
                 "iterate failed: {e} (reverted {} clean file(s))",
