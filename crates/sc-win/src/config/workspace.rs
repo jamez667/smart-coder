@@ -110,60 +110,11 @@ pub fn detect_verify_command(test_files: &[String], fallback: &str) -> String {
     }
 }
 
-/// Build a short overview of the files already in `workspace`, for the decomposer's
-/// `repo_overview` — so when iterating on an existing project the orchestrator plans
-/// *edits to existing files* (and new files) instead of assuming a blank slate. Returns
-/// an empty string for an empty/missing dir (the from-scratch case). Walks recursively,
-/// listing workspace-relative paths with byte sizes; capped so a huge tree can't blow
-/// the prompt budget.
-pub fn repo_overview(workspace: &std::path::Path) -> String {
-    /// Cap on listed files (keep the decomposer prompt bounded).
-    const MAX_FILES: usize = 200;
-
-    let mut files: Vec<(String, u64)> = Vec::new();
-    let mut stack = vec![workspace.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            // Skip VCS/build/generated noise so the overview is the user's actual sources
-            // (and doesn't get swamped by e.g. a `screenshots/` folder full of PNGs).
-            if crate::filetree::is_noise_dir(name) {
-                continue;
-            }
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(path),
-                Ok(ft) if ft.is_file() => {
-                    let rel = path
-                        .strip_prefix(workspace)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    files.push((rel, size));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if files.is_empty() {
-        return String::new();
-    }
-    files.sort();
-    let truncated = files.len() > MAX_FILES;
-    let mut out = String::from("Existing files (edit these in place where the task applies):\n");
-    for (rel, size) in files.iter().take(MAX_FILES) {
-        out.push_str(&format!("  {rel} ({size} bytes)\n"));
-    }
-    if truncated {
-        out.push_str(&format!("  … and {} more\n", files.len() - MAX_FILES));
-    }
-    out
-}
+/// Build a short overview of the files already in `workspace`, for the decomposer.
+///
+/// Re-exported from `sc_iterate` rather than kept as a second copy. This was a
+/// line-for-line fork -- same walk, same MAX_FILES cap, same noise filter -- and
+/// both build PROMPT TEXT, so a divergence changes what the model is told between
+/// the desktop and the remote server. `sc-iterate` exists specifically to keep
+/// those two behaving identically.
+pub use sc_iterate::repo_overview;

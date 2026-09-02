@@ -25,29 +25,17 @@ pub struct TreeRow {
 }
 
 /// Directory names never worth showing (VCS, build output, tooling caches, deps, and
-/// generated-asset folders). A game's `target/` is enormous and irrelevant to iterating
-/// on source; `screenshots/`/`dist/` are build artifacts a `.gitignore` would exclude.
-pub fn is_noise_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "target"
-            | ".git"
-            | "node_modules"
-            | "__pycache__"
-            | ".smart-coder"
-            | ".pytest_cache"
-            | "screenshots"
-            | "dist"
-            | "build"
-            // Unity-generated / non-source trees.
-            | "Library"
-            | "Temp"
-            | "obj"
-            | "Logs"
-            | "UserSettings"
-            | "Builds"
-    ) || name.starts_with('.') && name != "."
-}
+/// generated-asset folders).
+///
+/// Re-exported from `sc_iterate` rather than kept as a second copy. Both lists feed
+/// PROMPT TEXT to the model -- this one via the explorer and the workspace overview,
+/// `sc-iterate`'s via the repo overview it builds for the remote server -- so a
+/// divergence (someone adds `.venv` to one) silently changes agent behaviour between
+/// the desktop and the server, which is precisely the behaviour-identical guarantee
+/// `sc-iterate` exists to provide. The two were byte-identical, down to the same
+/// fourteen-name match arm; the extraction had been done and the original never
+/// deleted.
+pub use sc_iterate::is_noise_dir;
 
 /// Build the flattened explorer rows for `root`, honoring the set of `collapsed`
 /// directories (a collapsed dir contributes its own row but none of its children).
