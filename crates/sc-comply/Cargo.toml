@@ -13,6 +13,10 @@ path = "src/lib.rs"
 [dependencies]
 sc-proto = { path = "../sc-proto" }
 sc-index = { path = "../sc-index" }
+# For `host_shell` only -- pack checks are POSIX-shaped and must not be handed to
+# `cmd`. sc-verify has ZERO dependencies, so this adds nothing to the build, and
+# spec 01's load-bearing boundary is about sc-model, which this does not reach.
+sc-verify = { path = "../sc-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

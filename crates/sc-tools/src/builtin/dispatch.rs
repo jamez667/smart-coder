@@ -16,11 +16,59 @@ pub enum ToolOutcome {
     Finished,
 }
 
-/// Execute a *validated* call against `workspace`.
+/// Registry tools this crate declares but does NOT execute.
+///
+/// A quarter of the registry. Each needs something `sc-tools` deliberately does not
+/// depend on, so `sc-core` routes it instead:
+///
+/// * `run_command` / `run_verification` spawn processes and need run configuration
+///   — the sandbox, the configured verify command, the confirm gate — so `sc-core`
+///   routes them to `sc-verify`.
+/// * `find_symbol` needs the retrieval index (`sc-index`).
+/// * `update_plan` mutates the agent loop's own plan state.
+/// * `ask_user` escalates to a human and ends the run.
+///
+/// The last three never reach an executor at all: the loop intercepts them before
+/// dispatch.
+///
+/// Named here so the split is discoverable from the crate that DECLARES the tools,
+/// not only from the one that routes them. A manual audit found ONE of these five,
+/// having looked only for process-spawning tools; the test that pins this list
+/// found the rest, one run at a time.
+pub const NOT_EXECUTED_HERE: [&str; 5] = [
+    "run_command",
+    "run_verification",
+    "find_symbol",
+    "update_plan",
+    "ask_user",
+];
+
+/// Whether [`execute`] can actually run `tool`.
+///
+/// `false` means the registry declares it but this executor does not implement it,
+/// and the caller must route it themselves — see [`NOT_EXECUTED_HERE`].
+pub fn handled_here(tool: &str) -> bool {
+    !NOT_EXECUTED_HERE.contains(&tool)
+}
+
+/// Execute a *validated* **filesystem** call against `workspace`.
 ///
 /// Because the call already passed [`ToolRegistry::validate`], the arguments are
 /// known to be present and well-typed. Runtime failures (missing file, bad path)
 /// still become observations, never panics.
+///
+/// # This does not execute every tool in the registry
+///
+/// [`NOT_EXECUTED_HERE`] — `run_command` and `run_verification` — are declared by the
+/// registry but spawn processes, which needs run configuration (the sandbox, the
+/// verify command, the permission gate) that this crate deliberately does not know
+/// about. `sc-core`'s agent loop handles them and routes to `sc-verify`; calling
+/// them here returns an `internal: no executor` observation rather than running
+/// anything.
+///
+/// That is a real hazard for a new caller: the tool is in the registry, validation
+/// passes, and the failure is a plausible-looking observation rather than a compile
+/// error. Check [`handled_here`] before dispatching if you are not the agent loop.
 ///
 /// [`ToolRegistry::validate`]: crate::spec::ToolRegistry::validate
 pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {

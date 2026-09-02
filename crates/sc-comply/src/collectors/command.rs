@@ -10,8 +10,7 @@
 //!
 //! Command construction returns a `std::process::Command` without spawning the
 //! pack's command, following `sc-verify`'s discipline, so the argument shape is
-//! testable without running the check. (On Windows it does probe once for a POSIX
-//! shell — see `build_command`.)
+//! testable without running the check.
 
 use std::path::Path;
 use std::process::Command;
@@ -30,9 +29,9 @@ pub struct CommandCollector;
 
 /// Build the OS command that runs `command` in `workspace`.
 ///
-/// Not quite pure: on Windows it probes once for a POSIX shell (see below). It
-/// still spawns nothing for the *pack's* command, so tests can assert the argument
-/// shape without running the check itself.
+/// Spawns nothing for the *pack's* command, so tests can assert the argument shape
+/// without running the check. (`host_shell` probes for a POSIX shell once per
+/// process, memoized, on first use.)
 pub fn build_command(workspace: &Path, command: &str) -> Command {
     // Prefer a POSIX shell, on every platform. Pack checks are written POSIX --
     // `test -f x && grep -q y x`, pipes, `2>/dev/null` -- and `cmd` rejects those
@@ -40,23 +39,14 @@ pub fn build_command(workspace: &Path, command: &str) -> Command {
     // desktop with a shell error that reads as a failed CHECK. An audit that
     // reports non-compliance because of the host's shell is worse than useless.
     //
-    // Deliberately duplicated from `sc_verify::host_shell` rather than shared:
-    // taking a dependency on the verification crate to answer "which shell" would
-    // couple the compliance engine to the agent stack. If a third site ever needs
-    // this, that is the point to lift it into `sc-proto`.
-    let posix = Command::new("sh")
-        .arg("-c")
-        .arg("exit 0")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let (shell, flag) = if cfg!(windows) && !posix {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
+    // Shared with `sc_verify::host_shell` rather than duplicated. This was a local
+    // copy, on the argument that depending on the verification crate would couple
+    // compliance to the agent stack -- but `sc-verify` has ZERO dependencies, and
+    // spec 01's load-bearing boundary is specifically that `sc-comply` must never
+    // reach `sc-model`, which this does not. The copy also probed for `sh` on EVERY
+    // call, where the shared one memoizes: an audit running hundreds of
+    // command-exit-code checks spawned hundreds of redundant processes.
+    let (shell, flag) = sc_verify::host_shell();
     let mut c = Command::new(shell);
     c.arg(flag).arg(command).current_dir(workspace);
     c
@@ -203,8 +193,7 @@ mod tests {
 
     #[test]
     fn builds_a_shell_command_without_spawning_it() {
-        // Assert the shape; do not run the pack's command. (The shell probe itself
-        // does spawn `sh -c 'exit 0'` once — that is not the check.)
+        // Assert the shape; do not run the pack's command.
         let cmd = build_command(Path::new("/ws"), "cargo audit");
         let program = cmd.get_program().to_string_lossy().into_owned();
         let args: Vec<String> = cmd

@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use super::{call, temp_dir};
-use crate::builtin::dispatch::{execute, ToolOutcome};
+use crate::builtin::dispatch::{execute, handled_here, ToolOutcome, NOT_EXECUTED_HERE};
 use crate::builtin::registry::default_registry;
 
 #[test]
@@ -100,5 +100,75 @@ fn no_tool_description_names_another_tool() {
                 spec.name
             );
         }
+    }
+}
+
+/// **Every registry tool is either executed here or named as one that is not.**
+///
+/// The registry declares `run_command` and `run_verification`, but this crate's
+/// executor cannot run them -- they spawn processes and need run configuration
+/// (the sandbox, the verify command, the confirm gate) that `sc-tools` deliberately
+/// does not know about, so `sc-core` owns them. Calling one here returns an
+/// `internal: no executor` observation rather than a compile error, which is a real
+/// hazard for any caller that is not the agent loop.
+///
+/// This pins the split from both ends: a new process-spawning tool added to the
+/// registry without being listed in `NOT_EXECUTED_HERE` fails here, rather than
+/// silently returning a plausible-looking observation at run time.
+#[test]
+fn every_registry_tool_is_executable_here_or_declared_otherwise() {
+    let ws = temp_dir("exec-split");
+    for spec in default_registry().specs() {
+        if !handled_here(spec.name) {
+            // Declared as sc-core's: it must really be one of the process tools.
+            assert!(
+                NOT_EXECUTED_HERE.contains(&spec.name),
+                "{} is not handled here but is not in NOT_EXECUTED_HERE",
+                spec.name
+            );
+            continue;
+        }
+        // Everything else must have an executor arm. A missing one shows up as the
+        // "no executor" fallthrough; `finish` is the one non-fs outcome.
+        // Validation needs the required args present, so build a minimal call from
+        // the spec itself: the point is which EXECUTOR arm runs, not the arguments.
+        let mut v = serde_json::Map::new();
+        v.insert("tool".into(), json!(spec.name));
+        for p in &spec.params {
+            let filler = match p.ty {
+                crate::spec::ParamType::Integer | crate::spec::ParamType::OptionalInteger => {
+                    json!(1)
+                }
+                _ => json!("x"),
+            };
+            v.insert(p.name.to_string(), filler);
+        }
+        let Ok(validated) = default_registry().validate(&serde_json::Value::Object(v)) else {
+            continue; // a spec this filler cannot satisfy is not what we are testing
+        };
+        let outcome = execute(&validated, &ws);
+        if let ToolOutcome::Observation(o) = &outcome {
+            assert!(
+                !o.starts_with("internal: no executor"),
+                "{} has no executor arm in sc-tools, and is not declared as a \
+                 process tool -- a caller would get a plausible-looking observation \
+                 instead of a result",
+                spec.name
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The names in `NOT_EXECUTED_HERE` must actually exist in the registry, or the list is
+/// stale and the guard above passes vacuously.
+#[test]
+fn process_tools_are_real_registry_tools() {
+    let reg = default_registry();
+    for name in NOT_EXECUTED_HERE {
+        assert!(
+            reg.get(name).is_some(),
+            "NOT_EXECUTED_HERE names {name}, which the registry does not declare"
+        );
     }
 }

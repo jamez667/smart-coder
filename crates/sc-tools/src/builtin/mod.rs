@@ -30,6 +30,6 @@ mod write;
 #[cfg(test)]
 mod tests;
 
-pub use dispatch::{execute, ToolOutcome};
+pub use dispatch::{execute, handled_here, ToolOutcome, NOT_EXECUTED_HERE};
 pub use registry::{default_registry, minimal_worker_registry};
 pub use util::{safe_join, source_files};
