@@ -283,6 +283,7 @@ impl App {
                 let lines = sc_win::claudesessions::transcript(&ws, &id);
                 self.claude_feed.clear();
                 for l in lines {
+                    // "·" only so the renderer treats it as prose; it draws no icon.
                     let icon = if l.is_user { "❯" } else { "·" };
                     self.claude_feed.push(Row::ok(icon, l.text));
                 }

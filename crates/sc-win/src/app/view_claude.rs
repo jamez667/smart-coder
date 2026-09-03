@@ -32,11 +32,40 @@ impl App {
         } else {
             let mut col = column![].spacing(3).padding(PAD).width(Fill);
             for r in &self.claude_feed {
+                // YOUR OWN QUESTION, set apart. It rendered identically to every
+                // other line — same size, same grey, only a different icon — so
+                // scrolling back through a long run gave no way to find where an
+                // exchange began. An accent bar down the left and a slightly lifted
+                // background mark it, in the flat square language the rest of the UI
+                // uses rather than importing a rounded bubble.
+                if r.icon == "❯" && !r.text.is_empty() {
+                    col = col.push(
+                        container(
+                            row![
+                                container(Space::new().width(Length::Fixed(2.0)).height(Fill))
+                                    .style(|_: &iced::Theme| container::Style {
+                                        background: Some(ACCENT.into()),
+                                        ..Default::default()
+                                    }),
+                                markdown_body(&r.text),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Alignment::Start),
+                        )
+                        .width(Fill)
+                        .padding([5, 8])
+                        .style(|_: &iced::Theme| container::Style {
+                            background: Some(EDITOR_BG.into()),
+                            ..Default::default()
+                        }),
+                    );
+                    continue;
+                }
                 // Tool-call lines and errors are single short strings and read
                 // better as they are — icon, one line, done. Only the model's PROSE
                 // (`💬`) and replayed conversation carry Markdown worth rendering,
                 // and a page of it as flat size-12 text is the wall this fixes.
-                if r.is_error || !matches!(r.icon, "💬" | "·" | "❯") || r.text.is_empty() {
+                if r.is_error || !matches!(r.icon, "💬" | "·") || r.text.is_empty() {
                     col = col.push(
                         row![
                             text(r.icon)
@@ -51,13 +80,13 @@ impl App {
                     );
                     continue;
                 }
+                // NO icon on the model's prose. A `·` on every line is a column of
+                // noise that says nothing -- the absence of the accent bar above
+                // already marks this as the answer rather than the question. The
+                // indent keeps it aligned with the user turn's text.
                 col = col.push(
-                    row![
-                        text(r.icon).size(12).color(FG_MUTED),
-                        markdown_body(&r.text),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Start),
+                    container(markdown_body(&r.text))
+                        .padding(iced::Padding::default().top(2).bottom(6).left(10)),
                 );
             }
             scrollable(col)
