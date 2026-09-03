@@ -196,33 +196,7 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
     // No confirmer: nothing here can mutate, so there is nothing to approve. Passing one
     // would put a permission prompt in front of reading a file to answer a question.
     let mut agent_cfg = cfg.agent_config(None);
-    // A question is not a build.
-    //
-    // Measured on the first live run: the loop found the right file in 8 steps and then
-    // spent 9 more without concluding. Two causes, both from inheriting a BUILD config:
-    //
-    // * 40 steps is a licence to keep looking. Reading is cheap and finishing is not
-    //   forced, so the model kept opening one more file. A tighter ceiling makes the
-    //   budget visible and pushes it to answer with what it has.
-    // * `verify_command` tells the loop there is a build to run, and this registry has no
-    //   `run_verification` to run it with — steering a model toward a tool it was not
-    //   offered is the `ToolNotOffered` failure, and it burns turns.
-    agent_cfg.max_steps = 14;
-    agent_cfg.verify_command = None;
-    agent_cfg.plan_first = false;
-    // Room to answer.
-    //
-    // Observed live: the reply hit the 6144-token cap after 23,019 chars and raised a
-    // ReplyTruncated fault. A question is answered in PROSE, and prose is far longer than
-    // the `{"tool":...}` JSON the default cap was sized for -- an answer that names a file,
-    // a line and a fix does not fit in a budget tuned for tool calls.
-    agent_cfg.response_reserve_tokens = 12288;
-    // `SC_INVESTIGATE_VERBOSE=1` emits the fully-assembled prompt each turn, so a probe run
-    // can be read back as "what the model actually saw" rather than guessed at from the
-    // tool calls it made. Off unless asked: the payload is large.
-    if std::env::var_os("SC_INVESTIGATE_VERBOSE").is_some() {
-        agent_cfg.verbose = true;
-    }
+    tune_for_investigation(&mut agent_cfg);
 
     let sink = FnSink(|e: &AgentEvent| {
         let _ = ev_tx.send(UiEvent::Agent(e.clone()));
@@ -301,5 +275,95 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
         Err(e) => {
             let _ = ev_tx.send(UiEvent::Failed(format!("investigation failed: {e}")));
         }
+    }
+}
+
+/// Shape a build-agent config for ANSWERING A QUESTION.
+///
+/// Split out from `investigate` so it can be asserted without a live backend: every value
+/// here was set because a live run went wrong without it.
+pub(crate) fn tune_for_investigation(agent_cfg: &mut sc_core::AgentConfig) {
+    // A question is not a build.
+    //
+    // Measured on the first live run: the loop found the right file in 8 steps and then
+    // spent 9 more without concluding. Two causes, both from inheriting a BUILD config:
+    //
+    // * 40 steps is a licence to keep looking. Reading is cheap and finishing is not
+    //   forced, so the model kept opening one more file. A tighter ceiling makes the
+    //   budget visible and pushes it to answer with what it has.
+    // * `verify_command` tells the loop there is a build to run, and this registry has no
+    //   `run_verification` to run it with — steering a model toward a tool it was not
+    //   offered is the `ToolNotOffered` failure, and it burns turns.
+    agent_cfg.max_steps = 14;
+    agent_cfg.verify_command = None;
+    agent_cfg.plan_first = false;
+    // Room to answer.
+    //
+    // Observed live: the reply hit the 6144-token cap after 23,019 chars and raised a
+    // ReplyTruncated fault. A question is answered in PROSE, and prose is far longer than
+    // the `{"tool":...}` JSON the default cap was sized for -- an answer that names a file,
+    // a line and a fix does not fit in a budget tuned for tool calls.
+    agent_cfg.response_reserve_tokens = 12288;
+    // `SC_INVESTIGATE_VERBOSE=1` emits the fully-assembled prompt each turn, so a probe run
+    // can be read back as "what the model actually saw" rather than guessed at from the
+    // tool calls it made. Off unless asked: the payload is large.
+    if std::env::var_os("SC_INVESTIGATE_VERBOSE").is_some() {
+        agent_cfg.verbose = true;
+    }
+    // Keep the reasoning OUT of the reply.
+    //
+    // Measured: one turn came back as 44,981 characters of "Let me analyze... Wait, let me
+    // re-read... So the first segment goes from..." -- the model thinking in plain prose
+    // until the cap cut it off, costing the turn. This is the exact quirk `system_suffix`
+    // exists for, and the investigate path was not setting it.
+    //
+    // Only when the caller has not chosen one: a user-set suffix is a deliberate override
+    // and must win.
+    if agent_cfg.system_suffix.is_none() {
+        agent_cfg.system_suffix = Some("/no_think".to_string());
+    }
+}
+
+#[cfg(test)]
+mod investigation_config {
+    use super::*;
+
+    /// **Every one of these was set because a live run went wrong without it.**
+    ///
+    /// The suffix is the load-bearing one: without it a turn came back as 44,981 characters
+    /// of "Let me analyze... Wait, let me re-read..." -- the model reasoning in plain prose
+    /// until the token cap cut it off, which costs the whole turn and raises a
+    /// ReplyTruncated fault.
+    #[test]
+    fn a_question_is_not_configured_like_a_build() {
+        let mut cfg = sc_core::AgentConfig {
+            verify_command: Some("cargo test".into()),
+            plan_first: true,
+            ..sc_core::AgentConfig::default()
+        };
+        tune_for_investigation(&mut cfg);
+
+        assert_eq!(cfg.system_suffix.as_deref(), Some("/no_think"));
+        assert_eq!(
+            cfg.verify_command, None,
+            "no run_verification exists in a read-only registry to satisfy it"
+        );
+        assert!(!cfg.plan_first, "a question needs an answer, not a plan");
+        assert_eq!(cfg.max_steps, 14, "40 steps is a licence to keep looking");
+        assert!(
+            cfg.response_reserve_tokens >= 12288,
+            "a prose answer does not fit a budget tuned for tool-call JSON"
+        );
+    }
+
+    /// A caller's own suffix is a deliberate override and must win.
+    #[test]
+    fn a_chosen_suffix_is_not_overwritten() {
+        let mut cfg = sc_core::AgentConfig {
+            system_suffix: Some("/think".into()),
+            ..sc_core::AgentConfig::default()
+        };
+        tune_for_investigation(&mut cfg);
+        assert_eq!(cfg.system_suffix.as_deref(), Some("/think"));
     }
 }

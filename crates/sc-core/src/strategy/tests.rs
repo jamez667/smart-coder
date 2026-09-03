@@ -480,3 +480,40 @@ fn select_strategy_follows_capabilities() {
     );
     assert_eq!(select_strategy(&caps(ToolCalling::Gbnf)).name(), "gbnf");
 }
+
+/// **A stray quote closing a number cost three turns in a row.**
+///
+/// Verbatim from a live run: `{"tool":"read_file","path":"…","start":130,"limit":60"}` —
+/// well-formed apart from one character, rejected three times as "no JSON tool object
+/// found in your reply", which is a misleading thing to say about a reply that plainly
+/// contains one.
+#[test]
+fn a_stray_quote_after_a_number_is_repaired() {
+    let registry = sc_tools::read_only_registry();
+    let raw = r#"{"tool":"read_file","path":"crates/void_claim/src/ship_render.rs","start":130,"limit":60"}"#;
+    let call = ParseRepair
+        .extract(raw, &registry)
+        .expect("a one-character slip must not cost a turn");
+    assert_eq!(call.name, "read_file");
+    assert_eq!(call.int("limit"), Some(60));
+    assert_eq!(call.int("start"), Some(130));
+}
+
+/// The repair must not touch a quote that legitimately ends a string.
+#[test]
+fn a_quote_ending_a_real_string_is_left_alone() {
+    // `"query":"fn draw_trails"` — the quote follows `s`, not a digit, so it stays.
+    let registry = sc_tools::read_only_registry();
+    let raw = r#"{"tool":"search_code","query":"draw_trails"}"#;
+    let call = ParseRepair.extract(raw, &registry).expect("valid JSON");
+    assert_eq!(call.str("query"), Some("draw_trails"));
+
+    // A string whose CONTENT ends in a digit must survive intact.
+    let raw2 = r#"{"tool":"search_code","query":"version 60"}"#;
+    let call2 = ParseRepair.extract(raw2, &registry).expect("valid JSON");
+    assert_eq!(
+        call2.str("query"),
+        Some("version 60"),
+        "a digit before the closing quote of a real string is not a stray quote"
+    );
+}

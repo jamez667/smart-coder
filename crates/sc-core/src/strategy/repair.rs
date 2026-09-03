@@ -372,3 +372,43 @@ pub(super) fn repair_edit_file_call(raw: &str) -> Option<serde_json::Value> {
     );
     Some(serde_json::Value::Object(obj))
 }
+
+/// Repair a call whose NUMERIC argument carries a stray closing quote: `"limit":60"`.
+///
+/// Observed live three turns in a row, costing the run three steps:
+/// `{"tool":"read_file","path":"…","start":130,"limit":60"}` — well-formed apart from one
+/// character. The model was told `"limit":<int>` and half-applied the string quoting from
+/// the arguments either side of it.
+///
+/// The existing repair ladder is all about string BODIES (`write_file` content, `edit_file`
+/// old_str) whose inner quotes close a JSON string early. This is the opposite shape: a quote
+/// where a number ends, which no amount of body-aware recovery reaches.
+///
+/// Deliberately narrow. Only a `"` that directly follows digits and precedes `,`/`}` is
+/// removed, so it cannot touch a genuine string value or a quote inside one.
+pub fn repair_stray_quote_after_number(raw: &str) -> Option<serde_json::Value> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let body = &raw[start..=end];
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut fixed = false;
+    for (i, ch) in body.char_indices() {
+        if ch == '"' && i > 0 {
+            let prev = bytes[i - 1];
+            let next = bytes[i + 1..].iter().find(|b| !b.is_ascii_whitespace());
+            if prev.is_ascii_digit() && matches!(next, Some(b',') | Some(b'}')) {
+                fixed = true;
+                continue; // drop the stray quote
+            }
+        }
+        out.push(ch);
+    }
+    if !fixed {
+        return None;
+    }
+    serde_json::from_str(&out).ok()
+}

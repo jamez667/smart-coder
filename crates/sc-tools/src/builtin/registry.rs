@@ -302,7 +302,7 @@ pub fn read_only_registry() -> ToolRegistry {
         .into_iter()
         .map(|mut s| {
             if s.name == "finish" {
-                s.description = "Give your final answer and end the investigation. Put the                                  COMPLETE answer in `summary` -- it is the only thing the user                                  sees.";
+                s.description = "Give your final answer and end the investigation. Put the COMPLETE answer in `summary` -- it is the only thing the user sees.";
                 s.params = vec![ParamSpec::new(
                     "summary",
                     ParamType::String,

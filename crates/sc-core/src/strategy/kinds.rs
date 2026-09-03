@@ -91,6 +91,15 @@ impl ToolCallStrategy for ParseRepair {
                     return Ok(call);
                 }
             }
+            // A stray quote closing a NUMERIC argument (`"limit":60"`). Every repair above
+            // is about string bodies whose inner quotes end a JSON string early; this is the
+            // opposite shape and none of them reach it. Cheap, and it was costing whole
+            // turns to a one-character mistake.
+            if let Some(value) = super::repair::repair_stray_quote_after_number(raw) {
+                if let Ok(call) = registry.validate(&value) {
+                    return Ok(call);
+                }
+            }
             return Err(last_err.unwrap_or(RepairError::NoJson));
         }
         // A call is SWALLOWED when one of its string args contains an embedded `"tool":` — the

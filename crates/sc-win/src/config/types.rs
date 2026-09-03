@@ -199,6 +199,18 @@ pub struct UiConfig {
     pub sandbox_override: Option<sc_verify::Sandbox>,
 }
 
+/// Where a local model server is expected, absent any config.
+///
+/// Deliberately llama.cpp's own default and NOT any particular machine's port: the real
+/// endpoint belongs in `config.json`, never in the repo (see
+/// `neutral_default_has_no_machine_specifics`).
+///
+/// Worth knowing when this misleads: if something unrelated answers on this port, the probe
+/// gets an HTTP 200, classifies the endpoint "reachable but no model loaded", and the badge
+/// reports a modelless backend while the real server sits elsewhere. That is why the badge
+/// names the URL and the model it asked for rather than just the symptom.
+pub const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:8080/v1";
+
 impl Default for UiConfig {
     fn default() -> Self {
         // Machine-agnostic fallbacks only. The real endpoint/model is layered on by
@@ -217,7 +229,7 @@ impl Default for UiConfig {
             // supplied by the user / .env). Stages default to Local so a fresh install behaves
             // exactly as before — the planner only moves to Gemini when the user routes it there.
             local_conn: Connection {
-                base_url: "http://localhost:8080/v1".to_string(),
+                base_url: DEFAULT_LOCAL_BASE_URL.to_string(),
                 key: None,
             },
             gemini_conn: Connection {
@@ -227,7 +239,7 @@ impl Default for UiConfig {
             coder_provider: Provider::Local,
             planner_provider: Provider::Local,
             advisor_provider: Provider::Local,
-            base_url: "http://localhost:8080/v1".to_string(),
+            base_url: DEFAULT_LOCAL_BASE_URL.to_string(),
             model: "default".to_string(),
             tool_calling: ToolCalling::None,
             key: None,
