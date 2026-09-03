@@ -298,18 +298,16 @@ impl App {
         // Past conversations, newest first — the picker. Read from the CLI's own
         // session logs rather than shelling out to `--resume` with no id, which
         // opens an interactive TUI this panel has no terminal to draw.
+        //
         // `workspace_root()`, NOT `cfg.workspace`: opening a project sets
-        // `picked_workspace` and leaves `cfg.workspace` at its default (a temp dir
-        // the CLI has never run in), so reading the config directly listed sessions
-        // for the wrong folder and always found none.
+        // `picked_workspace` and leaves the config at its default (a temp dir the CLI
+        // has never run in), so reading the config listed sessions for the wrong
+        // folder and always found none.
         let ws_root = self.workspace_root();
         let sessions = sc_win::claudesessions::list(&ws_root);
         if sessions.is_empty() {
-            // SAY SO. Sessions are per-workspace, and the default workspace is a temp
-            // directory the CLI has never run in -- so a silent absence reads as a
-            // broken feature rather than "there is nothing here yet". Naming the
-            // folder is the whole message: it tells you the list is empty because of
-            // WHERE you are, and points at the fix.
+            // SAY SO, and name the folder. Sessions are per-workspace, so a silent
+            // absence reads as a broken feature rather than "nothing here yet".
             let here = ws_root
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -317,26 +315,33 @@ impl App {
             let note = format!("No past conversations in {here}");
             if hit(&note, "") {
                 any = true;
-                items = items.push(container(text(note).size(11).color(FG_MUTED)).padding([6, 10]));
+                section(&mut items, "Resume");
+                items = items.push(container(text(note).size(12).color(FG_MUTED)).padding([5, 10]));
             }
         } else {
-            let header = format!("Resume a conversation ({})", sessions.len());
-            if hit(&header, "") || sessions.iter().any(|x| hit(&x.summary, "")) {
+            let rows: Vec<&sc_win::claudesessions::Session> =
+                sessions.iter().filter(|x| hit(&x.summary, "")).collect();
+            if !rows.is_empty() {
                 any = true;
-                items =
-                    items.push(container(text(header).size(11).color(FG_MUTED)).padding([6, 10]));
-            }
-            for sess in &sessions {
-                if !hit(&sess.summary, "") {
-                    continue;
+                section(&mut items, "Resume a conversation");
+                for sess in rows {
+                    let active = self.claude_session.as_deref() == Some(sess.id.as_str());
+                    // The house row shape: label left, value right-aligned. The
+                    // summary is the label and the AGE is the value — with a dozen
+                    // conversations the question alone does not distinguish
+                    // yesterday's from last month's. No per-row icon: an `↺` on every
+                    // line is noise, so only the ACTIVE one is marked.
+                    let label = if active {
+                        format!("● {}", sess.summary)
+                    } else {
+                        sess.summary.clone()
+                    };
+                    items = items.push(menu_row(
+                        label,
+                        relative_age(sess.modified),
+                        Some(Message::ResumeClaudeSession(sess.id.clone())),
+                    ));
                 }
-                any = true;
-                let active = self.claude_session.as_deref() == Some(sess.id.as_str());
-                items = items.push(menu_row(
-                    format!("  {} {}", if active { "●" } else { "↺" }, sess.summary),
-                    String::new(),
-                    Some(Message::ResumeClaudeSession(sess.id.clone())),
-                ));
             }
         }
 
@@ -387,6 +392,26 @@ impl App {
 ///
 /// `None` for the message renders it inert rather than hiding it — "Attach the open file" with
 /// no file open should say what it would do, not vanish and leave you wondering where it went.
+/// "3h" / "2d" / "5w" — how long ago, in the least space that still says it.
+///
+/// A wall-clock date would be more precise and less useful: the question a picker
+/// answers is "which of these is the one I was just in", and an age answers it at a
+/// glance where `2026-08-28 08:14` has to be read and compared.
+fn relative_age(modified_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(modified_secs);
+    let secs = now.saturating_sub(modified_secs);
+    match secs {
+        0..=59 => "now".to_string(),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        86_400..=604_799 => format!("{}d", secs / 86_400),
+        _ => format!("{}w", secs / 604_800),
+    }
+}
+
 fn menu_row(label: String, value: String, msg: Option<Message>) -> Element<'static, Message> {
     let inner = row![
         text(label)

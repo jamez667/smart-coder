@@ -169,7 +169,10 @@ fn first_user_message(path: &Path) -> Option<String> {
         if text.is_empty() || text.starts_with('<') {
             continue;
         }
-        return Some(one_line(text, 72));
+        // 44 chars, not 72: the menu is 340px wide with padding and an age column
+        // beside it, which is about 45 characters at this text size. A longer summary
+        // does not wrap -- it runs past the panel edge.
+        return Some(one_line(text, 44));
     }
     None
 }
