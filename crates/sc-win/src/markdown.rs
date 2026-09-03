@@ -23,6 +23,13 @@ pub enum Block {
     Code(String),
     /// Ordinary prose.
     Para { spans: Vec<Span> },
+    /// One row of a pipe table, already split into cells.
+    ///
+    /// `head` marks the header row, so it can be rendered apart from the body. The
+    /// `|---|---|` separator is consumed by the parser and never reaches here — it
+    /// is punctuation, and rendering it was half of what made a table look like
+    /// garbage.
+    TableRow { head: bool, cells: Vec<Vec<Span>> },
     /// A deliberate gap between paragraphs. Carries no text.
     Blank,
 }
@@ -75,6 +82,21 @@ pub fn parse(src: &str) -> Vec<Block> {
             out.push(Block::Bullet { spans: spans(rest) });
             continue;
         }
+        // A pipe table. The `|---|---|` rule is dropped and the row BEFORE it is
+        // promoted to a header, which is the only way to know which row it was.
+        if let Some(cells) = table_cells(line) {
+            if is_table_rule(line) {
+                if let Some(Block::TableRow { head, .. }) = out.last_mut() {
+                    *head = true;
+                }
+                continue;
+            }
+            out.push(Block::TableRow {
+                head: false,
+                cells: cells.into_iter().map(|c| spans(&c)).collect(),
+            });
+            continue;
+        }
         out.push(Block::Para { spans: spans(line) });
     }
 
@@ -113,6 +135,33 @@ fn bullet(line: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// `| a | b |` → the cells, or `None` if the line is not a table row.
+///
+/// Requires a LEADING pipe: a sentence containing "a | b" is prose, and treating
+/// it as a table would mangle far more text than it ever formatted.
+fn table_cells(line: &str) -> Option<Vec<String>> {
+    if !line.starts_with('|') {
+        return None;
+    }
+    let inner = line.trim_start_matches('|').trim_end_matches('|');
+    let cells: Vec<String> = inner.split('|').map(|c| c.trim().to_string()).collect();
+    // A single cell is just a line that happens to start with a pipe.
+    if cells.len() < 2 {
+        return None;
+    }
+    Some(cells)
+}
+
+/// Is this the `|---|:--:|` rule under a header?
+fn is_table_rule(line: &str) -> bool {
+    let Some(cells) = table_cells(line) else {
+        return false;
+    };
+    cells
+        .iter()
+        .all(|c| !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' '))
 }
 
 /// Split a line into styled spans on `**bold**` and `` `code` ``.
@@ -298,6 +347,60 @@ mod tests {
             ],
             "runs collapse, and no trailing gap"
         );
+    }
+
+    /// **A table must render as a table, not as raw pipes.**
+    ///
+    /// Screenshotted from a real run: `| before | after |` and `|---|---|` came out
+    /// verbatim, which is what a reader sees when the parser has no table support.
+    #[test]
+    fn a_pipe_table_becomes_rows_with_a_header() {
+        let b = parse("| before | after |\n|---|---|\n| 208 | 0 |");
+        assert_eq!(
+            b,
+            vec![
+                Block::TableRow {
+                    head: true,
+                    cells: vec![plain("before"), plain("after")],
+                },
+                Block::TableRow {
+                    head: false,
+                    cells: vec![plain("208"), plain("0")],
+                },
+            ],
+            "the rule is consumed and promotes the row above it"
+        );
+    }
+
+    /// Cells keep their inline styling — a table of `code` values is the common case.
+    #[test]
+    fn table_cells_carry_spans() {
+        let b = parse("| `miner-fuel` | 208 |");
+        assert_eq!(
+            b,
+            vec![Block::TableRow {
+                head: false,
+                cells: vec![vec![Span::Code("miner-fuel".into())], plain("208")],
+            }]
+        );
+    }
+
+    /// **Prose containing a pipe is not a table.**
+    ///
+    /// Requiring a leading pipe is what stops "run `a | b` to filter" from being
+    /// mangled into two cells. An over-eager table parser damages far more text
+    /// than it formats.
+    #[test]
+    fn a_pipe_mid_sentence_is_not_a_table() {
+        assert!(matches!(
+            parse("pipe stdout | grep foo to filter").first(),
+            Some(Block::Para { .. })
+        ));
+        // A single cell is a line that merely starts with a pipe.
+        assert!(matches!(
+            parse("| not really a table").first(),
+            Some(Block::Para { .. })
+        ));
     }
 
     #[test]

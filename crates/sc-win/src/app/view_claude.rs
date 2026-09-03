@@ -467,7 +467,7 @@ fn markdown_body(src: &str) -> Element<'static, Message> {
 
     let mut col = column![].spacing(2).width(Fill);
     for block in parse(src) {
-        col = col.push(match block {
+        let rendered: Element<'static, Message> = match block {
             // A gap, not an empty row: paragraph breaks are what let the eye find
             // the start of a thought.
             Block::Blank => Space::new().height(Length::Fixed(6.0)).into(),
@@ -483,26 +483,53 @@ fn markdown_body(src: &str) -> Element<'static, Message> {
                     .padding([4, 0])
                     .into()
             }
-            Block::Bullet { spans } => {
-                row![text("•").size(12).color(FG_MUTED), inline(spans, 12.0, FG),]
+            Block::Bullet { spans } => container(
+                row![text("•").size(12).color(FG_MUTED), inline(spans, 12.0, FG)]
                     .spacing(6)
-                    .align_y(iced::Alignment::Start)
-                    .into()
-            }
-            // Monospace on the editor background, so a block reads as code at a
-            // glance rather than as oddly-worded prose.
+                    .align_y(iced::Alignment::Start),
+            )
+            .padding(iced::Padding::default().top(1).bottom(1))
+            .into(),
+            // A code LINE. Zero vertical padding so consecutive lines butt together
+            // into ONE box -- with padding each line became a separately-inset strip
+            // with a gap above and below, which reads as a stack of fragments rather
+            // than as a block of code.
             Block::Code(line) => {
                 container(text(line).size(11).font(iced::Font::MONOSPACE).color(GOOD))
                     .width(Fill)
-                    .padding([1, 8])
+                    .padding([0, 8])
                     .style(|_: &iced::Theme| container::Style {
                         background: Some(EDITOR_BG.into()),
                         ..Default::default()
                     })
                     .into()
             }
-            Block::Para { spans } => inline(spans, 12.0, FG),
-        });
+            // A table row as a real row of columns. Each cell takes an equal share of
+            // the width, so successive rows line up without measuring text. The
+            // header is brighter and tinted; body rows sit on the feed's own
+            // background so a long table does not stripe.
+            Block::TableRow { head, cells } => {
+                let mut r = row![].spacing(10).width(Fill);
+                for cell in cells {
+                    r = r.push(
+                        container(inline(cell, 12.0, if head { Color::WHITE } else { FG }))
+                            .width(Length::FillPortion(1)),
+                    );
+                }
+                container(r)
+                    .width(Fill)
+                    .padding([2, 6])
+                    .style(move |_: &iced::Theme| container::Style {
+                        background: head.then(|| EDITOR_BG.into()),
+                        ..Default::default()
+                    })
+                    .into()
+            }
+            Block::Para { spans } => container(inline(spans, 12.0, FG))
+                .padding(iced::Padding::default().top(2).bottom(2))
+                .into(),
+        };
+        col = col.push(rendered);
     }
     col.into()
 }
