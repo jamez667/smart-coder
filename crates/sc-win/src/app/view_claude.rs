@@ -124,7 +124,9 @@ impl App {
         if o.permission != sc_win::claudecode::Permission::Default {
             chips.push(o.permission.label().to_string());
         }
-        if o.continue_session {
+        if let Some(id) = &self.claude_session {
+            chips.push(format!("resuming {}", &id[..id.len().min(8)]));
+        } else if o.continue_session {
             chips.push("continuing".to_string());
         }
         if !o.add_dirs.is_empty() {
@@ -201,7 +203,7 @@ impl App {
                 Some(Message::AddClaudeDir),
             ),
             (
-                "Continue previous conversation".to_string(),
+                "Continue most recent conversation".to_string(),
                 if o.continue_session { "on" } else { "off" }.to_string(),
                 Some(Message::ToggleClaudeContinue),
             ),
@@ -291,6 +293,31 @@ impl App {
                 String::new(),
                 Some(Message::RemoveClaudeDir(i)),
             ));
+        }
+
+        // Past conversations, newest first — the picker. Read from the CLI's own
+        // session logs rather than shelling out to `--resume` with no id, which
+        // opens an interactive TUI this panel has no terminal to draw.
+        let sessions = sc_win::claudesessions::list(&self.cfg.workspace);
+        if !sessions.is_empty() {
+            let header = format!("Resume a conversation ({})", sessions.len());
+            if hit(&header, "") || sessions.iter().any(|x| hit(&x.summary, "")) {
+                any = true;
+                items =
+                    items.push(container(text(header).size(11).color(FG_MUTED)).padding([6, 10]));
+            }
+            for sess in &sessions {
+                if !hit(&sess.summary, "") {
+                    continue;
+                }
+                any = true;
+                let active = self.claude_session.as_deref() == Some(sess.id.as_str());
+                items = items.push(menu_row(
+                    format!("  {} {}", if active { "●" } else { "↺" }, sess.summary),
+                    String::new(),
+                    Some(Message::ResumeClaudeSession(sess.id.clone())),
+                ));
+            }
         }
 
         if !any {

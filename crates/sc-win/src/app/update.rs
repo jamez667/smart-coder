@@ -273,8 +273,37 @@ impl App {
                 self.cfg.claude.permission = all[(i + 1) % all.len()];
                 self.cfg.save_config();
             }
+            Message::ResumeClaudeSession(id) => {
+                self.open_menu = None;
+                // Replay the tail into the feed, so the panel SHOWS the conversation
+                // it just resumed rather than only claiming to have done it. Without
+                // this the picker reads as another silent toggle -- which is exactly
+                // the confusion the `--continue` item causes.
+                let ws = self.cfg.workspace.clone();
+                let lines = sc_win::claudesessions::transcript(&ws, &id);
+                self.claude_feed.clear();
+                for l in lines {
+                    let icon = if l.is_user { "❯" } else { "·" };
+                    self.claude_feed.push(Row::ok(icon, l.text));
+                }
+                if self.claude_feed.is_empty() {
+                    self.claude_feed
+                        .push(Row::ok("·", "(this conversation has no replayable text)"));
+                }
+                // Resuming a specific session and "carry on from the most recent" are
+                // the same intent; leaving both set would pass two flags that mean
+                // different things.
+                self.cfg.claude.continue_session = false;
+                self.claude_session = Some(id);
+                self.cfg.save_config();
+            }
             Message::ToggleClaudeContinue => {
                 self.cfg.claude.continue_session = !self.cfg.claude.continue_session;
+                // The two are the same intent expressed differently, so turning this
+                // on drops any specific session the picker had chosen.
+                if self.cfg.claude.continue_session {
+                    self.claude_session = None;
+                }
                 self.cfg.save_config();
             }
             Message::AttachActiveFile => {
@@ -345,6 +374,10 @@ impl App {
                     self.claude_feed.push(Row::ok(" ", String::new()));
                 }
                 self.claude_feed.push(Row::ok("❯", asked));
+                // Hand the picked session to the run. Held on the panel rather than in
+                // the saved config (a session id belongs to this panel now, not to the
+                // machine), so it has to be copied across before `start` clones cfg.
+                self.cfg.claude.resume_session = self.claude_session.clone();
                 self.start(RunKind::ClaudeCode);
                 self.intent = composer;
                 // The prompt has been sent and is now in the feed; leaving it in the box means

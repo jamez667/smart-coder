@@ -138,6 +138,10 @@ pub struct Options {
     pub permission: Permission,
     /// Carry the previous run's context (`--continue`) instead of starting cold.
     pub continue_session: bool,
+    /// Resume one SPECIFIC past conversation (`--resume <id>`), chosen from the
+    /// picker. Takes precedence over [`Self::continue_session`], which only ever
+    /// means "the most recent".
+    pub resume_session: Option<String>,
     /// Extra directories the run may touch, beyond the workspace (`--add-dir`).
     pub add_dirs: Vec<String>,
     /// Restrict the run to these tools (`--allowedTools`). Empty ⇒ no restriction.
@@ -202,7 +206,13 @@ pub fn args(task: &str, opts: &Options) -> Vec<String> {
         v.push("--permission-mode".to_string());
         v.push(p.to_string());
     }
-    if opts.continue_session {
+    // A specific session wins over "the most recent": the picker is an explicit
+    // choice and `--continue` is a default, and passing both would be two flags
+    // asking for different conversations.
+    if let Some(id) = &opts.resume_session {
+        v.push("--resume".to_string());
+        v.push(id.clone());
+    } else if opts.continue_session {
         v.push("--continue".to_string());
     }
     for d in &opts.add_dirs {
@@ -643,6 +653,40 @@ mod tests {
         }
     }
 
+    /// **A picked session beats "the most recent".**
+    ///
+    /// `--continue` and `--resume <id>` both reopen a conversation, but they name
+    /// different ones, and passing both asks the CLI for two things at once. The
+    /// picker is an explicit choice; `--continue` is a default, so the explicit one
+    /// wins and the default is dropped.
+    #[test]
+    fn a_resumed_session_replaces_continue() {
+        let opts = Options {
+            continue_session: true,
+            resume_session: Some("abc-123".to_string()),
+            ..Options::default()
+        };
+        let a = args("t", &opts);
+        assert!(a.contains(&"--resume".to_string()), "{a:?}");
+        assert!(a.contains(&"abc-123".to_string()), "{a:?}");
+        assert!(
+            !a.contains(&"--continue".to_string()),
+            "both flags would name different conversations: {a:?}"
+        );
+    }
+
+    /// With no session picked, `--continue` still works as before.
+    #[test]
+    fn continue_alone_is_unchanged() {
+        let opts = Options {
+            continue_session: true,
+            ..Options::default()
+        };
+        let a = args("t", &opts);
+        assert!(a.contains(&"--continue".to_string()), "{a:?}");
+        assert!(!a.contains(&"--resume".to_string()), "{a:?}");
+    }
+
     /// Each option becomes its flag.
     #[test]
     fn options_become_flags() {
@@ -652,6 +696,8 @@ mod tests {
                 model: Model::Sonnet,
                 permission: Permission::AcceptEdits,
                 continue_session: true,
+                // No session picked, so --continue is what this asserts.
+                resume_session: None,
                 add_dirs: vec![r"C:\other".to_string()],
                 allowed_tools: vec!["Edit".to_string(), "Bash(git *)".to_string()],
                 disallowed_tools: vec!["WebFetch".to_string()],

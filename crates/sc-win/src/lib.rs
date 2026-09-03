@@ -15,6 +15,7 @@ pub mod bridge;
 pub mod chat;
 pub mod chat_session;
 pub mod claudecode;
+pub mod claudesessions;
 pub mod codeview;
 pub mod comments;
 pub mod comply;

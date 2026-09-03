@@ -226,6 +226,13 @@ pub(crate) struct App {
     /// and `start()` refuses while one is live — a Claude run and an agent run can never happen
     /// together, so a shared feed would only mean each showing the other's history.
     pub(crate) claude_feed: Vec<sc_win::view::Row>,
+    /// The past conversation the next run resumes, if one was picked.
+    ///
+    /// `Some(id)` passes `--resume <id>`; `None` leaves the run to `--continue` or
+    /// a cold start. Not persisted: a session id is a property of THIS panel right
+    /// now, and reopening the app onto a conversation you last touched days ago is
+    /// surprising in a way "carry on from the most recent" is not.
+    pub(crate) claude_session: Option<String>,
     /// The Unity editor path override (Settings ▸ General). Blank ⇒ search the Hub convention.
     pub(crate) unity_path_input: String,
     /// Set to cancel an in-flight compile. The worker checks it between reads and kills the
@@ -515,6 +522,7 @@ impl Default for App {
             claude_menu: false,
             claude_filter: String::new(),
             claude_feed: Vec::new(),
+            claude_session: None,
             compile_cancel: None,
             unity_path_input: unity_path_seed,
             confirm_close: None,
@@ -679,6 +687,11 @@ pub(crate) enum Message {
     CycleClaudePermission,
     /// Toggle `--continue`: carry the previous run's context instead of starting cold.
     ToggleClaudeContinue,
+    /// Resume a specific past conversation, by session id.
+    ///
+    /// `--continue` takes the most recent silently; this is the picker, so the
+    /// panel can reopen any of them and show what was said.
+    ResumeClaudeSession(String),
     /// Attach the file currently open in the editor to the next prompt.
     AttachActiveFile,
     /// Add a directory (folder picker) the run may touch beyond the workspace.

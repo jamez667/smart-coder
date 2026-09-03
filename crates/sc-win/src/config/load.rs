@@ -126,6 +126,10 @@ impl UiConfig {
                 .map(crate::claudecode::Permission::from_slug)
                 .unwrap_or_default(),
             continue_session: file.claude_continue.unwrap_or(false),
+            // Not persisted: a picked session belongs to the running panel, not to
+            // the machine. Reopening onto a conversation last touched days ago is
+            // surprising in a way "carry on from the most recent" is not.
+            resume_session: None,
             add_dirs: split_lines(file.claude_add_dirs.as_deref()),
             allowed_tools: crate::claudecode::split_tools(
                 file.claude_allowed_tools.as_deref().unwrap_or_default(),
