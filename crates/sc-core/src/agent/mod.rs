@@ -18,7 +18,7 @@ use sc_proto::Result;
 use sc_tools::{Journal, ToolOutcome, ToolRegistry};
 
 pub use config::{AgentConfig, AgentReport};
-use config::{FOCUS_TASK_PREFIX, TASK_PREFIX, TASK_PREFIX_SHELL};
+use config::{FOCUS_TASK_PREFIX, INVESTIGATE_TASK_PREFIX, TASK_PREFIX, TASK_PREFIX_SHELL};
 
 use crate::event::{AgentEvent, EventSink, FaultKind, NullSink};
 use crate::metrics::ToolCallMetrics;
@@ -164,7 +164,17 @@ pub fn run_agent_observed(
     // When the agent is scoped to focus files, the loop pins their live contents
     // every turn — so the system prompt must NOT tell the model to read first
     // (that just traps a tiny model in a read loop). Lead with "edit" instead.
-    let prefix = if !cfg.focus_files.is_empty() {
+    // A registry with nothing mutating in it IS a read-only run, so it needs the prompt that
+    // matches. Derived from the registry rather than a config flag: the tools the model can
+    // actually call are the ground truth, and a flag would be a second place to keep in sync
+    // that could disagree with them.
+    let read_only_run = registry
+        .specs()
+        .iter()
+        .all(|s| s.side_effect == sc_tools::SideEffect::ReadOnly);
+    let prefix = if read_only_run {
+        INVESTIGATE_TASK_PREFIX
+    } else if !cfg.focus_files.is_empty() {
         FOCUS_TASK_PREFIX
     } else if cfg.permission.allow_shell {
         TASK_PREFIX_SHELL

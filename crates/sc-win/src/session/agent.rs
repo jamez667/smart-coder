@@ -210,6 +210,19 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
     agent_cfg.max_steps = 14;
     agent_cfg.verify_command = None;
     agent_cfg.plan_first = false;
+    // Room to answer.
+    //
+    // Observed live: the reply hit the 6144-token cap after 23,019 chars and raised a
+    // ReplyTruncated fault. A question is answered in PROSE, and prose is far longer than
+    // the `{"tool":...}` JSON the default cap was sized for -- an answer that names a file,
+    // a line and a fix does not fit in a budget tuned for tool calls.
+    agent_cfg.response_reserve_tokens = 12288;
+    // `SC_INVESTIGATE_VERBOSE=1` emits the fully-assembled prompt each turn, so a probe run
+    // can be read back as "what the model actually saw" rather than guessed at from the
+    // tool calls it made. Off unless asked: the payload is large.
+    if std::env::var_os("SC_INVESTIGATE_VERBOSE").is_some() {
+        agent_cfg.verbose = true;
+    }
 
     let sink = FnSink(|e: &AgentEvent| {
         let _ = ev_tx.send(UiEvent::Agent(e.clone()));

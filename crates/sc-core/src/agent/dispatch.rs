@@ -296,6 +296,13 @@ pub(super) fn key_arg(call: &sc_tools::ValidatedCall) -> String {
     if let Some(cmd) = call.str("command") {
         return sc_verify::strip_leading_cd(cmd).trim().to_string();
     }
+    // `finish`'s `summary` is the ANSWER on a read-only run, and it was not in the list
+    // below -- the same omission this function's own comment describes for `command`, with
+    // a worse consequence: the model's whole reply reached `ToolCall.arg` as an empty
+    // string and the run reported success having returned nothing.
+    if let Some(summary) = call.str("summary") {
+        return summary.to_string();
+    }
     for k in ["path", "query", "name"] {
         if let Some(v) = call.str(k) {
             let start = call.int("start");
@@ -526,6 +533,24 @@ mod tests {
             name: "read_file".to_string(),
             args,
         }
+    }
+
+    /// **`finish`'s summary is the answer, and must survive into the event.**
+    ///
+    /// It was not in `key_arg`'s key list, so a read-only run's whole answer arrived at the
+    /// UI as an empty string while the run reported success.
+    #[test]
+    fn key_arg_carries_a_finish_summary() {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert(
+            "summary".to_string(),
+            json!("starfield.rs:173 swaps the colors"),
+        );
+        let call = sc_tools::ValidatedCall {
+            name: "finish".to_string(),
+            args,
+        };
+        assert_eq!(key_arg(&call), "starfield.rs:173 swaps the colors");
     }
 
     /// Shell commands must hash by what they RUN.

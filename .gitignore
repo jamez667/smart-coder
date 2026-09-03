@@ -65,3 +65,9 @@ evals/ladder/**/*.rcgu.o
 # on. Re-included here because the repo-wide rule above ignores all lock files.
 evals/ladder/**/target/
 !evals/ladder/**/Cargo.lock
+
+# Probe transcripts are large; the digests in logs/ are committed instead.
+crates/sc-win/logs/
+
+# Probe transcripts are large; the digests in logs/ are committed instead.
+crates/sc-win/logs/

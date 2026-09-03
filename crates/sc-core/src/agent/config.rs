@@ -239,6 +239,27 @@ shell is blocked); read which tests still fail and fix them; \
 4) finish only when the tests pass. \
 Take a concrete action every turn — prefer editing over searching.\n\n";
 
+/// The loop for a READ-ONLY run: answer a question about the code, change nothing.
+///
+/// `TASK_PREFIX` is a *build* prompt — "make the failing test pass", "edit_file it",
+/// "run_verification", "finish only when the tests pass". Handed to a read-only registry it
+/// describes three tools that are not there, and a model does what it is told: measured on a
+/// live run, it hunted for `edit_file`, could not find it, and dumped ~45,000 characters of
+/// prose four turns running, each one truncated at the reply cap and rejected as "no JSON
+/// tool object". The answer it had already worked out was thrown away.
+///
+/// The difference that matters is what `finish` MEANS. In a build run finishing is a signal
+/// and its argument is decoration; here the argument IS the deliverable, and a `finish` with
+/// an empty argument is the run failing while reporting success.
+pub(super) const INVESTIGATE_TASK_PREFIX: &str =
+    "You are a code investigator working in a project directory. Answer the user's question by READING the code. You have read-only tools: there is no way to edit files, run commands or run tests here, so do not look for one and do not describe an edit as though you were making it.
+
+Follow this loop: 1) read_file / read_function / search_code to find the relevant code; 2) when you know the answer, call finish and put the WHOLE ANSWER in its `summary` argument.
+
+The `summary` argument is the ONLY thing the user sees — prose written outside a JSON tool call is discarded. Name the file and the line, explain the cause, and give the exact change that would fix it. Take a concrete action every turn.
+
+";
+
 /// The same loop, for a run where the shell IS allowed.
 ///
 /// The difference is step 1. Telling a model to read first traps it in a read loop —

@@ -290,6 +290,28 @@ pub fn read_only_registry() -> ToolRegistry {
         specs.iter().any(|s| s.name == "finish"),
         "without finish the loop cannot terminate cleanly"
     );
+    // `finish` needs somewhere to PUT the answer.
+    //
+    // The build registry's `finish` takes no parameters -- it is a signal that work is done,
+    // and the work is the edits on disk. For a question there are no edits: the answer is the
+    // only deliverable, and with a parameterless `finish` there was nowhere to put it.
+    // Measured live: the model wrote a correct, complete diagnosis as prose, the harness
+    // rejected it as "no JSON tool object", and the next turn called `{"tool":"finish"}` with
+    // nothing in it. The run reported success and returned an empty answer.
+    let specs = specs
+        .into_iter()
+        .map(|mut s| {
+            if s.name == "finish" {
+                s.description = "Give your final answer and end the investigation. Put the                                  COMPLETE answer in `summary` -- it is the only thing the user                                  sees.";
+                s.params = vec![ParamSpec::new(
+                    "summary",
+                    ParamType::String,
+                    "the full answer: the file and line, the cause, and the exact fix",
+                )];
+            }
+            s
+        })
+        .collect();
     ToolRegistry::new(specs)
 }
 
@@ -410,6 +432,43 @@ mod investigate_shape {
         assert!(
             (4..=7).contains(&n),
             "expected a short investigation menu, got {n} tools"
+        );
+    }
+}
+
+#[cfg(test)]
+mod finish_carries_the_answer {
+    use super::*;
+
+    /// **On a read-only run the answer IS the deliverable, so `finish` must have room for it.**
+    ///
+    /// The build registry's `finish` takes no parameters: work is done, and the work is the
+    /// edits on disk. Reused for a question that leaves nowhere to put the answer — measured
+    /// live, the model wrote a correct diagnosis as prose, the harness rejected it as "no
+    /// JSON tool object", and the next turn sent `{"tool":"finish"}` with nothing in it.
+    #[test]
+    fn the_read_only_finish_takes_a_summary() {
+        let r = read_only_registry();
+        let finish = r
+            .specs()
+            .iter()
+            .find(|s| s.name == "finish")
+            .expect("finish must exist or the loop cannot end");
+        assert!(
+            finish.params.iter().any(|p| p.name == "summary"),
+            "read-only finish needs a summary to carry the answer, got {:?}",
+            finish.params.iter().map(|p| p.name).collect::<Vec<_>>()
+        );
+        // The build registry's finish stays parameterless — this must not leak into it.
+        let build_finish = default_registry()
+            .specs()
+            .iter()
+            .find(|s| s.name == "finish")
+            .cloned()
+            .expect("finish");
+        assert!(
+            build_finish.params.is_empty(),
+            "the build finish is a signal, not a report"
         );
     }
 }
