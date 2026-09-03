@@ -32,14 +32,29 @@ impl App {
         } else {
             let mut col = column![].spacing(3).padding(PAD).width(Fill);
             for r in &self.claude_feed {
+                // Tool-call lines and errors are single short strings and read
+                // better as they are — icon, one line, done. Only the model's PROSE
+                // (`💬`) and replayed conversation carry Markdown worth rendering,
+                // and a page of it as flat size-12 text is the wall this fixes.
+                if r.is_error || !matches!(r.icon, "💬" | "·" | "❯") || r.text.is_empty() {
+                    col = col.push(
+                        row![
+                            text(r.icon)
+                                .size(12)
+                                .color(if r.is_error { BAD } else { FG_MUTED }),
+                            text(&r.text)
+                                .size(12)
+                                .color(if r.is_error { BAD } else { FG }),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Start),
+                    );
+                    continue;
+                }
                 col = col.push(
                     row![
-                        text(r.icon)
-                            .size(12)
-                            .color(if r.is_error { BAD } else { FG_MUTED }),
-                        text(&r.text)
-                            .size(12)
-                            .color(if r.is_error { BAD } else { FG }),
+                        text(r.icon).size(12).color(FG_MUTED),
+                        markdown_body(&r.text),
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Start),
@@ -410,6 +425,81 @@ fn relative_age(modified_secs: u64) -> String {
         86_400..=604_799 => format!("{}d", secs / 86_400),
         _ => format!("{}w", secs / 604_800),
     }
+}
+
+/// Render Markdown prose as a styled column: headings, bullets, code and gaps.
+///
+/// The panel used to push a whole answer through as one flat line of size-12 text,
+/// which is why a page of it read as an undifferentiated wall next to any other
+/// chat client. Only the structure a coding model actually emits is handled — see
+/// `sc_win::markdown` for why the parser stops there.
+fn markdown_body(src: &str) -> Element<'static, Message> {
+    use sc_win::markdown::{parse, Block};
+
+    let mut col = column![].spacing(2).width(Fill);
+    for block in parse(src) {
+        col = col.push(match block {
+            // A gap, not an empty row: paragraph breaks are what let the eye find
+            // the start of a thought.
+            Block::Blank => Space::new().height(Length::Fixed(6.0)).into(),
+            Block::Heading { level, spans } => {
+                // Bigger and brighter, and the accent colour on the top level so a
+                // long answer has landmarks you can scan for.
+                let size = match level {
+                    1 => 15.0,
+                    2 => 14.0,
+                    _ => 13.0,
+                };
+                container(inline(spans, size, if level == 1 { ACCENT } else { FG }))
+                    .padding([4, 0])
+                    .into()
+            }
+            Block::Bullet { spans } => {
+                row![text("•").size(12).color(FG_MUTED), inline(spans, 12.0, FG),]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Start)
+                    .into()
+            }
+            // Monospace on the editor background, so a block reads as code at a
+            // glance rather than as oddly-worded prose.
+            Block::Code(line) => {
+                container(text(line).size(11).font(iced::Font::MONOSPACE).color(GOOD))
+                    .width(Fill)
+                    .padding([1, 8])
+                    .style(|_: &iced::Theme| container::Style {
+                        background: Some(EDITOR_BG.into()),
+                        ..Default::default()
+                    })
+                    .into()
+            }
+            Block::Para { spans } => inline(spans, 12.0, FG),
+        });
+    }
+    col.into()
+}
+
+/// One line's spans as a wrapping row: plain, **bold**, and `code`.
+///
+/// A `row` rather than a single `text`, because iced styles a whole `text` widget
+/// at once — mixed emphasis inside one line needs one widget per run.
+fn inline(spans: Vec<sc_win::markdown::Span>, size: f32, fg: Color) -> Element<'static, Message> {
+    use sc_win::markdown::Span;
+
+    let mut r = row![].spacing(0).align_y(iced::Alignment::Center);
+    for sp in spans {
+        r = r.push(match sp {
+            Span::Plain(t) => text(t).size(size).color(fg),
+            // Brighter rather than a bold face: the UI ships one weight, so weight
+            // is not available and contrast is what reads as emphasis.
+            Span::Bold(t) => text(t).size(size).color(Color::WHITE),
+            Span::Code(t) => text(t)
+                .size(size - 1.0)
+                .font(iced::Font::MONOSPACE)
+                .color(GOOD),
+        });
+    }
+    //  so a long line breaks at the panel edge instead of running past it.
+    r.wrap().into()
 }
 
 fn menu_row(label: String, value: String, msg: Option<Message>) -> Element<'static, Message> {

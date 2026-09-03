@@ -26,6 +26,7 @@ pub mod filetree;
 pub mod gitdiff;
 pub mod layout;
 pub mod linecomment;
+pub mod markdown;
 pub mod persist;
 pub mod plan;
 pub mod proc;
