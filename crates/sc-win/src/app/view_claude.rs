@@ -298,8 +298,28 @@ impl App {
         // Past conversations, newest first — the picker. Read from the CLI's own
         // session logs rather than shelling out to `--resume` with no id, which
         // opens an interactive TUI this panel has no terminal to draw.
-        let sessions = sc_win::claudesessions::list(&self.cfg.workspace);
-        if !sessions.is_empty() {
+        // `workspace_root()`, NOT `cfg.workspace`: opening a project sets
+        // `picked_workspace` and leaves `cfg.workspace` at its default (a temp dir
+        // the CLI has never run in), so reading the config directly listed sessions
+        // for the wrong folder and always found none.
+        let ws_root = self.workspace_root();
+        let sessions = sc_win::claudesessions::list(&ws_root);
+        if sessions.is_empty() {
+            // SAY SO. Sessions are per-workspace, and the default workspace is a temp
+            // directory the CLI has never run in -- so a silent absence reads as a
+            // broken feature rather than "there is nothing here yet". Naming the
+            // folder is the whole message: it tells you the list is empty because of
+            // WHERE you are, and points at the fix.
+            let here = ws_root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ws_root.display().to_string());
+            let note = format!("No past conversations in {here}");
+            if hit(&note, "") {
+                any = true;
+                items = items.push(container(text(note).size(11).color(FG_MUTED)).padding([6, 10]));
+            }
+        } else {
             let header = format!("Resume a conversation ({})", sessions.len());
             if hit(&header, "") || sessions.iter().any(|x| hit(&x.summary, "")) {
                 any = true;

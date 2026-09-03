@@ -279,7 +279,7 @@ impl App {
                 // it just resumed rather than only claiming to have done it. Without
                 // this the picker reads as another silent toggle -- which is exactly
                 // the confusion the `--continue` item causes.
-                let ws = self.cfg.workspace.clone();
+                let ws = self.workspace_root();
                 let lines = sc_win::claudesessions::transcript(&ws, &id);
                 self.claude_feed.clear();
                 for l in lines {

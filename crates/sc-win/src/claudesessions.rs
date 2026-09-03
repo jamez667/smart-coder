@@ -38,17 +38,40 @@ pub struct Session {
 /// map to the same directory every time.
 pub fn project_dir(workspace: &Path) -> Option<PathBuf> {
     let home = home_dir()?;
-    // The drive letter is upper-cased: the CLI writes `C--Users-...`, and while
-    // Windows resolves either spelling, a case-sensitive mount would not.
-    let raw = workspace.to_string_lossy();
-    let mut slug: String = raw
+    let projects = home.join(".claude").join("projects");
+    let slug: String = workspace
+        .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    if let Some(first) = slug.get_mut(0..1) {
+
+    // Try the slug BOTH WAYS, because the CLI writes whichever case the invoking
+    // path had and does not normalise. Both spellings genuinely exist on this
+    // machine: `C--Users-mail-working-Personal-SmartCoder-smart-coder` alongside
+    // `c--Users-mail-working-Personal-Games-void-claim`. Windows resolves either,
+    // but picking one and hoping is how a folder with eight conversations lists
+    // none on a case-sensitive filesystem -- and guessing wrong is invisible,
+    // because an empty directory and a missing one look identical here.
+    let mut lower = slug.clone();
+    if let Some(first) = lower.get_mut(0..1) {
+        first.make_ascii_lowercase();
+    }
+    let mut upper = slug;
+    if let Some(first) = upper.get_mut(0..1) {
         first.make_ascii_uppercase();
     }
-    Some(home.join(".claude").join("projects").join(slug))
+
+    let as_written = projects.join(&upper);
+    if as_written.is_dir() {
+        return Some(as_written);
+    }
+    let alt = projects.join(&lower);
+    if alt.is_dir() {
+        return Some(alt);
+    }
+    // Neither exists: return the upper form so the caller reports "no conversations
+    // here" against a sensible path rather than failing.
+    Some(projects.join(upper))
 }
 
 /// The user's home directory, without pulling in a crate for it.
@@ -243,13 +266,51 @@ fn one_line(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Every non-alphanumeric becomes `-`; only the leading drive letter's case is
+    /// uncertain, and both spellings are tried against disk.
     #[test]
     fn the_project_slug_replaces_every_non_alphanumeric() {
         let dir = project_dir(Path::new(r"C:\Users\mail\ws")).expect("home");
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        // Case is preserved: the CLI's own directory is `C--Users-...`, not `c--`.
-        assert_eq!(name, "C--Users-mail-ws");
-        assert!(dir.ends_with(Path::new(".claude/projects/C--Users-mail-ws")) || cfg!(windows));
+        assert!(
+            name == "C--Users-mail-ws" || name == "c--Users-mail-ws",
+            "got {name}"
+        );
+        // The body of the slug is exact regardless of which case won.
+        assert!(name.ends_with("--Users-mail-ws"), "got {name}");
+    }
+
+    /// **Both drive-letter cases must resolve.**
+    ///
+    /// The CLI writes whichever case the invoking path had and does not normalise:
+    /// this machine has `C--Users-mail-working-Personal-SmartCoder-smart-coder` and
+    /// `c--Users-mail-working-Personal-Games-void-claim` side by side. Picking one
+    /// spelling lists nothing for half the projects, and the failure is invisible --
+    /// an empty directory and a missing one look the same to a picker.
+    ///
+    /// Windows resolves either spelling itself, so this asserts the LOOKUP behaviour
+    /// rather than the filesystem's: a directory that exists is returned, whichever
+    /// case it was created with.
+    #[test]
+    fn a_project_directory_that_exists_is_found_whatever_its_case() {
+        let home = home_dir().expect("home");
+        let projects = home.join(".claude").join("projects");
+        let ws = Path::new(r"Z:\sc-win-case-test");
+        let dir = projects.join("z--sc-win-case-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let found = project_dir(ws).expect("home");
+        assert!(
+            found.is_dir(),
+            "an existing project directory must be returned, got {}",
+            found.display()
+        );
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy().to_lowercase(),
+            "z--sc-win-case-test"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
