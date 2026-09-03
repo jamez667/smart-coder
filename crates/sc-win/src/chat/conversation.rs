@@ -204,10 +204,21 @@ impl Conversation {
         messages.extend(self.turns[start..].iter().cloned());
         let mut req = GenerateRequest::new(messages);
         req.temperature = 0.4;
-        // Thinking needs room to reach a conclusion; fast mode stays tight but must still fit a
-        // multi-section feature plan without truncating mid-block. The model stops early on short
-        // answers, so the larger ceiling only costs tokens when it genuinely writes a plan.
-        req.max_tokens = if think { 2400 } else { 1200 };
+        // Room for a REASONING model to think AND then answer.
+        //
+        // These used to be 1200/2400, sized for a model that answers directly. A reasoning
+        // model does not: Tiel spends its budget in `reasoning_content` first, and measured
+        // on the prompt below it burned 1663 reasoning tokens before emitting a single
+        // content token. At 1200 the reply came back `finish_reason: "length"` with content
+        // EMPTY — the user saw raw thinking and no answer, and it read as the model being
+        // stupid rather than as us cutting it off mid-thought.
+        //
+        // `/no_think` does NOT save us here: Tiel ignores the directive and reasons anyway,
+        // so the fast path needs a real budget too. This is a local model on the user's own
+        // GPU — an unspent ceiling costs nothing, because generation stops at the stop token
+        // whatever the cap says. Only a cap that is too SMALL has a price, and that price is
+        // a truncated, useless answer.
+        req.max_tokens = if think { 8000 } else { 4000 };
         req
     }
 

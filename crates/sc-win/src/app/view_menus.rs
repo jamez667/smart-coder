@@ -200,6 +200,18 @@ impl App {
         // It's styled transparent/borderless to read as plain chat text, not an input box. The
         // `on_action` handler drops edits (see `Message::ChatEditorAction`), so it's immutable.
         // Falls back to plain text if the editor buffer isn't synced yet (shouldn't happen).
+        // An AGENT turn goes through the markdown renderer: headings, bullets, code boxes and
+        // pipe tables, the same treatment the Claude panel gets. Without it a model's answer
+        // arrives as one undifferentiated wall with `|---|---|` and ``` shown literally.
+        //
+        // A YOUR turn stays a `text_editor`. The formatter renders, it does not select, and
+        // losing drag-select + Ctrl+C on your own prompts to prettify text you typed yourself
+        // is a bad trade. Agent answers keep the ⧉ copy button above, so nothing is unreachable.
+        if turn.role != sc_win::chat::Speaker::You {
+            return column![header, super::view_claude::markdown_body(&turn.text)]
+                .spacing(2)
+                .into();
+        }
         let body: Element<'a, Message> = match self.chat_editors.get(i) {
             Some(content) => iced::widget::text_editor(content)
                 .size(13)

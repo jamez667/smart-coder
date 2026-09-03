@@ -1478,3 +1478,28 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod disk_repro {
+    use super::*;
+
+    /// **The Claude panel vanished from a real, freshly-launched client.**
+    ///
+    /// Screenshotted: no Claude panel and only Problems|Terminal in the bottom bar,
+    /// while `config.json` said `assistant` and `layout.json` contained a `claude`
+    /// leaf. This drives the USER'S ACTUAL FILE through the real load path, so the
+    /// test fails for the same reason the app does.
+    #[test]
+    fn the_users_own_layout_file_keeps_its_claude_panel() {
+        let Ok(text) = std::fs::read_to_string(layout_file()) else {
+            return; // not this machine
+        };
+        let store = LayoutStore::parse(&text);
+        let got = store.get(false);
+        assert!(
+            got.contains(PanelKind::Claude),
+            "the stored assistant layout lost its Claude panel on load:\n{}",
+            got.to_json()
+        );
+    }
+}

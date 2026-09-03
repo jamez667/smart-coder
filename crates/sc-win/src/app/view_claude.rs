@@ -462,7 +462,7 @@ fn relative_age(modified_secs: u64) -> String {
 /// which is why a page of it read as an undifferentiated wall next to any other
 /// chat client. Only the structure a coding model actually emits is handled — see
 /// `sc_win::markdown` for why the parser stops there.
-fn markdown_body(src: &str) -> Element<'static, Message> {
+pub(crate) fn markdown_body(src: &str) -> Element<'static, Message> {
     use sc_win::markdown::{parse, Block};
 
     let mut col = column![].spacing(2).width(Fill);

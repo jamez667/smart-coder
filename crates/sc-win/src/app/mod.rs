@@ -173,7 +173,7 @@ pub fn run() -> iced::Result {
             // would be absurd, and the answer cannot change without the user installing
             // something — which is a restart-shaped event anyway.
             app.claude_available = sc_win::claudecode::detect();
-            // Boot is deferred while the first-run question is open (spec 21): opening a
+           // Boot is deferred while the first-run question is open (spec 21): opening a
             // conversation is Assistant-shaped, and doing it before the user has said which mode
             // they want would mean undoing it the moment they answer "Just code".
             // `Message::ChooseMode` finishes this once they have.

@@ -366,8 +366,19 @@ fn parse_stream_delta(payload: &str) -> Option<String> {
     if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
         return Some(c.to_string());
     }
+    // A reasoning model streams its thinking in a SEPARATE field. Emitting it raw made it
+    // indistinguishable from the answer, so the chat panel rendered a page of "Wait — I'm
+    // Tiel-Coder... Actually, let me reconsider" as if it were the reply.
+    //
+    // Wrap it in `<think>` tags — the shape every consumer here already strips (`strip_think`,
+    // `visible_so_far`). That keeps ONE representation of "this is reasoning" rather than
+    // teaching each caller about a second one, and models that inline their own `<think>`
+    // tags in `content` already produce exactly this.
     if let Some(r) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
-        return Some(r.to_string());
+        if r.is_empty() {
+            return None;
+        }
+        return Some(format!("<think>{r}</think>"));
     }
     None
 }
@@ -1036,11 +1047,13 @@ Connection: close
             parse_stream_delta(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#).as_deref(),
             Some("Hel")
         );
-        // A reasoning-model delta streams into reasoning_content.
+        // A reasoning-model delta streams into reasoning_content, and comes back TAGGED so
+        // callers can tell thinking from answer. Returning it bare (as this once asserted)
+        // is what let a model's private deliberation render as the chat reply.
         assert_eq!(
             parse_stream_delta(r#"{"choices":[{"delta":{"reasoning_content":"think"}}]}"#)
                 .as_deref(),
-            Some("think")
+            Some("<think>think</think>")
         );
         // The role-announcing first chunk (no content) yields nothing.
         assert_eq!(
@@ -1054,5 +1067,31 @@ Connection: close
         );
         // Garbage doesn't panic.
         assert_eq!(parse_stream_delta("not json"), None);
+    }
+}
+
+#[cfg(test)]
+mod reasoning_stream {
+    use super::*;
+
+    /// **Reasoning deltas must be marked as reasoning.**
+    ///
+    /// They used to be returned bare, indistinguishable from answer text, so the chat
+    /// panel rendered a reasoning model's private deliberation as the reply. Tagging
+    /// them reuses the `<think>` shape every consumer already strips.
+    #[test]
+    fn a_reasoning_delta_is_tagged_and_content_is_not() {
+        let r = parse_stream_delta(
+            r#"{"choices":[{"delta":{"reasoning_content":"let me think"}}]}"#,
+        );
+        assert_eq!(r.as_deref(), Some("<think>let me think</think>"));
+
+        // Ordinary content passes through untouched — tagging it would hide the answer.
+        let c = parse_stream_delta(r#"{"choices":[{"delta":{"content":"the answer"}}]}"#);
+        assert_eq!(c.as_deref(), Some("the answer"));
+
+        // An empty reasoning delta yields nothing, not an empty pair of tags.
+        let e = parse_stream_delta(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#);
+        assert_eq!(e, None);
     }
 }

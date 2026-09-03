@@ -409,3 +409,41 @@ mod tests {
         assert!(parse("\n\n").is_empty());
     }
 }
+
+#[cfg(test)]
+mod chat_panel_formatting {
+    use super::*;
+
+    /// **The Chat panel showed raw markdown while the Claude panel formatted it.**
+    ///
+    /// The renderer was wired into `view_claude.rs` only, so an agent answer in Chat
+    /// arrived with `##`, ``` and `|---|---|` shown literally. This pins the parse of
+    /// a reply shaped like the ones that looked worst — a heading, a table and a
+    /// fenced block in one message.
+    #[test]
+    fn an_agent_reply_with_a_table_and_a_fence_is_structured() {
+        let blocks = parse("## Findings\n\n| file | lines |\n|---|---|\n| `a.rs` | 12 |\n\n```\nfn main() {}\n```");
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Heading { .. })),
+            "the heading must not stay as literal ##"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::TableRow { head: true, .. })),
+            "the header row must be detected, and the |---|---| rule consumed"
+        );
+        assert!(
+            !blocks.iter().any(|b| match b {
+                Block::TableRow { cells, .. } =>
+                    cells.iter().flatten().any(|s| matches!(s, Span::Plain(t) if t.contains("---"))),
+                _ => false,
+            }),
+            "the rule row must never render as a table row of dashes"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Code(_))),
+            "the fenced block must become code, not prose"
+        );
+    }
+}

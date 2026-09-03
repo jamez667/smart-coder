@@ -109,21 +109,26 @@ pub fn visible_so_far(partial: &str) -> String {
 /// (one block, possibly unterminated if the model ran out of tokens mid-think). Returns the
 /// remaining visible text, trimmed.
 fn strip_think(reply: &str) -> String {
-    let lower = reply.to_ascii_lowercase();
-    let Some(open) = lower.find("<think>") else {
-        // No think block — still strip any leaked control tokens from the plain reply.
-        return strip_control_tokens(reply);
-    };
-    let before = &reply[..open];
-    // Find the matching close after the open tag.
-    let after = if let Some(rel_close) = lower[open..].find("</think>") {
-        &reply[open + rel_close + "</think>".len()..]
-    } else {
-        // Unterminated think block (model ran out of budget) — drop everything after <think>.
-        ""
-    };
-    // Strip control tokens AFTER removing the think block, so `/think` doesn't clobber `</think>`.
-    strip_control_tokens(&format!("{}{}", before.trim_end(), after))
+    // EVERY block, not just the first. A reasoning model streams its thinking in many
+    // deltas, and the backend tags each one, so a reply arrives as `<think>a</think>` +
+    // `<think>b</think>` + … Stripping only the first left the rest visible, which is the
+    // wall of "Wait — I'm Tiel-Coder… Actually, let me reconsider" the user saw.
+    let mut out = reply.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(open) = lower.find("<think>") else { break };
+        let before = &out[..open];
+        let after = if let Some(rel_close) = lower[open..].find("</think>") {
+            out[open + rel_close + "</think>".len()..].to_string()
+        } else {
+            // Unterminated block (the model ran out of budget) — drop everything after it.
+            String::new()
+        };
+        out = format!("{}{}", before.trim_end(), after);
+    }
+    // Strip control tokens AFTER removing the think blocks, so `/think` doesn't clobber
+    // `</think>`.
+    strip_control_tokens(&out)
 }
 
 /// Strip model control tokens that must never reach the chat bubble. The chat prompt appends a

@@ -567,3 +567,28 @@ fn parse_reply_handles_two_file_blocks() {
     assert_eq!(files[0].name, "README.md");
     assert_eq!(files[1].name, "TODO.md");
 }
+
+/// **A reasoning model's thinking must never be the visible reply.**
+///
+/// Measured against Tiel on a real prompt: the server returns thinking in a SEPARATE
+/// `reasoning_content` field, not as `<think>` tags in `content`. The backend now tags
+/// each streamed reasoning delta, so a reply arrives as MANY `<think>` blocks — and
+/// `strip_think` used to remove only the first, leaving the rest on screen as the
+/// "Wait — I'm Tiel-Coder… Actually, let me reconsider" wall the user reported.
+#[test]
+fn every_think_block_is_stripped_not_just_the_first() {
+    let streamed = "<think>The user is asking</think><think>Wait, let me reconsider</think>The trail is drawn tail-first.";
+    assert_eq!(
+        visible_so_far(streamed),
+        "The trail is drawn tail-first.",
+        "multi-block reasoning must be fully hidden"
+    );
+}
+
+/// Reasoning with NO answer yet (the truncation case) must show nothing, not the thinking.
+#[test]
+fn reasoning_with_no_answer_shows_nothing() {
+    assert_eq!(visible_so_far("<think>still working</think><think>and more</think>"), "");
+    // The measured failure: budget spent entirely on reasoning, content empty.
+    assert_eq!(visible_so_far("<think>burned the whole budget"), "");
+}
