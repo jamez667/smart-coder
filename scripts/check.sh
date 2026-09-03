@@ -44,11 +44,21 @@ cargo test --workspace
 # asks for it, so without these two gates the flag rots silently: nothing in the
 # default build would notice a `cfg(feature = "craft-only")` block that stopped
 # compiling, or a test whose assumptions the pinned mode invalidates.
+#
+# Built into a SEPARATE target dir. Cargo writes every feature variant of a binary to
+# the same `target/debug/sc-win.exe`, so these steps used to leave a craft-only
+# executable sitting at the path a developer then launches -- an app with no Chat, no
+# Claude panel and no backend badge, from a config that says `assistant`. That looked
+# like the layout being corrupted or the mode being wrong, and it was neither: it was
+# the gate silently replacing the binary. Isolating the target dir costs a little disk
+# and makes the gate incapable of touching what you run.
+CRAFT_TARGET="${CARGO_TARGET_DIR:-target}/craft-only"
+
 echo "==> clippy (craft-only)"
-cargo clippy -p sc-win --all-targets --features craft-only -- -D warnings
+CARGO_TARGET_DIR="$CRAFT_TARGET" cargo clippy -p sc-win --all-targets --features craft-only -- -D warnings
 
 echo "==> tests (craft-only)"
-cargo test -p sc-win --features craft-only
+CARGO_TARGET_DIR="$CRAFT_TARGET" cargo test -p sc-win --features craft-only
 
 # Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
 # Deterministic and model-free, so it costs nothing to run every time. `unknown`

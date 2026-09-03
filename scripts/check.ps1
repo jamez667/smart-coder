@@ -35,10 +35,24 @@ Invoke-Step 'tests' { cargo test --workspace }
 # for it, so without these two gates the flag rots silently: nothing in the default
 # build would notice a `cfg(feature = "craft-only")` block that stopped compiling, or a
 # test whose assumptions the pinned mode invalidates.
+#
+# Built into a SEPARATE target dir. Cargo writes every feature variant of a binary to the
+# same target\debug\sc-win.exe, so these steps used to leave a craft-only executable at the
+# path a developer then launches -- an app with no Chat, no Claude panel and no backend
+# badge, from a config that says `assistant`. That looked like a corrupted layout and was
+# neither: it was the gate replacing the binary.
+$CraftBase = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
+$CraftTarget = Join-Path $CraftBase 'craft-only'
 Invoke-Step 'clippy (craft-only)' {
-    cargo clippy -p sc-win --all-targets --features craft-only -- -D warnings
+    $env:CARGO_TARGET_DIR = $CraftTarget
+    try { cargo clippy -p sc-win --all-targets --features craft-only -- -D warnings }
+    finally { Remove-Item Env:CARGO_TARGET_DIR -EA SilentlyContinue }
 }
-Invoke-Step 'tests (craft-only)' { cargo test -p sc-win --features craft-only }
+Invoke-Step 'tests (craft-only)' {
+    $env:CARGO_TARGET_DIR = $CraftTarget
+    try { cargo test -p sc-win --features craft-only }
+    finally { Remove-Item Env:CARGO_TARGET_DIR -EA SilentlyContinue }
+}
 # Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
 # Deterministic and model-free, so it costs nothing to run every time. `unknown`
 # never gates and an ungoverned crate only warns — this fails on BROKEN or STALE.
