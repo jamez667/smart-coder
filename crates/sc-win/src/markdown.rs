@@ -422,7 +422,9 @@ mod chat_panel_formatting {
     /// fenced block in one message.
     #[test]
     fn an_agent_reply_with_a_table_and_a_fence_is_structured() {
-        let blocks = parse("## Findings\n\n| file | lines |\n|---|---|\n| `a.rs` | 12 |\n\n```\nfn main() {}\n```");
+        let blocks = parse(
+            "## Findings\n\n| file | lines |\n|---|---|\n| `a.rs` | 12 |\n\n```\nfn main() {}\n```",
+        );
         assert!(
             blocks.iter().any(|b| matches!(b, Block::Heading { .. })),
             "the heading must not stay as literal ##"
@@ -435,8 +437,10 @@ mod chat_panel_formatting {
         );
         assert!(
             !blocks.iter().any(|b| match b {
-                Block::TableRow { cells, .. } =>
-                    cells.iter().flatten().any(|s| matches!(s, Span::Plain(t) if t.contains("---"))),
+                Block::TableRow { cells, .. } => cells
+                    .iter()
+                    .flatten()
+                    .any(|s| matches!(s, Span::Plain(t) if t.contains("---"))),
                 _ => false,
             }),
             "the rule row must never render as a table row of dashes"

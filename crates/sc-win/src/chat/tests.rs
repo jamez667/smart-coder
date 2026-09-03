@@ -588,7 +588,10 @@ fn every_think_block_is_stripped_not_just_the_first() {
 /// Reasoning with NO answer yet (the truncation case) must show nothing, not the thinking.
 #[test]
 fn reasoning_with_no_answer_shows_nothing() {
-    assert_eq!(visible_so_far("<think>still working</think><think>and more</think>"), "");
+    assert_eq!(
+        visible_so_far("<think>still working</think><think>and more</think>"),
+        ""
+    );
     // The measured failure: budget spent entirely on reasoning, content empty.
     assert_eq!(visible_so_far("<think>burned the whole budget"), "");
 }

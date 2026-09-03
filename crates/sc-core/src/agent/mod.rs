@@ -459,17 +459,31 @@ pub fn run_agent_observed(
         // Half the cap is deliberately generous. A genuine truncation runs to the
         // cap, so it clears this easily; the false positives are all short replies
         // that reached a natural stop.
+        //
+        // EMPTY content plus `length` is its own certainty, and bypasses `ran_long`. A
+        // reasoning model spends its budget in a separate `reasoning_content` field, so a
+        // reply cut off mid-thought scores ZERO content tokens and slipped straight through
+        // this check -- measured on Tiel, which burned all 700 completion tokens reasoning
+        // and returned `content: ""`. The false positive the guard exists for is a
+        // grammar-constrained decode stopping at a well-formed object, which by
+        // construction HAS content; nothing empty is ever that.
         let ran_long = counter.count(&resp.content) > cfg.response_reserve_tokens / 2;
-        if resp.was_truncated() && ran_long {
+        let spent_it_all_thinking = resp.content.trim().is_empty();
+        if resp.was_truncated() && (ran_long || spent_it_all_thinking) {
             sink.record(&AgentEvent::HarnessFault {
                 kind: FaultKind::ReplyTruncated,
-                detail: format!(
-                    "the reply stopped at the {}-token cap after {} chars; any tool call \
-                     it was about to emit was cut off. Raise `response_reserve_tokens` \
-                     if this repeats, or the model is not converging on a call.",
-                    cfg.response_reserve_tokens,
-                    resp.content.len()
-                ),
+                detail: if spent_it_all_thinking {
+                    format!(
+                        "the reply stopped at the {}-token cap having emitted NO content at \n                         all -- a reasoning model spent the entire budget thinking, so it \n                         never got to answer. Raise `response_reserve_tokens`.",
+                        cfg.response_reserve_tokens
+                    )
+                } else {
+                    format!(
+                        "the reply stopped at the {}-token cap after {} chars; any tool call \n                         it was about to emit was cut off. Raise `response_reserve_tokens` \n                         if this repeats, or the model is not converging on a call.",
+                        cfg.response_reserve_tokens,
+                        resp.content.len()
+                    )
+                },
                 step: step + 1,
             });
         }

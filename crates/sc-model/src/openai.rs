@@ -1081,9 +1081,8 @@ mod reasoning_stream {
     /// them reuses the `<think>` shape every consumer already strips.
     #[test]
     fn a_reasoning_delta_is_tagged_and_content_is_not() {
-        let r = parse_stream_delta(
-            r#"{"choices":[{"delta":{"reasoning_content":"let me think"}}]}"#,
-        );
+        let r =
+            parse_stream_delta(r#"{"choices":[{"delta":{"reasoning_content":"let me think"}}]}"#);
         assert_eq!(r.as_deref(), Some("<think>let me think</think>"));
 
         // Ordinary content passes through untouched — tagging it would hide the answer.

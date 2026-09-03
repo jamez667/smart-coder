@@ -470,3 +470,79 @@ fn a_short_complete_reply_reporting_length_is_not_a_truncation() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// A reasoning model that spends its ENTIRE budget thinking: `finish_reason: "length"`
+/// with `content` empty, because the thinking went to a separate `reasoning_content`
+/// field the harness never sees.
+struct ThoughtItselfOut(std::cell::RefCell<usize>);
+
+impl ModelBackend for ThoughtItselfOut {
+    fn name(&self) -> &str {
+        "thought-itself-out"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        let mut n = self.0.borrow_mut();
+        *n += 1;
+        Ok(if *n == 1 {
+            // Measured against Tiel: 700/700 completion tokens spent, content EMPTY.
+            GenerateResponse::with_finish_reason(String::new(), Some("length".into()))
+        } else {
+            GenerateResponse::with_finish_reason(r#"{"tool":"finish"}"#, Some("stop".into()))
+        })
+    }
+}
+
+/// **The empty-content truncation must fire too.**
+///
+/// The detector required the reply to have "actually run long" to suppress llama.cpp's
+/// false `length` on a grammar-constrained decode. But it measured `content`, and a
+/// reasoning model cut off mid-thought has ZERO content tokens — so the real truncation
+/// scored 0, failed the length check, and passed silently. That is exactly the case
+/// observed in the chat panel: an empty bubble, no warning, and a model that looked
+/// broken while the harness held the evidence.
+#[test]
+fn a_reply_that_was_all_reasoning_and_no_answer_still_raises_the_fault() {
+    let ws = temp("thought-itself-out");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    run_agent_observed(
+        &ThoughtItselfOut(std::cell::RefCell::new(0)),
+        None,
+        &registry,
+        &ParseRepair,
+        "read a.txt",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let fault = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::HarnessFault { kind, detail, step } => Some((*kind, detail.clone(), *step)),
+            _ => None,
+        })
+        .expect("an empty reply cut off at the cap must raise a harness fault");
+
+    assert_eq!(fault.0, FaultKind::ReplyTruncated);
+    assert_eq!(fault.2, 1, "raised on the turn it happened");
+    // The detail must say the model never got to answer — "cut off after 0 chars" would
+    // read as the model declining to speak rather than as us cutting it off.
+    assert!(
+        fault.1.contains("NO content"),
+        "the detail must distinguish the all-reasoning case, got: {}",
+        fault.1
+    );
+}

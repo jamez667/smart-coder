@@ -32,7 +32,16 @@ pub enum ChatEvent {
     /// the app can, e.g., wrap a bare-prose feature plan into a PLAN file). The app parses the
     /// text for plan-file blocks / `<think>` stripping (the streamed tokens were the raw live
     /// view). `intent` is `None` for a non-classified turn (the plain `spawn` path).
-    Reply(String, Option<ChatIntent>),
+    ///
+    /// `truncated` is the backend's `finish_reason == "length"`: the reply hit the token cap
+    /// rather than finishing. It used to be dropped here, which is how a reasoning model that
+    /// spent its ENTIRE budget thinking arrived as a silent empty bubble — the signal saying
+    /// so was in the response all along and nothing looked at it.
+    Reply {
+        text: String,
+        intent: Option<ChatIntent>,
+        truncated: bool,
+    },
     /// The turn failed (backend unreachable, etc.) — a human-readable reason.
     Failed(String),
 }
@@ -72,7 +81,12 @@ impl ChatSession {
             let result = backend.generate_streaming(&req, &mut on_token);
             match result {
                 Ok(resp) => {
-                    let _ = tx.send(ChatEvent::Reply(resp.content, None));
+                    let truncated = resp.was_truncated();
+                    let _ = tx.send(ChatEvent::Reply {
+                        text: resp.content,
+                        intent: None,
+                        truncated,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(ChatEvent::Failed(format!("chat failed: {e}")));
@@ -121,7 +135,12 @@ impl ChatSession {
             };
             match backend.generate_streaming(&req, &mut on_token) {
                 Ok(resp) => {
-                    let _ = tx.send(ChatEvent::Reply(resp.content, Some(intent)));
+                    let truncated = resp.was_truncated();
+                    let _ = tx.send(ChatEvent::Reply {
+                        text: resp.content,
+                        intent: Some(intent),
+                        truncated,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(ChatEvent::Failed(format!("chat failed: {e}")));
@@ -162,8 +181,54 @@ mod tests {
         // Block for the terminal event (Err means the sender dropped).
         let ev = session.events.recv().ok();
         assert!(
-            matches!(ev, Some(ChatEvent::Failed(_)) | Some(ChatEvent::Reply(..))),
+            matches!(
+                ev,
+                Some(ChatEvent::Failed(_)) | Some(ChatEvent::Reply { .. })
+            ),
             "expected a terminal ChatEvent, got {ev:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod truncation_is_reported {
+    use super::*;
+
+    /// **A truncated reply must be distinguishable from a finished one.**
+    ///
+    /// Measured against Tiel: it spent all 700 completion tokens in
+    /// `reasoning_content` and returned `content: ""` with
+    /// `finish_reason: "length"`. The event dropped that flag, so the UI showed an
+    /// empty bubble and the model looked broken. The flag now rides along.
+    #[test]
+    fn the_reply_event_carries_the_truncation_flag() {
+        let cut = ChatEvent::Reply {
+            text: String::new(),
+            intent: None,
+            truncated: true,
+        };
+        match cut {
+            ChatEvent::Reply {
+                truncated, text, ..
+            } => {
+                assert!(truncated, "a capped reply must say so");
+                assert!(text.is_empty(), "the measured case had no content at all");
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // A healthy reply is not flagged, or the warning becomes noise people ignore.
+        let ok = ChatEvent::Reply {
+            text: "done".into(),
+            intent: None,
+            truncated: false,
+        };
+        assert!(matches!(
+            ok,
+            ChatEvent::Reply {
+                truncated: false,
+                ..
+            }
+        ));
     }
 }

@@ -674,7 +674,7 @@ impl App {
             let reply = match ev {
                 // Triage is a one-word classify — ignore streamed tokens, act on the final.
                 sc_win::chat_session::ChatEvent::Token(_) => continue,
-                sc_win::chat_session::ChatEvent::Reply(r, _) => r,
+                sc_win::chat_session::ChatEvent::Reply { text, .. } => text,
                 sc_win::chat_session::ChatEvent::Failed(_) => {
                     // On a failed triage, fall back to planning (the safe route).
                     "BIG".to_string()
@@ -786,8 +786,8 @@ impl App {
                         }
                     }
                 }
-                sc_win::chat_session::ChatEvent::Reply(raw, _) => {
-                    done = Some((raw, String::new()));
+                sc_win::chat_session::ChatEvent::Reply { text, .. } => {
+                    done = Some((text, String::new()));
                     break;
                 }
                 sc_win::chat_session::ChatEvent::Failed(msg) => {

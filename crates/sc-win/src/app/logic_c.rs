@@ -218,7 +218,11 @@ impl App {
                         }
                     }
                 }
-                sc_win::chat_session::ChatEvent::Reply(raw, intent) => {
+                sc_win::chat_session::ChatEvent::Reply {
+                    text: raw,
+                    intent,
+                    truncated,
+                } => {
                     self.streaming = None; // the live bubble is replaced by the finished turn
                     self.working = None; // a question answer is done → drop the amber highlight
                     let (prose, mut files) = sc_win::chat::parse_reply(&raw);
@@ -263,16 +267,39 @@ impl App {
                             }
                         }
                     }
-                    let shown = if !prose.is_empty() {
+                    let mut shown = if !prose.is_empty() {
                         prose
                     } else if let Some(cmd) = &self.proposed_command {
                         // A reply that was only a command block → say what will run.
                         format!("Run this in the terminal:  {cmd}")
-                    } else {
+                    } else if !files.is_empty() {
                         // A reply that was only file blocks → note what changed.
                         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
                         format!("Proposed changes to {}.", names.join(", "))
+                    } else {
+                        // NOTHING came back. Previously this fell into the file-block arm and
+                        // rendered "Proposed changes to ." — a bubble naming no files, which
+                        // reads as the model having malfunctioned.
+                        String::new()
                     };
+                    // The reply hit the token cap. Say so INSTEAD of showing an empty or
+                    // half-finished bubble: a reasoning model can spend its entire budget
+                    // thinking and emit no answer at all, and silence there is indistinguishable
+                    // from the model having nothing to say. The signal is the backend's
+                    // `finish_reason == "length"`, which used to be discarded.
+                    if truncated {
+                        let note = if shown.trim().is_empty() {
+                            "⚠ The reply hit the token limit before the model wrote any answer —                              it spent the whole budget reasoning. Raise the chat token cap, or                              ask something narrower."
+                                .to_string()
+                        } else {
+                            format!(
+                                "{shown}
+
+⚠ Cut off at the token limit — this answer is                                  incomplete."
+                            )
+                        };
+                        shown = note;
+                    }
                     self.chat_turns.push(sc_win::chat::Turn {
                         role: sc_win::chat::Speaker::Agent,
                         text: shown.clone(),

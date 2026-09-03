@@ -116,7 +116,9 @@ fn strip_think(reply: &str) -> String {
     let mut out = reply.to_string();
     loop {
         let lower = out.to_ascii_lowercase();
-        let Some(open) = lower.find("<think>") else { break };
+        let Some(open) = lower.find("<think>") else {
+            break;
+        };
         let before = &out[..open];
         let after = if let Some(rel_close) = lower[open..].find("</think>") {
             out[open + rel_close + "</think>".len()..].to_string()
