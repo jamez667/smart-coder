@@ -514,20 +514,44 @@ fn markdown_body(src: &str) -> Element<'static, Message> {
 fn inline(spans: Vec<sc_win::markdown::Span>, size: f32, fg: Color) -> Element<'static, Message> {
     use sc_win::markdown::Span;
 
+    // ONE WIDGET PER WORD, not per span.
+    //
+    // A `wrap()`ping row can only break BETWEEN its children, so a span holding a
+    // whole sentence is an unbreakable block: the line broke at span boundaries
+    // instead of at words, and a paragraph with inline code came out as orphaned
+    // fragments — `, and both my clamp…` alone on a line after a code span pushed
+    // it over. Splitting prose into words gives the layout somewhere to break.
+    //
+    // Code and bold spans stay whole: breaking mid-identifier is worse than a
+    // slightly ragged edge, and they are short.
     let mut r = row![].spacing(0).align_y(iced::Alignment::Center);
     for sp in spans {
-        r = r.push(match sp {
-            Span::Plain(t) => text(t).size(size).color(fg),
-            // Brighter rather than a bold face: the UI ships one weight, so weight
-            // is not available and contrast is what reads as emphasis.
-            Span::Bold(t) => text(t).size(size).color(Color::WHITE),
-            Span::Code(t) => text(t)
-                .size(size - 1.0)
-                .font(iced::Font::MONOSPACE)
-                .color(GOOD),
-        });
+        match sp {
+            Span::Plain(t) => {
+                // `split_inclusive(' ')` keeps the trailing space ON the word, so the
+                // gaps survive with `spacing(0)` — a plain `split` would need spacing,
+                // which would then also appear either side of code spans that have no
+                // space in the source.
+                for word in t.split_inclusive(' ') {
+                    r = r.push(text(word.to_string()).size(size).color(fg));
+                }
+            }
+            // Brighter rather than a bold face: the UI ships one weight, so weight is
+            // not available and contrast is what reads as emphasis.
+            Span::Bold(t) => r = r.push(text(t).size(size).color(Color::WHITE)),
+            // Dimmer and monospace rather than the old green, which read as syntax
+            // highlighting in a chat rather than as an inline literal.
+            Span::Code(t) => {
+                r = r.push(
+                    text(t)
+                        .size(size - 1.0)
+                        .font(iced::Font::MONOSPACE)
+                        .color(AMBER),
+                )
+            }
+        }
     }
-    //  so a long line breaks at the panel edge instead of running past it.
+    // `wrap()` so a long line breaks at the panel edge instead of running past it.
     r.wrap().into()
 }
 

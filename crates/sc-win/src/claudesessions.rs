@@ -240,9 +240,14 @@ pub fn transcript(workspace: &Path, id: &str) -> Vec<TranscriptLine> {
         if text.is_empty() || text.starts_with('<') {
             continue;
         }
+        // WHOLE, not collapsed and clipped. `one_line` flattens newlines and cuts at
+        // 160 characters -- which destroyed exactly what the Markdown renderer needs
+        // (paragraphs, headings, bullets) and left the feed full of sentences ending
+        // in "...". The picker's one-line SUMMARY still uses it; a replayed
+        // conversation is prose to read, not a label to fit in a menu.
         all.push(TranscriptLine {
             is_user,
-            text: one_line(text, 160),
+            text: text.to_string(),
         });
     }
 
