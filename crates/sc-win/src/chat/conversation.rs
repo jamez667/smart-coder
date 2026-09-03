@@ -145,6 +145,19 @@ impl Conversation {
     /// Build the fast classification call: given the conversation so far, ask the model which of
     /// the [`ChatIntent`] cases the latest user turn is. The reply is constrained by a GBNF
     /// grammar to exactly ONE intent token, so the result needs no parsing heuristics — the model
+    /// The most recent user message, verbatim.
+    ///
+    /// The investigate path needs the question as the user asked it, not the assembled
+    /// prompt around it: it feeds a tool-using agent loop whose task IS the question.
+    pub fn last_user_message(&self) -> &str {
+        self.turns
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, sc_model::Role::User))
+            .map(|m| m.content.as_str())
+            .unwrap_or("")
+    }
+
     /// classifies, we don't guess. Tiny (a handful of tokens), so it's milliseconds on the 30B.
     pub fn classify_request(&self) -> GenerateRequest {
         let last_user = self

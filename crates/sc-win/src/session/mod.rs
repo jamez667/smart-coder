@@ -27,7 +27,7 @@ use std::thread;
 use crate::bridge::Pending;
 use crate::config::UiConfig;
 
-mod agent;
+pub mod agent;
 mod claude;
 mod staged;
 mod swarm;

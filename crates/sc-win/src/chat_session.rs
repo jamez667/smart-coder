@@ -113,7 +113,16 @@ impl ChatSession {
     /// Both calls run on the worker thread; only the generate call streams tokens to the UI. This
     /// replaces string-sniffing the reply for intent — the model classifies, the app doesn't
     /// guess. `think` controls the generate reasoning budget.
-    pub fn spawn_planning(cfg: UiConfig, convo: Conversation, think: bool) -> Self {
+    /// `workspace` enables the INVESTIGATE path: a question about the code runs the
+    /// read-only agent loop so the model can read its way to an answer. `None` (no project
+    /// open) keeps the old prose-only behaviour, which is all that is possible without a
+    /// tree to read.
+    pub fn spawn_planning(
+        cfg: UiConfig,
+        convo: Conversation,
+        think: bool,
+        workspace: Option<std::path::PathBuf>,
+    ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -127,6 +136,19 @@ impl ChatSession {
                 Ok(resp) => ChatIntent::parse(&resp.content),
                 Err(_) => ChatIntent::Question,
             };
+            // 1b) A QUESTION about the code is answered by READING the code.
+            //
+            // Everything below this branch is a single completion with no tools: the model
+            // sees the README, the TODO and whichever file happens to be open, and nothing
+            // else. Asked why a star trail was thin before it was thick, it said "I can't
+            // see the jump screen rendering code", guessed, and asked to be pointed at the
+            // file — the only move it had. With a workspace it now searches and reads.
+            if intent == ChatIntent::Question {
+                if let Some(ws) = workspace {
+                    investigate_into_chat(&cfg, convo.last_user_message(), &ws, &tx);
+                    return;
+                }
+            }
             // 2) Generate the actual reply, tailored to the classified intent, streamed live.
             let req = convo.request(think, intent);
             let tok_tx = tx.clone();
@@ -231,4 +253,82 @@ mod truncation_is_reported {
             }
         ));
     }
+}
+
+/// Run a read-only agent loop over `workspace` to answer `question`, reporting into the
+/// chat channel as it goes.
+///
+/// The loop speaks [`AgentEvent`]; the chat speaks [`ChatEvent`]. This is the adapter. Tool
+/// calls stream in as progress lines ("reading starfield.rs") so the panel is not silent for
+/// the many seconds a multi-step investigation takes — silence there is what makes a model
+/// look hung. The `finish` argument is the answer, and becomes the reply.
+fn investigate_into_chat(
+    cfg: &UiConfig,
+    question: &str,
+    workspace: &std::path::Path,
+    tx: &std::sync::mpsc::Sender<ChatEvent>,
+) {
+    let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+    let cfg2 = cfg.clone();
+    let q = question.to_string();
+    let ws = workspace.to_path_buf();
+    // The loop is blocking; run it on its own thread so this one can drain events and keep
+    // the panel updating while it works.
+    let worker = thread::spawn(move || {
+        crate::session::agent::investigate(cfg2, q, ws, ev_tx);
+    });
+
+    let mut answer = String::new();
+    let mut steps = 0usize;
+    while let Ok(ev) = ev_rx.recv() {
+        match ev {
+            crate::session::UiEvent::Agent(a) => match a {
+                sc_core::AgentEvent::ToolCall { tool, arg } => {
+                    if tool == "finish" {
+                        // The finish argument IS the answer.
+                        answer = arg;
+                    } else {
+                        steps += 1;
+                        // A progress line, not the reply: shown live, replaced by the answer.
+                        let _ = tx.send(ChatEvent::Token(format!("· {tool} {arg}\n")));
+                    }
+                }
+                sc_core::AgentEvent::HarnessFault { kind, detail, .. } => {
+                    // Surface OUR faults in the chat rather than only in a log the user
+                    // never opens — a truncated or over-budget turn is why an answer is
+                    // thin, and staying silent about it blames the model.
+                    let _ = tx.send(ChatEvent::Token(format!(
+                        "\n⚠ harness fault ({}): {detail}\n",
+                        kind.label()
+                    )));
+                }
+                _ => {}
+            },
+            crate::session::UiEvent::Failed(msg) => {
+                let _ = tx.send(ChatEvent::Failed(msg));
+                let _ = worker.join();
+                return;
+            }
+            crate::session::UiEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    let _ = worker.join();
+
+    let text = if answer.trim().is_empty() {
+        // Reading without concluding. Say so plainly: an empty bubble after a visible
+        // multi-step search reads as a crash.
+        format!(
+            "I read the code for this but did not reach a conclusion \
+             (searched across {steps} step(s)). Try narrowing the question, or name the \
+             file you think is involved."
+        )
+    } else {
+        answer
+    };
+    let _ = tx.send(ChatEvent::Reply {
+        text,
+        intent: Some(ChatIntent::Question),
+        truncated: false,
+    });
 }

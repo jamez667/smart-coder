@@ -256,6 +256,43 @@ pub fn default_registry() -> ToolRegistry {
     ])
 }
 
+/// A READ-ONLY registry: every built-in tool that cannot change the workspace, plus
+/// `finish`.
+///
+/// For answering a question ABOUT the code — "why is the star trail thin before it gets
+/// thick?" — where the answer requires reading the source but nothing should be edited.
+/// Without it that question reached a model holding no tools at all, which could only
+/// reason from the README/TODO and the one open file; it correctly said "I can't see the
+/// rendering code" and guessed, and the guess read as the model being stupid.
+///
+/// Derived from [`SideEffect::ReadOnly`] rather than a hardcoded name list, so a tool
+/// added later is classified by what it DOES. A hand-written list is a second place to
+/// remember, and the one that silently goes stale.
+pub fn read_only_registry() -> ToolRegistry {
+    // ReadOnly is the safety property, but it is not the whole selection: `update_plan`
+    // and `ask_user` are read-only and still wrong here. They are workflow tools for a
+    // build run, and offering them to a question-answering loop invites a model to
+    // update a plan or bounce the question back instead of opening the file. Six tools
+    // beat sixteen for exactly this reason -- a big menu makes a small model deliberate
+    // rather than act.
+    const EXCLUDE: [&str; 2] = ["update_plan", "ask_user"];
+    let specs: Vec<ToolSpec> = default_registry()
+        .specs()
+        .iter()
+        .filter(|s| s.side_effect == SideEffect::ReadOnly && !EXCLUDE.contains(&s.name))
+        .cloned()
+        .collect();
+    debug_assert!(
+        specs.iter().any(|s| s.name == "read_file"),
+        "a read-only registry without read_file cannot investigate anything"
+    );
+    debug_assert!(
+        specs.iter().any(|s| s.name == "finish"),
+        "without finish the loop cannot terminate cleanly"
+    );
+    ToolRegistry::new(specs)
+}
+
 /// A deliberately tiny registry for a focus-scoped worker (spec 04/08): just the
 /// three tools it ever needs — `edit_file`, `run_verification`, `finish`. The
 /// worker is already shown the file's current contents every turn, so it never
@@ -314,4 +351,65 @@ pub fn minimal_worker_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
     ])
+}
+
+#[cfg(test)]
+mod read_only_registry_tests {
+    use super::*;
+
+    /// **A read-only registry must be able to investigate, and must not be able to edit.**
+    ///
+    /// Both halves matter. Without `read_file` it answers questions about code it cannot
+    /// see — the failure this registry exists to fix. With `write_file` it is not read-only
+    /// at all, and a question about the code could silently change it.
+    #[test]
+    fn it_can_read_and_search_but_never_write() {
+        let r = read_only_registry();
+        let names: Vec<&str> = r.specs().iter().map(|s| s.name).collect();
+
+        for needed in ["read_file", "list_dir", "search_code", "finish"] {
+            assert!(names.contains(&needed), "missing {needed}, got {names:?}");
+        }
+        for forbidden in [
+            "write_file",
+            "edit_file",
+            "edit_lines",
+            "run_command",
+            // Read-only, but workflow tools rather than investigation ones.
+            "update_plan",
+            "ask_user",
+        ] {
+            assert!(
+                !names.contains(&forbidden),
+                "{forbidden} can change the workspace and must not be offered"
+            );
+        }
+        // The real invariant, not just the named cases above: nothing mutating gets through.
+        assert!(
+            r.specs()
+                .iter()
+                .all(|s| s.side_effect == SideEffect::ReadOnly),
+            "every tool in a read-only registry must be ReadOnly"
+        );
+    }
+}
+
+#[cfg(test)]
+mod investigate_shape {
+    use super::*;
+
+    /// **The investigate registry must be small.**
+    ///
+    /// Sixteen tools measured 3/12 where six measured 12/12: a big menu makes a small
+    /// model deliberate instead of act. This one exists to read code and stop, so it
+    /// should stay close to that size — a regression that quietly re-adds tools would
+    /// show up here rather than as a model that suddenly dithers.
+    #[test]
+    fn it_stays_a_short_menu() {
+        let n = read_only_registry().specs().len();
+        assert!(
+            (4..=7).contains(&n),
+            "expected a short investigation menu, got {n} tools"
+        );
+    }
 }

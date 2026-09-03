@@ -173,3 +173,120 @@ pub fn run_iterate(
         }
     }
 }
+
+/// Answer a QUESTION about the code by actually reading it.
+///
+/// The chat panel had no tools at all: it saw the README, the TODO and whichever file
+/// happened to be open, and nothing else. Asked "why is the star trail thin before it gets
+/// thick?", it said — correctly and uselessly — "I can't see the jump screen rendering
+/// code", guessed three plausible causes, and asked the user to point it at the file. The
+/// guess was not the model being stupid; it was the only move available to it.
+///
+/// This runs the ordinary agent loop over [`sc_tools::read_only_registry`], so the model can
+/// search and read its way to the answer but cannot change anything on the way. A question
+/// must never edit the workspace as a side effect of being asked.
+pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: Sender<UiEvent>) {
+    let Some(backend) = cfg.backend() else {
+        let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
+        return;
+    };
+    // Read-only: the loop can look at anything and change nothing.
+    let registry = sc_tools::read_only_registry();
+    let strategy = sc_core::select_strategy(&backend.capabilities());
+    // No confirmer: nothing here can mutate, so there is nothing to approve. Passing one
+    // would put a permission prompt in front of reading a file to answer a question.
+    let mut agent_cfg = cfg.agent_config(None);
+    // A question is not a build.
+    //
+    // Measured on the first live run: the loop found the right file in 8 steps and then
+    // spent 9 more without concluding. Two causes, both from inheriting a BUILD config:
+    //
+    // * 40 steps is a licence to keep looking. Reading is cheap and finishing is not
+    //   forced, so the model kept opening one more file. A tighter ceiling makes the
+    //   budget visible and pushes it to answer with what it has.
+    // * `verify_command` tells the loop there is a build to run, and this registry has no
+    //   `run_verification` to run it with — steering a model toward a tool it was not
+    //   offered is the `ToolNotOffered` failure, and it burns turns.
+    agent_cfg.max_steps = 14;
+    agent_cfg.verify_command = None;
+    agent_cfg.plan_first = false;
+
+    let sink = FnSink(|e: &AgentEvent| {
+        let _ = ev_tx.send(UiEvent::Agent(e.clone()));
+    });
+
+    // Say what the loop is FOR. Without this the agent treats a question as a task and
+    // reports "finished in 4 steps" instead of answering — the steps were the means, and
+    // the user asked for the conclusion.
+    // HAND OVER THE MAP rather than making the model discover it.
+    //
+    // Measured: the first live run spent steps 1-2 on `list_dir .` and `list_dir crates`
+    // just learning the repo has 22 crates, then steps 3-7 guessing keywords ("jump",
+    // "hyperspace", "trail") because it had no index to consult. Five of eight steps went
+    // on orientation that is IDENTICAL for every question and free to compute here.
+    //
+    // The harness resolves paths; the model never has to invent one. Same rule that
+    // removed hallucinated paths elsewhere, and it applies doubly to a small model: a
+    // filename it can SEE is a filename it cannot get wrong.
+    let map = sc_tools::source_files(&workspace);
+    let map_block = if map.is_empty() {
+        String::new()
+    } else {
+        // Capped: a huge repo would otherwise spend the whole prompt budget on a listing
+        // and leave no room for the file contents the answer actually needs.
+        const MAX: usize = 800;
+        let mut b = format!(
+            "\nThe source files in this project ({} of {}):\n",
+            map.len().min(MAX),
+            map.len()
+        );
+        for f in map.iter().take(MAX) {
+            b.push_str("  ");
+            b.push_str(f);
+            b.push('\n');
+        }
+        if map.len() > MAX {
+            b.push_str("  ... (truncated; use search_code for anything not listed)\n");
+        }
+        b
+    };
+
+    // Say what the loop is FOR. Without this the agent treats a question as a task and
+    // reports "finished in 4 steps" instead of answering -- the steps were the means, and
+    // the user asked for the conclusion.
+    let task = format!(
+        "Answer this question about the code in this project:\n\n{question}\n{map_block}\n\
+         Pick the likely file from the list above and read it -- do NOT spend turns listing \
+         directories, and do not guess at file names or line numbers. When you know the \
+         answer, call `finish` with a short explanation naming the file and line, and say \
+         what the fix would be. You cannot edit anything here; the user applies changes \
+         themselves."
+    );
+
+    let result = sc_core::run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        &task,
+        &workspace,
+        &agent_cfg,
+        &sink,
+    );
+
+    match result {
+        Ok(report) => {
+            let _ = ev_tx.send(UiEvent::Done {
+                ok: report.finished,
+                summary: if report.finished {
+                    format!("answered after reading {} step(s)", report.steps)
+                } else {
+                    format!("stopped after {} steps without an answer", report.steps)
+                },
+            });
+        }
+        Err(e) => {
+            let _ = ev_tx.send(UiEvent::Failed(format!("investigation failed: {e}")));
+        }
+    }
+}

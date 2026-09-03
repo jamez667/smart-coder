@@ -534,10 +534,16 @@ impl App {
                 .join("\n\n");
             self.debug_prompt("chat", &joined);
         }
+        // The workspace enables the investigate path: a question about the code is answered
+        // by READING it. Deliberately `picked_workspace`, NOT `workspace_root()`: the latter
+        // falls back to a scratch temp dir, and searching that for an answer would burn a
+        // multi-step agent run to discover an empty directory.
+        let workspace = self.picked_workspace.clone();
         self.chat_session = Some(sc_win::chat_session::ChatSession::spawn_planning(
             self.cfg.clone(),
             convo,
             think,
+            workspace,
         ));
     }
 

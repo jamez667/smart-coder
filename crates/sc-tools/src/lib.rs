@@ -19,8 +19,8 @@ mod permission;
 mod spec;
 
 pub use builtin::{
-    default_registry, execute, handled_here, minimal_worker_registry, safe_join, source_files,
-    ToolOutcome, NOT_EXECUTED_HERE,
+    default_registry, execute, handled_here, minimal_worker_registry, read_only_registry,
+    safe_join, source_files, ToolOutcome, NOT_EXECUTED_HERE,
 };
 pub use grammar::{params_json_schema, registry_gbnf};
 pub use journal::{EditRecord, Journal};

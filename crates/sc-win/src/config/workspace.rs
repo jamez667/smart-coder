@@ -25,7 +25,16 @@ pub fn source_files(workspace: &std::path::Path) -> Vec<String> {
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
             // Skip hidden/dot dirs (.smart-coder, .pytest_cache, .git), caches, deps.
-            if name.starts_with('.') || name == "__pycache__" || name == "node_modules" {
+            // Mirrors `sc_tools::source_files` -- including skipping BUILD OUTPUT, which
+            // both were missing. Measured on a real Rust project: 40,585 of 41,180 files
+            // were under `target/`, burying 595 real ones.
+            if name.starts_with('.')
+                || name == "__pycache__"
+                || name == "node_modules"
+                || name == "target"
+                || name == "dist"
+                || name == "build"
+            {
                 continue;
             }
             match entry.file_type() {

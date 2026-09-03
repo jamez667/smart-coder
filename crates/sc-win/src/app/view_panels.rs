@@ -446,9 +446,22 @@ impl App {
         let (dot, label, color) = match &self.backend_health {
             None => ("●", "checking backend…".to_string(), FG_MUTED),
             Some(Ready) => ("●", format!("{} ready", self.cfg.model), GOOD),
+            // Name the ENDPOINT and the MODEL, not just the symptom.
+            //
+            // This said only "backend up — no model loaded", which is true of three very
+            // different situations: nothing is loaded, the model NAME is wrong, or the URL
+            // points at something that is not a model server at all. Observed: the config
+            // still pointed at :8080, which by then served an unrelated website — nginx
+            // answered the reachability probe, the completion failed, and the badge reported
+            // a modelless backend while the real server sat on another port. `Unreachable`
+            // already names its URL; this arm discarding both was the reason the state was
+            // undiagnosable from the UI.
             Some(NoModel { .. }) => (
                 "●",
-                "backend up — no model loaded".to_string(),
+                format!(
+                    "no model at {} (asked for {})",
+                    self.cfg.base_url, self.cfg.model
+                ),
                 Color::from_rgb(0.95, 0.72, 0.30), // amber
             ),
             Some(Unreachable { .. }) => (
