@@ -287,6 +287,9 @@ pub fn run_agent_observed(
     // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
     // a firm "you have enough; act now" nudge and reset. Cleared on any change.
     let mut reads_since_change = 0usize;
+    // Fingerprints of every prompt sent this run, to catch an exact resend (see the check in
+    // the loop). A hash, not the text: the prompts are ~12k tokens each.
+    let mut seen_prompts = std::collections::HashSet::new();
     // How many times the read-thrash nudge has fired since the last edit.
     //
     // The nudge alone is not enough. It resets its own counter when it fires, so it
@@ -387,6 +390,56 @@ pub fn run_agent_observed(
                     step: step + 1,
                 });
             }
+        }
+
+        // AN IDENTICAL PROMPT IS A LOOP. Kill the run.
+        //
+        // The prompt carries the whole conversation, so two turns that assemble byte-for-byte
+        // the same prompt cannot produce different work: the model has already seen this exact
+        // input and whatever it replied did not change the state. Sending it again buys
+        // nothing and costs a full prompt-processing pass -- on a 35B model at ~12k tokens,
+        // most of a minute each.
+        //
+        // Measured: runs that ended `BudgetExhausted` after 812 seconds were resending the
+        // same prompt eight or more times while the model wrote prose the harness discarded.
+        // The existing detectors all missed it -- the stall detector watches ACTIONS, and
+        // these turns produced none.
+        //
+        // This is the backstop for every such loop, whatever its cause, because it checks the
+        // one thing that must differ for progress to be possible.
+        let prompt_fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for m in &built.messages {
+                m.content.hash(&mut h);
+            }
+            h.finish()
+        };
+        if !seen_prompts.insert(prompt_fingerprint) {
+            sink.record(&AgentEvent::Stalled {
+                trigger: "the same prompt was assembled twice — the run cannot progress"
+                    .to_string(),
+            });
+            let reason =
+                StopReason::Stalled("an identical prompt was about to be sent twice".to_string());
+            sink.record(&AgentEvent::Stopped {
+                reason: reason.clone(),
+            });
+            let faults = runlog.lock().fault_counts();
+            return Ok(stopped(
+                reason,
+                step + 1,
+                &cfg.sandbox,
+                &cfg.verify_command,
+                workspace,
+                &journal,
+                metrics,
+                peak_prompt_tokens,
+                peak_reply_tokens,
+                faults,
+                budget,
+                interv.count,
+            ));
         }
 
         // Verbose (spec 06): surface the exact assembled prompt before it's sent, so
@@ -829,6 +882,48 @@ pub fn run_agent_observed(
                 sink.record(&AgentEvent::RepairTriggered {
                     detail: first_line(&detail),
                 });
+                // TWO unparseable replies in a row and the run stops.
+                //
+                // The stall detector never sees this: it observes ACTIONS, and a reply that
+                // fails extraction produces none. Measured on a read-only run, the model
+                // stopped emitting tool calls once it had read enough and wrote 30,000-
+                // character explanations on eight consecutive turns -- six RepairTriggered
+                // events, ZERO Stalled events, ending `BudgetExhausted` 812 seconds later
+                // with nothing returned. Every one of those turns was a full prompt resend.
+                //
+                // A model that could not produce a call twice, having just been told exactly
+                // how, is not going to produce one on the ninth attempt. Stopping returns
+                // the same (empty) result far sooner and leaves a stop reason that says why.
+                // Only on a READ-ONLY run. A build run has a recovery for this that works --
+                // the `edit_lines` steer just above, aimed at the real cause there (a long
+                // `old_str` that will not encode). A read-only run has no edit_file to steer
+                // to: the reply is prose because the model has finished reading and started
+                // explaining, and no repair prompt changes that.
+                if read_only_run && malformed_streak >= 2 {
+                    sink.record(&AgentEvent::Stalled {
+                        trigger: "two unparseable replies in a row".to_string(),
+                    });
+                    let reason =
+                        StopReason::Stalled("two unparseable replies in a row".to_string());
+                    sink.record(&AgentEvent::Stopped {
+                        reason: reason.clone(),
+                    });
+                    let faults = runlog.lock().fault_counts();
+                    return Ok(stopped(
+                        reason,
+                        step + 1,
+                        &cfg.sandbox,
+                        &cfg.verify_command,
+                        workspace,
+                        &journal,
+                        metrics,
+                        peak_prompt_tokens,
+                        peak_reply_tokens,
+                        faults,
+                        budget,
+                        interv.count,
+                    ));
+                }
                 (
                     detail,
                     action_hash("(malformed)", ""),
@@ -1017,9 +1112,21 @@ pub fn run_agent_observed(
             reads_since_change = 0;
             read_nudges_since_change += 1;
             interv.count += 1;
+            // A read-only run has no edit tool and no tests, so both nudges below are
+            // impossible instructions -- the `ToolNotOffered` failure, spoken by the harness
+            // itself. Measured: a run read one irrelevant file SIX times in different
+            // windows, was told to "make a concrete edit", could not, and burned all 14 steps
+            // without answering. What it should do is answer with what it already has.
+            if read_only_run {
+                format!(
+                    "{obs}
+
+[harness] You have read {READ_THRASH_LIMIT}+ times. You already                      have what you read above, and there is nothing to edit here -- this is a                      question. If you have the answer, call `finish` NOW with it in `summary`.                      If you are reading the wrong file, say that in `finish` rather than                      reading on."
+                )
+            }
             // Asking twice is generous; a third round means the words are not
             // working and repeating them just burns the budget.
-            if read_nudges_since_change >= 2 {
+            else if read_nudges_since_change >= 2 {
                 format!(
                     "{obs}\n\n[harness] STOP READING. This is the second time you have been told \
                      you already have what you need. Make one concrete edit THIS turn."

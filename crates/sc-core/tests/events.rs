@@ -546,3 +546,121 @@ fn a_reply_that_was_all_reasoning_and_no_answer_still_raises_the_fault() {
         fault.1
     );
 }
+
+/// A model that has stopped emitting tool calls and only writes prose.
+struct OnlyProse;
+
+impl ModelBackend for OnlyProse {
+    fn name(&self) -> &str {
+        "only-prose"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        Ok(GenerateResponse::with_finish_reason(
+            "Looking at the code, the widths are assigned to the wrong segments. \
+             Let me re-read that once more to be sure."
+                .to_string(),
+            Some("stop".into()),
+        ))
+    }
+}
+
+/// **Two unparseable replies in a row must end a read-only run.**
+///
+/// The stall detector observes ACTIONS, and a reply that fails extraction produces none —
+/// so a model that stops emitting tool calls is invisible to it. Measured live: eight
+/// consecutive 30,000-character explanations, six RepairTriggered events, ZERO Stalled
+/// events, ending `BudgetExhausted` 812 seconds later with nothing returned. Every one of
+/// those turns re-sent the whole prompt.
+#[test]
+fn a_read_only_run_stops_after_two_unparseable_replies() {
+    let ws = temp("only-prose");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    // A read-only registry is what selects this behaviour.
+    let registry = sc_tools::read_only_registry();
+    let report = run_agent_observed(
+        &OnlyProse,
+        None,
+        &registry,
+        &ParseRepair,
+        "why is the trail thin?",
+        &ws,
+        &AgentConfig {
+            max_steps: 20,
+            ..AgentConfig::default()
+        },
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        report.steps <= 3,
+        "must stop on the 2nd bad reply, not burn the budget — took {} steps",
+        report.steps
+    );
+    assert!(
+        matches!(report.stop_reason, sc_core::StopReason::Stalled(_)),
+        "the stop reason must say why, got {:?}",
+        report.stop_reason
+    );
+    let events = log.into_inner().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Stalled { .. })),
+        "a stall must be reported, not silence"
+    );
+}
+
+/// **An identical prompt means the run cannot progress. Kill it.**
+///
+/// The prompt carries the whole conversation, so two turns that assemble byte-for-byte the
+/// same prompt have already been tried: the model saw this exact input and whatever it
+/// replied changed nothing. Measured, runs ended `BudgetExhausted` after 812 seconds having
+/// resent the same ~12,000-token prompt eight or more times — most of a minute each on a 35B
+/// model — while every existing detector stayed silent, because they watch ACTIONS and these
+/// turns produced none.
+#[test]
+fn an_identical_prompt_is_never_sent_twice() {
+    let ws = temp("same-prompt");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let registry = sc_tools::read_only_registry();
+    let report = run_agent_observed(
+        &OnlyProse,
+        None,
+        &registry,
+        &ParseRepair,
+        "why is the trail thin?",
+        &ws,
+        &AgentConfig {
+            max_steps: 30,
+            ..AgentConfig::default()
+        },
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        report.steps < 30,
+        "the run must stop early, not exhaust its budget resending a prompt"
+    );
+    let events = log.into_inner().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Stalled { .. })),
+        "stopping must be reported, not silent"
+    );
+}

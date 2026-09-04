@@ -174,6 +174,32 @@ pub fn run_iterate(
     }
 }
 
+/// Is this a file a model could usefully READ to answer a question about the code?
+///
+/// `sc_tools::source_files` means "not a build artifact", which is the right answer for its
+/// other callers (a progress ledger cares that an asset was produced). For a file map handed
+/// to a model it is too broad: measured on a real project, 199 of 595 entries were .png,
+/// .mp3, .log and .json. A model cannot read a screenshot, and every line of the map is
+/// prompt budget that could have held code.
+///
+/// Allow-list, not a deny-list: a new binary format should be excluded by default rather
+/// than silently appearing in the map until someone notices.
+fn is_readable_source(path: &str) -> bool {
+    const READABLE: [&str; 12] = [
+        "rs", "py", "cs", "ts", "tsx", "js", "go", "java", "c", "cpp", "h", "wgsl",
+    ];
+    // Kept alongside code because a question is often answered by a config or a doc:
+    // Cargo.toml names the crates, a README explains the shape.
+    const ALSO: [&str; 4] = ["toml", "md", "yml", "yaml"];
+    match path.rsplit('.').next() {
+        Some(ext) => {
+            let e = ext.to_ascii_lowercase();
+            READABLE.contains(&e.as_str()) || ALSO.contains(&e.as_str())
+        }
+        None => false,
+    }
+}
+
 /// Answer a QUESTION about the code by actually reading it.
 ///
 /// The chat panel had no tools at all: it saw the README, the TODO and whichever file
@@ -215,7 +241,19 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
     // The harness resolves paths; the model never has to invent one. Same rule that
     // removed hallucinated paths elsewhere, and it applies doubly to a small model: a
     // filename it can SEE is a filename it cannot get wrong.
-    let map = sc_tools::source_files(&workspace);
+    // SORTED, not ranked by relevance to the question. That was tried and it lost:
+    // 2/2 runs answered with the sorted map, 0/4 with a ranked one.
+    //
+    // Two reasons, both visible once the assembled prompt is read back. Sorting groups the
+    // map by directory, which is real navigational information -- `crates/void_engine/src/fx/`
+    // sitting together tells a model where effects live. Ranking scatters that. And scoring
+    // filenames against question words promotes coincidences: "screen" matched every
+    // `screenshot_*.png`, so a question about a jump SCREEN filled the top of the map with
+    // screenshots and an .mp3.
+    let map: Vec<String> = sc_tools::source_files(&workspace)
+        .into_iter()
+        .filter(|f| is_readable_source(f))
+        .collect();
     let map_block = if map.is_empty() {
         String::new()
     } else {
@@ -303,6 +341,22 @@ pub(crate) fn tune_for_investigation(agent_cfg: &mut sc_core::AgentConfig) {
     // ReplyTruncated fault. A question is answered in PROSE, and prose is far longer than
     // the `{"tool":...}` JSON the default cap was sized for -- an answer that names a file,
     // a line and a fix does not fit in a budget tuned for tool calls.
+    // 12288, and NOT lower -- this was measured the hard way.
+    //
+    // The reserve is subtracted from the prompt (`budget = window*fraction - reserve`, capped
+    // at half the window), so it looks like waste: 12288 pins the prompt at 12288 on a 32k
+    // model. Cutting it to "free up" prompt space made the run STRICTLY WORSE, twice:
+    //
+    //    4096 -> prompt 20480, but every turn truncated. The model writes ~15,000-character
+    //            reasoning replies; at 4096 not one can finish, so it never emits a tool
+    //            call. 343s, no answer.
+    //    8192 -> same failure at ~30,000 chars. 687s, no answer.
+    //   12288 -> answers in ~200s.
+    //
+    // The reserve is not headroom for the ANSWER (~1,500 chars). It is headroom for the
+    // model's habit of thinking out loud before it commits to a call, and a reply that
+    // cannot finish that thought is a wasted turn. Prompt space is worth less than the
+    // ability to complete a turn.
     agent_cfg.response_reserve_tokens = 12288;
     // `SC_INVESTIGATE_VERBOSE=1` emits the fully-assembled prompt each turn, so a probe run
     // can be read back as "what the model actually saw" rather than guessed at from the
@@ -365,5 +419,37 @@ mod investigation_config {
         };
         tune_for_investigation(&mut cfg);
         assert_eq!(cfg.system_suffix.as_deref(), Some("/think"));
+    }
+}
+
+#[cfg(test)]
+mod map_contents {
+    use super::*;
+
+    /// **A model cannot read a screenshot.**
+    ///
+    /// Measured on a real project: 199 of 595 entries in the file map were `.png`, `.mp3`,
+    /// `.log` and `.json`. Every one is a line of prompt budget that could have held code,
+    /// and one question about a jump SCREEN surfaced a run of `screenshot_*.png` because
+    /// their names matched.
+    #[test]
+    fn binaries_and_logs_are_not_in_the_map() {
+        for keep in [
+            "crates/void_engine/src/fx/starfield.rs",
+            "src/main.py",
+            "Cargo.toml",
+            "README.md",
+            "shaders/star.wgsl",
+        ] {
+            assert!(is_readable_source(keep), "{keep} must stay in the map");
+        }
+        for drop in [
+            "screenshots/screenshot_1778474991.png",
+            "music/Blazing-Stars_Looping.mp3",
+            "client_debug.log",
+            "assets/atlas.bin",
+        ] {
+            assert!(!is_readable_source(drop), "{drop} is not readable source");
+        }
     }
 }
