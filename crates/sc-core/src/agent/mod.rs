@@ -308,6 +308,11 @@ pub fn run_agent_observed(
     // delivered twice and ignored both times. Past a second warning the harness
     // stops asking and starts refusing the read outright.
     let mut read_nudges_since_change = 0usize;
+    // Every (tool, argument) pair already read, so a REPEAT can be answered differently
+    // from a new read. The volume guard below counts reads; it cannot tell a model
+    // working through a directory from one re-opening the same file, and those want
+    // opposite advice.
+    let mut already_read: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // The same verification failure, seen N times in a row. A model stuck on a hard bug
     // edits ineffectively (each edit resets the stall, so the stall detector never trips)
     // or spams run_verification — burning the whole budget while the SAME tests keep
@@ -1224,7 +1229,37 @@ pub fn run_agent_observed(
             reads_since_change += 1;
             total_reads += 1;
         }
-        let obs = if reads_since_change >= READ_THRASH_LIMIT {
+        // A REPEAT of a read already performed. Tracked separately from the volume
+        // count because it means something different: reading ten files is a search,
+        // reading one file twice is the amnesia loop, and telling a model that is
+        // searching to "answer now" is wrong while telling one that is looping the same
+        // thing is exactly right.
+        //
+        // Observed on a live investigation: hyperspace_fx.rs opened at step 1 and again
+        // at step 11, with nine unrelated files between -- far enough apart that the
+        // 5-read volume guard had been reset by then and never fired on the repetition.
+        let repeated_read = matches!(
+            tool.as_str(),
+            "read_file" | "read_function" | "search_code" | "list_dir"
+        ) && !already_read.insert(format!("{tool}\u{1}{arg}"));
+        let obs = if repeated_read {
+            interv.count += 1;
+            // A read-only run has no edit tool: telling it to "make a change" is the
+            // ToolNotOffered failure. Answering is the only move it has.
+            let next_move = if read_only_run {
+                "If you have the answer, call `finish` NOW with it in `summary`."
+            } else {
+                "Move on: make the change, or read something you have not read yet."
+            };
+            // Naming the repeat is the whole point: a model that re-opens a file has
+            // forgotten it read it, and the fix is to remind it rather than to nudge it
+            // about volume it may not have reached.
+            format!(
+                "{obs}\n\n[harness] You have ALREADY read this exact thing earlier in \
+                 this run, and it has not changed. Its contents are above. Do not read \
+                 it again -- use what you have. {next_move}"
+            )
+        } else if reads_since_change >= READ_THRASH_LIMIT {
             reads_since_change = 0;
             read_nudges_since_change += 1;
             interv.count += 1;

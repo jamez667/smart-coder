@@ -1019,3 +1019,45 @@ cargo run -p void_claim --release
         );
     }
 }
+
+/// History is stored CLEAN, so the model never re-reads its own thinking.
+mod stored_history_is_clean {
+    use super::*;
+
+    /// **Found in a live log.** Every display path stripped tags, so the bubbles looked
+    /// right while the stored history quietly filled with them -- and an investigation
+    /// built its task anchor from that history, producing:
+    ///
+    /// ```text
+    /// You answered: <think>The</think><think> user</think><think> wants</think>...
+    /// ```
+    #[test]
+    fn a_reply_is_stored_without_its_reasoning() {
+        let mut c = Conversation::open("# X", "- a");
+        c.user_turn("can you start the game");
+        c.record_reply(
+            "<think>The</think><think> user</think><think> wants</think>             </think>The game client is the void_claim crate.",
+        );
+        c.user_turn("in the jump screen the star is on the wrong side");
+
+        let anchor = c.investigation_question();
+        assert!(!anchor.contains("<think>"), "tags in the anchor: {anchor}");
+        assert!(!anchor.contains("</think>"), "tags in the anchor: {anchor}");
+        assert!(
+            anchor.contains("void_claim"),
+            "the answer survived: {anchor}"
+        );
+    }
+
+    /// A reply that was ENTIRELY reasoning stores nothing rather than storing tags --
+    /// and the turn is kept, so user/assistant alternation is not desynchronised.
+    #[test]
+    fn an_all_reasoning_reply_stores_empty_but_keeps_the_turn() {
+        let mut c = Conversation::open("# X", "- a");
+        c.user_turn("hi");
+        c.record_reply("<think>hmm</think><think>nothing to say</think>");
+        c.user_turn("still there?");
+        let anchor = c.investigation_question();
+        assert!(!anchor.contains("think"), "{anchor}");
+    }
+}

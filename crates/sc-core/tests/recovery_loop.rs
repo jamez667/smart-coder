@@ -295,3 +295,66 @@ fn plan_first_produces_a_plan_and_still_finishes() {
     assert!(report.finished);
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **A file re-read far later in the run is still a re-read.**
+///
+/// Observed on a live investigation: `hyperspace_fx.rs` was opened at step 1 and again
+/// at step 11, with nine unrelated files between them. The volume guard
+/// (`READ_THRASH_LIMIT`, five reads without a change) had been reset by the intervening
+/// work and never fired, because it counts HOW MUCH was read, not whether the same
+/// thing was read twice. Reading ten files is a search; reading one file twice is the
+/// amnesia loop, and they want opposite advice.
+#[test]
+fn re_reading_the_same_file_is_called_out_however_far_apart() {
+    let ws = temp("repeat-read");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(ws.join(n), "contents").unwrap();
+    }
+
+    // Read a, then two others, then a AGAIN -- never five in a row, so the volume
+    // guard cannot be what catches it.
+    let backend = Scripted::new(vec![
+        r#"{"tool":"read_file","path":"a.txt"}"#,
+        r#"{"tool":"read_file","path":"b.txt"}"#,
+        r#"{"tool":"read_file","path":"c.txt"}"#,
+        r#"{"tool":"read_file","path":"a.txt"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 12,
+        // High, so a repeat cannot be mistaken for the generic repeat-limit guard.
+        repeat_limit: 99,
+        ..Default::default()
+    };
+    let report = run(&backend, None, &ws, &cfg);
+
+    assert!(
+        report.interventions >= 1,
+        "the repeated read should have been called out: {report:?}"
+    );
+}
+
+/// Reading DIFFERENT files is a search, and must not be nudged.
+#[test]
+fn reading_several_different_files_is_not_a_repeat() {
+    let ws = temp("distinct-reads");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(ws.join(n), "contents").unwrap();
+    }
+    let backend = Scripted::new(vec![
+        r#"{"tool":"read_file","path":"a.txt"}"#,
+        r#"{"tool":"read_file","path":"b.txt"}"#,
+        r#"{"tool":"read_file","path":"c.txt"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 12,
+        repeat_limit: 99,
+        ..Default::default()
+    };
+    let report = run(&backend, None, &ws, &cfg);
+    assert_eq!(
+        report.interventions, 0,
+        "distinct reads are a search, not a loop: {report:?}"
+    );
+}

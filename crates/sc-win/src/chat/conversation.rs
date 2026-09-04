@@ -112,9 +112,35 @@ impl Conversation {
         self.turns.push(Message::user(text));
     }
 
-    /// Append the assistant's reply.
+    /// Append the assistant's reply, **cleaned**.
+    ///
+    /// The stored turn is what the next prompt is built from — the chat's own history,
+    /// and (via [`Conversation::investigation_question`]) the preamble an investigation
+    /// is anchored on. Storing the raw reply put the model's own reasoning back into
+    /// its next prompt.
+    ///
+    /// It leaked into the UI too, which is how it was found. An investigation's recorded
+    /// question began:
+    ///
+    /// ```text
+    /// You answered: <think>The</think><think> user</think><think> wants</think>…
+    /// ```
+    ///
+    /// Every display path already stripped tags, so the bubbles looked clean while the
+    /// history quietly filled with them. Cleaning HERE fixes both at once: the model
+    /// stops re-reading its own thinking, and no future caller can reintroduce it by
+    /// passing raw text.
     pub fn record_reply(&mut self, content: &str) {
-        self.turns.push(Message::assistant(content));
+        let cleaned = super::reply::visible_so_far(content);
+        let text = if cleaned.trim().is_empty() {
+            // A reply that was ENTIRELY reasoning leaves nothing to store. Keep the turn
+            // (dropping it would desynchronise the user/assistant alternation) but keep
+            // it empty rather than storing tags.
+            String::new()
+        } else {
+            cleaned
+        };
+        self.turns.push(Message::assistant(&text));
     }
 
     /// Refresh the plan-file contents (call after an Apply writes README/TODO, so the next
