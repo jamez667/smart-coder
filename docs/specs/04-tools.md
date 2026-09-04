@@ -44,7 +44,10 @@ Kept deliberately small. Each does one thing.
 ### Read / navigate (ReadOnly)
 - `read_file` — read a file (or a line range). Returns bytes + line numbers.
 - `list_dir` — list a directory (non-recursive by default).
-- `search_code` — ripgrep-style regex/literal search; returns file:line hits.
+- `search_code` — one name, two paths ([23](23-repo-intelligence.md)): a
+  pattern-shaped query gets ripgrep-style regex/literal search returning
+  file:line hits; a question-shaped one gets indexed lexical search returning
+  ranked functions. The one-parameter schema is unchanged.
 - `find_symbol` — locate a definition/usages via the retrieval index
   ([05](05-context-management.md), [01](01-architecture.md)). Lets a small model
   jump to the right place instead of scanning.

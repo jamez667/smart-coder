@@ -91,21 +91,26 @@ most constrained by evidence.
 
 ## The walker
 
-One walk, one skip list, one extension policy — the union of the four current
+One walk <!--@ sc_index::walk -->, one skip list
+<!--@ sc_index::SKIP_DIRS -->, one extension policy — the union of the four current
 lists: `.git` and all dotdirs, `target`, `node_modules`, `dist`, `build`,
-`__pycache__`, `.venv`, `.smart-coder`. A per-file size cap (the 64 KiB cap
-from `gather_sources` becomes the shared default, overridable). The three
-walks and the sc-win mirror migrate to it; the regression tests that pinned their individual
-quirks (binaries and logs stay out of the file map, session logs stay out of
-search) move with them and must keep passing against the unified walker.
+`__pycache__`, `.venv`, `.smart-coder`, plus machine-generated lockfiles
+<!--@ sc_index::SKIP_FILES -->, which contributed more index terms than the agent
+loop and have never answered a question. A per-file size cap is available
+<!--@ sc_index::PROMPT_MAX_FILE_BYTES --> but **opt-in** — see *What shipped*.
+The three walks and the sc-win mirror migrate to it; the regression tests that
+pinned their individual quirks (binaries and logs stay out of the file map,
+session logs stay out of search) move with them and must keep passing against the
+unified walker.
 
 This is a prerequisite, not a feature: an index built by a fifth divergent walk
 would make the visibility problem worse, not better.
 
 ## The index
 
-`RepoIndex` is a persistent, incrementally-refreshed snapshot of the workspace,
-stored as one serde_json file at `.smart-coder/index.json` (a location every
+`RepoIndex` <!--@ sc_index::RepoIndex --> is a persistent,
+incrementally-refreshed snapshot of the workspace, stored as one serde_json file at
+`.smart-coder/index.json` (a location every
 walk already skips). No sqlite, no tantivy — a serialized struct, in the house
 tradition of hand-rolled and tiny.
 
@@ -142,12 +147,16 @@ are split and comments are indexed:
 - *thin*, *thick* → the comment at the flip point, verbatim
 - *stars* → `self.stars`, `Starfield`
 
-Mechanics, all deterministic:
+Mechanics, all deterministic <!--@ sc_index::search -->:
 
-1. **Tokenization** (same for queries and documents): split on
+1. **Tokenization** <!--@ sc_index::tokenize --> (same for queries and
+   documents): split on
    non-alphanumerics *and* camelCase/snake_case boundaries, lowercase, drop
    one-character tokens and a small fixed stopword list (question words: "why",
-   "the", "is", "before", …). `width_head` indexes as `width`, `head`.
+   "the", "is", "before", …), then fold a trailing plural. `width_head` indexes as
+   `width`, `head`. The plural fold is **not a stemmer** — a stemmer turns
+   `intensity` into `intens` and mangles identifiers — it is just enough that a
+   user's "stars" reaches the code's `stars` and "trail" reaches `draw_trails`.
 2. **Fields with weights**: symbol names (×4), comments (×3), string literals
    (×2), remaining code (×1). Comments outrank plain code deliberately — that
    is where authors write the words users use.
@@ -156,7 +165,17 @@ Mechanics, all deterministic:
    dependency-free math as `pagerank.rs`. Scores aggregate per **enclosing
    symbol span**, not per line — a hit is "this function", which is the unit a
    model can act on with `read_function`.
-4. **Tie-breaks**: score descending, then path ascending, then line ascending.
+4. **Two multipliers after the BM25 sum.** *Coverage*: a hit matching three of
+   the question's words beats one matching a single word forty times — the second
+   is a rendering loop, the first is an answer. *Test damping* (×0.35): test names
+   are long English sentences, exactly the shape a vague query matches by accident,
+   and three of them crowded the top five for "why does a tool result get cut off".
+   Damped rather than excluded, because a test is sometimes the clearest statement
+   of intended behaviour, and applied per **symbol** rather than per path, because
+   most tests here are inline `#[cfg(test)]` blocks inside the files they test.
+   Both are constants in the diff, not runtime tuning, so they stay inside the
+   determinism surface.
+5. **Tie-breaks**: score descending, then path ascending, then line ascending.
    No randomness, no hash-order iteration anywhere in the pipeline.
 
 Result rendering is built for a 200-line observation cap and a model that reads
@@ -243,9 +262,13 @@ names.
    the GBNF grammar, the menu text, and the model's habits all survive
    unchanged) but is re-backed by indexed search. The model asks the same vague
    question it always asked; the answers get better. Regex queries still work:
-   a query that compiles as a regex *and* looks like one (non-alphanumeric
-   metacharacters) falls through to the literal grep path, so precise queries
-   keep their precision.
+   a query that *looks* like a pattern — a regex metacharacter, or `::`/`.`/`_`
+   in a query of three words or fewer — falls through to the literal grep path, so
+   precise queries keep their precision. Whether it compiles is deliberately not
+   the test: almost any prose compiles as a regex matching itself, so "does it
+   parse" would send every question to grep and change nothing. An indexed search
+   that finds nothing also falls back to grep, so the tool never returns worse than
+   it did before.
 2. **`find_symbol` is re-backed by the persistent index** — same output, no
    per-call rescan.
 3. **Investigate leads, behind a flag.** After the sorted file map (which does
@@ -270,15 +293,50 @@ scripts, and above all for debugging: `smart-coder search "<question>"` prints
 *exactly* what the model would have been shown, which turns "why did the
 investigation go sideways" into a reproducible one-liner.
 
+## What shipped, and what the build changed
+
+Three things the design did not anticipate, each forced by evidence and each worth
+carrying forward:
+
+- **The 64 KiB cap is opt-in, not the walk's default.** It was `gather_sources`'
+  prompt-size guard applied *after* its walk, never a walk policy. Five source files
+  in this repo exceed it, `crates/sc-core/src/agent/mod.rs` among them; defaulting it
+  on would have quietly deleted the project's biggest files from the repo map and from
+  `find_symbol`.
+- **Postings anchor to the enclosing definition, and a doc comment counts as part of
+  the definition below it.** Search aggregates per symbol span anyway, so per-line
+  detail was resolution nobody read and most of the file (716k postings became 397k).
+  The doc-comment rule matters more: that comment is outside the span but is the most
+  valuable text in the file for retrieval, because it is where the author wrote in the
+  user's language.
+- **Test code is damped, per symbol rather than per path.** Test names are long
+  English sentences, exactly the shape a vague query matches by accident; three tests
+  crowded the top five for "why does a tool result get cut off". Per symbol because
+  most tests here are inline `#[cfg(test)]` blocks inside the files they test.
+
+Measured once, on this repo at 619 files: 2.6s cold build, 171ms warm open, a
+~21 MB cache. A snapshot of a before/after, not a property — the repo grows, and
+the only figure a test pins is the shape that matters (`warm × 3 ≤ cold`). Reaching that took removing two redundant tree-sitter parses —
+`function_span` per symbol was ~13s on the largest file alone — and declining to index
+lockfiles, which contributed more terms than the agent loop and have never answered a
+question.
+
 ## Measurement
 
 The genuinely new instrument: a **model-free retrieval eval** that runs in CI.
 
-`evals/retrieval/suite.toml` holds `[[queries]]` entries — a natural-language
+`evals/retrieval/suite.toml` <!--@ evals/retrieval/suite.toml --> holds
+`[[queries]]` entries <!--@ sc_eval::RetrievalSuite --> — a natural-language
 question, a fixture directory, and the expected file(s)/symbol(s). Grading is
 "expected target appears in the top-k hits" (k=5 strict, k=25 loose). Because
 search is deterministic, this suite needs no model, no GPU, and no flakiness
 allowance; it runs inside `scripts/check.sh` like any unit test.
+
+A query may also carry `expect = "miss"`, asserting the lexical index is expected
+*not* to find the target. That reads backwards until you consider the alternative:
+a suite of only-winnable questions measures nothing, and quietly becomes a suite
+somebody tuned the ranker against. A declared miss keeps the gap visible and turns
+the suite red the day it starts working — which is news worth having.
 
 Fixture strategy: the `evals/ladder/tasks/engine-*` fixtures are already in-repo
 slices of the same game codebase as the starfield bug — the vague-question set

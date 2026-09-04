@@ -33,6 +33,8 @@ sc-swarm = { path = "../sc-swarm" }
 sc-workflow = { path = "../sc-workflow" }
 sc-model = { path = "../sc-model" }
 sc-tools = { path = "../sc-tools" }
+# Spec 23: the harness resolves a pasted stack trace before the model sees it.
+sc-index = { path = "../sc-index" }
 sc-verify = { path = "../sc-verify" }
 sc-web = { path = "../sc-web" }
 sc-proto = { path = "../sc-proto" }

@@ -16,6 +16,7 @@ mod repomap;
 mod search;
 mod store;
 mod symbols;
+mod trace;
 mod walk;
 mod workspace;
 
@@ -30,6 +31,7 @@ pub use symbols::{
     count_functions_named, definition_spans, extract_all, extract_symbols, function_span,
     FileSymbols, Language, SymbolDef,
 };
+pub use trace::{render_trace, resolve_trace, Frame};
 pub use walk::{
     is_skipped_dir, is_skipped_file, relative, walk, WalkOptions, WalkedFile,
     PROMPT_MAX_FILE_BYTES, SKIP_DIRS, SKIP_FILES,

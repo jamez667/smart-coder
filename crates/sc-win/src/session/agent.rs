@@ -297,11 +297,29 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
         b
     };
 
+    // A pasted panic or traceback is RESOLVED BY THE HARNESS, above the file map.
+    //
+    // Frame parsing is mechanical work a parser does perfectly and a small model
+    // fumbles: the paths belong to whoever built the binary, the frame order differs
+    // by language, and most frames are library code. A model that has been handed
+    // "starfield.rs:153 in draw_trails (workspace)" has been handed the answer's
+    // location; one asked to `search_code` a backtrace spends turns on string
+    // handling. Empty for the overwhelmingly common case of a question in prose --
+    // this must never put noise above the map (spec 23).
+    let trace_block = {
+        let frames = sc_index::resolve_trace(&question, &sc_index::RepoIndex::open(&workspace));
+        if frames.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}\n", sc_index::render_trace(&frames))
+        }
+    };
+
     // Say what the loop is FOR. Without this the agent treats a question as a task and
     // reports "finished in 4 steps" instead of answering -- the steps were the means, and
     // the user asked for the conclusion.
     let task = format!(
-        "Answer this question about the code in this project:\n\n{question}\n{map_block}\n\
+        "Answer this question about the code in this project:\n\n{question}\n{trace_block}{map_block}\n\
          Pick the likely file from the list above and read it -- do NOT spend turns listing \
          directories, and do not guess at file names or line numbers. When you know the \
          answer, call `finish` with a short explanation naming the file and line, and say \
@@ -472,5 +490,55 @@ mod map_contents {
         ] {
             assert!(!is_readable_source(drop), "{drop} is not readable source");
         }
+    }
+}
+
+/// The harness resolves a pasted stack trace before the model sees it (spec 23).
+#[cfg(test)]
+mod pasted_traces {
+    fn fixture() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "sc-win-trace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(d.join("src/fx")).unwrap();
+        std::fs::write(
+            d.join("src/fx/starfield.rs"),
+            "pub fn draw_stars() {}\n\npub fn draw_trails() {\n    let w = 1;\n    panic!();\n}\n",
+        )
+        .unwrap();
+        d
+    }
+
+    /// A question carrying a panic gets the frame resolved to a workspace file AND
+    /// the enclosing function -- the answer's location handed over rather than hunted
+    /// for. The path in the trace is the CI box's, not this workspace's; bridging that
+    /// is the whole job.
+    #[test]
+    fn a_panic_in_the_question_resolves_to_a_file_and_a_function() {
+        let root = fixture();
+        let idx = sc_index::RepoIndex::build(&root);
+        let question = "it crashes: thread 'main' panicked at /ci/build/src/fx/starfield.rs:5:5:";
+        let out = sc_index::render_trace(&sc_index::resolve_trace(question, &idx));
+        assert!(out.contains("src/fx/starfield.rs:5"), "{out}");
+        assert!(out.contains("draw_trails"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A question in prose must not grow a trace block.** The overwhelmingly common
+    /// case is an ordinary question, and noise above the file map would cost anchor
+    /// tokens on every run for the sake of the rare one.
+    #[test]
+    fn an_ordinary_question_produces_no_trace_block() {
+        let root = fixture();
+        let idx = sc_index::RepoIndex::build(&root);
+        let question = "why is the trail behind the stars thin before it gets thick";
+        assert!(sc_index::resolve_trace(question, &idx).is_empty());
+        assert!(sc_index::render_trace(&[]).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
