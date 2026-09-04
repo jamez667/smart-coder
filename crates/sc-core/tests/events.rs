@@ -891,3 +891,77 @@ Your reply was cut off because it ran too long. You are THINKING OUT LOUD instea
         "the phrase must survive intact — it was split across a reflow once"
     );
 }
+
+/// A backend that truncates at the cap but NEVER reports `finish_reason: "length"` —
+/// exactly what the user's llama.cpp server does.
+struct SilentlyTruncates;
+
+impl ModelBackend for SilentlyTruncates {
+    fn name(&self) -> &str {
+        "silently-truncates"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 32_768,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, r: &GenerateRequest) -> Result<GenerateResponse> {
+        // Fill the cap almost exactly, and claim a clean stop.
+        let words = r.max_tokens.max(1);
+        Ok(GenerateResponse::with_finish_reason(
+            "analysis ".repeat(words),
+            Some("stop".into()),
+        ))
+    }
+}
+
+/// **Truncation must be MEASURED, not taken on trust.**
+///
+/// `was_truncated()` reads `finish_reason == "length"`, and the user's backend does not send
+/// it: verified in its own transcript log — three replies of 7,088 / 7,302 / 7,380 chars,
+/// every one ending mid-word ("...Unless... the user"), all reported `ok` with no finish
+/// reason. So every guard keyed on that flag was blind exactly when it mattered, and runs
+/// recorded ZERO faults while burning turns on replies that had plainly been cut off.
+///
+/// The harness knows the cap it asked for, so it can see the reply reach it.
+#[test]
+fn a_reply_that_fills_the_cap_counts_as_truncated_without_a_finish_reason() {
+    let ws = temp("silent-truncation");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let report = run_agent_observed(
+        &SilentlyTruncates,
+        None,
+        &sc_tools::read_only_registry(),
+        &ParseRepair,
+        "why is the trail thin?",
+        &ws,
+        &AgentConfig {
+            max_steps: 20,
+            ..AgentConfig::default()
+        },
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::HarnessFault {
+                kind: FaultKind::ReplyTruncated,
+                ..
+            }
+        )),
+        "a reply that filled its cap must raise a truncation fault even with finish_reason=stop"
+    );
+    assert!(
+        report.steps < 20,
+        "and the run must stop, not burn its whole budget — took {}",
+        report.steps
+    );
+}

@@ -156,14 +156,17 @@ impl App {
         // just edited. It costs one small read on a path that is already about to do a
         // model call.
         let on_disk = UiConfig::load();
-        if self.local_url_input.trim() == self.cfg.local_conn.base_url.trim() {
-            // Untouched box: adopt whatever the file says now.
-            self.local_url_input = on_disk.local_conn.base_url.clone();
-            self.cfg.local_conn.base_url = on_disk.local_conn.base_url;
+        if let Some(url) = adopt_external(
+            &self.local_url_input,
+            &self.cfg.local_conn.base_url,
+            &on_disk.local_conn.base_url,
+        ) {
+            self.local_url_input = url.clone();
+            self.cfg.local_conn.base_url = url;
         }
-        if self.model_input.trim() == self.cfg.model.trim() {
-            self.model_input = on_disk.model.clone();
-            self.cfg.model = on_disk.model;
+        if let Some(model) = adopt_external(&self.model_input, &self.cfg.model, &on_disk.model) {
+            self.model_input = model.clone();
+            self.cfg.model = model;
         }
 
         // Models (per stage) + the endpoint-agnostic knobs.
@@ -835,5 +838,55 @@ impl App {
         if let Some((raw, _)) = done {
             self.apply_line_replace(&raw);
         }
+    }
+}
+
+/// Should an externally-edited config value replace what the settings box holds?
+///
+/// Yes when the box still equals the value it was SEEDED with — the user has not typed
+/// anything, so the file is the more recent truth. No once they have typed: a deliberate
+/// edit in the UI must win over the file.
+///
+/// Pure on purpose. The behaviour was first tested by pointing `APPDATA` (and then
+/// `SC_STATE_DIR`) at a temp dir, but both are process-wide and other tests set them, so the
+/// test passed alone and failed in the suite. A rule with no I/O has no such race.
+pub(crate) fn adopt_external(input: &str, seeded: &str, on_disk: &str) -> Option<String> {
+    (input.trim() == seeded.trim() && on_disk.trim() != input.trim()).then(|| on_disk.to_string())
+}
+
+#[cfg(test)]
+mod adopt {
+    use super::adopt_external;
+
+    /// **The 8080 revert.**
+    ///
+    /// `commit_settings` runs on every chat send and writes the settings INPUT BOXES to disk.
+    /// Those are seeded from config.json at boot and never again, so an app launched while
+    /// the file said `:8080` held `:8080` for its whole life and the next message the user
+    /// sent stamped it back over a file that had since been corrected. `model` reverted to
+    /// "default" by the same route.
+    #[test]
+    fn an_untouched_box_adopts_the_file_but_a_typed_one_does_not() {
+        // Untouched box, file corrected underneath -> adopt.
+        assert_eq!(
+            adopt_external(
+                "http://localhost:8080/v1",
+                "http://localhost:8080/v1",
+                "http://localhost:11436/v1"
+            )
+            .as_deref(),
+            Some("http://localhost:11436/v1")
+        );
+        // The user typed something -> their edit wins.
+        assert_eq!(
+            adopt_external(
+                "http://localhost:9999/v1",
+                "http://localhost:8080/v1",
+                "http://localhost:11436/v1"
+            ),
+            None
+        );
+        // Nothing changed on disk -> nothing to do.
+        assert_eq!(adopt_external("same", "same", "same"), None);
     }
 }

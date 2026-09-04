@@ -519,6 +519,20 @@ pub fn run_agent_observed(
         // construction HAS content; nothing empty is ever that.
         let ran_long = counter.count(&resp.content) > cfg.response_reserve_tokens / 2;
         let spent_it_all_thinking = resp.content.trim().is_empty();
+        // MEASURE the truncation; do not trust the server to report it.
+        //
+        // `was_truncated()` reads `finish_reason == "length"`, and this backend does not send
+        // it for these calls -- verified in the transcript log: three replies of 7,088 /
+        // 7,302 / 7,380 chars, every one ending mid-word ("...Unless... the user"), all with
+        // `ok=true` and no finish_reason. So every guard keyed on `was_truncated()` was blind
+        // exactly when it was needed, and the run recorded ZERO faults while burning turns.
+        //
+        // The harness knows the cap it asked for, so it can see the reply reach it. 90% is
+        // the threshold: a reply that stops one token short of its ceiling has not "finished
+        // naturally", and a genuine short answer is nowhere near it.
+        let reply_tokens = counter.count(&resp.content);
+        let hit_the_cap = req.max_tokens > 0 && reply_tokens * 10 >= req.max_tokens * 9;
+        let was_cut_off = resp.was_truncated() || hit_the_cap;
         // Count truncated replies for the WHOLE run, not as a consecutive streak.
         //
         // A streak was wrong: the observed pattern alternates -- the model runs to the cap,
@@ -530,10 +544,10 @@ pub fn run_agent_observed(
         // Each truncated reply costs a full prompt pass plus a maximum-length generation --
         // most of a minute on a 35B model -- so a run that keeps hitting the cap is burning
         // the user's time whether or not the waste is contiguous.
-        if resp.was_truncated() {
+        if was_cut_off {
             capped_replies += 1;
         }
-        if resp.was_truncated() && (ran_long || spent_it_all_thinking) {
+        if was_cut_off && (ran_long || spent_it_all_thinking) {
             sink.record(&AgentEvent::HarnessFault {
                 kind: FaultKind::ReplyTruncated,
                 detail: if spent_it_all_thinking {
@@ -907,7 +921,7 @@ pub fn run_agent_observed(
                 //
                 // Tell it the one thing that ends the loop: it already has the code, and the
                 // answer goes in `finish`.
-                if read_only_run && resp.was_truncated() {
+                if read_only_run && was_cut_off {
                     detail.push_str(
                         // ONE LINE: a backslash-continued literal gets reflowed by
                         // rustfmt into literal spaces, which happened to this very
@@ -959,7 +973,7 @@ pub fn run_agent_observed(
                 // used to fire first and end the run before the model ever saw it -- measured,
                 // the steer text never reached the prompt at all. Truncation is handled by
                 // `capped_replies`; this one is for a reply that is genuinely unparseable.
-                if read_only_run && !resp.was_truncated() && malformed_streak >= 2 {
+                if read_only_run && !was_cut_off && malformed_streak >= 2 {
                     sink.record(&AgentEvent::Stalled {
                         trigger: "two unparseable replies in a row".to_string(),
                     });

@@ -9,6 +9,13 @@
 /// the same directory convention as [`crate::persist`]'s state file — deliberately kept
 /// together. It is NOT tracked by git; each box supplies its own endpoint/model here.
 pub(super) fn config_file() -> std::path::PathBuf {
+    // `SC_STATE_DIR` redirects it, mirroring `layout_file()`. That exists for tests: without
+    // it, anything calling `save_config` writes the DEVELOPER'S REAL config.json -- the exact
+    // file whose corruption ("it switched back to 8080 again") took this long to track down.
+    // Overriding `APPDATA` instead is process-wide, so it races other tests reading it.
+    if let Some(dir) = std::env::var_os("SC_STATE_DIR") {
+        return std::path::PathBuf::from(dir).join("config.json");
+    }
     let base = std::env::var_os("APPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
