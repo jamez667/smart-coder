@@ -301,6 +301,10 @@ fn investigate_into_chat(
 
     let mut answer = String::new();
     let mut steps = 0usize;
+    // Everything the run did, kept so a failure can show its work rather than replacing
+    // seven progress lines with one sentence saying it found nothing.
+    let mut trace = String::new();
+    let mut faults = 0usize;
     while let Ok(ev) = ev_rx.recv() {
         match ev {
             crate::session::UiEvent::Agent(a) => match a {
@@ -310,8 +314,14 @@ fn investigate_into_chat(
                         answer = arg;
                     } else {
                         steps += 1;
-                        // A progress line, not the reply: shown live, replaced by the answer.
-                        let _ = tx.send(ChatEvent::Token(format!("· {tool} {arg}\n")));
+                        // A progress line: shown live, and kept in `trace` so a run that
+                        // never answers can still show where it looked.
+                        let line = format!(
+                            "· {tool} {arg}
+"
+                        );
+                        trace.push_str(&line);
+                        let _ = tx.send(ChatEvent::Token(line));
                     }
                 }
                 // WHY the model chose this step, when it says so.
@@ -326,10 +336,9 @@ fn investigate_into_chat(
                     // echoing that would bury the progress rather than explain it.
                     let prose = raw.split('{').next().unwrap_or("").trim();
                     if !prose.is_empty() && prose.len() <= 200 {
-                        let _ = tx.send(ChatEvent::Token(format!(
-                            "{prose}
-"
-                        )));
+                        let line = format!("{prose}\n");
+                        trace.push_str(&line);
+                        let _ = tx.send(ChatEvent::Token(line));
                     }
                 }
                 // WHAT THE STEP FOUND, not just what it ran.
@@ -344,13 +353,13 @@ fn investigate_into_chat(
                         // The first line only. A read returns the whole file, and echoing that
                         // into the chat would bury the progress it is meant to show.
                         let head: String = line.chars().take(120).collect();
-                        let _ = tx.send(ChatEvent::Token(format!(
-                            "    ↳ {head}
-"
-                        )));
+                        let line = format!("    ↳ {head}\n");
+                        trace.push_str(&line);
+                        let _ = tx.send(ChatEvent::Token(line));
                     }
                 }
                 sc_core::AgentEvent::HarnessFault { kind, detail, .. } => {
+                    faults += 1;
                     // Surface OUR faults in the chat rather than only in a log the user
                     // never opens — a truncated or over-budget turn is why an answer is
                     // thin, and staying silent about it blames the model.
@@ -358,6 +367,7 @@ fn investigate_into_chat(
                         "\n⚠ harness fault ({}): {detail}\n",
                         kind.label()
                     )));
+                    trace.push_str(&format!("\n⚠ harness fault ({}): {detail}\n", kind.label()));
                 }
                 _ => {}
             },
@@ -372,17 +382,40 @@ fn investigate_into_chat(
     }
     let _ = worker.join();
 
+    let answered = !answer.trim().is_empty();
     let text = if answer.trim().is_empty() {
-        // Reading without concluding. Say so plainly: an empty bubble after a visible
-        // multi-step search reads as a crash.
+        // Reading without concluding. Show the TRACE, not just an apology: the finished
+        // turn replaces the streamed progress lines, so without this the user watched
+        // several steps scroll past and then saw them all vanish, replaced by one sentence
+        // saying nothing was found -- with no way to see where it had looked.
         format!(
-            "I read the code for this but did not reach a conclusion \
-             (searched across {steps} step(s)). Try narrowing the question, or name the \
-             file you think is involved."
+            "{trace}\nI read the code but did not reach a conclusion ({steps} step(s) above). Try naming the file you think is involved."
         )
     } else {
         answer
     };
+
+    // WRITE THE RUN TO DISK.
+    //
+    // Every failure the user has reported was invisible to me: the client keeps no record,
+    // so a run that answered nothing left nothing to read afterwards and I was reduced to
+    // reproducing it in a test harness and hoping to hit the same path. This is one small
+    // file per investigation, in the same directory as the config, so a bad run can be read
+    // instead of guessed at.
+    if let Some(dir) = crate::config::log_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let body = format!(
+            "question: {question}\n\nsteps: {steps}  faults: {faults}  answered: {}\n\n--- trace ---\n{trace}\n--- answer ---\n{}\n",
+            answered,
+            text.trim()
+        );
+        let _ = std::fs::write(dir.join(format!("investigate-{stamp}.md")), body);
+    }
+
     let _ = tx.send(ChatEvent::Reply {
         text,
         intent: Some(ChatIntent::Question),
