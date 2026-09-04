@@ -1,5 +1,19 @@
 # Implementation prompt — spec 23 (repo intelligence)
 
+> **COMPLETED.** All seven milestones shipped: `0f4b2db` (M1 walker), `3bb2ea4`
+> (M2 index), `6168050` (M3 search + retrieval eval), `4b97232` (M4 tools),
+> `eecb550` (M5 traces), `fcb95c7` (M6 health + CLI), `db15a95` / `d85a479`
+> (M7 leads + the A/B measurement). `docs/specs/23-repo-intelligence.md` is the
+> source of truth for what exists; this file is kept as the record of what was
+> asked for.
+>
+> Three things shipped differently from the plan below, each for a reason the spec
+> records: the CLI subcommand is **`stack`**, not `trace` (which is spec
+> traceability); the leads switch is the **`SC_INVESTIGATE_LEADS` env var**, not an
+> `AgentConfig` field, because it exists to be flipped for one probe and compared;
+> and trace files are **marked** in the file map rather than boosted, because that
+> map is sorted rather than ranked and sorted won its own probe.
+
 Paste the block below into a new session. The milestones are independent
 commits; each one lands green on `scripts/check.sh` and pushes to `main`
 before the next begins. If a milestone goes sideways, stop and re-plan rather

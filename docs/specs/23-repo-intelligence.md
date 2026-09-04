@@ -59,7 +59,7 @@ Three findings from the probe logs anchor the design:
 |---|---|---|
 | The answer to a vague question is often *verbatim in a comment* | `starfield.rs:173` contains the words "thin" and "thick" — the exact words of the user's question | Index comments and string literals, not just identifiers |
 | Small menus beat big menus | six tools: `run_command` used 12/12; sixteen tools: 3/12 | This spec adds **zero** tools to any scored registry |
-| Ranking can hurt | sorted map 2/2, ranked map 0/4 | New retrieval output is *additive* and ships behind a flag until probed |
+| Ranking can hurt | sorted map 2/2, ranked map 0/4 | New retrieval output is *additive* and shipped behind a flag until probed — see *Investigate leads* |
 
 ## Architecture
 
@@ -231,8 +231,18 @@ external frames as such; and renders innermost-first:
 ```
 
 Wiring: the investigate path scans the question for a trace; on a hit, the
-resolved frames are prepended to the task anchor above the file map, and the
-frame files are boosted the way in-play files already are in `build_repo_map`.
+resolved frames are prepended to the task anchor above the file map, and every file
+the trace named is **marked in the map** — `  src/fx/starfield.rs   <- in the stack
+trace` — including one that falls outside the 800-entry cap, which would otherwise be
+invisible precisely when it is the file we most know is implicated.
+
+Marked, not moved. The obvious design was to boost those files the way in-play files
+are boosted in `build_repo_map`, and that is what this spec first said. But the
+investigate map is not built by `build_repo_map`; it is a sorted list, and sorted is
+a measured decision (2/2 against a ranked map's 0/4) because sorting groups the map
+by directory and ranking scatters that. Reordering to boost would trade a measured
+win for an unmeasured one. A marker carries the same information and keeps the
+grouping.
 No new tool — a model that can be handed resolved frames should never be asked
 to parse a backtrace with `search_code`.
 
@@ -247,10 +257,16 @@ index already holds:
 - functions over the existing 120-line giant-function threshold,
 - per-file function counts, TODO/FIXME counts.
 
+Test symbols are excluded from the function count and from giant-hunting: a long
+test is a long test, and recommending its split is not the same advice as splitting a
+300-line function that production code calls. The report lists only files with
+something to say — over a threshold, holding a giant, or carrying a TODO — sorted by
+lines descending, then path.
+
 This is a size-and-attention report, not a linter: no style opinions, no
-model calls, no configurable rule packs. Its consumers are humans (CLI, GUI)
-and future harness heuristics. Smells do **not** feed search ranking in this
-spec — that is an unmeasured idea, and unmeasured ranking changes are exactly
+model calls, no configurable rule packs. Its consumer today is the
+`smart-coder health` CLI; a GUI surface is not built. Smells do **not** feed search
+ranking in this spec — that is an unmeasured idea, and unmeasured ranking changes are exactly
 what the sorted-map lesson warns against.
 
 ## Model-facing surface
@@ -324,7 +340,10 @@ names.
 `repo_health` and `resolve_trace` never enter a model registry. The CLI gets
 `smart-coder index | search | health | stack` subcommands
 <!--@ crates/sc-cli/src/cmd/index.rs --> (`stack`, not `trace`, because `trace` is
-spec traceability and one verb should not mean two things) — for humans, for
+spec traceability and one verb should not mean two things). Each takes `--json` for
+scripts; `stack` reads the trace from stdin (`cargo test 2>&1 | smart-coder stack`),
+and `search <query...>` joins its remaining arguments so a question can be typed
+unquoted, the way it would be said. — for humans, for
 scripts, and above all for debugging: `smart-coder search "<question>"` prints
 *exactly* what the model would have been shown, which turns "why did the
 investigation go sideways" into a reproducible one-liner.

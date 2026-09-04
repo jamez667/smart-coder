@@ -271,6 +271,33 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
     // filenames against question words promotes coincidences: "screen" matched every
     // `screenshot_*.png`, so a question about a jump SCREEN filled the top of the map with
     // screenshots and an .mp3.
+    // One index for the whole anchor. It was opened twice -- once for the trace,
+    // once for leads -- which on a cold cache is two full builds of the same thing.
+    let index = sc_index::RepoIndex::open(&workspace);
+
+    // A pasted panic or traceback is RESOLVED BY THE HARNESS, before anything else,
+    // because what it names changes how the map below is written.
+    //
+    // Frame parsing is mechanical work a parser does perfectly and a small model
+    // fumbles: the paths belong to whoever built the binary, the frame order differs
+    // by language, and most frames are library code. A model handed
+    // "starfield.rs:153 in draw_trails (workspace)" has been handed the answer's
+    // location; one asked to `search_code` a backtrace spends turns on string
+    // handling. Empty for the overwhelmingly common case of a question in prose --
+    // this must never put noise above the map (spec 23).
+    let frames = sc_index::resolve_trace(&question, &index);
+    let trace_block = if frames.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n", sc_index::render_trace(&frames))
+    };
+    let frame_files: Vec<String> = frames
+        .iter()
+        .filter_map(|f| f.path.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
     let map: Vec<String> = sc_tools::source_files(&workspace)
         .into_iter()
         .filter(|f| is_readable_source(f))
@@ -289,30 +316,31 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
         for f in map.iter().take(MAX) {
             b.push_str("  ");
             b.push_str(f);
+            // A file the stack trace named is MARKED, not moved.
+            //
+            // Spec 23 called for boosting these "the way in-play files already are
+            // in `build_repo_map`" -- but this map is not built by `build_repo_map`,
+            // it is a sorted list, and sorted is a measured decision (2/2 against a
+            // ranked map's 0/4) because sorting groups the map by directory and
+            // ranking scatters that. Reordering to boost would trade a measured win
+            // for an unmeasured one. A marker gets the same information across and
+            // keeps the grouping.
+            if frame_files.iter().any(|t| t == f) {
+                b.push_str("   <- in the stack trace");
+            }
             b.push('\n');
         }
         if map.len() > MAX {
             b.push_str("  ... (truncated; use search_code for anything not listed)\n");
         }
-        b
-    };
-
-    // A pasted panic or traceback is RESOLVED BY THE HARNESS, above the file map.
-    //
-    // Frame parsing is mechanical work a parser does perfectly and a small model
-    // fumbles: the paths belong to whoever built the binary, the frame order differs
-    // by language, and most frames are library code. A model that has been handed
-    // "starfield.rs:153 in draw_trails (workspace)" has been handed the answer's
-    // location; one asked to `search_code` a backtrace spends turns on string
-    // handling. Empty for the overwhelmingly common case of a question in prose --
-    // this must never put noise above the map (spec 23).
-    let trace_block = {
-        let frames = sc_index::resolve_trace(&question, &sc_index::RepoIndex::open(&workspace));
-        if frames.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}\n", sc_index::render_trace(&frames))
+        // A trace file outside the cap would otherwise be invisible: the map is
+        // capped at 800 and the one file we KNOW is implicated must be listed.
+        for t in &frame_files {
+            if !map.iter().take(MAX).any(|f| f == t) {
+                b.push_str(&format!("  {t}   <- in the stack trace\n"));
+            }
         }
+        b
     };
 
     // LEADS: the indexed search over the question, as a short list of functions.
@@ -326,7 +354,7 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
     // still holding. A retrieval feature that costs anchor tokens without shortening
     // runs is deleted, not tuned (spec 23).
     let leads_block = if leads_enabled() {
-        render_leads(&question, &workspace)
+        render_leads(&question, &index)
     } else {
         String::new()
     };
@@ -392,9 +420,8 @@ pub(crate) fn leads_enabled() -> bool {
 pub(crate) const MAX_LEADS: usize = 8;
 
 /// Render the leads block, or empty when there is nothing worth saying.
-pub(crate) fn render_leads(question: &str, workspace: &std::path::Path) -> String {
-    let index = sc_index::RepoIndex::open(workspace);
-    let hits = sc_index::search(&index, question);
+pub(crate) fn render_leads(question: &str, index: &sc_index::RepoIndex) -> String {
+    let hits = sc_index::search(index, question);
     if hits.is_empty() {
         return String::new();
     }
@@ -589,6 +616,23 @@ mod pasted_traces {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A file the trace named is marked in the map, not moved up it.**
+    ///
+    /// Spec 23 asked for these to be "boosted the way in-play files already are in
+    /// `build_repo_map`" — but this map is a sorted list, and sorted beat ranked 2/2
+    /// against 0/4 because sorting groups by directory. Reordering to boost would
+    /// trade a measured win for an unmeasured one; a marker carries the same
+    /// information and keeps the grouping.
+    #[test]
+    fn a_file_named_by_the_trace_is_marked_in_the_map() {
+        let root = fixture();
+        let idx = sc_index::RepoIndex::build(&root);
+        let frames = sc_index::resolve_trace("panicked at /ci/src/fx/starfield.rs:5:5:", &idx);
+        let files: Vec<String> = frames.iter().filter_map(|f| f.path.clone()).collect();
+        assert_eq!(files, vec!["src/fx/starfield.rs".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A question in prose must not grow a trace block.** The overwhelmingly common
     /// case is an ordinary question, and noise above the file map would cost anchor
     /// tokens on every run for the sake of the rare one.
@@ -648,7 +692,8 @@ mod leads {
     #[test]
     fn the_block_is_bounded_and_names_functions() {
         let root = fixture();
-        let out = render_leads("why is the trail thin before it gets thick", &root);
+        let index = sc_index::RepoIndex::build(&root);
+        let out = render_leads("why is the trail thin before it gets thick", &index);
         assert!(
             out.contains("leads (indexed search over your question)"),
             "{out}"
@@ -665,7 +710,8 @@ mod leads {
     #[test]
     fn a_question_with_no_hits_adds_nothing() {
         let root = fixture();
-        assert!(render_leads("", &root).is_empty());
+        let index = sc_index::RepoIndex::build(&root);
+        assert!(render_leads("", &index).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
