@@ -686,14 +686,14 @@ impl ModelBackend for AlwaysTruncates {
     }
 }
 
-/// **Two capped replies in a row end a read-only run.**
+/// **Repeated capped replies end a read-only run.**
 ///
 /// Each costs a full prompt pass plus a maximum-length generation — most of a minute on a
 /// 35B model — and buys nothing, because a capped reply carries no tool call. Measured, a
 /// run burned 14 steps and 812 seconds this way with SIX repair events and ZERO stalls: the
 /// stall detector watches actions, and these turns produce none.
 #[test]
-fn two_capped_replies_in_a_row_stop_a_read_only_run() {
+fn repeated_capped_replies_stop_a_read_only_run() {
     let ws = temp("always-truncates");
     std::fs::write(ws.join("a.txt"), "x").unwrap();
 
@@ -715,8 +715,88 @@ fn two_capped_replies_in_a_row_stop_a_read_only_run() {
     .unwrap();
 
     assert!(
-        report.steps <= 2,
-        "must stop on the 2nd capped reply, not burn 20 steps — took {}",
+        report.steps <= 3,
+        "must stop once the cap keeps being hit, not burn 20 steps — took {}",
+        report.steps
+    );
+    let events = log.into_inner().unwrap();
+    // Either guard may fire first here -- the model produces both a capped reply AND an
+    // unparseable one every turn. What matters is that SOME stall is reported, so the
+    // transcript says why the run ended rather than showing a silent budget exhaustion.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Stalled { .. })),
+        "stopping must be reported, not silent"
+    );
+}
+
+/// A model that ALTERNATES: runs to the cap, recovers with one good call, repeats.
+///
+/// This is the real observed pattern, and it is what a consecutive-streak counter cannot
+/// catch — the streak resets on every recovery.
+struct AlternatesTruncating(std::cell::RefCell<usize>);
+
+impl ModelBackend for AlternatesTruncating {
+    fn name(&self) -> &str {
+        "alternates"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        let mut n = self.0.borrow_mut();
+        *n += 1;
+        Ok(if *n % 2 == 1 {
+            GenerateResponse::with_finish_reason(
+                "Let me analyse the widths. ".repeat(400),
+                Some("length".into()),
+            )
+        } else {
+            GenerateResponse::with_finish_reason(
+                r#"{"tool":"read_file","path":"a.txt"}"#,
+                Some("stop".into()),
+            )
+        })
+    }
+}
+
+/// **An ALTERNATING cap-hit must still end the run.**
+///
+/// The previous version counted a consecutive streak and passed its unit test only because
+/// that mock truncated every single turn. On a real run the pattern alternates — cap, one
+/// good call, cap again — so the streak reset on every recovery and the kill never fired.
+/// Observed directly: step 4 truncated at 45,964 chars, step 5 recovered, and the run
+/// carried on burning minutes.
+#[test]
+fn alternating_cap_hits_still_stop_a_read_only_run() {
+    let ws = temp("alternates");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let report = run_agent_observed(
+        &AlternatesTruncating(std::cell::RefCell::new(0)),
+        None,
+        &sc_tools::read_only_registry(),
+        &ParseRepair,
+        "why is the trail thin?",
+        &ws,
+        &AgentConfig {
+            max_steps: 20,
+            ..AgentConfig::default()
+        },
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        report.steps <= 6,
+        "3 cap hits arrive by step 5-6; must not run to 20 — took {}",
         report.steps
     );
     let events = log.into_inner().unwrap();
@@ -725,6 +805,6 @@ fn two_capped_replies_in_a_row_stop_a_read_only_run() {
             e,
             AgentEvent::Stalled { trigger } if trigger.contains("token cap")
         )),
-        "the stall must name the real cause, so a transcript says why the run ended"
+        "the stall must name the cap so a transcript says why the run ended"
     );
 }

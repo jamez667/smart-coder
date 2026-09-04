@@ -287,9 +287,11 @@ pub fn run_agent_observed(
     // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
     // a firm "you have enough; act now" nudge and reset. Cleared on any change.
     let mut reads_since_change = 0usize;
-    // Consecutive turns that ran to the token cap without producing a tool call. Each one
-    // costs a full prompt pass plus a maximum-length generation and buys nothing.
-    let mut truncated_streak = 0usize;
+    // How many replies this run have run to the token cap. Each costs a full prompt pass
+    // plus a maximum-length generation -- most of a minute on a 35B model -- and carries no
+    // tool call, so a run that keeps hitting it is burning time whether or not the waste is
+    // contiguous.
+    let mut capped_replies = 0usize;
     // How many times the read-thrash nudge has fired since the last edit.
     //
     // The nudge alone is not enough. It resets its own counter when it fires, so it
@@ -499,13 +501,19 @@ pub fn run_agent_observed(
         // construction HAS content; nothing empty is ever that.
         let ran_long = counter.count(&resp.content) > cfg.response_reserve_tokens / 2;
         let spent_it_all_thinking = resp.content.trim().is_empty();
-        // A reply that ran to the cap is a wasted turn: it carries no tool call, and the
-        // repair prompt that follows has already been tried. Reset on any reply that did NOT
-        // hit the cap, so this counts a STREAK rather than a total.
+        // Count truncated replies for the WHOLE run, not as a consecutive streak.
+        //
+        // A streak was wrong: the observed pattern alternates -- the model runs to the cap,
+        // gets the repair prompt, emits one good call, then runs to the cap again. A
+        // consecutive counter resets on every recovery and never reaches its limit, which is
+        // why the previous version of this never fired on a real run even though it fired in
+        // the unit test (whose mock truncates every turn).
+        //
+        // Each truncated reply costs a full prompt pass plus a maximum-length generation --
+        // most of a minute on a 35B model -- so a run that keeps hitting the cap is burning
+        // the user's time whether or not the waste is contiguous.
         if resp.was_truncated() {
-            truncated_streak += 1;
-        } else {
-            truncated_streak = 0;
+            capped_replies += 1;
         }
         if resp.was_truncated() && (ran_long || spent_it_all_thinking) {
             sink.record(&AgentEvent::HarnessFault {
@@ -538,12 +546,13 @@ pub fn run_agent_observed(
         // Only on a READ-ONLY run: a build run's equivalent (a long `edit_file` old_str that
         // will not encode) has a recovery that works -- the `edit_lines` steer -- and killing
         // it would throw away a run that was about to succeed.
-        if read_only_run && truncated_streak >= 2 {
+        if read_only_run && capped_replies >= 3 {
             sink.record(&AgentEvent::Stalled {
-                trigger: "two replies in a row ran to the token cap with no tool call".to_string(),
+                trigger: "the model kept generating to the token cap instead of calling a tool"
+                    .to_string(),
             });
             let reason = StopReason::Stalled(
-                "the model twice generated to the token cap without calling a tool".to_string(),
+                format!("{capped_replies} replies ran to the token cap; the model is not converging on a tool call"),
             );
             sink.record(&AgentEvent::Stopped {
                 reason: reason.clone(),
