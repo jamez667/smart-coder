@@ -287,9 +287,9 @@ pub fn run_agent_observed(
     // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
     // a firm "you have enough; act now" nudge and reset. Cleared on any change.
     let mut reads_since_change = 0usize;
-    // Fingerprints of every prompt sent this run, to catch an exact resend (see the check in
-    // the loop). A hash, not the text: the prompts are ~12k tokens each.
-    let mut seen_prompts = std::collections::HashSet::new();
+    // Consecutive turns that ran to the token cap without producing a tool call. Each one
+    // costs a full prompt pass plus a maximum-length generation and buys nothing.
+    let mut truncated_streak = 0usize;
     // How many times the read-thrash nudge has fired since the last edit.
     //
     // The nudge alone is not enough. It resets its own counter when it fires, so it
@@ -392,55 +392,22 @@ pub fn run_agent_observed(
             }
         }
 
-        // AN IDENTICAL PROMPT IS A LOOP. Kill the run.
+        // A REPEATED TRUNCATED REPLY IS A LOOP. Kill the run.
         //
-        // The prompt carries the whole conversation, so two turns that assemble byte-for-byte
-        // the same prompt cannot produce different work: the model has already seen this exact
-        // input and whatever it replied did not change the state. Sending it again buys
-        // nothing and costs a full prompt-processing pass -- on a 35B model at ~12k tokens,
-        // most of a minute each.
+        // The first version of this compared PROMPTS and was dead code: every failed turn
+        // appends the model's reply and the repair error to the history, so the next prompt
+        // is never byte-identical and the check could never fire. Measured on a real
+        // transcript -- five consecutive prompts, zero identical.
         //
-        // Measured: runs that ended `BudgetExhausted` after 812 seconds were resending the
-        // same prompt eight or more times while the model wrote prose the harness discarded.
-        // The existing detectors all missed it -- the stall detector watches ACTIONS, and
-        // these turns produced none.
+        // What actually repeats is the FAILURE: the model runs to the token cap producing
+        // prose with no tool call, gets a repair prompt, and does it again. Each of those
+        // turns costs a full ~12k-token prompt pass plus a maximum-length generation -- most
+        // of a minute on a 35B model -- and buys nothing. Two in a row is enough: a model
+        // that has just been told exactly what went wrong and hit the cap again is not going
+        // to converge on the third attempt.
         //
-        // This is the backstop for every such loop, whatever its cause, because it checks the
-        // one thing that must differ for progress to be possible.
-        let prompt_fingerprint = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            for m in &built.messages {
-                m.content.hash(&mut h);
-            }
-            h.finish()
-        };
-        if !seen_prompts.insert(prompt_fingerprint) {
-            sink.record(&AgentEvent::Stalled {
-                trigger: "the same prompt was assembled twice — the run cannot progress"
-                    .to_string(),
-            });
-            let reason =
-                StopReason::Stalled("an identical prompt was about to be sent twice".to_string());
-            sink.record(&AgentEvent::Stopped {
-                reason: reason.clone(),
-            });
-            let faults = runlog.lock().fault_counts();
-            return Ok(stopped(
-                reason,
-                step + 1,
-                &cfg.sandbox,
-                &cfg.verify_command,
-                workspace,
-                &journal,
-                metrics,
-                peak_prompt_tokens,
-                peak_reply_tokens,
-                faults,
-                budget,
-                interv.count,
-            ));
-        }
+        // Tracked here rather than in the stall detector because that one observes ACTIONS,
+        // and these turns produce none.
 
         // Verbose (spec 06): surface the exact assembled prompt before it's sent, so
         // a renderer/log can show what the model actually saw. Gated — the payload
@@ -532,6 +499,14 @@ pub fn run_agent_observed(
         // construction HAS content; nothing empty is ever that.
         let ran_long = counter.count(&resp.content) > cfg.response_reserve_tokens / 2;
         let spent_it_all_thinking = resp.content.trim().is_empty();
+        // A reply that ran to the cap is a wasted turn: it carries no tool call, and the
+        // repair prompt that follows has already been tried. Reset on any reply that did NOT
+        // hit the cap, so this counts a STREAK rather than a total.
+        if resp.was_truncated() {
+            truncated_streak += 1;
+        } else {
+            truncated_streak = 0;
+        }
         if resp.was_truncated() && (ran_long || spent_it_all_thinking) {
             sink.record(&AgentEvent::HarnessFault {
                 kind: FaultKind::ReplyTruncated,
@@ -549,6 +524,45 @@ pub fn run_agent_observed(
                 },
                 step: step + 1,
             });
+        }
+
+        // TWO truncated replies in a row and the run stops.
+        //
+        // The model is generating to the cap and emitting no tool call. It has already been
+        // told what went wrong once, and each further attempt costs a full ~12k-token prompt
+        // pass plus a maximum-length generation -- most of a minute on a 35B model -- for
+        // nothing. Measured: runs burned 14 steps and 812 seconds this way, with six repair
+        // events and ZERO stalls, because the stall detector watches ACTIONS and these turns
+        // produce none.
+        //
+        // Only on a READ-ONLY run: a build run's equivalent (a long `edit_file` old_str that
+        // will not encode) has a recovery that works -- the `edit_lines` steer -- and killing
+        // it would throw away a run that was about to succeed.
+        if read_only_run && truncated_streak >= 2 {
+            sink.record(&AgentEvent::Stalled {
+                trigger: "two replies in a row ran to the token cap with no tool call".to_string(),
+            });
+            let reason = StopReason::Stalled(
+                "the model twice generated to the token cap without calling a tool".to_string(),
+            );
+            sink.record(&AgentEvent::Stopped {
+                reason: reason.clone(),
+            });
+            let faults = runlog.lock().fault_counts();
+            return Ok(stopped(
+                reason,
+                step + 1,
+                &cfg.sandbox,
+                &cfg.verify_command,
+                workspace,
+                &journal,
+                metrics,
+                peak_prompt_tokens,
+                peak_reply_tokens,
+                faults,
+                budget,
+                interv.count,
+            ));
         }
 
         // Decode the tool call.

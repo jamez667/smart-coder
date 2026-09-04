@@ -621,16 +621,14 @@ fn a_read_only_run_stops_after_two_unparseable_replies() {
     );
 }
 
-/// **An identical prompt means the run cannot progress. Kill it.**
+/// **A model generating to the token cap twice in a row must not keep going.**
 ///
-/// The prompt carries the whole conversation, so two turns that assemble byte-for-byte the
-/// same prompt have already been tried: the model saw this exact input and whatever it
-/// replied changed nothing. Measured, runs ended `BudgetExhausted` after 812 seconds having
-/// resent the same ~12,000-token prompt eight or more times — most of a minute each on a 35B
-/// model — while every existing detector stayed silent, because they watch ACTIONS and these
-/// turns produced none.
+/// An earlier version of this compared PROMPTS and was dead code: every failed turn appends
+/// the reply and the repair error to the history, so the next prompt is never byte-identical.
+/// Measured on a real transcript — five consecutive prompts, zero identical. What repeats is
+/// the FAILURE, and each attempt costs a full prompt pass plus a maximum-length generation.
 #[test]
-fn an_identical_prompt_is_never_sent_twice() {
+fn a_read_only_run_stops_when_replies_keep_hitting_the_cap() {
     let ws = temp("same-prompt");
     std::fs::write(ws.join("a.txt"), "x").unwrap();
 
@@ -654,7 +652,7 @@ fn an_identical_prompt_is_never_sent_twice() {
 
     assert!(
         report.steps < 30,
-        "the run must stop early, not exhaust its budget resending a prompt"
+        "the run must stop early, not exhaust its budget on capped replies"
     );
     let events = log.into_inner().unwrap();
     assert!(
@@ -662,5 +660,71 @@ fn an_identical_prompt_is_never_sent_twice() {
             .iter()
             .any(|e| matches!(e, AgentEvent::Stalled { .. })),
         "stopping must be reported, not silent"
+    );
+}
+
+/// A model that always generates to the token cap without ever emitting a tool call —
+/// exactly what the star-trail investigation did at ~47,000 characters a turn.
+struct AlwaysTruncates;
+
+impl ModelBackend for AlwaysTruncates {
+    fn name(&self) -> &str {
+        "always-truncates"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        Ok(GenerateResponse::with_finish_reason(
+            "Let me analyse the widths. ".repeat(400),
+            Some("length".into()),
+        ))
+    }
+}
+
+/// **Two capped replies in a row end a read-only run.**
+///
+/// Each costs a full prompt pass plus a maximum-length generation — most of a minute on a
+/// 35B model — and buys nothing, because a capped reply carries no tool call. Measured, a
+/// run burned 14 steps and 812 seconds this way with SIX repair events and ZERO stalls: the
+/// stall detector watches actions, and these turns produce none.
+#[test]
+fn two_capped_replies_in_a_row_stop_a_read_only_run() {
+    let ws = temp("always-truncates");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let report = run_agent_observed(
+        &AlwaysTruncates,
+        None,
+        &sc_tools::read_only_registry(),
+        &ParseRepair,
+        "why is the trail thin?",
+        &ws,
+        &AgentConfig {
+            max_steps: 20,
+            ..AgentConfig::default()
+        },
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        report.steps <= 2,
+        "must stop on the 2nd capped reply, not burn 20 steps — took {}",
+        report.steps
+    );
+    let events = log.into_inner().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Stalled { trigger } if trigger.contains("token cap")
+        )),
+        "the stall must name the real cause, so a transcript says why the run ended"
     );
 }

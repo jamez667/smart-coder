@@ -255,6 +255,13 @@ mod truncation_is_reported {
     }
 }
 
+/// What the panel says before any slow work starts.
+///
+/// ONE LINE on purpose: a backslash-continued literal had its continuation reflowed by
+/// rustfmt into literal spaces, and the user saw "and come          back with the".
+const INVESTIGATION_PLAN: &str =
+    "Looking through the code to answer that — I'll read the relevant files and come back with the file, the line, and what to change.\n\n";
+
 /// Run a read-only agent loop over `workspace` to answer `question`, reporting into the
 /// chat channel as it goes.
 ///
@@ -274,6 +281,20 @@ fn investigate_into_chat(
     let ws = workspace.to_path_buf();
     // The loop is blocking; run it on its own thread so this one can drain events and keep
     // the panel updating while it works.
+    // SAY WHAT IS ABOUT TO HAPPEN, before anything slow starts.
+    //
+    // An investigation takes minutes on a local model, and until the first tool call lands
+    // the panel showed nothing at all -- the user asked a question and got silence. The plan
+    // comes from the harness rather than the model on purpose: it is instant, it cannot be
+    // truncated, and the model's own prompt forbids prose outside a tool call, so a model
+    // written plan would be discarded by the parser anyway.
+    let _ = tx.send(ChatEvent::Token(
+        // One line, deliberately. A backslash-continued string here had its continuation
+        // reflowed by rustfmt into LITERAL spaces, so the user saw "and come          back
+        // with the". A single line cannot be reflowed and cannot pick up source indentation.
+        INVESTIGATION_PLAN.to_string(),
+    ));
+
     let worker = thread::spawn(move || {
         crate::session::agent::investigate(cfg2, q, ws, ev_tx);
     });
@@ -331,4 +352,24 @@ fn investigate_into_chat(
         intent: Some(ChatIntent::Question),
         truncated: false,
     });
+}
+
+#[cfg(test)]
+mod plan_line {
+    /// **A continued string literal can pick up its own source indentation.**
+    ///
+    /// The plan line was written with a `\`-continuation; rustfmt reflowed it and the
+    /// continuation's leading whitespace became LITERAL spaces, so the panel rendered
+    /// "and come          back with the file". Nothing in the type system catches text
+    /// that is merely ugly, so this asserts it.
+    #[test]
+    fn the_plan_line_has_no_stray_whitespace() {
+        let line = super::INVESTIGATION_PLAN;
+        assert!(
+            !line.contains("  "),
+            "a run of spaces means a reflowed continuation leaked indentation: {line:?}"
+        );
+        assert!(line.ends_with("\n\n"), "the plan is a paragraph of its own");
+        assert!(!line.trim().is_empty());
+    }
 }
