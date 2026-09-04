@@ -476,6 +476,39 @@ impl App {
     /// caller refuses to run the command. The host shell is used ONLY when sandboxing is
     /// explicitly off. This guarantees you can never *think* you're contained while running on
     /// the host.
+    /// The exec mode for a command **the user clicked**, which is always the host.
+    ///
+    /// [`Self::term_exec_mode`] contains the AGENT: a command a model decided to run
+    /// unattended should not touch the host, and that guarantee is worth its
+    /// inconvenience. A command the user chose is a different act. They clicked a button
+    /// labelled "Run in terminal", in their own project, on their own machine.
+    ///
+    /// Observed: clicking Run on `cargo run -p void_claim --release` produced a terminal
+    /// and nothing else. `use_docker` defaults to true and the default image is
+    /// `smart-coder-pyenv` — a Python image with no cargo — so the command could not
+    /// have built. And even in a Rust image it could not have RUN: void_claim opens a
+    /// window, and a container on Windows has no display to open it on. The button
+    /// inherited the agent's containment and could never do what it said.
+    ///
+    /// So: the host, in the open project (or the current directory when none is open).
+    /// The agent's own sandboxing is untouched.
+    pub(crate) fn user_exec_mode(&self) -> sc_win::terminal::ExecMode {
+        sc_win::terminal::ExecMode::Host {
+            cwd: self
+                .picked_workspace
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        }
+    }
+
+    /// **No current caller.** The interactive terminal — typed commands and the Run
+    /// button — now uses [`Self::user_exec_mode`], because those are the user's own
+    /// commands in the user's own project. This is kept because the containment rule it
+    /// implements is the right one for anything the MODEL initiates in a terminal, and
+    /// deleting it would mean rediscovering "never silently fall back to the host" the
+    /// next time something needs it. The agent's verification path sandboxes separately,
+    /// via `cfg.sandbox()` in `session/`.
+    #[allow(dead_code)]
     pub(crate) fn term_exec_mode(&mut self) -> Result<sc_win::terminal::ExecMode, String> {
         use sc_win::terminal::ExecMode;
 

@@ -508,14 +508,14 @@ impl App {
             Message::CopyTurn(t) => return iced::clipboard::write(t),
             Message::RunProposedCommand => {
                 if let Some(cmd) = self.proposed_command.take() {
-                    // Show the Terminal tab and run there, through the same sandbox path as a
-                    // typed command (strict containment applies — refused if it can't sandbox).
+                    // Show the Terminal tab and run there, ON THE HOST: the user clicked
+                    // this, in their own project. See `user_exec_mode` -- running it in
+                    // the agent's sandbox is why clicking Run on a game launcher
+                    // produced a terminal and nothing else.
                     self.bottom_tab = BottomTab::Terminal;
                     if !self.terminal.running {
-                        match self.term_exec_mode() {
-                            Ok(mode) => self.term_rx = self.terminal.run(&cmd, &mode),
-                            Err(reason) => self.terminal.blocked(&cmd, &reason),
-                        }
+                        let mode = self.user_exec_mode();
+                        self.term_rx = self.terminal.run(&cmd, &mode);
                     }
                 }
             }
@@ -599,19 +599,12 @@ impl App {
             Message::TermInput(s) => self.terminal.input = s,
             Message::TermSubmit => {
                 if !self.terminal.running {
+                    // Typed by the user, in their own project: the host, like the Run
+                    // button. This terminal is theirs. The agent's own commands still go
+                    // through `term_exec_mode` and stay contained.
                     let cmdline = self.terminal.input.clone();
-                    match self.term_exec_mode() {
-                        Ok(mode) => {
-                            self.term_rx = self.terminal.run(&cmdline, &mode);
-                        }
-                        // Strict containment: sandbox was intended but unavailable. Echo the
-                        // command as blocked and DO NOT run it on the host.
-                        Err(reason) => {
-                            if !cmdline.trim().is_empty() {
-                                self.terminal.blocked(cmdline.trim(), &reason);
-                            }
-                        }
-                    }
+                    let mode = self.user_exec_mode();
+                    self.term_rx = self.terminal.run(&cmdline, &mode);
                 }
             }
             Message::TermKill => self.terminal.kill(),

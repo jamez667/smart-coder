@@ -352,6 +352,47 @@ mod tests {
         }
     }
 
+    /// **A user's own command runs on the host, and can reach the host's toolchain.**
+    ///
+    /// The interactive terminal used to inherit the agent's sandbox. With `use_docker`
+    /// defaulting to true and the default image being `smart-coder-pyenv` -- a Python
+    /// image with no cargo -- clicking Run on `cargo run -p void_claim --release`
+    /// produced a terminal and nothing else. Even a Rust image could not have helped:
+    /// the game opens a window, and a container on Windows has no display.
+    ///
+    /// This runs a real command through the real host path, because the bug was that
+    /// the command never reached a shell that could run it.
+    #[test]
+    fn a_host_command_actually_executes() {
+        let mut t = Terminal::default();
+        // `cargo` is present wherever this test suite runs.
+        let Some(rx) = t.run("cargo --version", &host_mode()) else {
+            panic!("the host path failed to spawn");
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut exited = None;
+        while std::time::Instant::now() < deadline && exited.is_none() {
+            while let Ok(m) = rx.try_recv() {
+                if let TermMsg::Exited(code) = m {
+                    exited = Some(code);
+                } else {
+                    t.apply(m);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            exited,
+            Some(Some(0)),
+            "the command should have run and succeeded"
+        );
+        assert!(
+            t.lines.iter().any(|l| l.text.contains("cargo")),
+            "the host toolchain must be reachable: {:?}",
+            t.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+
     fn parts(cmd: &Command) -> (String, Vec<String>) {
         (
             cmd.get_program().to_string_lossy().into_owned(),
