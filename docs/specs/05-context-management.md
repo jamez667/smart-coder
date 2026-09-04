@@ -45,8 +45,9 @@ repo lets the manager pull **only the relevant chunks**:
 - Index files into chunks (function/section granularity where the language
   allows) with lightweight symbol extraction.
 - Rank by relevance to the current step (keyword/symbol match first; embeddings
-  optional and pluggable — a small local embedder, or none on constrained
-  hardware).
+  are ruled out for the deterministic core — see [23](23-repo-intelligence.md)
+  *Why not embeddings*; the sanctioned escape hatch is orchestrator-side query
+  expansion).
 - Inject the top-K chunks that fit the retrieval zone, each labeled with
   `path:line` so the model can ask to read more precisely.
 
@@ -108,7 +109,7 @@ available.
 ## Tuning knobs (config)
 
 - `context_tokens` cap and response reserve.
-- Retrieval top-K and ranking method (lexical / embedding / hybrid).
+- Retrieval top-K (ranking is lexical; see [23](23-repo-intelligence.md)).
 - Observation truncation limits.
 - History compaction threshold (when to start summarizing).
 
