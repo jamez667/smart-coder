@@ -158,6 +158,69 @@ impl Conversation {
             .unwrap_or("")
     }
 
+    /// How much of a previous turn is worth carrying into an investigation.
+    ///
+    /// A previous ANSWER is the expensive one: investigate answers are prose naming
+    /// files, lines and a proposed fix, and they run to thousands of characters. The
+    /// referent of "that fix" is almost always in the opening sentences, and the task
+    /// anchor is already carrying an 800-entry file map against a measured 12288-token
+    /// reserve — so this takes the head and stops.
+    const CONTEXT_CLIP: usize = 600;
+
+    /// The question as the user asked it, made **self-contained**.
+    ///
+    /// The investigate path's task anchor is one string, not a message list, so it
+    /// cannot simply be handed the transcript the way [`Conversation::request`] is.
+    /// For the FIRST question that costs nothing: the last user message and the
+    /// question are the same thing.
+    ///
+    /// They stop being the same thing the moment someone writes "can you plan out that
+    /// fix". Observed live: the harness passed that sentence alone into a fresh agent
+    /// loop, which correctly reported it had "no record of what that fix is" and then
+    /// read an unrelated file while flailing for one. The routing was right — the
+    /// intent classifier sees the whole conversation and correctly called it a code
+    /// question — and then the destination threw away the context that made the routing
+    /// correct.
+    ///
+    /// So the anchor stays ONE POINTED QUESTION and gains a bounded preamble naming
+    /// what came immediately before it. Not the transcript: the previous exchange only,
+    /// head-clipped, and omitted entirely when there is nothing to refer back to.
+    pub fn investigation_question(&self) -> String {
+        let question = self.last_user_message();
+        if question.is_empty() {
+            return String::new();
+        }
+        // The exchange BEFORE this question: the previous user turn and the answer it
+        // drew. Anything older is unlikely to be what a pronoun points at, and every
+        // line costs anchor budget.
+        let mut prior: Vec<&Message> = self
+            .turns
+            .iter()
+            .rev()
+            .skip_while(|m| !matches!(m.role, sc_model::Role::User))
+            .skip(1) // the question itself
+            .take(2) // the answer before it, and the question that drew it
+            .collect();
+        prior.reverse();
+        if prior.is_empty() {
+            return question.to_string();
+        }
+
+        let mut out = String::from("Earlier in this conversation:\n\n");
+        for m in prior {
+            let who = match m.role {
+                sc_model::Role::User => "The user asked",
+                _ => "You answered",
+            };
+            let body = clip(m.content.trim(), Self::CONTEXT_CLIP);
+            out.push_str(&format!("{who}: {body}\n\n"));
+        }
+        out.push_str(&format!(
+            "Now answer this, resolving any reference it makes to the above:\n\n{question}"
+        ));
+        out
+    }
+
     /// classifies, we don't guess. Tiny (a handful of tokens), so it's milliseconds on the 30B.
     pub fn classify_request(&self) -> GenerateRequest {
         let last_user = self
@@ -373,4 +436,18 @@ fn clip_lines(body: &str, max_lines: usize) -> (String, bool) {
     }
     let cut = body.lines().nth(n).is_some();
     (out, cut)
+}
+
+/// Head-clip `text` to `max` characters on a word boundary, marking the cut.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    // Back off to the last space so the clip does not end mid-word.
+    let head = match head.rsplit_once(' ') {
+        Some((h, _)) if h.len() > max / 2 => h.to_string(),
+        _ => head,
+    };
+    format!("{head} […]")
 }

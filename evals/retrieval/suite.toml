@@ -55,6 +55,30 @@ path = "src/ui/hud.rs"
 symbol = "draw_hull_bar"
 strict = true
 
+# A FOLLOW-UP question, in the shape the chat path now hands to an investigation:
+# a bounded preamble naming the previous exchange, then the question itself.
+#
+# Seeded because the suite could not previously catch this class of bug at all --
+# every other query here is a standalone question, and the live failure was a
+# follow-up ("can you plan out that fix") arriving with its referent stripped. The
+# index must still find the right file when the question is wrapped this way, or
+# resolving the pronoun would fix the model's confusion and break its retrieval.
+[[queries]]
+id = "starfield-follow-up"
+question = """Earlier in this conversation:
+
+The user asked: why is the trail behind the stars thin before it gets thick?
+
+You answered: The trail is drawn as two segments in draw_trails. The fix is to swap the two widths.
+
+Now answer this, resolving any reference it makes to the above:
+
+Can you plan out that fix"""
+fixture = "fixtures/starfield"
+path = "src/fx/starfield.rs"
+symbol = "draw_trails"
+strict = true
+
 # ---------------------------------------------------------------------------
 # The ladder's engine fixtures, asked as symptoms.
 # ---------------------------------------------------------------------------

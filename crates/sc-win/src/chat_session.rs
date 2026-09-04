@@ -145,7 +145,11 @@ impl ChatSession {
             // file — the only move it had. With a workspace it now searches and reads.
             if intent == ChatIntent::Question {
                 if let Some(ws) = workspace {
-                    investigate_into_chat(&cfg, convo.last_user_message(), &ws, &tx);
+                    // `investigation_question`, not `last_user_message`: a follow-up
+                    // ("can you plan out that fix") is only answerable with what it
+                    // refers back to, and the anchor is one string rather than a
+                    // message list, so the referent has to travel inside it.
+                    investigate_into_chat(&cfg, &convo.investigation_question(), &ws, &tx);
                     return;
                 }
             }

@@ -595,3 +595,84 @@ fn reasoning_with_no_answer_shows_nothing() {
     // The measured failure: budget spent entirely on reasoning, content empty.
     assert_eq!(visible_so_far("<think>burned the whole budget"), "");
 }
+
+/// The investigation anchor must survive a FOLLOW-UP question (spec 23 / the
+/// investigate path).
+mod investigation_question {
+    use super::*;
+
+    /// **A first question is unchanged.** The whole reason the anchor took only the
+    /// last message was that a task anchor is one pointed question, not a transcript,
+    /// and that reasoning is right for the opening turn. Nothing here may spend anchor
+    /// budget on a preamble when there is nothing to refer back to.
+    fn convo() -> Conversation {
+        Conversation::open("# Readme", "- todo")
+    }
+
+    #[test]
+    fn a_first_question_is_passed_through_verbatim() {
+        let mut c = convo();
+        c.user_turn("why is the trail behind the stars thin before it gets thick?");
+        assert_eq!(
+            c.investigation_question(),
+            "why is the trail behind the stars thin before it gets thick?"
+        );
+    }
+
+    /// **The bug this exists for.** Observed live: "Can you plan out that fix" was
+    /// passed alone into a fresh agent loop, which correctly reported it had "no record
+    /// of what that fix is" and then read an unrelated file while flailing. The routing
+    /// was right; the destination threw away the context that made it right.
+    #[test]
+    fn a_follow_up_carries_what_its_pronoun_points_at() {
+        let mut c = convo();
+        c.user_turn("why is the trail behind the stars thin before it gets thick?");
+        c.record_reply(
+            "The trail is drawn as two segments in draw_trails in \
+             crates/void_engine/src/fx/starfield.rs. The fix is to swap width_head and \
+             width_tail on the two batch.line calls.",
+        );
+        c.user_turn("Can you plan out that fix");
+
+        let q = c.investigation_question();
+        // The question itself is still the thing being asked, and asked last.
+        assert!(q.trim_end().ends_with("Can you plan out that fix"), "{q}");
+        // And the referent travelled with it.
+        assert!(q.contains("Earlier in this conversation"), "{q}");
+        assert!(q.contains("draw_trails"), "{q}");
+        assert!(q.contains("starfield.rs"), "{q}");
+        // Both sides of the prior exchange are named, so "that fix" is resolvable.
+        assert!(q.contains("The user asked"), "{q}");
+        assert!(q.contains("You answered"), "{q}");
+    }
+
+    /// A previous ANSWER is the expensive turn — investigate replies run to thousands
+    /// of characters — so it is head-clipped rather than pasted whole. The anchor is
+    /// already carrying an 800-entry file map against a measured token reserve.
+    #[test]
+    fn a_long_previous_answer_is_clipped_not_pasted() {
+        let mut c = convo();
+        c.user_turn("why is the trail thin?");
+        c.record_reply(&format!(
+            "The fix is in starfield.rs. {}",
+            "padding ".repeat(400)
+        ));
+        c.user_turn("plan that out");
+
+        let q = c.investigation_question();
+        // The head survives -- that is where the referent lives.
+        assert!(q.contains("starfield.rs"), "{q}");
+        // The tail does not, and the cut is marked.
+        assert!(q.contains("[…]"), "{q}");
+        assert!(
+            q.len() < 2000,
+            "anchor preamble too long: {} chars",
+            q.len()
+        );
+    }
+
+    #[test]
+    fn an_empty_conversation_yields_an_empty_question() {
+        assert!(convo().investigation_question().is_empty());
+    }
+}
