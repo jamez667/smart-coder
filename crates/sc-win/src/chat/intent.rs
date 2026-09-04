@@ -198,9 +198,15 @@ pub(super) fn intent_instruction(intent: ChatIntent, slug: String) -> String {
              prose lead-in, then the exact shell command to run in a ```command block (a fenced \
              block whose info string is `command`), e.g.\n\
              ```command\ncargo run -p sc-win\n```\n\
-             Output ONE command line only. Infer it from the project (a Rust crate → `cargo run \
-             -p <crate>` / `cargo build` / `cargo test`; a script → the run command). It will run \
-             in the integrated terminal. Do NOT output a file block, and do NOT write source code."
+             Output ONE command line only. Infer it from the README and file list above (a Rust \
+             crate → `cargo run -p <crate>`; a script → the run command). It will run in the \
+             integrated terminal.\n\
+             YOU HAVE NO TOOLS HERE. Everything you can see is already in this prompt — there \
+             is nothing to list, read or explore, and no way to do so. Never emit a tool call, \
+             a <function> or <tool_call> block, or a request to inspect the project: answer \
+             from what is above. If the README does not say how to run it, give your best \
+             guess from the file list and say it is a guess.\n\
+             Do NOT output a file block, and do NOT write source code."
             .to_string(),
     }
 }

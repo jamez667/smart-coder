@@ -130,7 +130,70 @@ fn strip_think(reply: &str) -> String {
     }
     // Strip control tokens AFTER removing the think blocks, so `/think` doesn't clobber
     // `</think>`.
-    strip_control_tokens(&out)
+    strip_tool_syntax(&strip_control_tokens(&out))
+}
+
+/// Remove a hallucinated tool call from a reply that has no tools.
+///
+/// The planning chat is a single completion: no registry, no tools, nothing to call.
+/// But a model trained on agent harnesses reaches for one anyway when it feels it needs
+/// to look something up — and the result was rendered into the chat bubble verbatim:
+///
+/// ```text
+/// I need to see what's in this project to know how to launch it.
+/// <tool_call>
+/// <function=task>
+/// <parameter=subagent_type>Explore</parameter>
+/// </function>
+/// </tool_call>
+/// ```
+///
+/// The real fix is upstream — the `Command` intent now gets the README and the file
+/// list, so it has no reason to go looking (see `system_prompt`). This is the backstop,
+/// because "the model should not do that" is not a guarantee and this text is the one
+/// thing the user actually sees. Several syntaxes are covered because the leak is a
+/// model reciting whichever harness it was trained on.
+fn strip_tool_syntax(text: &str) -> String {
+    const BLOCKS: &[(&str, &str)] = &[
+        ("<tool_call>", "</tool_call>"),
+        ("<function=", "</function>"),
+        ("<function_call>", "</function_call>"),
+        ("<invoke>", "</invoke>"),
+        ("<invoke", "</invoke>"),
+    ];
+    let mut out = text.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        // The EARLIEST block of any syntax, so nesting cannot leave an inner one behind.
+        let found = BLOCKS
+            .iter()
+            .filter_map(|(open, close)| lower.find(open).map(|at| (at, *open, *close)))
+            .min_by_key(|(at, _, _)| *at);
+        let Some((open_at, _, close)) = found else {
+            break;
+        };
+        let after = match lower[open_at..].find(close) {
+            Some(rel) => out[open_at + rel + close.len()..].to_string(),
+            // Unterminated: the model ran out of budget mid-call. Everything from the
+            // opening tag on is machinery, so drop it.
+            None => String::new(),
+        };
+        out = format!("{}{}", out[..open_at].trim_end(), after);
+    }
+    // A stray closing tag with no opener is machinery too.
+    for (_, close) in BLOCKS {
+        out = out.replace(close, "");
+    }
+    // `<parameter=...>` lines survive when the model omits the wrapper entirely.
+    out = out
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !(t.starts_with("<parameter=") || t == "</parameter>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.trim().to_string()
 }
 
 /// Strip model control tokens that must never reach the chat bubble. The chat prompt appends a

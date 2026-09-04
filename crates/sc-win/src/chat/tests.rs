@@ -941,3 +941,81 @@ mod runnable_commands_in_prose {
         );
     }
 }
+
+/// A chat with no tools must never render a tool call.
+mod hallucinated_tool_calls {
+    use super::*;
+
+    /// **The reported case, verbatim.** The planning chat is a single completion with
+    /// no registry and nothing to call, but a model trained on agent harnesses reaches
+    /// for one anyway -- and it was rendered into the bubble as prose.
+    #[test]
+    fn a_hallucinated_tool_call_never_reaches_the_bubble() {
+        let reply = "I need to see what is in this project to know how to launch it.
+
+                     <function=filesystem_list_dir>
+                     <parameter=path>
+.
+</parameter>
+                     <parameter=include_hidden_dirs>
+False
+</parameter>
+                     </function>";
+        let out = visible_so_far(reply);
+        assert_eq!(
+            out,
+            "I need to see what is in this project to know how to launch it."
+        );
+        assert!(!out.contains("function"), "{out}");
+        assert!(!out.contains("parameter"), "{out}");
+    }
+
+    /// The other syntax the same model produced, wrapped in `<tool_call>`.
+    #[test]
+    fn a_tool_call_wrapper_is_stripped_with_its_contents() {
+        let reply = "I will look.
+
+<tool_call>
+<function=task>
+                     <parameter=subagent_type>
+Explore
+</parameter>
+                     </function>
+</tool_call>";
+        assert_eq!(visible_so_far(reply), "I will look.");
+    }
+
+    /// Cut off mid-call (the model ran out of budget): everything from the opening tag
+    /// is machinery, so none of it is shown.
+    #[test]
+    fn an_unterminated_tool_call_drops_everything_after_it() {
+        let reply = "Checking the project.
+<tool_call>
+<function=list_dir>
+<parameter=path>";
+        assert_eq!(visible_so_far(reply), "Checking the project.");
+    }
+
+    /// A real answer is untouched -- the stripper must not eat prose that merely talks
+    /// about functions or parameters.
+    #[test]
+    fn ordinary_prose_survives_unchanged() {
+        let reply = "The draw_trails function takes an intensity parameter, and the fix                      is in its width calculation.";
+        assert_eq!(visible_so_far(reply), reply);
+    }
+
+    /// A command block still survives, since that is the thing the Command intent is
+    /// asked for.
+    #[test]
+    fn a_command_block_is_not_confused_for_a_tool_call() {
+        let reply = "Launch it with:
+
+```command
+cargo run -p void_claim --release
+```";
+        assert_eq!(
+            extract_command(reply).as_deref(),
+            Some("cargo run -p void_claim --release")
+        );
+    }
+}

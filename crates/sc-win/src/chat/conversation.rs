@@ -336,7 +336,13 @@ impl Conversation {
     fn system_prompt(&self, intent: ChatIntent) -> String {
         use ChatIntent::*;
         let produces_file = matches!(intent, TodoEdit | ReadmeEdit | FeaturePlan | PlanFromTodo);
-        let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan | PlanFromTodo);
+        // The README is where run/build instructions actually live, so a Command needs it
+        // as much as a plan does. Without it the model was asked to "infer it from the
+        // project" while being shown none of the project -- and a model told to produce
+        // a command with nothing to read tries to go LOOK, by inventing a tool interface
+        // it half-remembers from training. Observed live: a `<tool_call>` block naming
+        // `subagent_type: Explore`, rendered into the chat as prose.
+        let wants_readme = matches!(intent, ReadmeEdit | FeaturePlan | PlanFromTodo | Command);
         // The TODO (backlog) is injected ONLY when the request is ABOUT the backlog: a TODO edit,
         // or a plan explicitly derived from it (PlanFromTodo). A plain feature spec (FeaturePlan)
         // does NOT get the whole backlog dragged into context just because it's open on screen.
@@ -346,7 +352,9 @@ impl Conversation {
         // The spec (FeaturePlan) is WHAT/WHY only — it names no files, so it needs no file tree.
         // (The architecture step is where real file paths get resolved.) Keeping it off also
         // shrinks the prompt for the small model.
-        let wants_file_tree = false;
+        // Same reasoning for the tree: `cargo run -p <crate>` needs the crate's real
+        // name, and the paths are cheap grounding (names only, no contents).
+        let wants_file_tree = matches!(intent, Command);
         // A feature plan is about the PROJECT (README/TODO give the shape); the full open-file
         // dump was the bulk of a bloated ~49k-char prompt that buried the fence instruction and
         // eats a 32k-context small model's window. Questions/code changes still get the file.
