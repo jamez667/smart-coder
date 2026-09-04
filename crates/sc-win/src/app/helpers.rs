@@ -128,8 +128,10 @@ pub(crate) struct WorkspaceSnapshot {
 /// nothing.
 pub(crate) fn compute_snapshot(root: std::path::PathBuf) -> WorkspaceSnapshot {
     let tree = sc_win::filetree::full_rows(&root);
-    let file_status = sc_win::gitdiff::statuses(&root);
-    let stage_states = sc_win::gitdiff::stage_states(&root);
+    // ONE `git status`, both views. These were two calls running the identical command
+    // and parsing it differently -- ~26ms of pure process-spawn waste every 500ms on a
+    // machine where spawning git at all costs that much.
+    let (file_status, stage_states) = sc_win::gitdiff::status_both(&root);
     let mut unstaged_deltas = sc_win::gitdiff::line_deltas(&root, false);
     let staged_deltas = sc_win::gitdiff::line_deltas(&root, true);
     // Untracked files don't show in `git diff --numstat`; count their lines directly as all-added

@@ -606,6 +606,27 @@ impl App {
         self.refresh_changed_lines();
     }
 
+    /// Turn an armed diff request into an off-thread `git diff`.
+    ///
+    /// `file_diff` costs ~50ms on this machine, ~26ms of which is bare process spawn
+    /// (`git --version`, which does nothing, costs the same). Blocking the UI thread on
+    /// that is the file-click freeze; this is where it stops.
+    pub(crate) fn diff_task(&mut self) -> Task<Message> {
+        let Some(rel) = self.take_diff_request() else {
+            return Task::none();
+        };
+        let root = self.workspace_root();
+        let for_msg = rel.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || sc_win::gitdiff::file_diff(&root, &rel))
+                    .await
+                    .unwrap_or_default()
+            },
+            move |diff| Message::FileDiffReady(for_msg.clone(), Box::new(diff)),
+        )
+    }
+
     /// The OFF-THREAD live-view refresh: while a run is in flight, reload the shown file's
     /// contents + its git-diff highlight on a background thread and apply via
     /// [`Message::LiveViewReloaded`] — never on the UI thread (the file read + `git diff` cost
@@ -700,18 +721,54 @@ impl App {
     /// Recompute the shown file's PR-style diff vs HEAD (git): added lines (green) + removed lines
     /// (red). Cheap `git diff -U0` on the one file (all-added for an untracked file); empty when
     /// nothing's selected. `changed_lines` is the green set, kept for the minimap + jump-to-change.
+    /// Paint the focused pane's diff from cache, and return a task to compute it if it
+    /// is not cached yet.
+    ///
+    /// This used to call `file_diff` inline, on the UI thread, on every file click.
+    /// Measured on this machine that is ~50ms per click — and ~26ms of it is bare
+    /// process spawn, since `git --version` (which does nothing) costs the same. There
+    /// is no making the git call fast enough to block on; the only fix is not to block.
+    ///
+    /// So a cached diff paints immediately and a miss paints the file with no diff
+    /// highlight, which arrives a frame or two later. The wrong-looking alternative —
+    /// keeping the previous file's highlight until the new one lands — would draw red
+    /// and green lines against the wrong source.
     pub(crate) fn refresh_changed_lines(&mut self) {
-        // Read the path and compute the diff BEFORE touching the pane mutably: `workspace_root`
-        // borrows `self`, so doing it inline would hold an immutable borrow across the write.
-        let root = self.workspace_root();
-        let rel = self.panes.focused().selected_file.clone();
-        let diff = match rel {
-            Some(rel) => sc_win::gitdiff::file_diff(&root, &rel),
-            None => sc_win::gitdiff::FileDiff::default(),
+        let Some(rel) = self.panes.focused().selected_file.clone() else {
+            let pane = self.panes.focused_mut();
+            pane.changed_lines = Default::default();
+            pane.file_diff = sc_win::gitdiff::FileDiff::default();
+            return;
         };
-        let pane = self.panes.focused_mut();
-        pane.changed_lines = diff.added.clone();
-        pane.file_diff = diff;
+        if let Some(diff) = self.diff_cache.get(&rel).cloned() {
+            let pane = self.panes.focused_mut();
+            pane.changed_lines = diff.added.clone();
+            pane.file_diff = diff;
+            return;
+        }
+        // A miss clears the stale highlight and ARMS the computation; the next tick
+        // turns that into an off-thread task (`take_diff_request`). Arming rather than
+        // returning a `Task` keeps the dozen callers of this function unchanged --
+        // several are deep in save/reload paths that have no `Task` to return.
+        {
+            let pane = self.panes.focused_mut();
+            pane.changed_lines = Default::default();
+            pane.file_diff = sc_win::gitdiff::FileDiff::default();
+        }
+        self.diff_wanted = Some(rel);
+    }
+
+    /// The pending diff request, if one is due and nothing is already in flight.
+    ///
+    /// One computation at a time: clicking through ten files must not spawn ten git
+    /// processes, and only the last file's diff is wanted anyway.
+    pub(crate) fn take_diff_request(&mut self) -> Option<String> {
+        if self.diff_pending.is_some() {
+            return None;
+        }
+        let rel = self.diff_wanted.take()?;
+        self.diff_pending = Some(rel.clone());
+        Some(rel)
     }
 
     /// Refresh the PR-view git state synchronously: the tree cache, per-file M/A/D statuses,
@@ -726,6 +783,10 @@ impl App {
     /// Apply a computed [`WorkspaceSnapshot`] to the live state. Pure assignment — the expensive
     /// walk/git work already happened in [`compute_snapshot`] (possibly on a background thread).
     pub(crate) fn apply_snapshot(&mut self, snap: WorkspaceSnapshot) {
+        // A new snapshot means the working tree moved, so every cached diff is suspect.
+        // Clearing wholesale rather than per-file: the snapshot does not say WHICH files
+        // changed, and a stale green line is a lie about the user's own code.
+        self.diff_cache.clear();
         self.tree_cache = snap.tree;
         self.file_status = snap.file_status;
         self.stage_states = snap.stage_states;

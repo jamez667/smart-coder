@@ -366,29 +366,44 @@ pub fn parse_stage_states(porcelain: &str) -> std::collections::BTreeMap<String,
 /// The staged/unstaged state of every changed file in `workspace` (path → [`StageState`]). Empty
 /// if the tree is clean or git isn't present.
 pub fn stage_states(workspace: &Path) -> std::collections::BTreeMap<String, StageState> {
+    parse_stage_states(&porcelain(workspace))
+}
+
+/// `git status --porcelain -uall`, once.
+///
+/// [`stage_states`] and [`statuses`] ran the SAME command and parsed the output two
+/// different ways, so every workspace snapshot spawned git twice for one answer. On this
+/// machine a git spawn costs ~26ms before git does any work (`git --version`, which does
+/// nothing, costs the same), so the second call was ~26ms of pure waste every 500ms.
+/// [`status_both`] is the way to get both without paying twice.
+fn porcelain(workspace: &Path) -> String {
     let out = crate::proc::git()
         .arg("-C")
         .arg(workspace)
         .args(["status", "--porcelain", "-uall"])
         .output();
     match out {
-        Ok(o) if o.status.success() => parse_stage_states(&String::from_utf8_lossy(&o.stdout)),
-        _ => std::collections::BTreeMap::new(),
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => String::new(),
     }
+}
+
+/// Both views of the working tree from ONE `git status`.
+#[allow(clippy::type_complexity)]
+pub fn status_both(
+    workspace: &Path,
+) -> (
+    std::collections::BTreeMap<String, FileStatus>,
+    std::collections::BTreeMap<String, StageState>,
+) {
+    let text = porcelain(workspace);
+    (parse_status(&text), parse_stage_states(&text))
 }
 
 /// The working-tree status of every changed file in `workspace` (path → status). Empty if the
 /// tree is clean or git isn't present.
 pub fn statuses(workspace: &Path) -> std::collections::BTreeMap<String, FileStatus> {
-    let out = crate::proc::git()
-        .arg("-C")
-        .arg(workspace)
-        .args(["status", "--porcelain", "-uall"])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => parse_status(&String::from_utf8_lossy(&o.stdout)),
-        _ => std::collections::BTreeMap::new(),
-    }
+    parse_status(&porcelain(workspace))
 }
 
 /// Added/removed line counts for one file, from `git diff --numstat`. Git counts a modified
@@ -561,6 +576,21 @@ diff --git a/x b/x
             "3-line change: {ch:?}"
         );
         assert!(!ch.contains(&40) && !ch.contains(&103), "bounded: {ch:?}");
+    }
+
+    /// **One spawn must answer exactly what two did.**
+    ///
+    /// `stage_states` and `statuses` ran the identical `git status --porcelain -uall`
+    /// and parsed it two ways, so every workspace snapshot paid for git twice. On this
+    /// machine a git spawn costs ~26ms before git does any work, so that was ~26ms of
+    /// pure waste every 500ms. Merging them is only safe if the answers are identical.
+    #[test]
+    fn status_both_agrees_with_the_two_calls_it_replaces() {
+        // The repo this test runs in is a git repo, which is all this needs.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (both_status, both_stage) = status_both(root);
+        assert_eq!(both_status, statuses(root));
+        assert_eq!(both_stage, stage_states(root));
     }
 
     #[test]

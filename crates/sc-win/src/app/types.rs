@@ -163,6 +163,21 @@ pub(crate) struct App {
     /// True while a background `compute_snapshot` is in flight, so the heartbeat doesn't stack up
     /// overlapping walks if one runs long.
     pub(crate) sync_pending: bool,
+    /// Cached `git diff` per workspace-relative path, so clicking a file paints from
+    /// memory instead of waiting on a subprocess.
+    ///
+    /// Measured on this machine: `file_diff` costs ~50ms, of which ~26ms is bare process
+    /// spawn — `git --version`, which does nothing, costs the same 26ms. That is the
+    /// floor for shelling out at all here (Defender scanning each spawn), so the fix
+    /// cannot be "make the git call faster"; it has to be "do not block on it".
+    /// Invalidated wholesale whenever the workspace snapshot changes.
+    pub(crate) diff_cache: std::collections::HashMap<String, sc_win::gitdiff::FileDiff>,
+    /// The file whose diff is currently being computed off-thread, so a burst of clicks
+    /// does not queue one subprocess per click.
+    pub(crate) diff_pending: Option<String>,
+    /// A file whose diff is wanted but not yet started — armed by
+    /// `refresh_changed_lines`, drained by the tick.
+    pub(crate) diff_wanted: Option<String>,
     /// The editor panes: their tabs, active file and viewport state, and which is focused.
     ///
     /// One pane's worth of this used to live directly on `App`. It moved because a second pane
@@ -515,6 +530,9 @@ impl Default for App {
             file_filter: String::new(),
             tree_cache,
             sync_pending: false,
+            diff_cache: std::collections::HashMap::new(),
+            diff_pending: None,
+            diff_wanted: None,
             panes: Panes::default(),
             project_kind: sc_win::project::ProjectKind::Unknown,
             compile_report: None,
@@ -740,6 +758,10 @@ pub(crate) enum Message {
     /// The off-thread live-view reload finished: the shown file's fresh contents + its
     /// changed-line set (green git-diff highlight). `None` if the background load failed.
     LiveViewReloaded(Option<(sc_win::CodeView, std::collections::BTreeSet<usize>)>),
+    /// A `git diff` finished off-thread: `(relative path, diff)`. Applied only if that
+    /// file is still the selected one — a fast click-through must not repaint the pane
+    /// with a diff for a file the user has already moved on from.
+    FileDiffReady(String, Box<sc_win::gitdiff::FileDiff>),
     /// Heartbeat while a project is open: kick off an OFF-THREAD re-walk of the tree + git state
     /// so externally-created/removed files appear without a manual refresh.
     SyncWorkspace,

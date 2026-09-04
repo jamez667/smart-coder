@@ -391,9 +391,27 @@ impl App {
                 // reload is due). This is the fix for the Execute-plan freeze.
                 // Also keep the chat pinned to the bottom as content streams in (unless the user
                 // scrolled up) — batched so both run this tick.
-                return Task::batch([self.live_reload_task(), self.chat_autoscroll_task()]);
+                return Task::batch([
+                    self.live_reload_task(),
+                    self.chat_autoscroll_task(),
+                    self.diff_task(),
+                ]);
             }
             Message::HealthTick => self.tick_health_probe(),
+            Message::FileDiffReady(rel, diff) => {
+                if self.diff_pending.as_deref() == Some(rel.as_str()) {
+                    self.diff_pending = None;
+                }
+                self.diff_cache.insert(rel.clone(), (*diff).clone());
+                // Apply ONLY if that file is still the one on screen. A fast
+                // click-through must not repaint the pane with a diff belonging to a
+                // file the user has already moved past.
+                if self.panes.focused().selected_file.as_deref() == Some(rel.as_str()) {
+                    let pane = self.panes.focused_mut();
+                    pane.changed_lines = diff.added.clone();
+                    pane.file_diff = *diff;
+                }
+            }
             Message::LiveViewReloaded(result) => {
                 if let Some((code, added)) = result {
                     self.panes.focused_mut().code = Some(code);

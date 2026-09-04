@@ -36,6 +36,10 @@ impl App {
             // Remote mirror active: keep ticking so inbound phone commands (chat/cancel)
             // are drained even when the desktop is otherwise idle.
             || self.remote.is_some()
+            // A file was clicked and its diff has not been computed yet. Without this
+            // the tick is OFF while idle -- which is exactly when a click happens -- and
+            // the armed request would sit there until something else woke the app.
+            || self.diff_wanted.is_some()
         {
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick)
         } else {
@@ -46,7 +50,21 @@ impl App {
         // refresh. The walk is cheap and off the render path, so 500ms feels live without cost.
         // Off when no project is open.
         let sync = if self.picked_workspace.is_some() {
-            iced::time::every(Duration::from_millis(500)).map(|_| Message::SyncWorkspace)
+            // 500ms while something is RUNNING -- an agent writing files is exactly when
+            // the tree needs to look live. 2s otherwise.
+            //
+            // The snapshot spawns several git processes, and on this machine a git spawn
+            // costs ~26ms before git does any work. At 500ms that is a steady drip of
+            // subprocess churn competing with the render loop for CPU (and for the
+            // virus scanner that makes each spawn expensive), which is felt as typing
+            // lag. Nothing changes the tree while the user is just typing, so paying
+            // that every half-second buys nothing.
+            let period = if self.session.is_some() || self.chat_session.is_some() {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(2000)
+            };
+            iced::time::every(period).map(|_| Message::SyncWorkspace)
         } else {
             Subscription::none()
         };
