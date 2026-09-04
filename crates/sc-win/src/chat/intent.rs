@@ -72,17 +72,41 @@ impl ChatIntent {
     /// guarantees one of the tokens, but we match leniently and default to `Question` (the safe,
     /// prose-only intent) if anything unexpected comes back.
     pub fn parse(reply: &str) -> ChatIntent {
-        let t = reply.trim().to_ascii_lowercase();
+        let t = crate::chat::visible_so_far(reply).to_ascii_lowercase();
+        let t = if t.trim().is_empty() {
+            reply.trim().to_ascii_lowercase()
+        } else {
+            t
+        };
+        // The LAST token mentioned, not the first.
+        //
+        // A reasoning model narrates before it concludes -- "this isn't a todo_edit,
+        // it's asking to run something, so: command" -- and taking the first match
+        // returns the option it was RULING OUT. The conclusion is at the end.
         ChatIntent::all()
             .into_iter()
-            .find(|i| t.contains(i.token()))
+            .filter_map(|i| t.rfind(i.token()).map(|at| (at, i)))
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, i)| i)
             .unwrap_or(ChatIntent::Question)
     }
 }
 
 /// The GBNF grammar for the intent classifier: the whole output must be exactly one intent
-/// token. This makes the classification unforgeable — the model can only emit a valid label, so
-/// [`ChatIntent::parse`] never has to guess.
+/// token.
+///
+/// **No longer used for the classification call**, and the reason is worth keeping. The
+/// theory was that constraining the output makes classification unforgeable. In practice
+/// it made it random: a grammar forces a token to be emitted *now*, and a reasoning model
+/// has not finished thinking after eight tokens, so it emitted a VALID word chosen
+/// arbitrarily. Measured against tiel-coder-35b, every launch phrasing came back
+/// `todo_edit` or `readme_edit`; "why is the trail thin?" came back `readme_edit`.
+/// Unconstrained, with a real token budget, the same model got 6/6 right.
+///
+/// The lesson generalises: a grammar guarantees the SHAPE of an answer, never its
+/// correctness, and forcing shape early on a model that reasons out loud costs
+/// correctness. Kept because the shape is still the right one to ask for elsewhere.
+#[allow(dead_code)]
 pub(super) fn intent_grammar() -> String {
     let alts = ChatIntent::all()
         .into_iter()
@@ -101,12 +125,17 @@ pub(super) fn classifier_prompt(open: &str) -> String {
          Reply with ONLY the intent word, nothing else.\n\
          • chat — GENERIC conversation NOT about this specific project: greetings and small \
          talk (\"hello\", \"how are you\", \"thanks\"), or general questions about coding / \
-         the tool itself (\"what can you do?\", \"what is Rust?\"). Use this when answering \
-         needs NO knowledge of this project's files.\n\
-         • question — a question ABOUT THIS project: its plan, code, or the open file (\"what \
-         does this file do?\", \"what's the architecture?\", \"anything you'd change?\"). \
-         Reviewing or critiquing a file is a question UNLESS they ask to write the result \
-         down. Use this only when answering needs this project's context.\n\
+         the tool itself (\"what can you do?\", \"what is Rust?\"). Use this ONLY when the \
+         message could be answered identically in any project. A question naming ANYTHING \
+         from this codebase -- a behaviour, a screen, a symptom, a bug -- is NOT chat.\n\
+         • question — a question ABOUT THIS project: its plan, code, the open file, or \
+         SOMETHING IT DOES (\"what does this file do?\", \"what's the architecture?\", \
+         \"why is the trail behind the stars thin?\", \"why does the screen flicker?\", \
+         \"anything you'd change?\"). Reviewing or critiquing a file is a question UNLESS \
+         they ask to write the result down. **A description of buggy or surprising \
+         behaviour is a question**, even when it names no file: the answer is found by \
+         reading this project's code. Prefer this over chat whenever the message could \
+         only make sense about THIS project.\n\
          • todo_edit — add/remove/reorder items in the whole-project TODO backlog.\n\
          • readme_edit — change the project overview/architecture in the README.\n\
          • feature_plan — design/spec a SPECIFIC feature the user names (\"make a plan to add \

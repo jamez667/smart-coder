@@ -8,7 +8,7 @@
 
 use sc_model::{GenerateRequest, Message};
 
-use super::intent::{classifier_prompt, intent_grammar, intent_instruction, ChatIntent};
+use super::intent::{classifier_prompt, intent_instruction, ChatIntent};
 use super::spec::slugify;
 
 /// Which planning posture the conversation opens in, decided from what's already on disk.
@@ -241,8 +241,21 @@ impl Conversation {
         ];
         let mut req = GenerateRequest::new(messages);
         req.temperature = 0.0;
-        req.max_tokens = 8;
-        req.constraint = Some(sc_model::OutputConstraint::Grammar(intent_grammar()));
+        // ROOM TO THINK, and NO GRAMMAR.
+        //
+        // This was `max_tokens = 8` plus a GBNF grammar allowing only the eight intent
+        // words -- unforgeable by construction, and wrong in practice. A reasoning model
+        // has not reached a conclusion after eight tokens, so the grammar forced out a
+        // valid word chosen essentially at random: measured against tiel-coder-35b,
+        // EVERY launch phrasing ("run the game", "launch the game", "start the game")
+        // classified as todo_edit or readme_edit, which is why asking the app to launch
+        // the game produced a paragraph about the README instead of a Run button.
+        //
+        // Unconstrained with a real budget, the same model got 6/6 right. So the call
+        // now lets it reason and `ChatIntent::parse` reads the conclusion -- the LAST
+        // intent word mentioned, since a model narrating its way to an answer names the
+        // options it is ruling out first.
+        req.max_tokens = 400;
         req
     }
 

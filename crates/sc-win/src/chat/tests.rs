@@ -43,19 +43,45 @@ fn request_carries_system_prompt_plus_turns_and_injects_plan_files() {
         .any(|m| m.role == sc_model::Role::User && m.content.contains("next backlog item")));
 }
 
+/// **The classifier is deliberately UNCONSTRAINED, with room to think.**
+///
+/// This test previously asserted the opposite: a GBNF grammar allowing only the eight
+/// intent words, with `max_tokens = 8`. The theory was that constraining the output
+/// makes classification unforgeable. In practice it made it random — a grammar forces
+/// a token out *now*, and a reasoning model has not concluded anything after eight
+/// tokens, so it emitted a VALID word chosen arbitrarily.
+///
+/// Measured against tiel-coder-35b: every launch phrasing ("run the game", "launch the
+/// game", "start the game") came back `todo_edit` or `readme_edit`, which is why asking
+/// the app to launch the game produced prose about the README instead of a Run button.
+/// Unconstrained with a real budget, the same model scored 17/17 across the taxonomy.
+///
+/// A grammar guarantees the SHAPE of an answer, never its correctness.
 #[test]
-fn classify_request_is_grammar_constrained_to_the_intent_tokens() {
-    // The classifier must FORCE one intent word via GBNF — no free-text to misparse.
+fn classify_request_lets_the_model_reason_before_answering() {
     let mut c = Conversation::open("# X", "- a");
     c.user_turn("can you make a plan to investigate these issues?");
     let req = c.classify_request();
-    match req.constraint {
-        Some(sc_model::OutputConstraint::Grammar(g)) => {
-            assert!(g.contains("feature_plan"), "grammar lists intents: {g}");
-            assert!(g.contains("question"), "grammar lists intents: {g}");
-        }
-        other => panic!("expected a grammar constraint, got {other:?}"),
-    }
+    assert!(
+        req.constraint.is_none(),
+        "the classifier must not constrain the reply: {:?}",
+        req.constraint
+    );
+    assert!(
+        req.max_tokens >= 100,
+        "a reasoning model needs room to reach a conclusion, got {}",
+        req.max_tokens
+    );
+    // Deterministic: the same message must classify the same way every time.
+    assert_eq!(req.temperature, 0.0);
+    // The taxonomy still reaches the model -- it is in the system prompt rather than
+    // in a grammar.
+    let sys = &req.messages[0].content;
+    assert!(
+        sys.contains("feature_plan"),
+        "taxonomy in the prompt: {sys}"
+    );
+    assert!(sys.contains("command"), "taxonomy in the prompt: {sys}");
 }
 
 #[test]
@@ -773,5 +799,49 @@ mod thinking_never_leaks {
             visible_so_far(arg),
             "The fix is in starfield.rs: swap the widths."
         );
+    }
+}
+
+/// Reading the classifier's answer out of a reasoning model's narration.
+mod classifier_parsing {
+    use super::*;
+
+    /// **The conclusion is at the end.** A reasoning model names the options it is
+    /// RULING OUT before it commits, so taking the first token mentioned returned the
+    /// rejected one.
+    #[test]
+    fn the_last_intent_word_wins_not_the_first() {
+        let reply = "This is not a todo_edit, and it is not a feature_plan -- the user                      wants something executed. command";
+        assert_eq!(ChatIntent::parse(reply), ChatIntent::Command);
+    }
+
+    /// A bare word (what the model emits when it does not narrate) still parses.
+    #[test]
+    fn a_bare_intent_word_parses() {
+        assert_eq!(ChatIntent::parse("command"), ChatIntent::Command);
+        assert_eq!(
+            ChatIntent::parse(
+                "  question
+"
+            ),
+            ChatIntent::Question
+        );
+        assert_eq!(ChatIntent::parse("CHAT"), ChatIntent::Chat);
+    }
+
+    /// Reasoning tags are stripped before parsing, so a `<think>` block naming other
+    /// intents cannot outvote the conclusion after it.
+    #[test]
+    fn thinking_does_not_outvote_the_answer() {
+        let reply = "<think>maybe todo_edit? no, readme_edit? no</think>command";
+        assert_eq!(ChatIntent::parse(reply), ChatIntent::Command);
+    }
+
+    /// Nothing recognizable falls back to Question -- the safe default, since it is the
+    /// intent that reads the code before answering.
+    #[test]
+    fn an_unrecognizable_reply_falls_back_to_question() {
+        assert_eq!(ChatIntent::parse(""), ChatIntent::Question);
+        assert_eq!(ChatIntent::parse("I'm not sure"), ChatIntent::Question);
     }
 }
