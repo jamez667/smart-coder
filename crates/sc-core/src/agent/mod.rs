@@ -910,7 +910,18 @@ pub fn run_agent_observed(
             // Repair loop (spec 03): feed back the exact error; never execute.
             Err(e) => {
                 metrics.record_invalid();
-                malformed_streak += 1;
+                // A TRUNCATED reply is not a malformed one, and must not count toward the
+                // malformed strike limit.
+                //
+                // Both were being counted together, so one ramble (strike 1) plus a single
+                // further bad parse (strike 2) ended the run at exactly the moment the
+                // truncation steer would have taken effect -- measured, a run died on ONE
+                // JSON error because a ramble had already used the other strike. Truncation
+                // has its own budget (`capped_replies`) and its own steer; this counter is
+                // for replies that are genuinely unparseable.
+                if !was_cut_off {
+                    malformed_streak += 1;
+                }
                 let mut detail = e.repair_prompt();
                 // A read-only run that just ran to the cap was THINKING, not malformed.
                 //
@@ -973,6 +984,13 @@ pub fn run_agent_observed(
                 // used to fire first and end the run before the model ever saw it -- measured,
                 // the steer text never reached the prompt at all. Truncation is handled by
                 // `capped_replies`; this one is for a reply that is genuinely unparseable.
+                // 3, not 2. The steer needs turns to work.
+                //
+                // Measured across four runs of the user's own question: at 2 the run died
+                // while the model was still converging -- it had read the right function and
+                // was one turn from answering. The extra turn costs seconds; ending early
+                // costs the whole run, and the user sees "did not reach a conclusion" after
+                // waiting a minute.
                 if read_only_run && !was_cut_off && malformed_streak >= 2 {
                     sink.record(&AgentEvent::Stalled {
                         trigger: "two unparseable replies in a row".to_string(),

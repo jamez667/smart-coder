@@ -108,6 +108,18 @@ fn the_gui_path_answers_the_star_trail_question() {
     // The bar the UI has been failing: a real answer, not the "did not reach a conclusion"
     // fallback.
     assert!(failed.is_none(), "the run failed: {failed:?}");
+    // An EMPTY reply passed every assertion below when they only checked for absent phrases,
+    // and a batch script reading "json_err=0" called it a success. Assert presence first.
+    assert!(
+        !reply.trim().is_empty(),
+        "the run produced no reply at all (streamed: {} chars)",
+        streamed.len()
+    );
+    assert!(
+        reply.len() > 200,
+        "a real answer names a file, a cause and a fix; got {} chars: {reply}",
+        reply.len()
+    );
     assert!(
         !reply.contains("did not reach a conclusion"),
         "the GUI path produced no answer -- this is the failure the user reports every time"
