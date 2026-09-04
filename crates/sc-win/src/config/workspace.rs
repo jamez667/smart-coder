@@ -11,62 +11,14 @@ pub fn default_workspace() -> std::path::PathBuf {
 /// List the **source** files in `workspace` (workspace-relative, sorted) — i.e. the
 /// real output, excluding tests, the plan dir, and tooling caches. This is what a run
 /// actually *built*, so the UI can show "5 files built" / "0 files built" plainly.
+///
+/// This was a hand-synced copy of `sc_tools::source_files`, kept "in sync deliberately"
+/// — which is to say, kept in sync by remembering to. It now calls it (spec 23: one
+/// walk, one skip list). The one real difference the copy had is preserved by that
+/// function: it also drops the workflow's own artifacts, which are not project source
+/// either.
 pub fn source_files(workspace: &std::path::Path) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut stack = vec![workspace.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            // Skip hidden/dot dirs (.smart-coder, .pytest_cache, .git), caches, deps.
-            // Mirrors `sc_tools::source_files` -- including skipping BUILD OUTPUT, which
-            // both were missing. Measured on a real Rust project: 40,585 of 41,180 files
-            // were under `target/`, burying 595 real ones.
-            if name.starts_with('.')
-                || name == "__pycache__"
-                || name == "node_modules"
-                || name == "target"
-                || name == "dist"
-                || name == "build"
-            {
-                continue;
-            }
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(path),
-                Ok(ft) if ft.is_file() => {
-                    let rel = path
-                        .strip_prefix(workspace)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    if !is_test_file(&rel) {
-                        out.push(rel);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Whether a workspace-relative path looks like a test file (so it's excluded from the
-/// "source files built" count).
-fn is_test_file(rel: &str) -> bool {
-    let lower = rel.to_ascii_lowercase();
-    lower.contains("/tests/")
-        || lower.starts_with("tests/")
-        || lower.contains("test_")
-        || lower.contains(".test.")
-        || lower.contains("_test.")
-        || lower.contains(".spec.")
+    sc_tools::source_files(workspace)
 }
 
 /// Pick the verify command that matches the tests that were actually written, so a

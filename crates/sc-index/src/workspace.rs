@@ -9,41 +9,28 @@ use std::path::Path;
 
 use crate::repomap::{build_repo_map, render_repo_map, Boosts, SourceFile};
 use crate::symbols::{extract_symbols, Language};
-
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "__pycache__"];
+use crate::walk::{walk, WalkOptions};
 
 /// Collect every supported source file under `root` as `(relative path, source)`.
+///
+/// The directory policy is [`crate::walk`]'s, shared with every other walk in the
+/// project (spec 23); this adds only the language filter — a file the symbol
+/// extractor cannot parse is not index material.
 pub fn collect_sources(root: &Path) -> Vec<SourceFile> {
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let rd = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            Err(_) => continue,
-        };
-        for entry in rd.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
-                if !SKIP_DIRS.contains(&name.as_str()) {
-                    stack.push(path);
-                }
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if Language::from_path(&rel).is_none() {
-                    continue;
-                }
-                if let Ok(source) = std::fs::read_to_string(&path) {
-                    out.push(SourceFile { path: rel, source });
-                }
-            }
+    for f in walk(root, &WalkOptions::with_extensions(&["rs", "py", "cs"])) {
+        if Language::from_path(&f.rel).is_none() {
+            continue;
+        }
+        if let Ok(source) = std::fs::read_to_string(&f.abs) {
+            out.push(SourceFile {
+                path: f.rel,
+                source,
+            });
         }
     }
-    // Stable order so the index (and any ties) are deterministic.
+    // `walk` already sorts by path; keep the invariant explicit for callers that
+    // depend on ties being deterministic.
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
 }

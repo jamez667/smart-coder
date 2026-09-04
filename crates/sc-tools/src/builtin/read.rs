@@ -174,6 +174,13 @@ impl Matcher {
 
 /// A small search over the workspace's text files. Skips the usual noise dirs and
 /// anything that isn't valid UTF-8. Caps hits so the result fits a small context window.
+///
+/// The directory policy is [`sc_index::walk`]'s (spec 23). It already excluded the
+/// agent's own run logs under `.smart-coder/sessions/*` — which echo every prior tool
+/// result, so searching them makes the agent match its own transcript (observed live:
+/// a search for a function name hit the session log instead of the source, wasting
+/// turns) — and the shared list keeps that, plus the dotdirs and build output the old
+/// walk here was missing.
 pub fn search_code(workspace: &Path, query: &str) -> String {
     const MAX_HITS: usize = 50;
     if query.is_empty() {
@@ -186,44 +193,19 @@ pub fn search_code(workspace: &Path, query: &str) -> String {
     // actually work instead of returning "no matches" and looping.
     let matcher = Matcher::new(query);
     let mut hits = Vec::new();
-    let mut walk = vec![workspace.to_path_buf()];
-    while let Some(dir) = walk.pop() {
-        let rd = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            Err(_) => continue,
+    for file in sc_index::walk(workspace, &sc_index::WalkOptions::default()) {
+        let Ok(content) = std::fs::read_to_string(&file.abs) else {
+            continue;
         };
-        for entry in rd.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
-                // Skip VCS/build noise AND the agent's own run logs — `.smart-coder/sessions/*`
-                // echoes every prior tool result, so searching it makes the agent match its own
-                // transcript (observed live: a search for a function name hit the session log
-                // instead of the source, wasting turns).
-                if matches!(
-                    name.as_str(),
-                    ".git" | "target" | "node_modules" | ".smart-coder" | "__pycache__"
-                ) {
-                    continue;
-                }
-                walk.push(path);
-            } else if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path
-                    .strip_prefix(workspace)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                for (i, line) in content.lines().enumerate() {
-                    if matcher.is_match(line) {
-                        hits.push(format!("{rel}:{}: {}", i + 1, line.trim()));
-                        if hits.len() >= MAX_HITS {
-                            hits.sort();
-                            return format!(
-                                "search_code {query:?}: {MAX_HITS}+ hits (truncated):\n{}",
-                                hits.join("\n")
-                            );
-                        }
-                    }
+        for (i, line) in content.lines().enumerate() {
+            if matcher.is_match(line) {
+                hits.push(format!("{}:{}: {}", file.rel, i + 1, line.trim()));
+                if hits.len() >= MAX_HITS {
+                    hits.sort();
+                    return format!(
+                        "search_code {query:?}: {MAX_HITS}+ hits (truncated):\n{}",
+                        hits.join("\n")
+                    );
                 }
             }
         }

@@ -13,11 +13,15 @@
 mod pagerank;
 mod repomap;
 mod symbols;
+mod walk;
 mod workspace;
 
 pub use pagerank::{pagerank, Edge};
 pub use repomap::{build_repo_map, render_repo_map, Boosts, RankedSymbol, SourceFile};
 pub use symbols::{
     count_functions_named, extract_symbols, function_span, FileSymbols, Language, SymbolDef,
+};
+pub use walk::{
+    is_skipped_dir, relative, walk, WalkOptions, WalkedFile, PROMPT_MAX_FILE_BYTES, SKIP_DIRS,
 };
 pub use workspace::{collect_sources, find_symbol, find_symbol_hits, repo_map, SymbolHit};

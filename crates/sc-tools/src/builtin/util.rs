@@ -8,58 +8,23 @@ use sc_proto::{DcError, Result};
 /// `/`-separated, sorted), excluding test files and tooling caches/deps. This is
 /// filesystem ground truth — what the run has *really* built so far, independent of the
 /// model's own action history — so the agent loop can show the model a progress ledger and
-/// stop it re-creating files that already exist (spec 03/05). Mirrors
-/// `sc_win::config::source_files`; kept in sync deliberately.
+/// stop it re-creating files that already exist (spec 03/05).
+///
+/// The directory policy is [`sc_index::walk`]'s, shared with every other walk in the
+/// project (spec 23) — including skipping BUILD OUTPUT, which several of the old
+/// walks were missing. Measured on a real Rust project: 40,585 of 41,180 "source"
+/// files were build artifacts, 98.5% noise burying 595 real files. What stays *here*
+/// is the policy that is genuinely this ledger's own: tests are frozen, not output,
+/// and the workflow's own artifacts are not project source.
+///
+/// `sc_win::config::workspace::source_files` used to be a hand-synced copy of this
+/// and now calls it.
 pub fn source_files(workspace: &Path) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut stack = vec![workspace.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            // Skip hidden/dot dirs (.smart-coder, .pytest_cache, .git), caches, deps and
-            // BUILD OUTPUT.
-            //
-            // `target/` was missing here, and it dominates: measured on a real Rust
-            // project, 40,585 of 41,180 "source" files were build artifacts -- 98.5% noise
-            // burying 595 real files. Anything that shows this list to a model (a survey, a
-            // file map) was mostly showing it `target/debug/build/...` stamps, and anything
-            // that capped the list truncated before reaching the actual source.
-            //
-            // `dist`/`build` cover the same idea for the JS/Python trees this also walks.
-            if name.starts_with('.')
-                || name == "__pycache__"
-                || name == "node_modules"
-                || name == "target"
-                || name == "dist"
-                || name == "build"
-            {
-                continue;
-            }
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(path),
-                Ok(ft) if ft.is_file() => {
-                    let rel = path
-                        .strip_prefix(workspace)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    if !is_test_file(&rel) && !is_workflow_artifact(&rel) {
-                        out.push(rel);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    out.sort();
-    out
+    sc_index::walk(workspace, &sc_index::WalkOptions::default())
+        .into_iter()
+        .map(|f| f.rel)
+        .filter(|rel| !is_test_file(rel) && !is_workflow_artifact(rel))
+        .collect()
 }
 
 /// Whether a path is the workflow's **own output** rather than project source.
