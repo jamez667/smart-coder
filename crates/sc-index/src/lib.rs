@@ -10,18 +10,26 @@
 //! * **lexical search** + symbol lookup, surfaced to the agent as the
 //!   `find_symbol` tool.
 
+mod lexicon;
 mod pagerank;
 mod repomap;
+mod store;
 mod symbols;
 mod walk;
 mod workspace;
 
+pub use lexicon::{tokenize, Field, STOPWORDS};
 pub use pagerank::{pagerank, Edge};
 pub use repomap::{build_repo_map, render_repo_map, Boosts, RankedSymbol, SourceFile};
+pub use store::{
+    FileRecord, IndexedSymbol, Posting, RepoIndex, INDEX_FORMAT_VERSION, INDEX_REL_PATH,
+};
 pub use symbols::{
-    count_functions_named, extract_symbols, function_span, FileSymbols, Language, SymbolDef,
+    count_functions_named, definition_spans, extract_all, extract_symbols, function_span,
+    FileSymbols, Language, SymbolDef,
 };
 pub use walk::{
-    is_skipped_dir, relative, walk, WalkOptions, WalkedFile, PROMPT_MAX_FILE_BYTES, SKIP_DIRS,
+    is_skipped_dir, is_skipped_file, relative, walk, WalkOptions, WalkedFile,
+    PROMPT_MAX_FILE_BYTES, SKIP_DIRS, SKIP_FILES,
 };
 pub use workspace::{collect_sources, find_symbol, find_symbol_hits, repo_map, SymbolHit};

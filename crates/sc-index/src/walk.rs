@@ -52,6 +52,29 @@ pub const SKIP_DIRS: &[&str] = &[
 /// building a prompt ask for it by name.
 pub const PROMPT_MAX_FILE_BYTES: u64 = 64 * 1024;
 
+/// Files never indexed or searched, by exact name: machine-generated dependency
+/// manifests.
+///
+/// A lockfile is thousands of lines nobody wrote and nobody investigates, and it is
+/// dense with terms that collide with real code (every crate name in the ecosystem).
+/// `Cargo.lock` alone was the second-largest contributor of index terms in this repo —
+/// more than the agent loop — and a `search_code` hit inside one has never once been
+/// the answer to a question.
+pub const SKIP_FILES: &[&str] = &[
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "poetry.lock",
+    "Gemfile.lock",
+    "composer.lock",
+];
+
+/// Whether a file `name` is one the walk refuses to yield.
+pub fn is_skipped_file(name: &str) -> bool {
+    SKIP_FILES.contains(&name)
+}
+
 /// Whether a directory `name` is one the walk refuses to descend into.
 ///
 /// Dot-prefixed names are skipped as a *rule* rather than a list, which is how the
@@ -146,6 +169,9 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> Vec<WalkedFile> {
                     }
                 }
                 Ok(ft) if ft.is_file() => {
+                    if is_skipped_file(&name) {
+                        continue;
+                    }
                     let rel = relative(root, &path);
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                     if opts.keeps(&rel, size) {
@@ -223,6 +249,26 @@ mod tests {
         for d in ["src", "crates", "tests", "assets", "docs"] {
             assert!(!is_skipped_dir(d), "{d} must NOT be skipped");
         }
+    }
+
+    #[test]
+    fn lockfiles_are_not_source() {
+        let root = temp_repo("lockfiles");
+        write(
+            &root,
+            "Cargo.lock",
+            "[[package]]
+name = \"serde\"
+",
+        );
+        write(&root, "package-lock.json", "{}");
+        write(&root, "Cargo.toml", "[package]");
+        write(&root, "src/a.rs", "fn a() {}");
+
+        let files = walk(&root, &WalkOptions::default());
+        let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, vec!["Cargo.toml", "src/a.rs"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
