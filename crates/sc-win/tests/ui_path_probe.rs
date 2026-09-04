@@ -65,6 +65,15 @@ fn the_gui_path_answers_the_star_trail_question() {
                 // The offer to make the fix. Recorded rather than ignored: this probe
                 // drives the GUI's exact path, so it is where "did the offer actually
                 // reach the UI?" gets answered without a human clicking.
+                // A trail question is not a run request, so this arm should stay
+                // quiet here -- recorded rather than ignored so the probe would show it
+                // if the heuristic ever started firing on an investigation answer.
+                sc_win::chat_session::ChatEvent::SuggestedCommand(cmd) => {
+                    println!(
+                        "
+[SUGGESTED COMMAND] {cmd}"
+                    );
+                }
                 sc_win::chat_session::ChatEvent::ProposedFix(instruction) => {
                     println!(
                         "

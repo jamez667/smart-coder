@@ -25,7 +25,7 @@ mod tests;
 
 pub use conversation::{Conversation, Mode};
 pub use intent::ChatIntent;
-pub use reply::{extract_command, parse_reply, proposed_fix, visible_so_far};
+pub use reply::{extract_command, parse_reply, proposed_fix, suggested_command, visible_so_far};
 pub use spec::{is_spec_path, prepend_request, slug_for, spec_path, wrap_plan_prose};
 
 /// A plan-file the assistant proposed in a reply (a ```file:NAME block). The app shows it in

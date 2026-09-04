@@ -251,7 +251,14 @@ impl App {
                     }
                     // A ```command block (the Command intent) → offer it as a one-click Run in
                     // the terminal, rather than auto-executing.
-                    self.proposed_command = sc_win::chat::extract_command(&raw);
+                    //
+                    // Falling back to a command the answer merely MENTIONED. Asked to
+                    // launch the game, the model answered a question -- it explained
+                    // where the instructions live and quoted the cargo line as prose,
+                    // which was correct and completely unclickable. A command in an
+                    // answer is as runnable as a command in a proposal.
+                    self.proposed_command = sc_win::chat::extract_command(&raw)
+                        .or_else(|| sc_win::chat::suggested_command(&raw));
                     if let Some(convo) = self.conversation.as_mut() {
                         convo.record_reply(&raw);
                         // Fold any proposed plan-file content into the conversation's plan
@@ -324,6 +331,11 @@ impl App {
                             Some(sc_win::codeview::from_text(&name, &content));
                     }
                     self.chat_session = None;
+                }
+                sc_win::chat_session::ChatEvent::SuggestedCommand(cmd) => {
+                    // Same card the Command intent uses -- one way to offer a command,
+                    // whichever path found it.
+                    self.proposed_command = Some(cmd);
                 }
                 sc_win::chat_session::ChatEvent::ProposedFix(instruction) => {
                     // Held, not acted on. The card below the thread offers it; nothing

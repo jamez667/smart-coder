@@ -49,6 +49,12 @@ pub enum ChatEvent {
     /// clicks. Emitted alongside [`ChatEvent::Reply`], never instead of it — the answer
     /// stands on its own whether or not the offer is taken.
     ProposedFix(String),
+    /// The investigation's answer MENTIONED a runnable command.
+    ///
+    /// Offered the same way a `Command` intent's block is: a Run card, never an
+    /// execution. Separate from [`ChatEvent::Reply`] because an investigation's answer
+    /// is prose that happens to contain a command, not a proposal shaped like one.
+    SuggestedCommand(String),
     /// The turn failed (backend unreachable, etc.) — a human-readable reason.
     Failed(String),
 }
@@ -454,6 +460,13 @@ fn investigate_into_chat(
     if answered {
         if let Some(fix) = crate::chat::proposed_fix(question, &text) {
             let _ = tx.send(ChatEvent::ProposedFix(fix));
+        }
+        // An investigation that answers "how do I run this?" ends with a command in
+        // its prose. It is as runnable there as in a proposal, and this is the path
+        // the question actually took -- "can you launch the game" reads the README,
+        // finds the invocation, and quotes it.
+        if let Some(cmd) = crate::chat::suggested_command(&text) {
+            let _ = tx.send(ChatEvent::SuggestedCommand(cmd));
         }
     }
 

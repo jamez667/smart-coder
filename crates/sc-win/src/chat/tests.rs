@@ -2,7 +2,7 @@
 
 use super::conversation::{Conversation, Mode, KEEP_TURNS};
 use super::intent::{intent_grammar, ChatIntent};
-use super::reply::{extract_command, parse_reply, proposed_fix, visible_so_far};
+use super::reply::{extract_command, parse_reply, proposed_fix, suggested_command, visible_so_far};
 use super::spec::{prepend_request, wrap_plan_prose};
 
 #[test]
@@ -843,5 +843,101 @@ mod classifier_parsing {
     fn an_unrecognizable_reply_falls_back_to_question() {
         assert_eq!(ChatIntent::parse(""), ChatIntent::Question);
         assert_eq!(ChatIntent::parse("I'm not sure"), ChatIntent::Question);
+    }
+}
+
+/// A command the answer ME\nTIO\nED is as runnable as one it proposed.
+mod runnable_commands_in_prose {
+    use super::*;
+
+    /// **The reported case.** Asked to launch the game, the model answered correctly --
+    /// it found the README's instructions and quoted the cargo line -- and there was
+    /// nothing to click.
+    #[test]
+    fn a_command_quoted_in_prose_is_offered() {
+        let reply = "You can launch the game client with:\n\n\
+                     cargo run -p void_claim --release\n\n\
+                     This is documented in the project README under the ## run (local dev) \
+                     section.";
+        assert_eq!(
+            suggested_command(reply).as_deref(),
+            Some("cargo run -p void_claim --release")
+        );
+    }
+
+    #[test]
+    fn a_shell_fenced_block_is_offered() {
+        let reply = "Run the tests with:\n\n```bash\ncargo test --workspace\n```";
+        assert_eq!(
+            suggested_command(reply).as_deref(),
+            Some("cargo test --workspace")
+        );
+    }
+
+    #[test]
+    fn a_console_block_with_a_prompt_marker_is_stripped() {
+        let reply = "Try:\n\n```console\n$ npm run dev\n```";
+        assert_eq!(suggested_command(reply).as_deref(), Some("npm run dev"));
+    }
+
+    /// The explicit block still wins: the `Command` intent was ASKED for a command, and
+    /// a guess must never override an instruction.
+    #[test]
+    fn an_explicit_command_block_takes_precedence() {
+        let reply = "Do this:\n\n```command\ncargo run -p sc-win\n```\n\n\
+                     (not cargo build --release, which only builds)";
+        assert_eq!(
+            extract_command(reply).as_deref(),
+            Some("cargo run -p sc-win")
+        );
+        // `suggested_command` defers rather than competing.
+        assert!(suggested_command(reply).is_none());
+    }
+
+    /// **A button that runs the wrong thing is worse than no button.** The cost of a
+    /// miss is the user types it themselves; the cost of a false positive is an
+    /// unexpected process. So these must all stay silent.
+    #[test]
+    fn prose_about_commands_is_not_a_command() {
+        for reply in [
+            // Backticked prose -- talking about a command, not giving one.
+            "You would normally run `cargo test` here, but the harness does that for you.",
+            // A sentence that merely starts with a tool name.
+            "cargo is the Rust build tool. It handles dependencies and builds.",
+            // A pipeline: too easy to get wrong, and the sandbox would likely refuse it.
+            "cargo test 2>&1 | grep FAILED",
+            // A chain.
+            "cargo build && cargo run",
+            // A redirect.
+            "cargo test > out.txt",
+            // \not a build tool at all.
+            "rm -rf target",
+            "git push origin main",
+            // \nothing runnable.
+            "The trail is drawn in starfield.rs, in draw_trails.",
+            "",
+        ] {
+            assert!(
+                suggested_command(reply).is_none(),
+                "should \nOT offer a button for: {reply:?} (got {:?})",
+                suggested_command(reply)
+            );
+        }
+    }
+
+    /// A language fence that is not a shell is code being shown, not run.
+    #[test]
+    fn a_rust_block_is_not_a_command() {
+        let reply = "The fix is:\n\n```rust\nlet width_tail = width_head * 0.55;\n```";
+        assert!(suggested_command(reply).is_none());
+    }
+
+    #[test]
+    fn reasoning_is_stripped_before_looking() {
+        let reply = "<think>maybe cargo build? no</think>Run it with:\n\ncargo run -p void_claim";
+        assert_eq!(
+            suggested_command(reply).as_deref(),
+            Some("cargo run -p void_claim")
+        );
     }
 }

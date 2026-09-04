@@ -231,3 +231,93 @@ fn proposes_a_change(text: &str) -> bool {
     ];
     CUES.iter().any(|c| lower.contains(c))
 }
+
+/// A runnable command found in an answer that was NOT the `Command` intent.
+///
+/// [`extract_command`] handles the deliberate case: the `Command` intent is told to emit
+/// a ```command block, and the app offers it as a one-click Run. But an ordinary answer
+/// often contains a command too — asked to launch the game, the model explained where
+/// the instructions live and quoted `cargo run -p void_claim --release` as prose, which
+/// is the right answer and completely unclickable.
+///
+/// So this looks for a command the model *mentioned* rather than one it was asked to
+/// emit: a shell fence (```bash / ```sh / ```console / bare ```), or a
+/// line that reads unmistakably like a build/run invocation. The bar is deliberately
+/// high — see [`looks_runnable`] — because a wrong guess puts a button on the screen
+/// that runs something the user did not ask for.
+///
+/// Returns `None` when [`extract_command`] already found one; the explicit block wins.
+pub fn suggested_command(reply: &str) -> Option<String> {
+    if extract_command(reply).is_some() {
+        return None;
+    }
+    let cleaned = strip_think(reply);
+
+    // 1. A fenced block whose info string is a shell language (or absent).
+    let mut lines = cleaned.lines();
+    while let Some(line) = lines.next() {
+        let Some(info) = line.trim_start().strip_prefix("```") else {
+            continue;
+        };
+        let info = info.trim().to_ascii_lowercase();
+        let shellish = info.is_empty()
+            || matches!(
+                info.as_str(),
+                "bash" | "sh" | "shell" | "console" | "terminal" | "zsh"
+            );
+        if !shellish {
+            continue;
+        }
+        for l in lines.by_ref() {
+            if l.trim_start().starts_with("```") {
+                break;
+            }
+            let candidate = l.trim().trim_start_matches("$ ").trim();
+            if looks_runnable(candidate) {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    // 2. A bare line of prose that is unmistakably a command. The model writes these
+    //    when it is answering a question rather than proposing an action.
+    cleaned
+        .lines()
+        .map(|l| l.trim().trim_start_matches("$ ").trim())
+        .find(|l| looks_runnable(l))
+        .map(str::to_string)
+}
+
+/// Whether a line is confidently a build/run command.
+///
+/// **Deliberately narrow.** This decides whether to put a Run button in front of the
+/// user, and a button that runs the wrong thing is worse than no button: the cost of a
+/// miss is they type the command themselves, the cost of a false positive is an
+/// unexpected process. So it matches a short list of known build tools at the START of
+/// the line, and rejects anything carrying shell punctuation that suggests a fragment,
+/// a pipeline or prose wrapped around a command.
+fn looks_runnable(line: &str) -> bool {
+    const STARTERS: &[&str] = &[
+        "cargo ", "npm ", "npx ", "pnpm ", "yarn ", "python ", "python3 ", "pytest", "go ",
+        "dotnet ", "make ", "just ", "gradle ", "mvn ",
+    ];
+    let l = line.trim();
+    // A command is one line and not a paragraph.
+    if l.is_empty() || l.len() > 200 || l.contains(". ") {
+        return false;
+    }
+    // Prose about a command ("run `cargo test`") is not a command.
+    if l.contains('`') {
+        return false;
+    }
+    // Pipelines, redirects and chains are not offered: too easy to get wrong, and the
+    // sandbox would likely refuse them anyway.
+    if l.contains('|') || l.contains('>') || l.contains("&&") || l.contains(';') {
+        return false;
+    }
+    STARTERS.iter().any(|p| {
+        l.strip_prefix(p)
+            .map(|rest| !rest.trim().is_empty())
+            .unwrap_or_else(|| l == p.trim())
+    })
+}
