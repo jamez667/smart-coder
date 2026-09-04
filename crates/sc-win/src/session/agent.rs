@@ -315,11 +315,27 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
         }
     };
 
+    // LEADS: the indexed search over the question, as a short list of functions.
+    //
+    // OFF BY DEFAULT, and that is a measurement decision rather than caution. The map
+    // above is SORTED, not ranked, because ranking it lost 0/4 against sorted's 2/2 --
+    // scoring filenames against question words promoted coincidences. Leads score
+    // CONTENT rather than filenames, so the failure mode should not recur, but "should
+    // not" is not evidence. The bar for flipping this default is the probe suite
+    // answering in FEWER STEPS with leads than without, with the sorted-map result
+    // still holding. A retrieval feature that costs anchor tokens without shortening
+    // runs is deleted, not tuned (spec 23).
+    let leads_block = if leads_enabled() {
+        render_leads(&question, &workspace)
+    } else {
+        String::new()
+    };
+
     // Say what the loop is FOR. Without this the agent treats a question as a task and
     // reports "finished in 4 steps" instead of answering -- the steps were the means, and
     // the user asked for the conclusion.
     let task = format!(
-        "Answer this question about the code in this project:\n\n{question}\n{trace_block}{map_block}\n\
+        "Answer this question about the code in this project:\n\n{question}\n{trace_block}{map_block}{leads_block}\n\
          Pick the likely file from the list above and read it -- do NOT spend turns listing \
          directories, and do not guess at file names or line numbers. When you know the \
          answer, call `finish` with a short explanation naming the file and line, and say \
@@ -353,6 +369,50 @@ pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: S
             let _ = ev_tx.send(UiEvent::Failed(format!("investigation failed: {e}")));
         }
     }
+}
+
+/// Whether the leads block is switched on for this run.
+///
+/// An env var rather than a config field, deliberately: this exists to be flipped for
+/// one probe run and compared, and a setting that survives in `config.json` is a
+/// setting somebody forgets is on while reading the numbers. It graduates to a real
+/// config field on the day the measurement says it should be the default.
+pub(crate) fn leads_enabled() -> bool {
+    matches!(
+        std::env::var("SC_INVESTIGATE_LEADS").ok().as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
+/// The most this may add to the task anchor.
+///
+/// Eight lines. The anchor already carries up to 800 map entries and the question; the
+/// case for leads is that a handful of RANKED lines beats scrolling a sorted list, and
+/// if eight are not enough the ranking is not working and more will not save it.
+pub(crate) const MAX_LEADS: usize = 8;
+
+/// Render the leads block, or empty when there is nothing worth saying.
+pub(crate) fn render_leads(question: &str, workspace: &std::path::Path) -> String {
+    let index = sc_index::RepoIndex::open(workspace);
+    let hits = sc_index::search(&index, question);
+    if hits.is_empty() {
+        return String::new();
+    }
+    let mut b = String::from("\nleads (indexed search over your question):\n");
+    for h in hits.iter().take(MAX_LEADS) {
+        let what = match &h.symbol {
+            Some(name) => format!("fn {name}"),
+            None => "(file)".to_string(),
+        };
+        b.push_str(&format!(
+            "  {}:{}  {}  matched: {}\n",
+            h.path,
+            h.line,
+            what,
+            h.matched.join(", ")
+        ));
+    }
+    b
 }
 
 /// Shape a build-agent config for ANSWERING A QUESTION.
@@ -539,6 +599,73 @@ mod pasted_traces {
         let question = "why is the trail behind the stars thin before it gets thick";
         assert!(sc_index::resolve_trace(question, &idx).is_empty());
         assert!(sc_index::render_trace(&[]).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The leads block: additive, bounded, and off unless asked for (spec 23 M7).
+#[cfg(test)]
+mod leads {
+    use super::*;
+
+    fn fixture() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "sc-win-leads-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(d.join("src/fx")).unwrap();
+        std::fs::write(
+            d.join("src/fx/starfield.rs"),
+            "// the trail is thin at the head and thick at the tail\npub fn draw_trails() {}\n",
+        )
+        .unwrap();
+        for i in 0..30 {
+            std::fs::write(
+                d.join(format!("src/m{i}.rs")),
+                format!("pub fn helper{i}() {{ let trail = {i}; }}\n"),
+            )
+            .unwrap();
+        }
+        d
+    }
+
+    /// **Off by default.** The default must not change without the probe numbers,
+    /// so it is pinned by a test rather than by intention.
+    #[test]
+    fn leads_are_off_unless_the_env_var_asks() {
+        // The suite may run with the var set by someone measuring; assert the rule,
+        // not the ambient value.
+        assert!(!matches!(Some("0"), Some("1") | Some("true")));
+        std::env::remove_var("SC_INVESTIGATE_LEADS");
+        assert!(!leads_enabled());
+    }
+
+    /// The block names ranked FUNCTIONS and stays inside its budget.
+    #[test]
+    fn the_block_is_bounded_and_names_functions() {
+        let root = fixture();
+        let out = render_leads("why is the trail thin before it gets thick", &root);
+        assert!(
+            out.contains("leads (indexed search over your question)"),
+            "{out}"
+        );
+        assert!(out.contains("draw_trails"), "{out}");
+        // One header line plus at most MAX_LEADS entries.
+        let body = out.lines().filter(|l| l.starts_with("  ")).count();
+        assert!(body <= MAX_LEADS, "{body} lines: {out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A question the index cannot answer adds NOTHING, rather than a header over an
+    /// empty list -- anchor tokens spent to say "no idea" are anchor tokens wasted.
+    #[test]
+    fn a_question_with_no_hits_adds_nothing() {
+        let root = fixture();
+        assert!(render_leads("", &root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
