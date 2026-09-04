@@ -764,9 +764,13 @@ impl App {
                             self.claude_feed.extend(agent_rows(&e));
                         } else if let sc_core::AgentEvent::ModelTurn { raw, .. } = &e {
                             // Keep the model's PROSE, which is the actual answer — just not the
-                            // turn header wrapped around it.
-                            if !raw.trim().is_empty() {
-                                self.claude_feed.push(Row::ok("💬", raw.trim().to_string()));
+                            // turn header wrapped around it, and never its reasoning: this
+                            // pushed `raw` verbatim, so a reasoning model's per-delta
+                            // `<think>` tags went straight into the feed.
+                            let prose = sc_win::view::strip_think_blocks(raw);
+                            let prose = prose.trim();
+                            if !prose.is_empty() {
+                                self.claude_feed.push(Row::ok("💬", prose.to_string()));
                             }
                         }
                     } else {

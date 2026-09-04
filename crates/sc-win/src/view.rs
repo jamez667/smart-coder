@@ -114,16 +114,46 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
 ///
 /// Public so the chat/execute feed (`app::fix_feed_line`) can surface the same narration during
 /// an iterate/execute run, not just the activity stream.
-pub fn narration(raw: &str) -> Option<String> {
-    // Drop a leading/embedded <think> block (Qwen3 et al.) — internal reasoning, not narration.
-    let mut s = raw;
-    let lower = s.to_ascii_lowercase();
-    if let (Some(o), Some(c)) = (lower.find("<think>"), lower.find("</think>")) {
-        if c > o {
-            // Keep whatever prose came after the closed think block.
-            s = &raw[c + "</think>".len()..];
-        }
+/// Remove every `<think>…</think>` block, including an unterminated trailing one.
+///
+/// A reasoning model's output arrives as one tagged block PER STREAMED DELTA, so any
+/// single-block strip leaves the rest visible. An unterminated block means the model ran
+/// out of budget mid-thought: everything after it is dropped, because a half-sentence of
+/// reasoning is not narration.
+pub fn strip_think_blocks(raw: &str) -> String {
+    let mut out = raw.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(open) = lower.find("<think>") else {
+            break;
+        };
+        let after = match lower[open..].find("</think>") {
+            Some(rel) => out[open + rel + "</think>".len()..].to_string(),
+            None => String::new(),
+        };
+        out = format!("{}{}", out[..open].trim_end(), after);
     }
+    out
+}
+
+pub fn narration(raw: &str) -> Option<String> {
+    // Drop EVERY <think> block, not just the first.
+    //
+    // This took the first `<think>`…`</think>` pair and kept the rest, which is correct
+    // for a model that emits one block. A reasoning model STREAMS its thinking, and the
+    // backend tags each delta separately, so a turn arrives as
+    // `<think> task </think><think> is </think><think> clear </think>…` — dozens of
+    // pairs. Cutting at the first one left all the others in the feed, which is exactly
+    // what the user saw:
+    //
+    // ```text
+    // 💬 <think> task </think><think> is </think><think> clear </think>…
+    // ```
+    //
+    // `strip_think` already loops; this now uses it rather than keeping a second,
+    // subtly-different implementation of the same idea.
+    let stripped = strip_think_blocks(raw);
+    let s = stripped.as_str();
     // Cut at the first tool-call JSON object — everything before it is the narration.
     let prose = match sc_core::text::extract_json_object(s) {
         Some(json) => {
@@ -341,6 +371,48 @@ fn stop_row(reason: &StopReason) -> Row {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Per-delta think tags, from a live screenshot.**
+    ///
+    /// `narration` cut at the FIRST `</think>` and kept the rest, which is right for a
+    /// model that emits one block. A reasoning model tags every streamed delta, so a
+    /// turn arrives as dozens of pairs and all but the first survived into the activity
+    /// feed.
+    #[test]
+    fn every_think_block_is_dropped_not_just_the_first() {
+        let raw = "<think> task</think><think> is</think><think> clear</think>                   <think>.</think><think> I</think><think> need</think>                   <think> to</think><think> edit</think>";
+        assert!(
+            strip_think_blocks(raw).trim().is_empty(),
+            "{:?}",
+            strip_think_blocks(raw)
+        );
+        assert_eq!(narration(raw), None);
+    }
+
+    /// Real narration after the reasoning still reaches the feed -- dropping it was the
+    /// older bug this function exists to fix.
+    #[test]
+    fn narration_after_the_thinking_survives() {
+        let raw = "<think>hmm</think><think> ok</think>Reading the trail code now.";
+        assert_eq!(
+            narration(raw).as_deref(),
+            Some("Reading the trail code now.")
+        );
+    }
+
+    /// An unterminated block is a model that ran out of budget mid-thought: everything
+    /// after it goes, rather than showing half a sentence of reasoning.
+    #[test]
+    fn an_unterminated_think_block_yields_no_narration() {
+        assert_eq!(narration("<think>Wait, actually the head is"), None);
+    }
+
+    /// Prose that merely mentions thinking is not a tag.
+    #[test]
+    fn ordinary_prose_is_untouched() {
+        let raw = "I think the fix is in starfield.rs.";
+        assert_eq!(strip_think_blocks(raw), raw);
+    }
     use super::*;
 
     #[test]
