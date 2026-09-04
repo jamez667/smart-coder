@@ -217,6 +217,23 @@ impl ToolRegistry {
         &self.specs
     }
 
+    /// A registry narrowed to `names`, or `None` if none of them are present.
+    ///
+    /// Exists so a grammar can be tightened MID-RUN. Prompt-based steering ("call finish
+    /// now") is advice a model can ignore, and on a read-only run it demonstrably does:
+    /// measured, one read the same file window four times running and then kept reading.
+    /// Narrowing the grammar to `finish` alone means the decoder cannot emit anything else,
+    /// so the model must answer with what it has.
+    pub fn only(&self, names: &[&str]) -> Option<ToolRegistry> {
+        let specs: Vec<ToolSpec> = self
+            .specs
+            .iter()
+            .filter(|s| names.contains(&s.name))
+            .cloned()
+            .collect();
+        (!specs.is_empty()).then(|| ToolRegistry::new(specs))
+    }
+
     /// Look up a spec by tool name.
     pub fn get(&self, name: &str) -> Option<&ToolSpec> {
         self.specs.iter().find(|s| s.name == name)

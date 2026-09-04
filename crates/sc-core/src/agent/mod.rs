@@ -286,6 +286,14 @@ pub fn run_agent_observed(
     // void-claim: schema.rs read 6+ times in one run, burning budget). Paging through a large
     // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
     // a firm "you have enough; act now" nudge and reset. Cleared on any change.
+    // Reads before a read-only run is FORCED to answer. Deliberately below the read-thrash
+    // nudge limit: by the time the advice has been ignored once, more advice will not help.
+    const FORCE_FINISH_AFTER: usize = 11;
+    // Total reads this run. NOT `reads_since_change`, which the read-thrash guard resets to
+    // zero every 5 reads -- so a threshold above 5 on that counter can never be reached, and
+    // the force silently never fired. On a read-only run nothing ever changes the workspace,
+    // so "since change" means "since the last nudge", which is not the question being asked.
+    let mut total_reads = 0usize;
     let mut reads_since_change = 0usize;
     // How many replies this run have run to the token cap. Each costs a full prompt pass
     // plus a maximum-length generation -- most of a minute on a 35B model -- and carries no
@@ -463,6 +471,21 @@ pub fn run_agent_observed(
             cfg.response_reserve_tokens
         };
         strategy.prepare_request(&mut req, registry);
+        // FORCE the answer once the model has read enough.
+        //
+        // On a read-only run every prompt-based nudge has failed: the "call finish now" steer
+        // is delivered and ignored, and the read-thrash advice is ignored too -- measured, a
+        // grammar run read `bubble.rs@100:140` FOUR times identically and then kept going,
+        // burning all 14 steps without ever reaching the file it needed.
+        //
+        // A grammar is not advice. Narrowing it to `finish` alone means the decoder CANNOT
+        // emit another read, so the model must answer with what it has. That is the whole
+        // reason to constrain decoding rather than ask nicely.
+        if read_only_run && total_reads >= FORCE_FINISH_AFTER {
+            if let Some(finish_only) = registry.only(&["finish"]) {
+                strategy.prepare_request(&mut req, &finish_only);
+            }
+        }
         // Stream the turn when enabled, emitting a ContentDelta per token so a UI can show the
         // reply (incl. a file edit being written) appear live. Falls back to blocking generate
         // when off. Streaming is pure observation — the decode/apply path below is unchanged.
@@ -1199,6 +1222,7 @@ pub fn run_agent_observed(
             "read_file" | "read_function" | "search_code" | "list_dir"
         ) {
             reads_since_change += 1;
+            total_reads += 1;
         }
         let obs = if reads_since_change >= READ_THRASH_LIMIT {
             reads_since_change = 0;

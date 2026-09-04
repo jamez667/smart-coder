@@ -339,6 +339,9 @@ impl OpenAiBackend {
         // `stream = true` unconditionally, so the GUI was blind to the exact failure
         // the eval had been hardened against, where a reply cut off at the token cap
         // reads as a model declining to act.
+        // A grammar-constrained reply arrives entirely inside `reasoning_content`; unwrap it
+        // so the tool call survives instead of being stripped as thinking.
+        let full = unwrap_reasoning_only(&full).unwrap_or(full);
         Ok(GenerateResponse::with_finish_reason(full, finish_reason))
     }
 }
@@ -381,6 +384,29 @@ fn parse_stream_delta(payload: &str) -> Option<String> {
         return Some(format!("<think>{r}</think>"));
     }
     None
+}
+
+/// Does this streamed reply consist ONLY of reasoning, with no ordinary content?
+///
+/// A reasoning model puts its thinking in `reasoning_content`, which is wrapped in `<think>`
+/// above so consumers can strip it. But when decoding is grammar-constrained the model's
+/// ENTIRE output is the tool call, and this server still delivers it in `reasoning_content` --
+/// verified directly: a GBNF request returned `content: ""` and
+/// `reasoning_content: {"tool": "search_code", "query": "def draw_trails"}`, a perfect call in
+/// 18 tokens. Wrapped and then stripped, that call was destroyed and the harness reported
+/// "no JSON tool object found in your reply".
+///
+/// So: if nothing but reasoning arrived, the reasoning IS the reply. The non-streaming path
+/// has always had this fallback; streaming did not.
+fn unwrap_reasoning_only(full: &str) -> Option<String> {
+    let t = full.trim();
+    if !t.starts_with("<think>") || !t.ends_with("</think>") {
+        return None;
+    }
+    let inner = t.strip_prefix("<think>")?.strip_suffix("</think>")?.trim();
+    // Only when it is a tool call. Ordinary prose reasoning must stay hidden -- unwrapping
+    // that would put "Wait, let me re-read..." in front of the user as the answer.
+    (inner.starts_with('{') && inner.ends_with('}')).then(|| inner.to_string())
 }
 
 // ---- wire types (a minimal slice of the OpenAI schema) ----
@@ -1092,5 +1118,42 @@ mod reasoning_stream {
         // An empty reasoning delta yields nothing, not an empty pair of tags.
         let e = parse_stream_delta(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#);
         assert_eq!(e, None);
+    }
+}
+
+#[cfg(test)]
+mod reasoning_only_replies {
+    use super::unwrap_reasoning_only;
+
+    /// **A grammar-constrained call arrives as reasoning, and must survive.**
+    ///
+    /// Verified against the live server: a GBNF request returned `content: ""` and
+    /// `reasoning_content: {"tool": "search_code", "query": "def draw_trails"}` — a perfect
+    /// tool call in 18 tokens. The streaming path wrapped it in `<think>`, the chat panel
+    /// stripped it, and the harness reported "no JSON tool object found in your reply".
+    #[test]
+    fn a_tool_call_delivered_as_reasoning_is_unwrapped() {
+        assert_eq!(
+            unwrap_reasoning_only(r#"<think>{"tool": "search_code", "query": "x"}</think>"#)
+                .as_deref(),
+            Some(r#"{"tool": "search_code", "query": "x"}"#)
+        );
+    }
+
+    /// **Ordinary reasoning must stay hidden.**
+    ///
+    /// Unwrapping prose would put "Wait, let me re-read the code..." in front of the user as
+    /// though it were the answer — the exact wall this `<think>` wrapping exists to prevent.
+    #[test]
+    fn prose_reasoning_stays_wrapped() {
+        assert_eq!(
+            unwrap_reasoning_only("<think>Wait, let me re-read the code.</think>"),
+            None
+        );
+        // A reply that already has real content is untouched.
+        assert_eq!(
+            unwrap_reasoning_only(r#"<think>thinking</think>{"tool":"finish"}"#),
+            None
+        );
     }
 }

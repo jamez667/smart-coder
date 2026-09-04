@@ -212,13 +212,34 @@ fn is_readable_source(path: &str) -> bool {
 /// search and read its way to the answer but cannot change anything on the way. A question
 /// must never edit the workspace as a side effect of being asked.
 pub fn investigate(cfg: UiConfig, question: String, workspace: PathBuf, ev_tx: Sender<UiEvent>) {
+    // Ask for a llama.cpp backend so the grammar below is actually SENT: `cfg.backend()`
+    // builds a plain OpenAI client unless `tool_calling` says otherwise, and sc-win never
+    // sets it. Without this the Grammar strategy attaches a constraint the client silently
+    // drops, and the run is back to parse-and-hope.
+    let mut cfg = cfg;
+    cfg.tool_calling = crate::config::ToolCalling::Gbnf;
     let Some(backend) = cfg.backend() else {
         let _ = ev_tx.send(UiEvent::Failed(crate::chat_session::NO_MODEL.to_string()));
         return;
     };
     // Read-only: the loop can look at anything and change nothing.
     let registry = sc_tools::read_only_registry();
-    let strategy = sc_core::select_strategy(&backend.capabilities());
+    // GRAMMAR-CONSTRAINED decoding, not parse-and-hope.
+    //
+    // `select_strategy` follows the backend's declared capabilities, and sc-win never sets
+    // `tool_calling`, so it defaulted to `None` -> ParseRepair: ask nicely for JSON and
+    // repair what comes back. On a reasoning model that fails constantly -- measured, the
+    // model rambles past the token cap and emits no call at all, and no amount of prompt
+    // steering stops it.
+    //
+    // A grammar makes rambling IMPOSSIBLE: the decoder can only emit a valid call. Verified
+    // directly against this server with the six-tool grammar -- a clean
+    // `{"tool": "search_code", "query": "def draw_trails"}` in 18 tokens, where the
+    // unconstrained path had been burning 2,000.
+    //
+    // Scoped to the investigate path deliberately: this registry is six read-only tools with
+    // simple string/int params, which is exactly what a grammar expresses well.
+    let strategy: Box<dyn sc_core::ToolCallStrategy + Send + Sync> = Box::new(sc_core::Grammar);
     // No confirmer: nothing here can mutate, so there is nothing to approve. Passing one
     // would put a permission prompt in front of reading a file to answer a question.
     let mut agent_cfg = cfg.agent_config(None);
