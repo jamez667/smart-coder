@@ -17,6 +17,8 @@ sc-core = { path = "../sc-core" }
 sc-tools = { path = "../sc-tools" }
 sc-swarm = { path = "../sc-swarm" }
 sc-trace = { path = "../sc-trace" }
+# Spec 23: index / search / health / stack, for humans and for debugging a run.
+sc-index = { path = "../sc-index" }
 sc-daemon = { path = "../sc-daemon" }
 sc-workflow = { path = "../sc-workflow" }
 sc-tui = { path = "../sc-tui" }

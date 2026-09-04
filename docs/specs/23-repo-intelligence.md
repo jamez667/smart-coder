@@ -218,7 +218,8 @@ When a question contains a panic or traceback, the harness resolves it before
 any model sees it — frame parsing is exactly the kind of mechanical work a
 small model fumbles and a parser does not.
 
-`resolve_trace(text, &index)` recognizes Rust panics/backtraces, Python
+`resolve_trace(text, &index)` <!--@ sc_index::resolve_trace --> recognizes Rust
+panics/backtraces, Python
 tracebacks, and .NET stack traces; maps each frame's path to a
 workspace-relative path by suffix match against the index; annotates in-repo
 frames with the enclosing function via the existing `function_span`; marks
@@ -237,7 +238,8 @@ to parse a backtrace with `search_code`.
 
 ## Line counts and smells
 
-A deterministic health report, computed from data the index already holds:
+A deterministic health report <!--@ sc_index::health -->, computed from data the
+index already holds:
 
 - per-file line counts; files over 500 lines flagged *warn*, over 1000 *split
   required* (no gate in this repo enforces these today; this report becomes
@@ -288,7 +290,9 @@ names.
    without shortening runs is deleted, not tuned.
 
 `repo_health` and `resolve_trace` never enter a model registry. The CLI gets
-`smart-coder index | search | trace | health` subcommands — for humans, for
+`smart-coder index | search | health | stack` subcommands
+<!--@ crates/sc-cli/src/cmd/index.rs --> (`stack`, not `trace`, because `trace` is
+spec traceability and one verb should not mean two things) — for humans, for
 scripts, and above all for debugging: `smart-coder search "<question>"` prints
 *exactly* what the model would have been shown, which turns "why did the
 investigation go sideways" into a reproducible one-liner.
@@ -313,6 +317,14 @@ carrying forward:
   English sentences, exactly the shape a vague query matches by accident; three tests
   crowded the top five for "why does a tool result get cut off". Per symbol because
   most tests here are inline `#[cfg(test)]` blocks inside the files they test.
+
+Two more rules came from running the CLI against this repo for the first time.
+**Agent transcripts are not source**: `logs/` is skipped by name, because the
+recorded probe transcripts contain the canonical question *and* its answer, so the
+first `smart-coder search` returned seven copies of `investigate-probe.md` above any
+code. And **a frame or hit landing on a doc comment is about the function below
+it** <!--@ crates/sc-index/src/store.rs -->: a stack frame two lines above a
+function reported a bare line number until it could say `in draw_trails`.
 
 Measured once, on this repo at 619 files: 2.6s cold build, 171ms warm open, a
 ~21 MB cache. A snapshot of a before/after, not a property — the repo grows, and

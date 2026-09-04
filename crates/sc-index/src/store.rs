@@ -255,6 +255,26 @@ impl RepoIndex {
             .filter(|s| s.contains(line))
             .min_by_key(|s| s.len_lines())
     }
+
+    /// The symbol a `line` belongs to for a *human-facing* answer: the enclosing
+    /// definition, or the one whose doc comment the line sits in.
+    ///
+    /// A stack frame or a search hit that lands two lines above a function is about
+    /// that function, and saying so beats saying nothing. Kept separate from
+    /// [`RepoIndex::enclosing_symbol`], which answers the narrower structural
+    /// question and must keep answering it.
+    pub fn symbol_for_line(&self, path: &str, line: usize) -> Option<&IndexedSymbol> {
+        if let Some(s) = self.enclosing_symbol(path, line) {
+            return Some(s);
+        }
+        // The nearest definition starting within a doc comment's reach below.
+        self.files
+            .get(path)?
+            .symbols
+            .iter()
+            .filter(|s| s.line > line && s.line - line <= DOC_COMMENT_LOOKAHEAD)
+            .min_by_key(|s| s.line)
+    }
 }
 
 /// Whole seconds since the epoch, so an index is not invalidated by sub-second

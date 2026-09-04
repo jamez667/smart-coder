@@ -64,6 +64,23 @@ impl Cli {
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "doctor" if command.is_none() => command = Some(Command::Doctor),
+                "index" if command.is_none() => command = Some(Command::Index),
+                "health" if command.is_none() => command = Some(Command::Health),
+                "stack" if command.is_none() => command = Some(Command::Stack),
+                // `search <query...>`: the rest is the question, joined, so a user
+                // can type it unquoted the way they would say it.
+                "search" if command.is_none() => {
+                    let rest: Vec<String> = it.by_ref().collect();
+                    if rest.is_empty() {
+                        return Err(DcError::Eval(
+                            "search requires a query, e.g. `smart-coder search \"why is the trail thin\"`"
+                                .to_string(),
+                        ));
+                    }
+                    command = Some(Command::Search {
+                        query: rest.join(" "),
+                    });
+                }
                 "trace" if command.is_none() => command = Some(Command::Trace { check: false }),
                 "chat" if command.is_none() => command = Some(Command::Chat),
                 "remote" if command.is_none() => command = Some(Command::Remote),

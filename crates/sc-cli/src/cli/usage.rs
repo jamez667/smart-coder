@@ -58,6 +58,13 @@ COMMANDS:
     trace           Check the specs against the code (spec 17): anchors that no
                     longer resolve, assertions that are false, crates no spec
                     claims. Deterministic — no model runs. See --check.
+    index           Build or refresh the repo index; report what is in it (spec 23)
+    search QUERY    Search the repo the way the agent's `search_code` does, and
+                    print EXACTLY the bytes the model would have been shown --
+                    so a bad investigation is reproducible in one line
+    health          Line counts and size smells: files over a threshold, giant
+                    functions, TODO/FIXME counts. A report, not a linter
+    stack           Resolve a stack trace read from stdin against the index
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -148,6 +155,9 @@ EXAMPLES:
     smart-coder run \"refactor the parser\" --dry-run
     smart-coder replay 1718000000000
     smart-coder trace --check
+    smart-coder search \"why is the trail behind the stars thin before it gets thick\"
+    smart-coder health
+    cargo test 2>&1 | smart-coder stack
     smart-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
     smart-coder swarm \"add validation and a test\" --cli --verify \"python -m pytest -q\" \\
         --base-url http://localhost:11435/v1 --model coder-0 --max-workers 2 \\

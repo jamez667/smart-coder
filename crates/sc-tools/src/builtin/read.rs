@@ -61,8 +61,12 @@ pub fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option
 /// model to make a targeted `edit_lines` change rather than rewriting the whole thing, and
 /// [`edit_function`] warns that a full-rewrite of a function this size is error-prone.
 ///
+/// Re-exported from `sc_index` rather than defined twice: the health report (spec 23)
+/// flags the same functions, and a tool that advised "this is large" about a different
+/// set of functions than the report lists would be two sources of truth for one word.
+///
 /// [`edit_function`]: super::write::edit_function
-const GIANT_FN_LINES: usize = 120;
+const GIANT_FN_LINES: usize = sc_index::GIANT_FN_LINES;
 
 /// Resolve `(language, source, (start,end))` for the function `name` in `path`, or an error
 /// string. Shared by [`read_function`] and [`edit_function`].

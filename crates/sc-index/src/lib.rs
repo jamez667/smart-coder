@@ -10,6 +10,7 @@
 //! * **lexical search** + symbol lookup, surfaced to the agent as the
 //!   `find_symbol` tool.
 
+mod health;
 mod lexicon;
 mod pagerank;
 mod repomap;
@@ -20,6 +21,10 @@ mod trace;
 mod walk;
 mod workspace;
 
+pub use health::{
+    health, render_health, FileHealth, Health, Size, FILE_SPLIT_LINES, FILE_WARN_LINES,
+    GIANT_FN_LINES,
+};
 pub use lexicon::{tokenize, Field, STOPWORDS};
 pub use pagerank::{pagerank, Edge};
 pub use repomap::{build_repo_map, render_repo_map, Boosts, RankedSymbol, SourceFile};

@@ -49,6 +49,10 @@ fn main() -> ExitCode {
         }
         Command::Staged { task } => cmd::run::staged_task_json(&cli, task.clone()),
         Command::Trace { check } => cmd::trace::trace(cli.json, *check),
+        Command::Index => cmd::index::index(cli.json),
+        Command::Search { query } => cmd::index::search(query, cli.json),
+        Command::Health => cmd::index::health(cli.json),
+        Command::Stack => cmd::index::stack(cli.json),
         Command::Queue { action } => cmd::queue::queue(&cli, action),
         Command::Replay { session } => cmd::replay::replay(session.clone()),
     }

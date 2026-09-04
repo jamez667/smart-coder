@@ -69,6 +69,18 @@ pub enum Command {
     /// no model runs. With `check`, exits non-zero on a broken or stale claim,
     /// which is what makes it a CI gate.
     Trace { check: bool },
+    /// Build or refresh the repo index and report what is in it (spec 23).
+    Index,
+    /// Search the repo the way `search_code` does — printing exactly the bytes
+    /// the model would have been shown, so a bad investigation is reproducible
+    /// in one line (spec 23).
+    Search { query: String },
+    /// Line counts and size smells: files over a threshold, giant functions,
+    /// TODO/FIXME counts (spec 23). A size-and-attention report, not a linter.
+    Health,
+    /// Resolve a stack trace read from stdin against the index (spec 23).
+    /// Named `stack`, not `trace`, because `trace` is spec traceability.
+    Stack,
     /// The task queue (spec 19): file a request against any configured
     /// repository, draft its spec, approve or send it back.
     Queue { action: QueueAction },

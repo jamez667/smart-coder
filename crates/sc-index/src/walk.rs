@@ -70,6 +70,21 @@ pub const SKIP_FILES: &[&str] = &[
     "composer.lock",
 ];
 
+/// Directories holding the agent's own recorded output rather than project source.
+///
+/// `.smart-coder` is already skipped as a dotdir, but the recorded probe transcripts
+/// live in a plain `logs/` directory — and they echo every prior tool result, so
+/// indexing them lets a search match the harness's own transcript of being asked the
+/// same question. Observed the first time `smart-coder search` was run on this repo:
+/// the canonical starfield query returned seven copies of `investigate-probe.md`
+/// above any code, because that file contains the question *and* the answer.
+///
+/// Skipped by directory NAME at any depth, which is blunt: a project whose real
+/// source lives in a directory called `logs` would lose it. That has not happened,
+/// and the alternative -- reading file contents to guess whether they are a
+/// transcript -- is worse than a rule you can read.
+pub const SKIP_DIR_NAMES_LOGS: &[&str] = &["logs"];
+
 /// Whether a file `name` is one the walk refuses to yield.
 pub fn is_skipped_file(name: &str) -> bool {
     SKIP_FILES.contains(&name)
@@ -81,7 +96,7 @@ pub fn is_skipped_file(name: &str) -> bool {
 /// `source_files` pair already treated them: a new `.mypy_cache` needs no code
 /// change to stay out of a prompt.
 pub fn is_skipped_dir(name: &str) -> bool {
-    name.starts_with('.') || SKIP_DIRS.contains(&name)
+    name.starts_with('.') || SKIP_DIRS.contains(&name) || SKIP_DIR_NAMES_LOGS.contains(&name)
 }
 
 /// One file found by the walk.
@@ -245,6 +260,8 @@ mod tests {
         assert!(is_skipped_dir(".venv"));
         // ...and search_code's walk additionally had .smart-coder.
         assert!(is_skipped_dir(".smart-coder"));
+        // The agent's own recorded transcripts are not project source.
+        assert!(is_skipped_dir("logs"));
         // Real directories are not skipped.
         for d in ["src", "crates", "tests", "assets", "docs"] {
             assert!(!is_skipped_dir(d), "{d} must NOT be skipped");

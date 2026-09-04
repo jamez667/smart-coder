@@ -45,9 +45,12 @@ pub fn resolve_trace(text: &str, index: &RepoIndex) -> Vec<Frame> {
     }
     for f in &mut frames {
         if let Some(rel) = match_path(index, &f.raw_path) {
+            // `symbol_for_line`, not `enclosing_symbol`: a frame that lands on a
+            // function's doc comment is about that function, and naming it is the
+            // difference between an answer and a bare line number.
             f.symbol = f
                 .line
-                .and_then(|l| index.enclosing_symbol(&rel, l))
+                .and_then(|l| index.symbol_for_line(&rel, l))
                 .map(|s| s.name.clone());
             f.path = Some(rel);
         }
