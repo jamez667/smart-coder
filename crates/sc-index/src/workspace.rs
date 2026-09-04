@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::repomap::{build_repo_map, render_repo_map, Boosts, SourceFile};
-use crate::symbols::{extract_symbols, Language};
+use crate::symbols::Language;
 use crate::walk::{walk, WalkOptions};
 
 /// Collect every supported source file under `root` as `(relative path, source)`.
@@ -64,16 +64,20 @@ pub fn find_symbol_hits(root: &Path, name: &str) -> Vec<SymbolHit> {
     if name.is_empty() {
         return Vec::new();
     }
+    // Backed by the persistent index (spec 23): the symbols are already extracted,
+    // so this is a scan over records rather than a re-parse of every file in the
+    // workspace on every call.
+    let index = crate::store::RepoIndex::open(root);
     let mut hits = Vec::new();
-    for f in &collect_sources(root) {
-        let Some(lang) = Language::from_path(&f.path) else {
+    for (path, rec) in &index.files {
+        if rec.language.is_none() {
             continue;
-        };
-        for d in extract_symbols(lang, &f.source).defs {
+        }
+        for d in &rec.symbols {
             if d.name == name {
                 hits.push(SymbolHit {
-                    name: d.name,
-                    path: f.path.clone(),
+                    name: d.name.clone(),
+                    path: path.clone(),
                     line: d.line,
                 });
             }
@@ -89,12 +93,12 @@ pub fn find_symbol(root: &Path, name: &str) -> String {
     if name.is_empty() {
         return "find_symbol: empty name".to_string();
     }
-    let sources = collect_sources(root);
+    let index = crate::store::RepoIndex::open(root);
     // Be honest about *why* a symbol can't be found: this index only parses
-    // Rust/Python/C#. With no indexable files, find_symbol can't help — steer the
-    // model to read_file/list_dir/search_code instead of looping (spec 04 —
+    // Rust/Python/C#. With no indexable files, find_symbol can't help -- steer the
+    // model to read_file/list_dir/search_code instead of looping (spec 04 --
     // structured, actionable feedback).
-    if sources.is_empty() {
+    if index.files.values().all(|f| f.language.is_none()) {
         return format!(
             "find_symbol {name:?}: this project has no Rust/Python/C# files to index \
              (find_symbol only supports those). Use list_dir, then read_file or \

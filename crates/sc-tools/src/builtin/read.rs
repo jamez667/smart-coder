@@ -172,25 +172,65 @@ impl Matcher {
     }
 }
 
-/// A small search over the workspace's text files. Skips the usual noise dirs and
-/// anything that isn't valid UTF-8. Caps hits so the result fits a small context window.
+/// Whether a query is asking for a **pattern** rather than describing a problem.
 ///
-/// The directory policy is [`sc_index::walk`]'s (spec 23). It already excluded the
-/// agent's own run logs under `.smart-coder/sessions/*` — which echo every prior tool
-/// result, so searching them makes the agent match its own transcript (observed live:
-/// a search for a function name hit the session log instead of the source, wasting
-/// turns) — and the shared list keeps that, plus the dotdirs and build output the old
-/// walk here was missing.
+/// The model reaches for regex naturally (`match.*ShipRole`, `fn \w+`, `Foo::`), and
+/// those queries want the literal grep: they are precise by construction, and ranking
+/// them by relevance would be answering a question nobody asked. A question in
+/// English -- "why is the trail thin before it gets thick" -- has no metacharacters
+/// and wants the index.
+///
+/// The test is the presence of regex syntax, not whether the string happens to
+/// compile: almost any prose compiles as a regex that matches itself literally, so
+/// "does it parse" would send every question down the grep path and change nothing.
+fn looks_like_a_pattern(query: &str) -> bool {
+    const META: &[char] = &[
+        '\\', '[', ']', '(', ')', '{', '}', '*', '+', '?', '|', '^', '$',
+    ];
+    if query.chars().any(|c| META.contains(&c)) {
+        return true;
+    }
+    // `::`, a dot or an underscore is how code is spelled, not how questions are
+    // asked -- but only when the query is short enough to be a name rather than a
+    // sentence.
+    let words = query.split_whitespace().count();
+    words <= 3 && (query.contains("::") || query.contains('.') || query.contains('_'))
+}
+
+/// Search the workspace for `query`.
+///
+/// Two paths behind one name (spec 23). A query that **looks like a pattern** gets
+/// the literal regex grep it is asking for. A query that reads like a **question**
+/// gets indexed search: identifier-split, comment-weighted, ranked, and answered with
+/// functions rather than lines.
+///
+/// The tool's name, description and one-parameter schema are unchanged, deliberately.
+/// The six-tool menu is one of the few things in this project with a measurement
+/// behind it (12/12 versus 3/12), so this spends its improvement *behind* the name the
+/// model already knows: it asks the same vague question it always asked, and the
+/// answers get better.
 pub fn search_code(workspace: &Path, query: &str) -> String {
-    const MAX_HITS: usize = 50;
-    if query.is_empty() {
+    if query.trim().is_empty() {
         return "search_code: empty query".to_string();
     }
-    // Treat the query as a REGEX (the model naturally reaches for `match.*ShipRole`,
-    // `fn \w+`, etc.). If it isn't valid regex, fall back to a literal substring so a plain
-    // string like `ShipRole::` still works. A regex whose literal meaning differs (contains
-    // regex metachars) is matched as regex; this is what makes "find the exhaustive matches"
-    // actually work instead of returning "no matches" and looping.
+    if looks_like_a_pattern(query) {
+        return grep(workspace, query);
+    }
+    let index = sc_index::RepoIndex::open(workspace);
+    let hits = sc_index::search(&index, query);
+    if hits.is_empty() {
+        // The index found nothing, but a literal match might still exist -- a rare
+        // word the tokenizer dropped, or text in a file no grammar parses. Falling
+        // back costs one walk and never returns worse than "no matches".
+        return grep(workspace, query);
+    }
+    sc_index::render(query, &hits)
+}
+
+/// The original flat grep: every line matching a regex (or a literal, when the
+/// pattern will not compile), capped and sorted.
+fn grep(workspace: &Path, query: &str) -> String {
+    const MAX_HITS: usize = 50;
     let matcher = Matcher::new(query);
     let mut hits = Vec::new();
     for file in sc_index::walk(workspace, &sc_index::WalkOptions::default()) {
@@ -219,5 +259,110 @@ pub fn search_code(workspace: &Path, query: &str) -> String {
             hits.len(),
             hits.join("\n")
         )
+    }
+}
+
+#[cfg(test)]
+mod search_routing {
+    use super::*;
+
+    fn temp_repo(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "sc-tools-search-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn a_pattern_goes_to_grep_and_a_question_goes_to_the_index() {
+        assert!(looks_like_a_pattern("match.*ShipRole"));
+        assert!(looks_like_a_pattern("fn \\w+"));
+        assert!(looks_like_a_pattern("ShipRole::"));
+        assert!(looks_like_a_pattern("draw_trails"));
+        assert!(!looks_like_a_pattern(
+            "why is the trail behind the stars thin before it gets thick"
+        ));
+        assert!(!looks_like_a_pattern("where is the hull bar drawn"));
+    }
+
+    /// A precise query keeps its precision: the grep path still returns raw lines.
+    #[test]
+    fn a_regex_query_still_returns_matching_lines() {
+        let root = temp_repo("regex");
+        write(&root, "a.rs", "fn alpha() {}\nfn beta() {}\n");
+        let out = search_code(&root, "fn (alpha|beta)");
+        assert!(out.contains("a.rs:1: fn alpha() {}"), "{out}");
+        assert!(out.contains("a.rs:2: fn beta() {}"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The point of the whole spec.** A question whose words appear only in a
+    /// comment used to return "no matches"; now it returns the function.
+    #[test]
+    fn a_vague_question_finds_the_function_the_old_grep_could_not() {
+        let root = temp_repo("vague");
+        write(
+            &root,
+            "src/fx.rs",
+            "// the trail is thin at the head and thick at the tail\npub fn draw_trails() {}\n",
+        );
+        write(&root, "src/other.rs", "pub fn unrelated() {}\n");
+
+        let out = search_code(&root, "why is the trail thin before it gets thick");
+        assert!(out.contains("src/fx.rs"), "{out}");
+        assert!(out.contains("draw_trails"), "{out}");
+        // Indexed results name the matched terms and never quote source lines.
+        assert!(out.contains("matched:"), "{out}");
+        assert!(!out.contains("pub fn draw_trails() {}"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_query_is_still_rejected() {
+        let root = temp_repo("empty");
+        write(&root, "a.rs", "fn a() {}\n");
+        assert_eq!(search_code(&root, ""), "search_code: empty query");
+        assert_eq!(search_code(&root, "   "), "search_code: empty query");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A question the index cannot answer falls back to grep rather than dead-ending.
+    #[test]
+    fn a_question_with_no_indexed_match_falls_back_to_grep() {
+        let root = temp_repo("fallback");
+        write(&root, "a.rs", "fn a() {}\n");
+        let out = search_code(&root, "nothing here matches this question at all");
+        assert!(out.contains("no matches"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The index is a cache, and a tool call must never leave one where a user's
+    /// `git status` would trip over it -- except under `.smart-coder`, which every
+    /// walk already skips and `.gitignore` already covers.
+    #[test]
+    fn searching_writes_only_under_the_hidden_cache_dir() {
+        let root = temp_repo("cachedir");
+        write(&root, "a.rs", "// widget\npub fn alpha() {}\n");
+        search_code(&root, "where is the widget");
+        let stray: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "a.rs" && n != ".smart-coder")
+            .collect();
+        assert!(stray.is_empty(), "unexpected files: {stray:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

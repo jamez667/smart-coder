@@ -152,3 +152,63 @@ mod tests {
         assert!(g.contains("integer ::="));
     }
 }
+
+#[cfg(test)]
+mod the_model_facing_contract {
+    use crate::builtin::read_only_registry;
+    use crate::grammar::registry_gbnf;
+
+    /// **The investigate grammar is frozen.**
+    ///
+    /// Spec 23 re-backed `search_code` and `find_symbol` with an index, and the whole
+    /// point was that the model could not tell. The six-tool menu is one of the few
+    /// things in this project with a measurement behind it (`run_command` used 12/12
+    /// with six tools, 3/12 with sixteen), so the tool names, their schemas and the
+    /// grammar they generate are the contract -- improvements go *behind* them.
+    ///
+    /// A golden, byte for byte, written as a raw string so what you read here is
+    /// exactly what the model is constrained by. Changing it is allowed; changing it
+    /// by accident is not.
+    #[test]
+    fn the_read_only_registry_gbnf_is_unchanged() {
+        let expected = r###"root ::= call-read-file | call-list-dir | call-search-code | call-find-symbol | call-read-function | call-finish
+call-read-file ::= "{" ws "\"tool\"" ws ":" ws "\"read_file\"" ws "," ws "\"path\"" ws ":" ws string (ws "," ws "\"start\"" ws ":" ws integer)? (ws "," ws "\"limit\"" ws ":" ws integer)? ws "}"
+call-list-dir ::= "{" ws "\"tool\"" ws ":" ws "\"list_dir\"" ws "," ws "\"path\"" ws ":" ws string ws "}"
+call-search-code ::= "{" ws "\"tool\"" ws ":" ws "\"search_code\"" ws "," ws "\"query\"" ws ":" ws string ws "}"
+call-find-symbol ::= "{" ws "\"tool\"" ws ":" ws "\"find_symbol\"" ws "," ws "\"name\"" ws ":" ws string ws "}"
+call-read-function ::= "{" ws "\"tool\"" ws ":" ws "\"read_function\"" ws "," ws "\"path\"" ws ":" ws string ws "," ws "\"name\"" ws ":" ws string ws "}"
+call-finish ::= "{" ws "\"tool\"" ws ":" ws "\"finish\"" ws "," ws "\"summary\"" ws ":" ws string ws "}"
+string ::= "\"" ( [^"\\] | "\\" . )* "\""
+integer ::= "-"? [0-9]+
+ws ::= [ \t\n]*
+"###;
+        assert_eq!(registry_gbnf(&read_only_registry()), expected);
+    }
+
+    /// The tool names and arity the grammar is built from, stated independently of
+    /// the grammar text so a rename cannot pass by editing one golden.
+    #[test]
+    fn the_read_only_menu_is_still_the_measured_six() {
+        let reg = read_only_registry();
+        let names: Vec<&str> = reg.specs().iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "read_file",
+                "list_dir",
+                "search_code",
+                "find_symbol",
+                "read_function",
+                "finish"
+            ]
+        );
+        // search_code still takes exactly one parameter, `query`.
+        let sc = reg
+            .specs()
+            .iter()
+            .find(|s| s.name == "search_code")
+            .unwrap();
+        let params: Vec<&str> = sc.params.iter().map(|p| p.name).collect();
+        assert_eq!(params, vec!["query"]);
+    }
+}
