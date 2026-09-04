@@ -13,11 +13,13 @@
 
 pub mod fsutil;
 pub mod report;
+pub mod retrieval;
 pub mod runner;
 pub mod solver;
 pub mod task;
 
 pub use report::Report;
+pub use retrieval::{QueryResult, RetrievalQuery, RetrievalSuite};
 pub use runner::{run_suite, run_task, Outcome, TaskResult};
 pub use solver::{AgentSolver, FileSolver, FnSolver, NoopSolver, Solver};
 pub use task::{EvalTask, TaskSuite};

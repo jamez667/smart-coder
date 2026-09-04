@@ -1,0 +1,141 @@
+# The retrieval eval (spec 23 — Measurement).
+#
+# Model-free, GPU-free, deterministic. Search is a pure function of the repo bytes
+# and the question, so this suite needs no flakiness allowance and no live backend:
+# it runs inside scripts/check.sh like any unit test, and a regression in ranking
+# fails the build instead of quietly making investigations worse.
+#
+# Each entry is a question asked THE WAY A USER ASKS IT — vague, symptom-first, in
+# the user's words rather than the code's. That is the whole point: a query written
+# in the code's vocabulary is a query the old grep already answered.
+#
+# Grading is "the expected target appears in the top-k hits":
+#   strict = 5   the model would see it near the top of a lead block
+#   loose  = 25  it is at least in the result set
+# A query with `symbol` set must match that symbol; with only `path`, any hit in
+# that file counts.
+#
+# Fixtures:
+#   fixtures/starfield        the real void-claim starfield.rs plus siblings, so
+#                             the canonical question has somewhere to be wrong.
+#   ../ladder/tasks/*/fixture the engine slices the ladder already carries.
+#   ../..                     this repo, which is the largest and least forgiving
+#                             fixture available and the one being searched daily.
+#                             The suite's own directory is excluded when it is the
+#                             fixture -- see the runner. A file containing every
+#                             question verbatim would otherwise win every query.
+
+# ---------------------------------------------------------------------------
+# The canonical entry. The question that motivated the whole spec, asked exactly
+# as the user asked it. `draw_trails` must be the top hit.
+# ---------------------------------------------------------------------------
+[[queries]]
+id = "starfield-trail-thickness"
+question = "why on the jump screen is the trail behind the stars thin before it gets thick? it should be the other way around"
+fixture = "fixtures/starfield"
+path = "src/fx/starfield.rs"
+symbol = "draw_trails"
+strict = true
+
+# The same file, asked a different way: no jargon at all, just the symptom.
+[[queries]]
+id = "starfield-streaks-wrong-way"
+question = "the streaks coming off the stars look backwards"
+fixture = "fixtures/starfield"
+path = "src/fx/starfield.rs"
+strict = true
+
+# A neighbouring concern in the same fixture, to prove the index is discriminating
+# rather than just always answering starfield.rs.
+[[queries]]
+id = "starfield-hud-bar"
+question = "where is the bar that shows how much hull is left drawn"
+fixture = "fixtures/starfield"
+path = "src/ui/hud.rs"
+symbol = "draw_hull_bar"
+strict = true
+
+# ---------------------------------------------------------------------------
+# The ladder's engine fixtures, asked as symptoms.
+# ---------------------------------------------------------------------------
+[[queries]]
+id = "diagonal-path-cuts-corners"
+question = "why does the path cut corners around obstacles when moving diagonally"
+fixture = "../ladder/tasks/engine-diagonal-path/fixture"
+path = "pathfind.rs"
+strict = true
+
+[[queries]]
+id = "grid-flood-fill"
+question = "how do we group touching tiles of the same kind together"
+fixture = "../ladder/tasks/engine-grid-scan/fixture"
+path = "src/floor.rs"
+symbol = "tile_regions"
+strict = true
+
+# ---------------------------------------------------------------------------
+# smart-coder itself: the biggest fixture available, and the one a developer
+# actually searches. Questions are phrased the way someone unfamiliar with the
+# code would ask them.
+# ---------------------------------------------------------------------------
+[[queries]]
+id = "sc-prompt-token-budget"
+question = "where do we decide how many tokens the prompt is allowed to use"
+fixture = "../.."
+path = "crates/sc-context/src/budget.rs"
+strict = false
+
+[[queries]]
+id = "sc-observation-truncation"
+question = "why does a long tool result get cut off before the model sees all of it"
+fixture = "../.."
+path = "crates/sc-context/src/truncate.rs"
+strict = false
+
+[[queries]]
+id = "sc-repo-map-ranking"
+question = "how are the most important symbols in a repository picked out and ranked"
+fixture = "../.."
+path = "crates/sc-index/src/repomap.rs"
+strict = false
+
+[[queries]]
+id = "sc-history-compaction"
+question = "what happens to older turns when the history gets too long"
+fixture = "../.."
+path = "crates/sc-context/src/history.rs"
+symbol = "split_for_compaction"
+strict = true
+
+# ---------------------------------------------------------------------------
+# KNOWN MISSES — kept, and kept failing-by-declaration, because deleting a query
+# a lexical index cannot answer would hide exactly the evidence that decides
+# whether it ever needs help.
+#
+# `expect = "miss"` asserts the target is NOT found. That reads backwards until
+# you consider the alternative: a suite of only-winnable questions measures
+# nothing, and silently becomes a suite of questions somebody tuned the ranker
+# against. These two are the recorded shape of the gap, and if a future change
+# starts answering one, this suite goes red and says so.
+#
+# Both fail for the same reason, which is the honest limit of a lexical core: the
+# user's words and the code's words genuinely do not overlap. The grammar file
+# says "constraint", "GBNF", "malformed"; it never says "json instead of prose".
+# The permission gate says "confirm", "side effect", "destructive"; it never says
+# "delete files". Per spec 23, the sanctioned fix if these ever matter enough is
+# query expansion via the orchestrator model -- a rewritten query, still scored by
+# this same deterministic index -- not embeddings.
+# ---------------------------------------------------------------------------
+[[queries]]
+id = "sc-grammar-constrained"
+question = "how do we force the model to reply with valid json instead of prose"
+fixture = "../.."
+path = "crates/sc-tools/src/grammar.rs"
+expect = "miss"
+
+[[queries]]
+id = "sc-tool-permission"
+question = "what stops the agent running a command that would delete files"
+fixture = "../.."
+path = "crates/sc-core/src/agent/dispatch.rs"
+expect = "miss"

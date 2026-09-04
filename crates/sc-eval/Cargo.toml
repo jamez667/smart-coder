@@ -19,6 +19,8 @@ sc-proto = { path = "../sc-proto" }
 sc-model = { path = "../sc-model" }
 sc-core = { path = "../sc-core" }
 sc-tools = { path = "../sc-tools" }
+# The retrieval eval (spec 23) scores sc-index's search with no model at all.
+sc-index = { path = "../sc-index" }
 sc-verify = { path = "../sc-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }

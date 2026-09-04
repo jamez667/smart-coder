@@ -60,6 +60,16 @@ CARGO_TARGET_DIR="$CRAFT_TARGET" cargo clippy -p sc-win --all-targets --features
 echo "==> tests (craft-only)"
 CARGO_TARGET_DIR="$CRAFT_TARGET" cargo test -p sc-win --features craft-only
 
+# Retrieval quality (spec 23): does a vague, user-phrased question still find the
+# right function? Model-free and GPU-free -- search is a pure function of the repo
+# bytes and the query -- so it is an ordinary test, and a ranking regression fails
+# the build naming the query instead of quietly making investigations worse.
+#
+# Run explicitly (it is part of `cargo test --workspace` above) so its report is
+# visible in the gate's output rather than buried among two thousand other tests.
+echo "==> retrieval eval"
+cargo test --quiet -p sc-eval retrieval:: -- --nocapture
+
 # Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
 # Deterministic and model-free, so it costs nothing to run every time. `unknown`
 # never gates and an ungoverned crate only warns — this fails on BROKEN or STALE.

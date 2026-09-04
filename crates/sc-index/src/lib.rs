@@ -13,6 +13,7 @@
 mod lexicon;
 mod pagerank;
 mod repomap;
+mod search;
 mod store;
 mod symbols;
 mod walk;
@@ -21,6 +22,7 @@ mod workspace;
 pub use lexicon::{tokenize, Field, STOPWORDS};
 pub use pagerank::{pagerank, Edge};
 pub use repomap::{build_repo_map, render_repo_map, Boosts, RankedSymbol, SourceFile};
+pub use search::{render, search, Hit, MAX_HITS};
 pub use store::{
     FileRecord, IndexedSymbol, Posting, RepoIndex, INDEX_FORMAT_VERSION, INDEX_REL_PATH,
 };

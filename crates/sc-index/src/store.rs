@@ -44,6 +44,15 @@ pub struct IndexedSymbol {
     pub line: usize,
     /// 1-based inclusive end line. Equals `line` for symbols with no resolvable body.
     pub end_line: usize,
+    /// Whether this definition is test code.
+    ///
+    /// Most tests in this project are inline `#[cfg(test)] mod tests` blocks, not
+    /// files under `tests/`, so a path rule alone misses them — and test names are
+    /// long English sentences, exactly the shape a natural-language query matches by
+    /// accident. Recorded per symbol so search can rank a test below the code it
+    /// describes without pretending the test does not exist.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_test: bool,
 }
 
 impl IndexedSymbol {
@@ -273,6 +282,7 @@ fn build_record(rel: &str, text: &str, size: u64, mtime: Option<u64>, hash: Stri
     // spans and line numbers.
     let src = text.replace("\r\n", "\n").replace('\r', "\n");
     let lang = Language::from_path(rel);
+    let rel_is_test = path_is_test(rel);
     let mut symbols = Vec::new();
     let mut refs = Vec::new();
     if let Some(lang) = lang {
@@ -281,9 +291,11 @@ fn build_record(rel: &str, text: &str, size: u64, mtime: Option<u64>, hash: Stri
         // (~13s on this repo's largest file alone).
         let (spans, r) = extract_all(lang, &src);
         refs = r;
+        let test_spans = test_regions(&src, &spans);
         symbols = spans
             .into_iter()
             .map(|(name, line, end_line)| IndexedSymbol {
+                is_test: rel_is_test || test_spans.iter().any(|(s, e)| line >= *s && line <= *e),
                 name,
                 line,
                 end_line,
@@ -309,6 +321,53 @@ fn build_record(rel: &str, text: &str, size: u64, mtime: Option<u64>, hash: Stri
     }
 }
 
+/// Whether a workspace-relative path is a test file by convention.
+pub fn path_is_test(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    lower.contains("/tests/")
+        || lower.starts_with("tests/")
+        || lower.contains("test_")
+        || lower.contains("_test.")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+}
+
+/// Line spans covered by test code: `#[cfg(test)]` modules and `#[test]`/`#[bench]`
+/// functions, plus Python `def test_*`.
+///
+/// Attribute-driven rather than name-driven, because the attribute is what actually
+/// makes something a test. A `#[cfg(test)] mod tests` block claims every definition
+/// inside it, which is how the bulk of this project's tests are written.
+fn test_regions(src: &str, spans: &[(String, usize, usize)]) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let t = raw.trim();
+        let marks_test = t.starts_with("#[cfg(test)]")
+            || t.starts_with("#[test]")
+            || t.starts_with("#[bench]")
+            || t.starts_with("#[tokio::test]");
+        if !marks_test {
+            continue;
+        }
+        // The attribute belongs to the next definition that starts at or below it.
+        if let Some((_, s, e)) = spans
+            .iter()
+            .filter(|(_, s, _)| *s > i)
+            .min_by_key(|(_, s, _)| *s)
+        {
+            out.push((*s, *e));
+        }
+    }
+    // Python has no attribute; the convention is the name.
+    for (name, s, e) in spans {
+        if name.starts_with("test_") {
+            out.push((*s, *e));
+        }
+    }
+    out
+}
+
 fn count_todos(src: &str) -> usize {
     src.lines()
         .filter(|l| {
@@ -329,9 +388,10 @@ fn count_todos(src: &str) -> usize {
 fn build_postings(src: &str, symbols: &[IndexedSymbol]) -> Vec<Posting> {
     // term -> field -> anchor line -> count, all ordered so the output is deterministic.
     let mut acc: BTreeMap<(String, Field, usize), u32> = BTreeMap::new();
+    let doc_owner = doc_comment_owners(src, symbols);
 
     for (i, raw) in src.lines().enumerate() {
-        let line = anchor_line(symbols, i + 1);
+        let line = anchor_line(symbols, &doc_owner, i + 1);
         let (code, comment, strings) = split_line(raw);
         for (text, field) in [
             (comment, Field::Comment),
@@ -361,15 +421,61 @@ fn build_postings(src: &str, symbols: &[IndexedSymbol]) -> Vec<Posting> {
         .collect()
 }
 
-/// The line a term at `line` is recorded against: the start of the innermost
-/// definition enclosing it, or `line` itself when nothing encloses it.
-fn anchor_line(symbols: &[IndexedSymbol], line: usize) -> usize {
-    symbols
+/// How many lines of comment directly above a definition still count as part of it.
+///
+/// A doc comment is not inside the definition's span, but it is unambiguously *about*
+/// it — and it is the single most valuable text in the file for retrieval, because it
+/// is where the author wrote in the user's language rather than the compiler's.
+/// Anchoring it to the definition is what lets "why does the screen flicker with a
+/// stale buffer" return `fn commit_frame` instead of a bare line number.
+///
+/// Bounded rather than unbounded: a long licence header at the top of a file is not a
+/// description of whatever function happens to follow it.
+const DOC_COMMENT_LOOKAHEAD: usize = 24;
+
+/// The line a term at `line` is recorded against: the innermost definition enclosing
+/// it, else the definition its doc comment introduces, else `line` itself.
+fn anchor_line(
+    symbols: &[IndexedSymbol],
+    doc_owner: &BTreeMap<usize, usize>,
+    line: usize,
+) -> usize {
+    if let Some(s) = symbols
         .iter()
         .filter(|s| s.contains(line))
         .min_by_key(|s| s.len_lines())
-        .map(|s| s.line)
-        .unwrap_or(line)
+    {
+        return s.line;
+    }
+    doc_owner.get(&line).copied().unwrap_or(line)
+}
+
+/// Map each comment line in a run directly above a definition to that definition's
+/// line. Only *contiguous* comment lines count, so a blank line ends the association.
+fn doc_comment_owners(src: &str, symbols: &[IndexedSymbol]) -> BTreeMap<usize, usize> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut owners = BTreeMap::new();
+    for s in symbols {
+        // Walk upward from the definition over contiguous comment lines.
+        let mut l = s.line;
+        let mut steps = 0usize;
+        while l > 1 && steps < DOC_COMMENT_LOOKAHEAD {
+            let above = lines[l - 2].trim();
+            let is_comment = above.starts_with("//")
+                || above.starts_with('#')
+                || above.starts_with("/*")
+                || above.starts_with('*');
+            if !is_comment {
+                break;
+            }
+            // An inner definition claims its own doc comment; the outer one does not
+            // steal it back.
+            owners.entry(l - 1).or_insert(s.line);
+            l -= 1;
+            steps += 1;
+        }
+    }
+    owners
 }
 
 /// Split one line into `(code, comment, string-literals)`.
@@ -455,6 +561,7 @@ mod tests {
         assert_eq!(rec.language.as_deref(), Some("rust"));
         let names: Vec<&str> = rec.symbols.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second"]);
+        assert!(rec.symbols.iter().all(|s| !s.is_test));
         // The span covers the whole body, not just the signature.
         assert_eq!(rec.symbols[0].line, 1);
         assert_eq!(rec.symbols[0].end_line, 3);
@@ -538,6 +645,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A `#[cfg(test)] mod tests` block is test code even in a source file.** Most
+    /// of this project's tests live inline, so a path rule alone would call them
+    /// production code and let their long English names outrank the code they test.
+    #[test]
+    fn inline_test_modules_are_marked_as_tests() {
+        let root = temp_repo("inlinetests");
+        write(
+            &root,
+            "src/a.rs",
+            "pub fn truncate_result() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_result_that_was_cut_off_is_reported() {}
+}
+",
+        );
+        let idx = RepoIndex::build(&root);
+        let by = |n: &str| {
+            idx.files["src/a.rs"]
+                .symbols
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap_or_else(|| panic!("no symbol {n}"))
+                .is_test
+        };
+        assert!(!by("truncate_result"), "production fn is not a test");
+        assert!(by("a_result_that_was_cut_off_is_reported"), "inline test");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_deleted_file_drops_out() {
         let root = temp_repo("deleted");
@@ -573,6 +712,38 @@ mod tests {
         assert_eq!(
             p.iter().find(|x| x.term == "thick").map(|x| x.line),
             Some(2)
+        );
+        // So does the comment ABOVE it: a doc comment describes the definition it
+        // introduces, and is the most valuable text in the file for retrieval.
+        assert_eq!(p.iter().find(|x| x.term == "thin").map(|x| x.line), Some(2));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_doc_comment_belongs_to_the_definition_below_it_but_a_header_does_not() {
+        let root = temp_repo("doccomment");
+        write(
+            &root,
+            "a.rs",
+            "//! A licence-ish module header mentioning zebra.
+
+// describes the commit
+pub fn commit_frame() {
+    swap();
+}
+",
+        );
+        let idx = RepoIndex::build(&root);
+        let p = &idx.files["a.rs"].postings;
+        // "describes" sits on line 3, directly above the fn on line 4: it anchors there.
+        assert_eq!(
+            p.iter().find(|x| x.term == "describe").map(|x| x.line),
+            Some(4)
+        );
+        // The module header is separated by a blank line and belongs to nobody.
+        assert_eq!(
+            p.iter().find(|x| x.term == "zebra").map(|x| x.line),
+            Some(1)
         );
         let _ = std::fs::remove_dir_all(&root);
     }
