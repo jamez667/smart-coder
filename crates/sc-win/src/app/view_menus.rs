@@ -27,6 +27,9 @@ impl App {
             thread = thread.push(self.view_proposed_file(i, pf));
         }
         // A proposed command (the Command intent) → a Run card that pipes it into the terminal.
+        if let Some(fix) = &self.proposed_fix {
+            thread = thread.push(self.view_proposed_fix(fix));
+        }
         if let Some(cmd) = &self.proposed_command {
             thread = thread.push(self.view_proposed_command(cmd));
         }
@@ -317,6 +320,43 @@ impl App {
             .padding([5, 12])
             .style(menu_item_style);
         container(column![head, cmd_line, row![run, dismiss].spacing(8)].spacing(6))
+            .width(Fill)
+            .padding(10)
+            .style(dropdown_style)
+            .into()
+    }
+
+    /// The "Do you want me to implement this change?" card.
+    ///
+    /// An investigation that has just named a file, a line and a fix should offer to
+    /// make it rather than wait to be asked -- and when it WAS asked, it could not:
+    /// chat runs the read-only registry, so the model restated the fix a third time
+    /// instead of acting. The capability existed all along in `run_iterate`; only the
+    /// route from here was missing.
+    ///
+    /// A proposal, never an action, for the same reason the Run card is: this edits the
+    /// user's source, so it waits for a click. The button says what will happen.
+    pub(crate) fn view_proposed_fix(&self, _fix: &str) -> Element<'_, Message> {
+        let head = row![
+            text("✎ implement this change?").size(13).color(ACCENT),
+            Space::new().width(Fill),
+        ]
+        .align_y(iced::Alignment::Center);
+        let blurb = text(
+            "I can make this edit for you. It runs with the usual safety net — the files \
+             it touches are reverted if the change doesn't build.",
+        )
+        .size(12)
+        .color(FG_MUTED);
+        let go = button(text("✎ Implement it").size(13))
+            .on_press(Message::ImplementProposedFix)
+            .padding([5, 12])
+            .style(primary_button);
+        let no = button(text("No thanks").size(13).color(FG_MUTED))
+            .on_press(Message::DismissProposedFix)
+            .padding([5, 12])
+            .style(menu_item_style);
+        container(column![head, blurb, row![go, no].spacing(8)].spacing(6))
             .width(Fill)
             .padding(10)
             .style(dropdown_style)

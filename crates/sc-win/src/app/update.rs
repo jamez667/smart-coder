@@ -520,6 +520,16 @@ impl App {
                 }
             }
             Message::DismissProposedCommand => self.proposed_command = None,
+            Message::ImplementProposedFix => {
+                if let Some(instruction) = self.proposed_fix.take() {
+                    // `start_iterate_with` has existed since the line-comment fix path and
+                    // was never reachable from chat -- the capability was there, the route
+                    // was not. Iterate runs with write tools under a git safety net: files
+                    // it touches are reverted if the run does not end green.
+                    self.start_iterate_with(instruction);
+                }
+            }
+            Message::DismissProposedFix => self.proposed_fix = None,
             Message::ChatEditorAction(i, action) => {
                 // Read-only: apply selection/cursor/scroll actions so drag-select + Ctrl+C
                 // work, but never edits — the message text is immutable.

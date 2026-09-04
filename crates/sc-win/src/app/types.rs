@@ -283,6 +283,10 @@ pub(crate) struct App {
     /// awaiting a one-click Run into the integrated terminal. `None` when the latest reply
     /// proposed no command.
     pub(crate) proposed_command: Option<String>,
+    /// A fix an investigation offered to make: the instruction an iterate run would be
+    /// given. `Some` shows the "Implement this change?" card under the thread. Held
+    /// rather than run, because editing source is not a decision a classifier makes.
+    pub(crate) proposed_fix: Option<String>,
     /// Whether the next chat turn should let the model *reason* (slower, deeper) vs. answer
     /// directly (`/no_think`, fast). Off by default — this 8B rambles when left to think, so
     /// fast conclusions are the default and Think is opt-in per the composer toggle.
@@ -537,6 +541,7 @@ impl Default for App {
             chat_session: None,
             proposed_files: Vec::new(),
             proposed_command: None,
+            proposed_fix: None,
             think: false,
             bottom_tab: BottomTab::Verification,
             terminal: sc_win::terminal::Terminal::default(),
@@ -784,6 +789,11 @@ pub(crate) enum Message {
     RunProposedCommand,
     /// Dismiss the chat's proposed command without running it.
     DismissProposedCommand,
+    /// Accept the fix an investigation offered: start an iterate run (write tools, git
+    /// safety net) with the instruction it proposed.
+    ImplementProposedFix,
+    /// Dismiss the offered fix without making it.
+    DismissProposedFix,
     /// An action inside a chat turn's read-only editor (selection/scroll only — edits are
     /// dropped so the message text stays immutable). `usize` is the turn index.
     ChatEditorAction(usize, iced::widget::text_editor::Action),

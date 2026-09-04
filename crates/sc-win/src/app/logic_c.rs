@@ -325,6 +325,11 @@ impl App {
                     }
                     self.chat_session = None;
                 }
+                sc_win::chat_session::ChatEvent::ProposedFix(instruction) => {
+                    // Held, not acted on. The card below the thread offers it; nothing
+                    // touches the user's source until they click.
+                    self.proposed_fix = Some(instruction);
+                }
                 sc_win::chat_session::ChatEvent::Failed(msg) => {
                     self.streaming = None;
                     self.working = None;

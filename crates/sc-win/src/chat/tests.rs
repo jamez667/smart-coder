@@ -2,7 +2,7 @@
 
 use super::conversation::{Conversation, Mode, KEEP_TURNS};
 use super::intent::{intent_grammar, ChatIntent};
-use super::reply::{extract_command, parse_reply, visible_so_far};
+use super::reply::{extract_command, parse_reply, proposed_fix, visible_so_far};
 use super::spec::{prepend_request, wrap_plan_prose};
 
 #[test]
@@ -674,5 +674,55 @@ mod investigation_question {
     #[test]
     fn an_empty_conversation_yields_an_empty_question() {
         assert!(convo().investigation_question().is_empty());
+    }
+}
+
+/// Offering to make the fix (the investigate path).
+mod offering_the_fix {
+    use super::*;
+
+    /// **The case from the screenshot.** An investigation named the file, the lines and
+    /// the change; the user then had to ask "can you do it?" and got the fix restated a
+    /// third time, because chat runs the read-only registry. The offer should come with
+    /// the answer.
+    #[test]
+    fn an_answer_naming_a_file_and_a_fix_is_offered() {
+        let answer = "The trail is drawn in crates/void_engine/src/fx/starfield.rs, in \
+                      draw_trails (around line 168). The fix is to swap the widths so the \
+                      head is the thick segment and the tail is the thin one.";
+        let fix = proposed_fix("why is the trail thin before it gets thick?", answer)
+            .expect("should offer");
+        // The instruction carries the ANSWER -- that is where the file and remedy are.
+        assert!(fix.contains("starfield.rs"), "{fix}");
+        assert!(fix.contains("draw_trails"), "{fix}");
+        // And the question, as context for why.
+        assert!(fix.contains("why is the trail thin"), "{fix}");
+        // Scoped: an iterate run must not wander off refactoring.
+        assert!(fix.contains("nothing else"), "{fix}");
+    }
+
+    /// **An offer the user did not want is worse than no offer**, because clicking it
+    /// edits their source. An explanation that proposes no change must not sprout a
+    /// button.
+    #[test]
+    fn an_explanation_that_proposes_no_change_is_not_offered() {
+        // Names a file, but only describes how it works.
+        let explain = "Rendering happens in crates/void_engine/src/fx/starfield.rs. \
+                       draw_trails runs once per frame and iterates the star list, \
+                       drawing two line segments per star.";
+        assert!(proposed_fix("how does the starfield render?", explain).is_none());
+    }
+
+    #[test]
+    fn an_answer_naming_no_file_is_not_offered() {
+        // Reads like a fix, but there is nothing for an iterate run to open.
+        let vague = "The bug is that the widths are the wrong way round; you should swap them.";
+        assert!(proposed_fix("why is it backwards?", vague).is_none());
+    }
+
+    #[test]
+    fn an_empty_answer_is_not_offered() {
+        assert!(proposed_fix("why?", "").is_none());
+        assert!(proposed_fix("why?", "   ").is_none());
     }
 }

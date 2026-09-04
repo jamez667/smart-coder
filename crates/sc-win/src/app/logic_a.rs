@@ -549,6 +549,7 @@ impl App {
         });
         self.proposed_files.clear();
         self.proposed_command = None;
+        self.proposed_fix = None;
         self.intent.clear();
         if self.debug {
             // Show the generate prompt for the most likely intent path (feature plan is the one
@@ -708,6 +709,8 @@ impl App {
             let reply = match ev {
                 // Triage is a one-word classify — ignore streamed tokens, act on the final.
                 sc_win::chat_session::ChatEvent::Token(_) => continue,
+                // Triage never investigates, so it never offers a fix.
+                sc_win::chat_session::ChatEvent::ProposedFix(_) => continue,
                 sc_win::chat_session::ChatEvent::Reply { text, .. } => text,
                 sc_win::chat_session::ChatEvent::Failed(_) => {
                     // On a failed triage, fall back to planning (the safe route).
@@ -820,6 +823,9 @@ impl App {
                         }
                     }
                 }
+                // A replace turn rewrites a selection; it never investigates, so it
+                // never offers a fix.
+                sc_win::chat_session::ChatEvent::ProposedFix(_) => {}
                 sc_win::chat_session::ChatEvent::Reply { text, .. } => {
                     done = Some((text, String::new()));
                     break;

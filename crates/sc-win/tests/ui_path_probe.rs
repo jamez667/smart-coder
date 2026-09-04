@@ -53,6 +53,7 @@ fn the_gui_path_answers_the_star_trail_question() {
     let mut reply = String::new();
     let mut failed: Option<String> = None;
     // Drain like the UI does: `drain()` returns a batch each tick.
+    let mut offered: Option<String> = None;
     'outer: loop {
         for ev in session.drain() {
             match ev {
@@ -60,6 +61,18 @@ fn the_gui_path_answers_the_star_trail_question() {
                     print!("{t}");
                     let _ = std::io::stdout().flush();
                     streamed.push_str(&t);
+                }
+                // The offer to make the fix. Recorded rather than ignored: this probe
+                // drives the GUI's exact path, so it is where "did the offer actually
+                // reach the UI?" gets answered without a human clicking.
+                sc_win::chat_session::ChatEvent::ProposedFix(instruction) => {
+                    println!(
+                        "
+
+[OFFERED A FIX] {} chars",
+                        instruction.len()
+                    );
+                    offered = Some(instruction);
                 }
                 sc_win::chat_session::ChatEvent::Reply {
                     text, truncated, ..
@@ -127,5 +140,18 @@ fn the_gui_path_answers_the_star_trail_question() {
     assert!(
         reply.to_lowercase().contains("starfield"),
         "the answer must name the file: {reply}"
+    );
+    // And it must OFFER TO MAKE IT.
+    //
+    // The user's report: after being told exactly where the change went, they had to
+    // ask "can you do it?" -- and the answer was the fix restated a third time, because
+    // chat runs the read-only registry. An investigation that names a file and a remedy
+    // hands the UI an offer along with the answer.
+    let offered = offered.expect(
+        "an answer naming a file and a fix must offer to implement it -- the user should          not have to ask",
+    );
+    assert!(
+        offered.to_lowercase().contains("starfield"),
+        "the offered instruction must carry the fix: {offered}"
     );
 }

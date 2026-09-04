@@ -165,3 +165,69 @@ fn fence_file_name(line: &str) -> Option<&str> {
         Some(name)
     }
 }
+
+/// Whether an investigation's answer actually proposes a CHANGE, and the instruction
+/// an iterate run should be given if so.
+///
+/// The judgement is deliberately conservative and made from the answer's own words,
+/// not by asking a second model. An investigation that concluded "this is working as
+/// intended" or that only explained how something works must NOT sprout a button
+/// offering to change it — an offer the user did not want is worse than no offer,
+/// because clicking it edits their source.
+///
+/// So: the answer must name a file, and it must say something that reads as a
+/// remedy. Both, not either.
+pub fn proposed_fix(question: &str, answer: &str) -> Option<String> {
+    let a = answer.trim();
+    if a.is_empty() {
+        return None;
+    }
+    if !names_a_file(a) || !proposes_a_change(a) {
+        return None;
+    }
+    // The instruction an iterate run receives. It carries the ANSWER, because that is
+    // where the file, the line and the remedy are; the question is context for why.
+    Some(format!(
+        "Apply this fix.\n\nThe user asked:\n\n{}\n\nThe investigation found:\n\n{}\n\nMake exactly \
+         this change and nothing else. Do not refactor surrounding code.",
+        question.trim(),
+        a
+    ))
+}
+
+/// Whether the text names something that looks like a source file.
+fn names_a_file(text: &str) -> bool {
+    const EXTS: &[&str] = &[
+        ".rs", ".py", ".cs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".c", ".h", ".cpp",
+        ".toml", ".json", ".yaml", ".yml",
+    ];
+    EXTS.iter().any(|e| text.contains(e))
+}
+
+/// Whether the text reads as proposing a remedy rather than only explaining.
+///
+/// A word list, not a model call: this runs on every answered investigation, and a
+/// second model call would be both slow and nondeterministic for a decision whose
+/// only job is deciding whether to show a button.
+fn proposes_a_change(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    const CUES: &[&str] = &[
+        "the fix",
+        "fix is",
+        "fix:",
+        "should be",
+        "should say",
+        "needs to",
+        "change ",
+        "swap ",
+        "replace ",
+        "remove ",
+        "add ",
+        "instead of",
+        "rather than",
+        "incorrect",
+        "wrong",
+        "bug",
+    ];
+    CUES.iter().any(|c| lower.contains(c))
+}

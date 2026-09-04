@@ -42,6 +42,13 @@ pub enum ChatEvent {
         intent: Option<ChatIntent>,
         truncated: bool,
     },
+    /// The investigation found a fix and is OFFERING to make it.
+    ///
+    /// Carries the instruction an iterate run would be given, not the fix itself: the
+    /// app shows it on a card with a button, and nothing is edited until the user
+    /// clicks. Emitted alongside [`ChatEvent::Reply`], never instead of it — the answer
+    /// stands on its own whether or not the offer is taken.
+    ProposedFix(String),
     /// The turn failed (backend unreachable, etc.) — a human-readable reason.
     Failed(String),
 }
@@ -418,6 +425,23 @@ fn investigate_into_chat(
             text.trim()
         );
         let _ = std::fs::write(dir.join(format!("investigate-{stamp}.md")), body);
+    }
+
+    // OFFER TO DO IT.
+    //
+    // An investigation that has just named a file, a line and a fix should not wait to
+    // be asked "can you do it?" -- and when it was asked, it could not: chat runs the
+    // READ-ONLY registry, so the model restated the fix a third time instead. The
+    // capability existed the whole time (`run_iterate`, with write tools and a git
+    // safety net) and was simply not reachable from here.
+    //
+    // The offer is a proposal, never an action. Same shape as the `command` intent's
+    // Run card: the user sees what would happen and clicks, because editing source is
+    // not something a classifier should decide on its own.
+    if answered {
+        if let Some(fix) = crate::chat::proposed_fix(question, &text) {
+            let _ = tx.send(ChatEvent::ProposedFix(fix));
+        }
     }
 
     let _ = tx.send(ChatEvent::Reply {
