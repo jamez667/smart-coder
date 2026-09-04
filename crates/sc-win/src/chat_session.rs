@@ -321,8 +321,12 @@ fn investigate_into_chat(
             crate::session::UiEvent::Agent(a) => match a {
                 sc_core::AgentEvent::ToolCall { tool, arg } => {
                     if tool == "finish" {
-                        // The finish argument IS the answer.
-                        answer = arg;
+                        // The finish argument IS the answer -- and it is model-written
+                        // prose, so it gets the same stripping as any other reply. A
+                        // grammar-constrained call does not normally carry `<think>`, but
+                        // "does not normally" is how the progress lines leaked, and the
+                        // cost of being sure is one function call.
+                        answer = crate::chat::visible_so_far(&arg);
                     } else {
                         steps += 1;
                         // A progress line: shown live, and kept in `trace` so a run that
@@ -342,10 +346,19 @@ fn investigate_into_chat(
                 // geometry by checking the call site." That is exactly the reasoning the user
                 // asked to see, and it was being thrown away with the rest of the raw reply.
                 sc_core::AgentEvent::ModelTurn { raw, .. } => {
+                    // STRIP THE THINKING FIRST.
+                    //
+                    // A reasoning model streams into `reasoning_content`, and the backend
+                    // wraps each delta in `<think>…</think>` -- deliberately, because that is
+                    // the one representation every consumer here already strips. This path
+                    // was the consumer that did not, so a reply arriving as
+                    // `<think> task </think><think> is </think><think> clear </think>` was
+                    // echoed into the chat verbatim, one tag pair per token.
+                    let visible = crate::chat::visible_so_far(&raw);
                     // Only the prose BEFORE the first JSON object, and only when it is short:
                     // a long preamble is the thinking-out-loud that fills the token cap, and
                     // echoing that would bury the progress rather than explain it.
-                    let prose = raw.split('{').next().unwrap_or("").trim();
+                    let prose = visible.split('{').next().unwrap_or("").trim();
                     if !prose.is_empty() && prose.len() <= 200 {
                         let line = format!("{prose}\n");
                         trace.push_str(&line);

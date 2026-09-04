@@ -726,3 +726,52 @@ mod offering_the_fix {
         assert!(proposed_fix("why?", "   ").is_none());
     }
 }
+
+/// Reasoning tags must never reach a chat bubble — including from the investigate
+/// path's live progress lines.
+mod thinking_never_leaks {
+    use super::*;
+
+    /// **The exact shape the user saw.** A reasoning model streams into
+    /// `reasoning_content`, and the backend wraps EACH DELTA in its own `<think>` pair
+    /// — deliberately, because that is the one representation every consumer strips.
+    /// The investigate progress path was the consumer that did not, so a turn arrived
+    /// as one tag pair per token and was echoed verbatim.
+    #[test]
+    fn per_token_think_tags_are_stripped_entirely() {
+        let raw = "<think> task </think><think> is </think><think> clear </think>\
+                   <think>.</think><think> I</think><think> need </think>\
+                   <think> to </think><think> edit </think><think> void </think>";
+        assert!(visible_so_far(raw).is_empty(), "{:?}", visible_so_far(raw));
+    }
+
+    /// The real prose in front of the tags survives — the progress line is meant to say
+    /// what the model is doing, and throwing that away was the older bug this path was
+    /// written to fix.
+    #[test]
+    fn prose_before_the_thinking_survives() {
+        let raw = "Reading the trail code now.<think>let me check the widths</think>";
+        assert_eq!(visible_so_far(raw), "Reading the trail code now.");
+    }
+
+    /// An unterminated block is the model running out of budget mid-thought. Everything
+    /// after the opening tag is dropped rather than shown as a half-sentence of
+    /// reasoning.
+    #[test]
+    fn an_unterminated_think_block_shows_nothing_after_it() {
+        let raw = "Checking.<think>Wait, actually the head is the leading edge and";
+        assert_eq!(visible_so_far(raw), "Checking.");
+    }
+
+    /// The answer itself gets the same treatment. A grammar-constrained `finish` does
+    /// not normally carry tags — but "does not normally" is exactly how the progress
+    /// lines leaked.
+    #[test]
+    fn a_finish_answer_carrying_tags_is_cleaned() {
+        let arg = "<think>checking</think>The fix is in starfield.rs: swap the widths.";
+        assert_eq!(
+            visible_so_far(arg),
+            "The fix is in starfield.rs: swap the widths."
+        );
+    }
+}
