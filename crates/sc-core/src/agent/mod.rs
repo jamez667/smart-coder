@@ -443,7 +443,25 @@ pub fn run_agent_observed(
         // model that reasons long looks like a model that will not edit. Reads are
         // short and always survived; edits carry the reasoning plus an old_str/new_str
         // payload and did not.
-        req.max_tokens = cfg.response_reserve_tokens;
+        req.max_tokens = if read_only_run {
+            // A READ-ONLY turn is a tiny JSON object -- `{"tool":"read_file","path":"..."}`
+            // is well under 100 tokens, and the one long reply is `finish`, whose answer runs
+            // to ~2,000 characters. Nothing here needs 12,288 tokens.
+            //
+            // The reserve stays where it is because it also sets the PROMPT budget
+            // (`window*fraction - reserve`), and cutting it starved the reading -- measured,
+            // twice, into runs that never answered at all. This caps only the REPLY.
+            //
+            // The point is to make a ramble cheap. Tiel ignores `/no_think` (a Qwen3
+            // directive), so it reasons in prose until something stops it; at 12,288 that
+            // costs ~45,000 characters and most of a minute per turn. At 2,048 the same
+            // ramble is cut in a few seconds and the repair prompt lands while the run still
+            // has budget. The risk documented below -- truncating a long edit payload -- does
+            // not exist here: this registry has no edit tool.
+            2048.min(cfg.response_reserve_tokens)
+        } else {
+            cfg.response_reserve_tokens
+        };
         strategy.prepare_request(&mut req, registry);
         // Stream the turn when enabled, emitting a ContentDelta per token so a UI can show the
         // reply (incl. a file edit being written) appear live. Falls back to blocking generate
@@ -880,6 +898,23 @@ pub fn run_agent_observed(
                 metrics.record_invalid();
                 malformed_streak += 1;
                 let mut detail = e.repair_prompt();
+                // A read-only run that just ran to the cap was THINKING, not malformed.
+                //
+                // The generic repair prompt explains JSON syntax, which is useless advice for
+                // a model whose problem is that it never stopped reasoning. Observed: it came
+                // back with "I got confused in my previous reasoning. Let me re-read the code
+                // carefully" -- and re-read, and was cut off again.
+                //
+                // Tell it the one thing that ends the loop: it already has the code, and the
+                // answer goes in `finish`.
+                if read_only_run && resp.was_truncated() {
+                    detail.push_str(
+                        // ONE LINE: a backslash-continued literal gets reflowed by
+                        // rustfmt into literal spaces, which happened to this very
+                        // string once already.
+                        "\n\nYour reply was cut off because it ran too long. You are THINKING OUT LOUD instead of answering. Do not re-read anything - the code you need is already above. Reply with ONE JSON object now: {\"tool\":\"finish\",\"summary\":\"<your answer: the file, the line, the cause, the fix>\"}. Keep it under 200 words.",
+                    );
+                }
                 // Repeated malformed replies usually mean the model is trying to encode a long
                 // multi-line `edit_file` `old_str` as JSON and mangling it. Steer to `edit_lines`
                 // (line numbers, no old_str) so the encoding problem disappears.
@@ -917,12 +952,14 @@ pub fn run_agent_observed(
                 // A model that could not produce a call twice, having just been told exactly
                 // how, is not going to produce one on the ninth attempt. Stopping returns
                 // the same (empty) result far sooner and leaves a stop reason that says why.
-                // Only on a READ-ONLY run. A build run has a recovery for this that works --
-                // the `edit_lines` steer just above, aimed at the real cause there (a long
-                // `old_str` that will not encode). A read-only run has no edit_file to steer
-                // to: the reply is prose because the model has finished reading and started
-                // explaining, and no repair prompt changes that.
-                if read_only_run && malformed_streak >= 2 {
+                // Only on a READ-ONLY run, and NOT when the reply was truncated.
+                //
+                // A truncated read-only reply now gets its own steer above ("you are thinking
+                // out loud; call finish"), and that steer needs a turn to land. This guard
+                // used to fire first and end the run before the model ever saw it -- measured,
+                // the steer text never reached the prompt at all. Truncation is handled by
+                // `capped_replies`; this one is for a reply that is genuinely unparseable.
+                if read_only_run && !resp.was_truncated() && malformed_streak >= 2 {
                     sink.record(&AgentEvent::Stalled {
                         trigger: "two unparseable replies in a row".to_string(),
                     });

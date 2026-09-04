@@ -808,3 +808,86 @@ fn alternating_cap_hits_still_stop_a_read_only_run() {
         "the stall must name the cap so a transcript says why the run ended"
     );
 }
+
+/// **A read-only turn must not be given room to ramble for 45,000 characters.**
+///
+/// `max_tokens` was the reply reserve (12,288), so a model that reasons in prose — Tiel
+/// ignores `/no_think`, which is a Qwen3 directive — ran to ~45,000 characters and most of
+/// a minute before anything stopped it. A read-only call is a tiny JSON object and the one
+/// long reply is `finish` (~2,000 chars), so nothing here needs that much room.
+///
+/// The reserve itself must NOT be lowered: it also sets the prompt budget, and cutting it
+/// starved the reading and produced runs that never answered.
+#[test]
+fn a_read_only_turn_gets_a_small_reply_cap() {
+    let seen = std::sync::Mutex::new(Vec::new());
+    struct Spy<'a>(&'a std::sync::Mutex<Vec<usize>>);
+    impl ModelBackend for Spy<'_> {
+        fn name(&self) -> &str {
+            "spy"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                max_context_tokens: 32_768,
+                tool_calling: ToolCalling::None,
+                on_device: false,
+            }
+        }
+        fn generate(&self, r: &GenerateRequest) -> Result<GenerateResponse> {
+            self.0.lock().unwrap().push(r.max_tokens);
+            Ok(GenerateResponse::with_finish_reason(
+                r#"{"tool":"finish","summary":"done"}"#,
+                Some("stop".into()),
+            ))
+        }
+    }
+
+    let ws = temp("reply-cap");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+    run_agent_observed(
+        &Spy(&seen),
+        None,
+        &sc_tools::read_only_registry(),
+        &ParseRepair,
+        "why?",
+        &ws,
+        &AgentConfig {
+            response_reserve_tokens: 12288,
+            ..AgentConfig::default()
+        },
+        &FnSink(|_: &AgentEvent| {}),
+    )
+    .unwrap();
+
+    let caps = seen.into_inner().unwrap();
+    assert!(!caps.is_empty(), "the model must have been called");
+    assert!(
+        caps.iter().all(|&c| c <= 2048),
+        "a read-only reply must be capped small, got {caps:?}"
+    );
+}
+
+/// **Prompts sent to the model must not carry reflowed source indentation.**
+///
+/// A `\`-continuation is fine — rustc strips the newline AND the following indentation. What
+/// is not fine is a continuation that got reflowed so the backslash no longer ends the line;
+/// the whitespace then survives into the string. That has happened twice: once in a UI line
+/// the user saw as "and come          back with the", and once in the steer that tells a
+/// rambling model to call `finish`, where it also hid the text from a grep.
+///
+/// Checks the COMPILED string, not the source, so a correctly-continued literal passes.
+#[test]
+fn the_truncation_steer_reads_cleanly() {
+    // The exact text a read-only run appends when a reply runs to the cap.
+    let steer = "
+
+Your reply was cut off because it ran too long. You are THINKING OUT LOUD instead of answering. Do not re-read anything - the code you need is already above. Reply with ONE JSON object now: {\"tool\":\"finish\",\"summary\":\"<your answer: the file, the line, the cause, the fix>\"}. Keep it under 200 words.";
+    assert!(
+        !steer.trim().contains("  "),
+        "a run of spaces means the continuation was reflowed: {steer:?}"
+    );
+    assert!(
+        steer.contains("THINKING OUT LOUD instead of answering"),
+        "the phrase must survive intact — it was split across a reflow once"
+    );
+}
