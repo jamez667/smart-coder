@@ -283,11 +283,43 @@ names.
      ...
    ```
 
-   at most 8 lines, additive, off by default. It ships default-on only if the
-   probe suite says so — the acceptance bar is the existing investigate probes
+   at most 8 lines <!--@ crates/sc-win/src/session/agent.rs -->, additive, off by
+   default <!--@ sc_win::session::agent::leads_enabled -->. It ships default-on
+   only if the probe says so — the acceptance bar is the investigate probe
    answering in **fewer steps** with leads than without, and the sorted-map
    regression (2/2) still holding. A retrieval feature that costs anchor tokens
    without shortening runs is deleted, not tuned.
+
+   **The probe has now run** (`logs/leads-probe.md`, tiel-coder-35b against
+   void-claim, the user's original question verbatim):
+
+   | | answered | steps | tool calls | elapsed |
+   |---|---|---|---|---|
+   | leads OFF | yes | 10 | 9 | 59s |
+   | leads ON | yes | 5 | 5 | 18s |
+
+   Both arms reached the same correct answer — `starfield.rs`, the two `batch.line`
+   widths, the fix being to swap them. Leads halved the run, and the OFF transcript
+   shows exactly the behaviour this spec's principle describes: steps 1 and 2 were
+   spent reading `crates/void_claim/src/hyperspace.rs` and
+   `crates/void_claim/src/starfield.rs`, **neither of which exists**. The model was
+   guessing filenames. With leads, `crates/void_engine/src/fx/starfield.rs:114
+   fn draw_trails` was the first line of the block and the first file it opened.
+
+   The bar is met, so the default *should* flip — but flipping it is a human
+   decision, and one probe on one question is one data point. The switch stays off
+   until a person looks at that file.
+
+   The switch is the `SC_INVESTIGATE_LEADS` environment variable rather than a
+   `config.json` field, following `SC_INVESTIGATE_VERBOSE`. It exists to be
+   flipped for one probe run and compared; a setting that persists in a config
+   file is a setting somebody forgets is on while reading the numbers. It becomes
+   a real field the day the measurement says it should be the default. The A/B
+   itself is `crates/sc-win/tests/leads_probe.rs`
+   <!--@ crates/sc-win/tests/leads_probe.rs -->, which runs both arms and writes a
+   verdict to `logs/leads-probe.md` — and deliberately asserts nothing about which
+   arm wins, because an assertion encoding the expected result would make the
+   measurement decorative.
 
 `repo_health` and `resolve_trace` never enter a model registry. The CLI gets
 `smart-coder index | search | health | stack` subcommands
