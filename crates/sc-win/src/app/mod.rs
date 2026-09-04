@@ -1884,3 +1884,51 @@ mod tests {
         assert!(tc("weird_tool", "x").is_some());
     }
 }
+
+#[cfg(test)]
+mod endpoint_stickiness {
+    use super::*;
+
+    /// **A config corrected on disk must not be stamped back over by a stale input box.**
+    ///
+    /// `commit_settings` runs on every chat send and every run start, writing the settings
+    /// INPUT BOXES to disk. Those boxes are seeded from config.json at boot and never again,
+    /// so an app launched while the file said `:8080` held `:8080` for its whole life and the
+    /// next message the user sent stamped it back over a file that had since been fixed.
+    /// Observed repeatedly — "it switched back to 8080 again" — with the settings panel never
+    /// opened, and `model` reverting to "default" by the same route.
+    #[test]
+    fn an_external_edit_survives_a_chat_send() {
+        // Point %APPDATA% at a scratch dir so this never touches the developer's real
+        // config.json -- which is exactly the file the bug was corrupting.
+        let dir = std::env::temp_dir().join(format!("sc-endpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("smart-coder")).unwrap();
+        std::env::set_var("APPDATA", &dir);
+
+        // Boot state: the app read `:8080` and seeded its input box from it.
+        let mut app = App::default();
+        app.cfg.local_conn.base_url = "http://localhost:8080/v1".to_string();
+        app.local_url_input = "http://localhost:8080/v1".to_string();
+        app.cfg.model = "default".to_string();
+        app.model_input = "default".to_string();
+        app.cfg.resolve_stages();
+        app.cfg.save_config();
+
+        // Someone corrects the file while the app is running.
+        let good = r#"{"local_url":"http://localhost:11436/v1","base_url":"http://localhost:11436/v1","model":"tiel-coder-35b"}"#;
+        std::fs::write(dir.join("smart-coder").join("config.json"), good).unwrap();
+
+        // The user sends a chat message, which commits settings.
+        app.commit_settings();
+
+        assert_eq!(
+            app.cfg.local_conn.base_url, "http://localhost:11436/v1",
+            "the corrected endpoint must win over a box the user never touched"
+        );
+        assert_eq!(
+            app.cfg.model, "tiel-coder-35b",
+            "and so must the model, which reverted to \"default\" the same way"
+        );
+    }
+}

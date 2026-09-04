@@ -141,6 +141,31 @@ impl App {
     /// restart. Called before any run/chat/triage that talks to a model — the single place the
     /// input boxes become config, so the three entry points can't drift.
     pub(crate) fn commit_settings(&mut self) {
+        // RE-READ THE FILE FIRST, and let it win where the user has not typed.
+        //
+        // This function runs on every chat send and every run start, and it writes the
+        // settings INPUT BOXES back to disk. Those boxes are seeded from config.json at boot
+        // and never again — so an app launched while the file said `:8080` holds `:8080` in
+        // that box for its whole life, and the next message the user sends stamps it back
+        // over a file that had since been corrected. Observed repeatedly: the endpoint
+        // "switched back to 8080 again" minutes after being fixed, with the settings panel
+        // never opened. `model` reverted to "default" by the same route.
+        //
+        // Re-reading makes an external edit stick unless the user has actually typed
+        // something different, which is the behaviour anyone would expect of a file they
+        // just edited. It costs one small read on a path that is already about to do a
+        // model call.
+        let on_disk = UiConfig::load();
+        if self.local_url_input.trim() == self.cfg.local_conn.base_url.trim() {
+            // Untouched box: adopt whatever the file says now.
+            self.local_url_input = on_disk.local_conn.base_url.clone();
+            self.cfg.local_conn.base_url = on_disk.local_conn.base_url;
+        }
+        if self.model_input.trim() == self.cfg.model.trim() {
+            self.model_input = on_disk.model.clone();
+            self.cfg.model = on_disk.model;
+        }
+
         // Models (per stage) + the endpoint-agnostic knobs.
         self.cfg.model = self.model_input.clone();
         self.cfg.orchestrator_model = non_empty(&self.orch_model_input);

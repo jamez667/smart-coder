@@ -314,6 +314,42 @@ fn investigate_into_chat(
                         let _ = tx.send(ChatEvent::Token(format!("· {tool} {arg}\n")));
                     }
                 }
+                // WHY the model chose this step, when it says so.
+                //
+                // A reply is normally a bare `{"tool":...}` object, but the model often
+                // prefixes a sentence -- "I found the trail rendering. Let me verify the
+                // geometry by checking the call site." That is exactly the reasoning the user
+                // asked to see, and it was being thrown away with the rest of the raw reply.
+                sc_core::AgentEvent::ModelTurn { raw, .. } => {
+                    // Only the prose BEFORE the first JSON object, and only when it is short:
+                    // a long preamble is the thinking-out-loud that fills the token cap, and
+                    // echoing that would bury the progress rather than explain it.
+                    let prose = raw.split('{').next().unwrap_or("").trim();
+                    if !prose.is_empty() && prose.len() <= 200 {
+                        let _ = tx.send(ChatEvent::Token(format!(
+                            "{prose}
+"
+                        )));
+                    }
+                }
+                // WHAT THE STEP FOUND, not just what it ran.
+                //
+                // The panel showed a bare list -- `search_code trail`, `read_file
+                // starfield.rs` -- which says what happened but not what came back or why the
+                // next file was chosen. A search that returns nothing and a search that
+                // returns the answer looked identical while the user waited minutes.
+                sc_core::AgentEvent::ToolResult { summary, .. } => {
+                    let line = summary.trim();
+                    if !line.is_empty() {
+                        // The first line only. A read returns the whole file, and echoing that
+                        // into the chat would bury the progress it is meant to show.
+                        let head: String = line.chars().take(120).collect();
+                        let _ = tx.send(ChatEvent::Token(format!(
+                            "    ↳ {head}
+"
+                        )));
+                    }
+                }
                 sc_core::AgentEvent::HarnessFault { kind, detail, .. } => {
                     // Surface OUR faults in the chat rather than only in a log the user
                     // never opens — a truncated or over-budget turn is why an answer is
@@ -371,5 +407,44 @@ mod plan_line {
         );
         assert!(line.ends_with("\n\n"), "the plan is a paragraph of its own");
         assert!(!line.trim().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod step_feedback {
+    /// The prose a model puts before its tool call — the "why this file" the panel shows.
+    fn preamble(raw: &str) -> Option<String> {
+        let prose = raw.split('{').next().unwrap_or("").trim();
+        (!prose.is_empty() && prose.len() <= 200).then(|| prose.to_string())
+    }
+
+    /// **"What did it find, and why that file?" — verbatim from a real run.**
+    ///
+    /// The panel listed `search_code trail` then `read_file starfield.rs` with nothing
+    /// between them, so a search that found the answer and one that found nothing looked
+    /// identical while the user waited minutes.
+    #[test]
+    fn a_short_preamble_is_shown_and_a_long_ramble_is_not() {
+        // Step 3 of a real transcript.
+        let raw = "I found the trail rendering. Let me verify the geometry by checking the \
+                   call site and the flow direction.\n\n{\"tool\":\"read_file\",\"path\":\"a.rs\"}";
+        assert_eq!(
+            preamble(raw).as_deref(),
+            Some(
+                "I found the trail rendering. Let me verify the geometry by checking the call \
+                 site and the flow direction."
+            )
+        );
+
+        // A bare call has no preamble and must not produce an empty line.
+        assert_eq!(preamble("{\"tool\":\"finish\"}"), None);
+
+        // The thinking-out-loud that fills the token cap is NOT progress — showing it would
+        // bury the very lines this feature adds.
+        let ramble = format!(
+            "{}{{\"tool\":\"read_file\"}}",
+            "Let me reconsider. ".repeat(30)
+        );
+        assert_eq!(preamble(&ramble), None);
     }
 }
