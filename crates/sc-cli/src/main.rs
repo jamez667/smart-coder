@@ -54,6 +54,7 @@ fn main() -> ExitCode {
         Command::Health => cmd::index::health(cli.json),
         Command::Stack => cmd::index::stack(cli.json),
         Command::Queue { action } => cmd::queue::queue(&cli, action),
+        Command::Cargo { action } => cmd::cargo::cargo(action, cli.json),
         Command::Replay { session } => cmd::replay::replay(session.clone()),
     }
 }

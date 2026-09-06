@@ -76,6 +76,23 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "cargo_info",
+            // Names no other tool, per the rule below. "crate" rather than "package"
+            // because that is the word the manifests and the directory names use.
+            description: "Facts about this Rust workspace's crates, read from the \
+                          Cargo.toml manifests: what a crate is for, which crates it \
+                          depends on, and which crates depend on IT. Pass a crate name \
+                          for one crate, or omit it to list them all. Answers \
+                          architecture questions without opening manifests one at a time.",
+            params: vec![ParamSpec::new(
+                "crate",
+                ParamType::OptionalString,
+                "the crate to describe, e.g. 'sc-proto' (omit to list every crate)",
+            )],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "write_file",
             description: "Create or overwrite a file with the given full contents.",
             params: vec![
@@ -275,7 +292,15 @@ pub fn read_only_registry() -> ToolRegistry {
     // update a plan or bounce the question back instead of opening the file. Six tools
     // beat sixteen for exactly this reason -- a big menu makes a small model deliberate
     // rather than act.
-    const EXCLUDE: [&str; 2] = ["update_plan", "ask_user"];
+    //
+    // `cargo_info` is excluded on that last ground alone, not because it is unsafe or
+    // useless here -- a question about which crate owns a behaviour is exactly what it
+    // answers. But this menu is the one thing in the project with a measurement behind
+    // it (six tools: `run_command` 12/12; sixteen: 3/12), and that measurement compared
+    // six against sixteen -- it says nothing about seven. Growing it on a hunch would
+    // spend the only frozen model-facing contract here to find out. It joins the day a
+    // probe says it earns the slot, the way `SC_INVESTIGATE_LEADS` was decided.
+    const EXCLUDE: [&str; 3] = ["update_plan", "ask_user", "cargo_info"];
     let specs: Vec<ToolSpec> = default_registry()
         .specs()
         .iter()

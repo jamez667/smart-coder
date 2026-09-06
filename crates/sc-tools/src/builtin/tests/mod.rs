@@ -8,6 +8,7 @@ use crate::builtin::dispatch::ToolOutcome;
 use crate::builtin::registry::default_registry;
 use crate::spec::ValidatedCall;
 
+mod cargo;
 mod guards;
 mod read;
 mod registry;

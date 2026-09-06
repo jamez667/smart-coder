@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::spec::ValidatedCall;
 
+use super::cargo::cargo_info;
 use super::guards::{is_code_path, looks_like_tool_call_json};
 use super::read::{list_dir, read_file, read_function, search_code};
 use super::write::{append_file, create_file, edit_file, edit_function, edit_lines, write_file};
@@ -82,6 +83,7 @@ pub fn execute(call: &ValidatedCall, workspace: &Path) -> ToolOutcome {
         )),
         "list_dir" => ToolOutcome::Observation(list_dir(workspace, arg(call, "path"))),
         "search_code" => ToolOutcome::Observation(search_code(workspace, arg(call, "query"))),
+        "cargo_info" => ToolOutcome::Observation(cargo_info(workspace, call.str("crate"))),
         "read_function" => ToolOutcome::Observation(read_function(
             workspace,
             arg(call, "path"),

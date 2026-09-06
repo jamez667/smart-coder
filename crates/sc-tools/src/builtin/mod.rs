@@ -16,10 +16,12 @@
 //! * [`registry`] — the tool schemas (what the model is offered).
 //! * [`dispatch`] — [`ToolOutcome`] and [`execute`]: name → implementation.
 //! * [`read`] — read-only navigation.
+//! * [`cargo`] — the crate graph behind `cargo_info`.
 //! * [`write`] — the mutating tools.
 //! * [`guards`] — the pre-write tripwires that catch small-model corruption.
 //! * [`util`] — workspace helpers ([`safe_join`], [`source_files`]).
 
+mod cargo;
 mod dispatch;
 mod guards;
 mod read;

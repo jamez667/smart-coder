@@ -337,6 +337,40 @@ names.
    arm wins, because an assertion encoding the expected result would make the
    measurement decorative.
 
+### The crate graph
+
+`sc-cargo` answers the question the symbol index cannot: not *where is this
+function*, but *what does this crate depend on, and what depends on it*. It reads
+the `Cargo.toml` manifests directly — no `cargo metadata`, no network, no
+dependency of its own — because a shelled-out tool that is missing from PATH
+fails in a way that reads as broken agent logic rather than a missing binary.
+
+The honest limit, stated wherever it is surfaced: these are **declared**
+dependencies. No transitive external versions, no feature unification. For the
+question it exists to answer — the shape of this workspace's own architecture —
+that is the whole of what the manifests know.
+
+It exists because the claims resting on that shape were checkable only by eye.
+Spec [18](18-task-intake.md) says *"`sc-server` depends on `sc-proto` and nothing
+else"*, and that separation is the whole of what keeps a model out of the public
+server. It is now an assertion in `sc-cargo`'s tests rather than a sentence
+somebody has to re-verify by opening a file.
+
+**The model-facing half is one tool, `cargo_info`, and the investigate menu did
+not grow.** It is `ReadOnly`, so `read_only_registry` — which derives from the
+side effect rather than a name list — would have taken it automatically; it is
+named in that function's `EXCLUDE` instead. The reasoning is this section's
+rule applied honestly: the 12/12-vs-3/12 measurement compared six tools against
+sixteen, so it says nothing about seven, and spending the one frozen model-facing
+contract in this repo to find out is not a trade worth making on a hunch. It
+joins the day a probe says it earns the slot, the way *Investigate leads* was
+decided. `rdeps` has no model tool at all — "what breaks if I change this" is a
+question a person asks before an edit, and the CLI answers it.
+
+The CLI gets `smart-coder cargo list | deps | rdeps`
+<!--@ crates/sc-cli/src/cmd/cargo.rs -->, each taking `--json`, with the text form
+byte-identical to what `cargo_info` hands the model.
+
 `repo_health` and `resolve_trace` never enter a model registry. The CLI gets
 `smart-coder index | search | health | stack` subcommands
 <!--@ crates/sc-cli/src/cmd/index.rs --> (`stack`, not `trace`, because `trace` is

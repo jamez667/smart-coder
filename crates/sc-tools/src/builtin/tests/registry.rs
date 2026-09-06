@@ -16,6 +16,7 @@ fn default_registry_has_the_v1_tools() {
             "list_dir",
             "search_code",
             "find_symbol",
+            "cargo_info",
             "write_file",
             "create_file",
             "append_file",

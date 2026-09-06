@@ -13,6 +13,7 @@ members = [
     "crates/sc-verify",
     "crates/sc-review",
     "crates/sc-trace",
+    "crates/sc-cargo",
     "crates/sc-comply",
     "crates/sc-android",
     "crates/sc-core",
@@ -27,6 +28,7 @@ members = [
     "crates/sc-web",
     "crates/sc-cli",
     "crates/sc-eval",
+    "crates/sc-gateway",
 ]
 
 [workspace.package]

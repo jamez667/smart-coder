@@ -84,11 +84,32 @@ pub enum Command {
     /// The task queue (spec 19): file a request against any configured
     /// repository, draft its spec, approve or send it back.
     Queue { action: QueueAction },
+    /// The crate graph (spec 23): which crates exist, what one depends on, and
+    /// what depends on it. Read from the manifests -- no cargo, no network.
+    Cargo { action: CargoAction },
     /// Re-render a recorded session from its JSON-lines log (spec 06). `session`
     /// is a session id (resolved under `.smart-coder/sessions/`) or a path to a log.
     Replay { session: String },
     /// Print usage.
     Help,
+}
+
+/// What to ask the crate graph (spec 23).
+///
+/// Three questions, because three is what the manifests can honestly answer:
+/// what exists, what one crate needs, and what needs it. The third is the one no
+/// other surface has -- a dependency edge is written at one end and felt at the
+/// other, so "what breaks if I change this" cannot be read off the crate's own
+/// manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoAction {
+    /// Every workspace member, one line each.
+    List,
+    /// One crate: what it is for, what it depends on, and what depends on it.
+    Deps { krate: String },
+    /// The blast radius: which crates depend on this one, and through which kind
+    /// of dependency.
+    Rdeps { krate: String },
 }
 
 /// What to do with the task queue (spec 19).

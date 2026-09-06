@@ -65,6 +65,17 @@ COMMANDS:
     health          Line counts and size smells: files over a threshold, giant
                     functions, TODO/FIXME counts. A report, not a linter
     stack           Resolve a stack trace read from stdin against the index
+    cargo ACTION    The crate graph (spec 23), read from the Cargo.toml manifests --
+                    no cargo invoked, no network. Actions:
+                      list                    every workspace crate, one line each
+                      deps CRATE              what it is for, what it depends on
+                                              (workspace deps separated from
+                                              external ones) and what depends on it
+                      rdeps CRATE             the blast radius: which crates depend
+                                              on this one, and whether the edge is a
+                                              build, dev or normal dependency
+                    Declared deps, not a resolved graph -- no transitive external
+                    versions and no feature unification; use cargo metadata for those
     doctor          Check the backend is reachable; print effective config
     help            Show this message
 
@@ -157,6 +168,8 @@ EXAMPLES:
     smart-coder trace --check
     smart-coder search \"why is the trail behind the stars thin before it gets thick\"
     smart-coder health
+    smart-coder cargo rdeps sc-proto
+    smart-coder cargo deps sc-server --json
     cargo test 2>&1 | smart-coder stack
     smart-coder serve \"fix the bug in parse_config\" --verify \"cargo test\"
     smart-coder swarm \"add validation and a test\" --cli --verify \"python -m pytest -q\" \\

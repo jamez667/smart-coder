@@ -257,7 +257,12 @@ pub(super) fn mutating_path(
 pub(super) fn is_idempotent_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "read_file" | "list_dir" | "search_code" | "find_symbol" | "run_verification"
+        "read_file"
+            | "list_dir"
+            | "search_code"
+            | "find_symbol"
+            | "cargo_info"
+            | "run_verification"
     )
 }
 
@@ -303,7 +308,11 @@ pub(super) fn key_arg(call: &sc_tools::ValidatedCall) -> String {
     if let Some(summary) = call.str("summary") {
         return summary.to_string();
     }
-    for k in ["path", "query", "name"] {
+    // `crate` joins the list for the reason the two comments above describe: it is
+    // `cargo_info`'s only parameter, and omitting it would hash every call about
+    // every crate to the same empty key -- asking about `sc-proto` and then
+    // `sc-core` would read as a repeat, which is the third instance of this bug.
+    for k in ["path", "query", "name", "crate"] {
         if let Some(v) = call.str(k) {
             let start = call.int("start");
             let limit = call.int("limit");

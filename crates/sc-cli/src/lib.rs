@@ -13,6 +13,6 @@ mod cli;
 
 pub use cli::{
     detect_test_files, doctor_report, preflight, probe, resolve_replay_path, session_log_path,
-    sessions_dir, usage, Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL,
+    sessions_dir, usage, CargoAction, Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL,
     DEFAULT_MODEL,
 };

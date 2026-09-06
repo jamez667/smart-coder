@@ -1,6 +1,8 @@
 //! Argv parsing: subcommands, flag positions, the run-tail peel, and loud errors.
 
-use crate::{Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
+use crate::{
+    CargoAction, Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL,
+};
 
 #[test]
 fn defaults_to_chat_with_default_backend() {
@@ -733,4 +735,66 @@ fn the_feedback_actions_parse() {
     );
     // Feedback is stored per repository, so acknowledging needs to know which.
     assert!(Cli::parse(["queue", "ack", "f-1"]).is_err());
+}
+
+#[test]
+fn cargo_actions_parse() {
+    let cases: Vec<(Vec<&str>, CargoAction)> = vec![
+        (vec!["cargo", "list"], CargoAction::List),
+        (
+            vec!["cargo", "deps", "sc-proto"],
+            CargoAction::Deps {
+                krate: "sc-proto".into(),
+            },
+        ),
+        (
+            vec!["cargo", "rdeps", "sc-proto"],
+            CargoAction::Rdeps {
+                krate: "sc-proto".into(),
+            },
+        ),
+    ];
+    for (argv, expected) in cases {
+        let cli = Cli::parse(argv.clone()).unwrap();
+        assert_eq!(cli.command, Command::Cargo { action: expected }, "{argv:?}");
+    }
+}
+
+#[test]
+fn cargo_with_no_action_and_an_unknown_action_both_fail_loudly() {
+    // Spec 00 — fail loud. `cargo` alone is ambiguous, and a silently-ignored
+    // action would look like it worked.
+    let bare = Cli::parse(["cargo"]).expect_err("no action");
+    assert!(bare.to_string().contains("needs an action"), "{bare}");
+
+    let unknown = Cli::parse(["cargo", "tree"]).expect_err("no such action");
+    assert!(
+        unknown.to_string().contains("unknown cargo action"),
+        "{unknown}"
+    );
+}
+
+#[test]
+fn a_cargo_action_missing_its_crate_says_so_rather_than_guessing() {
+    // Defaulting to some crate would answer a question nobody asked.
+    for argv in [vec!["cargo", "deps"], vec!["cargo", "rdeps"]] {
+        let err = Cli::parse(argv.clone()).expect_err("should fail");
+        assert!(err.to_string().contains("crate name"), "{argv:?}: {err}");
+    }
+}
+
+#[test]
+fn cargo_still_forwards_top_level_flags() {
+    // The same bug `queue run --orchestrator-url` had: an action parser that
+    // swallows the rest of argv silently eats flags that were typed and meant.
+    let cli = Cli::parse(["cargo", "deps", "sc-proto", "--json"]).unwrap();
+    assert_eq!(
+        cli.command,
+        Command::Cargo {
+            action: CargoAction::Deps {
+                krate: "sc-proto".into()
+            }
+        }
+    );
+    assert!(cli.json, "--json reached the top-level config");
 }

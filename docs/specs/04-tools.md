@@ -51,6 +51,10 @@ Kept deliberately small. Each does one thing.
 - `find_symbol` — locate a definition/usages via the retrieval index
   ([05](05-context-management.md), [01](01-architecture.md)). Lets a small model
   jump to the right place instead of scanning.
+- `cargo_info` — the crate graph ([23](23-repo-intelligence.md)): what a crate is
+  for, what it depends on, and what depends on it, read from the manifests. One
+  optional `crate` parameter; omitted, it lists the workspace. **Not in the
+  read-only investigate menu** — see 23 for why that menu did not grow.
 
 ### Edit (Mutating)
 - `edit_file` — apply a **precise, anchored edit** (exact old → new string, or a

@@ -7,7 +7,9 @@
 
 use sc_proto::{DcError, Result};
 
-use super::types::{Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL};
+use super::types::{
+    CargoAction, Cli, Command, QueueAction, ToolCallingArg, DEFAULT_BASE_URL, DEFAULT_MODEL,
+};
 
 impl Cli {
     /// Parse argv (excluding the program name) into a [`Cli`].
@@ -173,6 +175,15 @@ impl Cli {
                     let rest: Vec<String> = it.by_ref().collect();
                     let (action, leftover) = parse_queue_action(rest)?;
                     command = Some(Command::Queue { action });
+                    it = leftover.into_iter();
+                }
+                // `cargo <action> [crate]` — the crate graph (spec 23). Parsed as a
+                // unit for the same reason `queue` is, and it hands back the flags it
+                // does not own so `--json` still reaches the top-level loop.
+                "cargo" if command.is_none() => {
+                    let rest: Vec<String> = it.by_ref().collect();
+                    let (action, leftover) = parse_cargo_action(rest)?;
+                    command = Some(Command::Cargo { action });
                     it = leftover.into_iter();
                 }
                 "replay" if command.is_none() => {
@@ -932,6 +943,64 @@ fn parse_queue_action(rest: Vec<String>) -> Result<(QueueAction, Vec<String>)> {
             "unknown queue action {other:?} — expected file, list, run, approve, \
              send-back, discard, show, feedback, ack, repos, add-repo or forget-repo"
         ))),
+    }
+}
+
+/// Parse `cargo <action> [crate]`.
+///
+/// Same shape as [`parse_queue_action`], including the leftover hand-back: a flag
+/// this does not own is returned so the top-level loop still sees it, rather than
+/// being swallowed into a crate name.
+fn parse_cargo_action(rest: Vec<String>) -> Result<(CargoAction, Vec<String>)> {
+    let mut it = rest.into_iter();
+    let action = it
+        .next()
+        .ok_or_else(|| DcError::Eval("cargo needs an action: list | deps | rdeps".to_string()))?;
+
+    let mut words: Vec<String> = Vec::new();
+    let mut leftover: Vec<String> = Vec::new();
+    while let Some(w) = it.next() {
+        if w.starts_with("--") {
+            leftover.push(w);
+            // Keep a flag's value adjacent to it, as the queue parser does: the
+            // top-level loop reads the pair together.
+            if let Some(next) = it.next() {
+                leftover.push(next);
+            }
+        } else {
+            words.push(w);
+        }
+    }
+    let first = words.first().cloned().unwrap_or_default();
+
+    match action.as_str() {
+        "list" => Ok((CargoAction::List, leftover)),
+        "deps" => Ok((
+            CargoAction::Deps {
+                krate: require_crate(&first, "deps")?,
+            },
+            leftover,
+        )),
+        "rdeps" => Ok((
+            CargoAction::Rdeps {
+                krate: require_crate(&first, "rdeps")?,
+            },
+            leftover,
+        )),
+        other => Err(DcError::Eval(format!(
+            "unknown cargo action {other:?} — expected list, deps or rdeps"
+        ))),
+    }
+}
+
+/// A required crate name, named in the error so a bare action says what it wanted.
+fn require_crate(value: &str, action: &str) -> Result<String> {
+    if value.trim().is_empty() {
+        Err(DcError::Eval(format!(
+            "cargo {action} needs a crate name — run `smart-coder cargo list` to see them"
+        )))
+    } else {
+        Ok(value.to_string())
     }
 }
 

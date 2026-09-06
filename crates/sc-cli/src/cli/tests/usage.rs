@@ -45,3 +45,19 @@ fn usage_documents_the_queue_and_its_limits() {
         "approve must say it starts nothing: {u}"
     );
 }
+
+#[test]
+fn usage_documents_the_cargo_commands() {
+    let u = usage();
+    assert!(u.contains("cargo ACTION"));
+    for action in ["list", "deps CRATE", "rdeps CRATE"] {
+        assert!(u.contains(action), "{action} undocumented: {u}");
+    }
+    // The one thing a reader must not have to guess: these are DECLARED
+    // dependencies. Someone expecting a resolved graph would read a wrong answer
+    // as a bug in the tool rather than a limit of it.
+    assert!(
+        u.contains("Declared deps"),
+        "the limit of the data must be stated: {u}"
+    );
+}
