@@ -1533,6 +1533,13 @@ mod disk_repro {
         let Ok(text) = std::fs::read_to_string(layout_file()) else {
             return; // not this machine
         };
+        // The repro is "the file HAS a claude leaf and the load loses it". A layout
+        // the user has since closed the panel out of has nothing to lose, and this
+        // test failed on exactly that file -- a regression test for a load bug must
+        // not fail because the developer's own workspace changed shape.
+        if !text.contains("\"claude\"") {
+            return;
+        }
         let store = LayoutStore::parse(&text);
         let got = store.get(false);
         assert!(
