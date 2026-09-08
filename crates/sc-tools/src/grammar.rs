@@ -49,15 +49,64 @@ pub fn params_json_schema(spec: &ToolSpec) -> Value {
 /// converter: the tool surface is tiny and this keeps the output readable and the
 /// crate dependency-light. Optional params are modelled as present-or-absent.
 pub fn registry_gbnf(registry: &ToolRegistry) -> String {
+    build_gbnf(registry, None)
+}
+
+/// **Experiment, opt in.** The same tool-call grammar with a bounded, unconstrained
+/// scratchpad in front of the call: `root ::= think? scratch? call`.
+///
+/// Spec 02's alignment-tax caveat says to constrain only the envelope and let the
+/// model reason first. The strict [`registry_gbnf`] forbids *any* prose, and the
+/// investigate path adopted it for exactly that reason -- unconstrained reasoning
+/// ran to the token cap. This variant sits between the two: reasoning is allowed but
+/// **bounded in the grammar itself**, so rambling past `max_chars` is impossible
+/// rather than merely discouraged. Whether that buys accuracy without giving the
+/// token budget back is the thing to measure; nothing selects this by default.
+///
+/// The prefix, in the position before the object:
+///
+/// * `think` -- an optional `<think>…</think>` block for reasoning models whose
+///   template opens one, bounded to `max_chars` characters with no `<` inside (the
+///   closing tag is the only delimiter, so `<` cannot be allowed to recur).
+/// * `scratch` -- an optional run of at most `max_chars` characters that cannot
+///   contain `{`, terminated by a newline. Because `{` is excluded, the first `{` in
+///   the reply is unambiguously the start of the tool object.
+///
+/// The bound is written as GBNF's `{m,n}` repetition range (`[^{]{0,N}`), which
+/// llama.cpp has parsed since PR #6640 (June 2024, b3091 and later). An older server
+/// rejects the grammar outright rather than silently ignoring the bound; a chained
+/// `char?` expansion would work everywhere but makes a 400-wide grammar unreadable,
+/// and every server this project talks to is far newer than that.
+pub fn registry_gbnf_with_scratchpad(registry: &ToolRegistry, max_chars: usize) -> String {
+    build_gbnf(registry, Some(max_chars))
+}
+
+/// One generator for both shapes so the call alternatives and shared terminals can
+/// never drift between them: the strict grammar is the `None` case, byte for byte.
+fn build_gbnf(registry: &ToolRegistry, scratchpad: Option<usize>) -> String {
     let mut out = String::new();
     let alts: Vec<String> = registry
         .specs()
         .iter()
         .map(|s| format!("call-{}", sanitize(s.name)))
         .collect();
-    out.push_str("root ::= ");
-    out.push_str(&alts.join(" | "));
-    out.push('\n');
+    match scratchpad {
+        None => {
+            out.push_str("root ::= ");
+            out.push_str(&alts.join(" | "));
+            out.push('\n');
+        }
+        Some(n) => {
+            out.push_str("root ::= think? scratch? call\n");
+            out.push_str("call ::= ");
+            out.push_str(&alts.join(" | "));
+            out.push('\n');
+            out.push_str(&format!(
+                "think ::= \"<think>\" [^<]{{0,{n}}} \"</think>\"\n\
+                 scratch ::= [^{{]{{0,{n}}} \"\\n\"\n"
+            ));
+        }
+    }
 
     for spec in registry.specs() {
         out.push_str(&tool_rule(spec));
@@ -150,6 +199,78 @@ mod tests {
         // Shared terminals are defined.
         assert!(g.contains("string ::="));
         assert!(g.contains("integer ::="));
+    }
+
+    /// A two-tool registry (a read with optional ints, and finish) -- small enough that
+    /// the goldens below are readable in full.
+    fn two_tool_registry() -> ToolRegistry {
+        let specs = crate::builtin::read_only_registry()
+            .specs()
+            .iter()
+            .filter(|s| s.name == "read_file" || s.name == "finish")
+            .cloned()
+            .collect();
+        ToolRegistry::new(specs)
+    }
+
+    const TWO_TOOL_STRICT: &str = r###"root ::= call-read-file | call-finish
+call-read-file ::= "{" ws "\"tool\"" ws ":" ws "\"read_file\"" ws "," ws "\"path\"" ws ":" ws string (ws "," ws "\"start\"" ws ":" ws integer)? (ws "," ws "\"limit\"" ws ":" ws integer)? ws "}"
+call-finish ::= "{" ws "\"tool\"" ws ":" ws "\"finish\"" ws "," ws "\"summary\"" ws ":" ws string ws "}"
+string ::= "\"" ( [^"\\] | "\\" . )* "\""
+integer ::= "-"? [0-9]+
+ws ::= [ \t\n]*
+"###;
+
+    /// The strict grammar is untouched by the scratchpad refactor: one generator, and the
+    /// `None` case is the old output byte for byte.
+    #[test]
+    fn strict_grammar_is_unchanged_by_the_scratchpad_variant() {
+        assert_eq!(registry_gbnf(&two_tool_registry()), TWO_TOOL_STRICT);
+    }
+
+    /// The scratchpad grammar, in full, for the same two tools at 400 characters. The
+    /// bound rides in the `{0,400}` repetition range on each prefix rule.
+    #[test]
+    fn scratchpad_grammar_is_the_strict_one_behind_a_bounded_prefix() {
+        let expected = r###"root ::= think? scratch? call
+call ::= call-read-file | call-finish
+think ::= "<think>" [^<]{0,400} "</think>"
+scratch ::= [^{]{0,400} "\n"
+call-read-file ::= "{" ws "\"tool\"" ws ":" ws "\"read_file\"" ws "," ws "\"path\"" ws ":" ws string (ws "," ws "\"start\"" ws ":" ws integer)? (ws "," ws "\"limit\"" ws ":" ws integer)? ws "}"
+call-finish ::= "{" ws "\"tool\"" ws ":" ws "\"finish\"" ws "," ws "\"summary\"" ws ":" ws string ws "}"
+string ::= "\"" ( [^"\\] | "\\" . )* "\""
+integer ::= "-"? [0-9]+
+ws ::= [ \t\n]*
+"###;
+        let g = registry_gbnf_with_scratchpad(&two_tool_registry(), 400);
+        assert_eq!(g, expected);
+        assert!(g.starts_with("root ::= "));
+    }
+
+    /// Structurally: everything after the prefix rules is the strict grammar minus its root
+    /// line, so the call alternatives can never drift between the two shapes.
+    #[test]
+    fn scratchpad_grammar_shares_the_call_rules_with_the_strict_one() {
+        let reg = two_tool_registry();
+        let strict = registry_gbnf(&reg);
+        let scratch = registry_gbnf_with_scratchpad(&reg, 400);
+        let strict_alts = strict
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches("root ::= ");
+        let scratch_call = scratch
+            .lines()
+            .nth(1)
+            .unwrap()
+            .trim_start_matches("call ::= ");
+        assert_eq!(strict_alts, scratch_call, "same alternatives, same order");
+        let strict_body: Vec<&str> = strict.lines().skip(1).collect();
+        let scratch_body: Vec<&str> = scratch.lines().skip(4).collect();
+        assert_eq!(
+            strict_body, scratch_body,
+            "call rules and terminals identical"
+        );
     }
 }
 

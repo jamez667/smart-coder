@@ -445,6 +445,111 @@ fn grammar_strategy_attaches_a_grammar_constraint() {
     }
 }
 
+/// **The scratchpad grammar is an experiment, and the strict grammar is not it.**
+///
+/// Spec 02 says constrain the envelope and let the model reason first; the investigate
+/// path found unconstrained reasoning ran to the token cap and went strict. `with_scratchpad`
+/// is the bounded middle, opt in. The plain `Grammar` must keep sending the strict grammar --
+/// that is the arm with a measurement behind it.
+#[test]
+fn plain_grammar_stays_strict_and_with_scratchpad_bounds_a_prefix() {
+    let reg = sc_tools::read_only_registry();
+    let mut strict = sc_model::GenerateRequest::new(vec![]);
+    Grammar.prepare_request(&mut strict, &reg);
+    let Some(OutputConstraint::Grammar(strict_g)) = strict.constraint else {
+        panic!("expected a grammar constraint");
+    };
+    assert_eq!(
+        strict_g,
+        sc_tools::registry_gbnf(&reg),
+        "the strict arm is untouched"
+    );
+    assert!(
+        !strict_g.contains("scratch"),
+        "no prose in the strict grammar"
+    );
+    assert_eq!(Grammar.name(), "gbnf");
+
+    let mut req = sc_model::GenerateRequest::new(vec![]);
+    let scratch = Grammar::with_scratchpad(400);
+    scratch.prepare_request(&mut req, &reg);
+    let Some(OutputConstraint::Grammar(g)) = req.constraint else {
+        panic!("expected a grammar constraint");
+    };
+    assert_eq!(g, sc_tools::registry_gbnf_with_scratchpad(&reg, 400));
+    assert!(g.starts_with("root ::= think? scratch? call\n"), "{g}");
+    assert!(
+        g.contains("[^{]{0,400}"),
+        "the bound rides in the grammar: {g}"
+    );
+    assert_eq!(
+        scratch.name(),
+        "gbnf+scratchpad",
+        "the arms are distinguishable in logs"
+    );
+    // The preamble tells the model it may think, and the one rule the grammar imposes.
+    let preamble = scratch.system_preamble(&reg);
+    assert!(preamble.contains("400 characters"), "{preamble}");
+    assert!(
+        preamble.contains("read_file"),
+        "still lists the tools: {preamble}"
+    );
+}
+
+/// What the scratchpad grammar can produce, extracted: prose then the object, a think
+/// block then the object, and the degenerate case of no prefix at all.
+#[test]
+fn scratchpad_extract_skips_the_prefix_and_validates_the_call() {
+    let reg = sc_tools::read_only_registry();
+    let s = Grammar::with_scratchpad(400);
+    let call = s
+        .extract(
+            "some thinking\n{\"tool\":\"finish\",\"summary\":\"done\"}",
+            &reg,
+        )
+        .expect("prose before the object is the whole point");
+    assert_eq!(call.name, "finish");
+    assert_eq!(call.str("summary"), Some("done"));
+
+    // A think block, and one that narrates a call in braces -- the grammar allows `{`
+    // inside <think>, so the narrated call must not be mistaken for the real one.
+    let raw = "<think>I could search: {\"tool\":\"search_code\",\"query\":\"x\"} but no</think>\n\
+               {\"tool\":\"read_file\",\"path\":\"a.rs\"}";
+    let call = s
+        .extract(raw, &reg)
+        .expect("the call after the think block");
+    assert_eq!(
+        call.name, "read_file",
+        "narration inside <think> is not the call"
+    );
+    assert_eq!(call.str("path"), Some("a.rs"));
+
+    // No prefix: exactly what the strict grammar would have emitted.
+    let call = s
+        .extract("{\"tool\":\"list_dir\",\"path\":\".\"}", &reg)
+        .unwrap();
+    assert_eq!(call.name, "list_dir");
+}
+
+/// Prose alone is the same failure ParseRepair reports -- the scratchpad path adds no
+/// error vocabulary of its own, so the loop's repair prompt is unchanged.
+#[test]
+fn scratchpad_extract_fails_like_parse_repair_on_prose_alone() {
+    let reg = sc_tools::read_only_registry();
+    let prose = "I think the answer is in ship_render.rs\n";
+    let scratch_err = Grammar::with_scratchpad(400)
+        .extract(prose, &reg)
+        .unwrap_err();
+    let plain_err = ParseRepair.extract(prose, &reg).unwrap_err();
+    assert_eq!(scratch_err, plain_err);
+    assert_eq!(scratch_err, RepairError::NoJson);
+    // An unterminated think block is not silently swallowed either.
+    let err = Grammar::with_scratchpad(400)
+        .extract("<think>never closed", &reg)
+        .unwrap_err();
+    assert_eq!(err, RepairError::NoJson);
+}
+
 #[test]
 fn all_strategies_share_the_same_validating_extractor() {
     // Whatever the strategy, a valid tool-call string validates and a bad one

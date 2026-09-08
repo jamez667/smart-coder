@@ -5,7 +5,9 @@
 //! every other strategy.
 
 use sc_model::{Capabilities, GenerateRequest, OutputConstraint, ToolCalling, ToolSchema};
-use sc_tools::{params_json_schema, registry_gbnf, ToolRegistry, ValidatedCall};
+use sc_tools::{
+    params_json_schema, registry_gbnf, registry_gbnf_with_scratchpad, ToolRegistry, ValidatedCall,
+};
 
 use super::error::{RepairError, ToolCallStrategy};
 use super::repair::{
@@ -199,25 +201,97 @@ impl ToolCallStrategy for NativeTools {
 /// decoding is constrained to the exact tool-call grammar, so the output is valid
 /// by construction. Extraction still validates (belt-and-braces) via the same
 /// registry path.
-pub struct Grammar;
+///
+/// The plain value `Grammar` is the strict grammar -- a bare object, no prose --
+/// which is what every caller has always meant by it. [`Grammar::with_scratchpad`]
+/// is the opt-in experiment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Grammar {
+    /// EXPERIMENT (spec 02's alignment-tax caveat). `Some(max_chars)` puts a bounded,
+    /// unconstrained scratchpad in front of the call so the model can reason before it
+    /// acts; `None` (the default) is the strict envelope-only grammar the investigate
+    /// path measured at 18 tokens a call. Nothing sets this by default: it exists to be
+    /// A/B'd on the investigate path, not to be believed.
+    scratchpad: Option<usize>,
+}
+
+/// `Grammar` the value: the strict strategy. Kept so `Box::new(sc_core::Grammar)` reads
+/// and compiles exactly as it did when `Grammar` was a unit struct; the struct gained a
+/// field and a braced struct occupies only the type namespace, so the value namespace is
+/// free for this.
+#[allow(non_upper_case_globals)]
+pub const Grammar: Grammar = Grammar { scratchpad: None };
+
+impl Grammar {
+    /// The scratchpad experiment: allow up to `max_chars` characters of free reasoning
+    /// (and an optional `<think>…</think>` block) before the tool object, with the bound
+    /// enforced by the grammar itself. See [`sc_tools::registry_gbnf_with_scratchpad`].
+    pub fn with_scratchpad(max_chars: usize) -> Self {
+        Self {
+            scratchpad: Some(max_chars),
+        }
+    }
+}
 
 impl ToolCallStrategy for Grammar {
     fn name(&self) -> &str {
-        "gbnf"
+        // Distinct names so a measurement can tell the two arms apart in the logs.
+        match self.scratchpad {
+            None => "gbnf",
+            Some(_) => "gbnf+scratchpad",
+        }
     }
 
     fn system_preamble(&self, registry: &ToolRegistry) -> String {
         // The grammar enforces shape; the prompt still lists tools so the model
         // knows what each does (the grammar can't convey intent).
-        ParseRepair.system_preamble(registry)
+        let base = ParseRepair.system_preamble(registry);
+        match self.scratchpad {
+            None => base,
+            // The strict preamble says "nothing else"; here the model is invited to think
+            // first, and told the one constraint the grammar will impose on that thinking
+            // so it does not fight the decoder at a `{`.
+            Some(n) => format!(
+                "You may reason briefly first -- at most {n} characters, containing no \
+                 '{{' -- on lines before the JSON object. Then:\n{base}"
+            ),
+        }
     }
 
     fn prepare_request(&self, req: &mut GenerateRequest, registry: &ToolRegistry) {
-        req.constraint = Some(OutputConstraint::Grammar(registry_gbnf(registry)));
+        let grammar = match self.scratchpad {
+            None => registry_gbnf(registry),
+            Some(n) => registry_gbnf_with_scratchpad(registry, n),
+        };
+        req.constraint = Some(OutputConstraint::Grammar(grammar));
     }
 
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError> {
+        // ParseRepair already tolerates prose before the object (it scans for balanced
+        // `{…}` blocks carrying a `"tool"` key), so the scratchpad needs no scanner of its
+        // own. The one thing it must NOT see is a `<think>` block: the grammar lets that
+        // block contain `{`, and a narrated `{"tool":…}` inside it would be picked up as
+        // the call. Drop the block, then extract exactly as the strict path does.
+        let raw = match self.scratchpad {
+            None => raw,
+            Some(_) => strip_think_block(raw),
+        };
         ParseRepair.extract(raw, registry)
+    }
+}
+
+/// `raw` with a leading `<think>…</think>` block removed (leading whitespace tolerated).
+/// Only a block at the very start counts -- that is the only position the scratchpad
+/// grammar allows one -- and an unterminated block is left alone for ParseRepair to
+/// report on.
+fn strip_think_block(raw: &str) -> &str {
+    let trimmed = raw.trim_start();
+    let Some(after_open) = trimmed.strip_prefix("<think>") else {
+        return raw;
+    };
+    match after_open.find("</think>") {
+        Some(end) => &after_open[end + "</think>".len()..],
+        None => raw,
     }
 }
 
