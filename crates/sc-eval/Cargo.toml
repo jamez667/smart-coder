@@ -14,6 +14,13 @@ path = "src/lib.rs"
 name = "sc-eval"
 path = "src/main.rs"
 
+# The ladder A/B (spec 23). Its own binary rather than a sc-eval subcommand: it
+# is an experiment with several arms and a caveat-carrying report, not a scoring
+# run. Formerly `gateway-ab`, when the gateway was its only treatment arm.
+[[bin]]
+name = "ladder-ab"
+path = "src/bin/ladder-ab.rs"
+
 [dependencies]
 sc-proto = { path = "../sc-proto" }
 sc-model = { path = "../sc-model" }

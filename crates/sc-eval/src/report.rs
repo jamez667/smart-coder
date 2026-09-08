@@ -160,6 +160,334 @@ impl Report {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The ladder A/B report: N arms side by side, from the rows they produced.
+// ---------------------------------------------------------------------------
+
+use crate::results::ResultRow;
+
+/// Distinct values of `key` over `rows`, in first-appearance order.
+fn distinct<'a>(rows: &'a [ResultRow], key: impl Fn(&'a ResultRow) -> &'a str) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    for r in rows {
+        let k = key(r);
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// (solved, total) over `rows`.
+fn solved<'a>(rows: impl Iterator<Item = &'a ResultRow>) -> (usize, usize) {
+    let mut n = 0;
+    let mut s = 0;
+    for r in rows {
+        n += 1;
+        if r.is_pass() {
+            s += 1;
+        }
+    }
+    (s, n)
+}
+
+/// Prompt tokens summed across runs, and how many runs reported them.
+///
+/// A run that errored before its first turn reports nothing, and averaging over
+/// it would flatter whichever arm failed earliest.
+fn tokens<'a>(rows: impl Iterator<Item = &'a ResultRow>) -> (usize, usize) {
+    let counted: Vec<usize> = rows
+        .map(|r| r.total_prompt_tokens)
+        .filter(|t| *t > 0)
+        .collect();
+    (counted.iter().sum(), counted.len())
+}
+
+fn pct(n: usize, of: usize) -> u32 {
+    if of == 0 {
+        return 0;
+    }
+    ((n as f64 / of as f64) * 100.0).round() as u32
+}
+
+/// The rows of one arm.
+fn by_arm<'a>(rows: &'a [ResultRow], arm: &'a str) -> impl Iterator<Item = &'a ResultRow> + 'a {
+    rows.iter().filter(move |r| r.arm == arm)
+}
+
+/// The rung a row belongs to, for grouping.
+fn rung(r: &ResultRow) -> &str {
+    r.rung.as_deref().unwrap_or("(untagged)")
+}
+
+/// The scorecard for an N-arm run: solve rate per arm, solve rate per rung and
+/// arm, context cost per arm and per task, the process metrics, and the caveats
+/// the numbers do not carry on their own.
+///
+/// Built from [`ResultRow`]s rather than `TaskResult`s so the printed report and
+/// the `rows.jsonl` it sits beside are the same numbers by construction.
+pub fn ab_report(rows: &[ResultRow], repeat: usize) -> String {
+    let mut s = String::new();
+    let arms = distinct(rows, |r| r.arm.as_str());
+    let tasks = distinct(rows, |r| r.task.as_str());
+    let rungs = distinct(rows, rung);
+    let width = arms.iter().map(|a| a.len()).max().unwrap_or(4).max(4);
+
+    let _ = writeln!(s, "\n=== ladder A/B ===\n");
+    let _ = writeln!(
+        s,
+        "{:<width$} {:>7} {:>7} {:>6}",
+        "arm", "solved", "of", "rate"
+    );
+    for arm in &arms {
+        let (p, n) = solved(by_arm(rows, arm));
+        let _ = writeln!(s, "{arm:<width$} {p:>7} {n:>7} {:>5}%", pct(p, n));
+    }
+
+    // Per rung: the rung IS the measurement. A total says one arm scored 6/10;
+    // this says which rung it fell off, and whether the others fell off the same
+    // one.
+    if rungs.len() > 1 || rungs.first().is_some_and(|r| *r != "(untagged)") {
+        let rw = rungs.iter().map(|r| r.len()).max().unwrap_or(4).max(4);
+        let _ = write!(
+            s,
+            "\n--- per rung (solved/total across {repeat} round(s)) ---\n"
+        );
+        let _ = write!(s, "{:<rw$}", "rung");
+        for arm in &arms {
+            let _ = write!(s, " {arm:>width$}");
+        }
+        let _ = writeln!(s);
+        for rg in &rungs {
+            let _ = write!(s, "{rg:<rw$}");
+            for arm in &arms {
+                let (p, n) = solved(by_arm(rows, arm).filter(|r| rung(r) == *rg));
+                let cell = format!("{p}/{n}");
+                let _ = write!(s, " {cell:>width$}");
+            }
+            let _ = writeln!(s);
+        }
+    }
+
+    // **The measurement this A/B can actually make.** Solve rate needs a ladder
+    // that discriminates; context cost does not — every run consumes tokens
+    // whether it succeeds or fails, so the number means something even when the
+    // arms score identically.
+    let _ = write!(
+        s,
+        "\n--- context cost (prompt tokens summed over every turn) ---\n"
+    );
+    let _ = writeln!(
+        s,
+        "{:<width$} {:>12} {:>12} {:>10}",
+        "arm", "total", "per task", "vs first"
+    );
+    let (first_total, _) = arms
+        .first()
+        .map(|a| tokens(by_arm(rows, a)))
+        .unwrap_or((0, 0));
+    for arm in &arms {
+        let (t, n) = tokens(by_arm(rows, arm));
+        let vs = if first_total > 0 && t > 0 {
+            format!("{:.0}%", (t as f64 / first_total as f64) * 100.0)
+        } else {
+            "-".to_string()
+        };
+        let _ = writeln!(
+            s,
+            "{arm:<width$} {t:>12} {:>12} {vs:>10}",
+            t.checked_div(n).unwrap_or(0)
+        );
+    }
+    // Per task, so one runaway task cannot masquerade as a trend.
+    if tasks.len() > 1 {
+        let tw = tasks.iter().map(|t| t.len()).max().unwrap_or(4).max(4);
+        let _ = write!(s, "\n  {:<tw$}", "task");
+        for arm in &arms {
+            let _ = write!(s, " {arm:>width$}");
+        }
+        let _ = writeln!(s);
+        for task in &tasks {
+            let _ = write!(s, "  {task:<tw$}");
+            for arm in &arms {
+                let (t, _) = tokens(by_arm(rows, arm).filter(|r| r.task == *task));
+                let _ = write!(s, " {t:>width$}");
+            }
+            let _ = writeln!(s);
+        }
+    }
+
+    // How each arm got there. A solve rate cannot see a model that reads for
+    // twenty turns before its first edit, or one that re-reads what the harness
+    // just evicted.
+    let _ = write!(s, "\n--- process (per task, averaged) ---\n");
+    let _ = writeln!(
+        s,
+        "{:<width$} {:>6} {:>11} {:>9} {:>7} {:>8}",
+        "arm", "steps", "first edit", "re-reads", "wasted", "secs"
+    );
+    for arm in &arms {
+        let rs: Vec<&ResultRow> = by_arm(rows, arm).filter(|r| r.steps > 0).collect();
+        if rs.is_empty() {
+            let _ = writeln!(s, "{arm:<width$} {:>6}", "-");
+            continue;
+        }
+        let n = rs.len() as f64;
+        let steps = rs.iter().map(|r| r.steps).sum::<usize>() as f64 / n;
+        let edits: Vec<usize> = rs.iter().filter_map(|r| r.turns_to_first_edit).collect();
+        let first_edit = if edits.is_empty() {
+            "never".to_string()
+        } else {
+            format!(
+                "{:.1}",
+                edits.iter().sum::<usize>() as f64 / edits.len() as f64
+            )
+        };
+        let re_reads = rs.iter().map(|r| r.re_reads).sum::<usize>() as f64 / n;
+        let wasted = rs.iter().map(|r| r.wasted_turns).sum::<usize>() as f64 / n;
+        let secs = rs.iter().map(|r| r.wall_ms).sum::<u128>() as f64 / 1000.0 / n;
+        let _ = writeln!(
+            s,
+            "{arm:<width$} {steps:>6.1} {first_edit:>11} {re_reads:>9.1} {wasted:>7.1} {secs:>8.0}"
+        );
+    }
+
+    // The interpretation the numbers do NOT carry on their own.
+    let _ = write!(s, "\n--- reading this ---\n");
+    if arms.len() > 1 {
+        let counts: Vec<usize> = arms.iter().map(|a| solved(by_arm(rows, a)).0).collect();
+        let spread = counts.iter().max().unwrap_or(&0) - counts.iter().min().unwrap_or(&0);
+        if spread <= 1 && repeat == 1 {
+            let _ = writeln!(
+                s,
+                "  a {spread}-task spread over one pass is NOISE, not a result. Re-run with \
+                 --repeat 3 before concluding anything."
+            );
+        }
+        // A task every arm always solves, or always fails, carries no information —
+        // and a ladder mostly made of those cannot detect a difference at all.
+        let flat = tasks
+            .iter()
+            .filter(|task| {
+                let per_arm: Vec<(usize, usize)> = arms
+                    .iter()
+                    .map(|a| solved(by_arm(rows, a).filter(|r| r.task == **task)))
+                    .collect();
+                per_arm.iter().all(|(p, n)| *p == 0 || p == n)
+                    && per_arm.windows(2).all(|w| (w[0].0 == 0) == (w[1].0 == 0))
+            })
+            .count();
+        let _ = writeln!(
+            s,
+            "  {flat} of {} tasks scored identically on every arm every round — \
+             only the remaining {} could show a difference at all.",
+            tasks.len(),
+            tasks.len() - flat
+        );
+    }
+    s
+}
+
+#[cfg(test)]
+mod ab_tests {
+    use super::*;
+
+    fn row(task: &str, arm: &str, rung: Option<&str>, pass: bool, tokens: usize) -> ResultRow {
+        ResultRow {
+            task: task.into(),
+            arm: arm.into(),
+            model: "m".into(),
+            commit: "c".into(),
+            repeat: 1,
+            outcome: if pass { "PASS" } else { "STILL-RED" }.into(),
+            steps: 5,
+            total_prompt_tokens: tokens,
+            peak_prompt_tokens: tokens / 2,
+            peak_reply_tokens: 100,
+            wall_ms: 2000,
+            faults: Vec::new(),
+            interventions: 0,
+            turns_to_first_edit: Some(2),
+            re_reads: 1,
+            wasted_turns: 0,
+            rung: rung.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_scorecard_has_one_line_per_arm_in_first_seen_order() {
+        let rows = vec![
+            row("a", "control(6)", Some("stated"), true, 1000),
+            row("a", "raw", Some("stated"), false, 500),
+            row("a", "pi", Some("stated"), true, 700),
+        ];
+        let s = ab_report(&rows, 1);
+        let control = s.find("control(6)").unwrap();
+        let raw = s.find("\nraw").unwrap();
+        let pi = s.find("\npi").unwrap();
+        assert!(control < raw && raw < pi, "{s}");
+        assert!(s.contains("100%"), "{s}");
+    }
+
+    #[test]
+    fn the_rung_table_groups_tasks_by_tag_and_columns_by_arm() {
+        let rows = vec![
+            row("a", "control(6)", Some("stated"), true, 1000),
+            row("b", "control(6)", Some("located"), false, 1000),
+            row("a", "raw", Some("stated"), false, 1000),
+            row("b", "raw", Some("located"), false, 1000),
+        ];
+        let s = ab_report(&rows, 1);
+        assert!(s.contains("per rung"), "{s}");
+        let stated = s
+            .lines()
+            .find(|l| l.starts_with("stated"))
+            .expect("stated row");
+        assert!(stated.contains("1/1") && stated.contains("0/1"), "{stated}");
+        let located = s
+            .lines()
+            .find(|l| l.starts_with("located"))
+            .expect("located row");
+        assert_eq!(located.matches("0/1").count(), 2, "{located}");
+    }
+
+    #[test]
+    fn context_cost_is_relative_to_the_first_arm() {
+        let rows = vec![
+            row("a", "control(6)", None, true, 1000),
+            row("a", "gateway(5)", None, true, 500),
+        ];
+        let s = ab_report(&rows, 1);
+        let cost = s
+            .split("context cost")
+            .nth(1)
+            .expect("context cost section");
+        let gw = cost.lines().find(|l| l.starts_with("gateway(5)")).unwrap();
+        assert!(gw.contains("50%"), "{gw}");
+        // No rung tags anywhere: no rung table.
+        assert!(!s.contains("per rung"), "{s}");
+    }
+
+    #[test]
+    fn a_one_pass_tie_is_called_noise_and_flat_tasks_are_counted() {
+        let rows = vec![
+            row("a", "control(6)", None, true, 1000),
+            row("b", "control(6)", None, false, 1000),
+            row("a", "raw", None, true, 1000),
+            row("b", "raw", None, true, 1000),
+        ];
+        let s = ab_report(&rows, 1);
+        assert!(s.contains("NOISE"), "{s}");
+        assert!(s.contains("1 of 2 tasks scored identically"), "{s}");
+    }
+
+    #[test]
+    fn an_empty_run_does_not_panic() {
+        let s = ab_report(&[], 1);
+        assert!(s.contains("ladder A/B"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

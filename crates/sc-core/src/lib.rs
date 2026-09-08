@@ -36,10 +36,13 @@ pub use event::{
     TranscriptSink,
 };
 pub use metrics::ToolCallMetrics;
+// Token accounting, so a solver without an sc-context dependency (the raw control
+// arm in sc-eval) can cost its prompts the same way the loop does.
 pub use plan::{PlanState, Step, StepStatus};
 pub use planner::{make_plan, parse_plan};
 pub use recovery::{action_hash, Progress, StallDetector, StopReason};
 pub use runlog::{RunLog, RunLogSink};
+pub use sc_context::{estimate_tokens, TokenCounter};
 pub use strategy::{
     select_strategy, Grammar, NativeTools, ParseRepair, RepairError, ToolCallStrategy,
 };

@@ -258,6 +258,48 @@ pub fn run_agent_observed(
         });
     }
 
+    // Nothing to work from. A blank instruction still runs -- the model is asked to
+    // act on whitespace, guesses, and the guesses read as incompetence. Named here,
+    // once, before the first turn is spent on it.
+    if instruction.trim().is_empty() {
+        sink.record(&AgentEvent::HarnessFault {
+            kind: FaultKind::EmptyGuidance,
+            detail: String::from(
+                "the task instruction is blank; the model has nothing to act on and \
+                 every turn it spends is guessing",
+            ),
+            step: 0,
+        });
+    } else if system.trim().is_empty() {
+        sink.record(&AgentEvent::HarnessFault {
+            kind: FaultKind::EmptyGuidance,
+            detail: String::from(
+                "the assembled system prompt is empty; the model was told nothing about \
+                 its tools or how to reply",
+            ),
+            step: 0,
+        });
+    }
+
+    // A pinned focus file the harness cannot read. `render_focus_files` skips it
+    // silently, so the model is told "the file to edit" and shown nothing -- never
+    // the model's fault by construction. Test files were once delivered as
+    // DIRECTORIES across 185 instances, and every run read them as failed and moved
+    // on. One fault per path, at run start, so a wrong path is blamed on the caller
+    // that pinned it.
+    for f in &cfg.focus_files {
+        if let Err(e) = std::fs::read_to_string(workspace.join(f)) {
+            sink.record(&AgentEvent::HarnessFault {
+                kind: FaultKind::UnreadablePath,
+                detail: format!(
+                    "focus file `{f}` cannot be read ({e}); it was pinned by the harness, \
+                     so the model will be steered toward a file it cannot see"
+                ),
+                step: 0,
+            });
+        }
+    }
+
     // PLAN (spec 03): decompose the task up front, grounded in the repo map. The
     // harness owns the plan; the model only ever sees a compact rendering.
     let mut plan = if cfg.plan_first {
@@ -1339,6 +1381,24 @@ pub fn run_agent_observed(
         });
         history.push(TurnRecord::new(tool.clone(), arg, was_error));
         let trimmed = truncate_observation(&obs, observation_cap_for(&tool, cfg), true);
+        // Did the cap just hide the answer? Capping is usually right -- error-first
+        // truncation keeps the failing lines, and a paged read keeps its "read the next
+        // chunk" tail. The case worth a fault is the BLIND cut: no error line to anchor
+        // on, so a head/tail slice dropped the middle unseen, and it dropped more than
+        // it kept. The model then decides on less than half the evidence and its next
+        // call looks like it ignored the output.
+        if let Some((total, shown)) = blind_cut(&obs, &trimmed) {
+            sink.record(&AgentEvent::HarnessFault {
+                kind: FaultKind::ObservationTruncated,
+                detail: format!(
+                    "`{tool}` returned {total} lines; the cap showed the model {shown} and \
+                     dropped {} from the middle with no error line to anchor on. Raise \
+                     `observation_line_cap` if the model then acts on what it did not see.",
+                    total - shown
+                ),
+                step: step + 1,
+            });
+        }
         push_recent(&mut recent, &resp.content, &trimmed, cfg.keep_recent_turns);
 
         // Auto test-repair (spec 03): the moment an edit lands, the harness runs
@@ -1477,8 +1537,8 @@ mod test_util;
 mod tests;
 
 use dispatch::{
-    dispatch, gate_finish, is_idempotent_tool, key_arg, looks_like_failure, mutating_path,
-    observation_cap_for, pre_apply_batched_writes, FinishGate,
+    blind_cut, dispatch, gate_finish, is_idempotent_tool, key_arg, looks_like_failure,
+    mutating_path, observation_cap_for, pre_apply_batched_writes, FinishGate,
 };
 use escalation::{escalate, stopped};
 use window::{push_observation, push_recent, replace_last_user, role_word};

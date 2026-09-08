@@ -71,3 +71,9 @@ crates/sc-win/logs/
 
 # Probe transcripts are large; the digests in logs/ are committed instead.
 crates/sc-win/logs/
+
+# pi writes these into the eval agent-dir at runtime (evals/pi/README.md)
+evals/pi/agent-dir/auth.json
+evals/pi/agent-dir/models-store.json
+# ladder-ab default output; dated baselines are committed under evals/results/
+evals/ladder/results/

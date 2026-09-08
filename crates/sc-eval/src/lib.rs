@@ -12,13 +12,19 @@
 //! frozen contract tests, and green-after-solve — so a "pass" is trustworthy.
 
 pub mod fsutil;
+pub mod gateway_arm;
+pub mod pi_arm;
+pub mod raw_arm;
 pub mod report;
+pub mod results;
 pub mod retrieval;
 pub mod runner;
 pub mod solver;
 pub mod task;
 
-pub use report::Report;
+pub use gateway_arm::{build_arm, Arm, ArmRun, ArmSolver, AskStats, GatewayTool};
+pub use report::{ab_report, Report};
+pub use results::{current_commit, rung_of, write_rows, MetricsSink, ResultRow, RunMetrics};
 pub use retrieval::{QueryResult, RetrievalQuery, RetrievalSuite};
 pub use runner::{run_suite, run_task, Outcome, TaskResult};
 pub use solver::{AgentSolver, FileSolver, FnSolver, NoopSolver, Solver};

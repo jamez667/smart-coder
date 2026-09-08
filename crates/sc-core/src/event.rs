@@ -157,8 +157,10 @@ pub enum FaultKind {
     /// saw it, so it decided on partial evidence.
     ///
     /// This is *usually correct* -- capping a 10,000-line file is the whole point.
-    /// It earns a fault only when the clipped tail plausibly carried the answer;
-    /// see the emit site for the threshold. Fires on everything and the count
+    /// It earns a fault only when the clipped tail plausibly carried the answer:
+    /// the cut was BLIND (a head/tail slice with no error lines to anchor on) and
+    /// it hid more than it showed. Error-first truncation keeps the signal by
+    /// construction and is not reported. Fires on everything and the count
     /// becomes noise people learn to ignore.
     ObservationTruncated,
     /// Harness-authored text named a tool the model was never offered.
@@ -168,11 +170,14 @@ pub enum FaultKind {
     /// run put 99 mentions of `edit_lines` in front of a model holding six tools,
     /// none of them that one.
     ToolNotOffered,
-    /// An error message promised the model context and then showed none.
+    /// The harness handed the model nothing to work from: a blank task
+    /// instruction, or an empty system prompt.
     ///
-    /// The ambiguous-anchor message said "the anchor matched multiple places" and
-    /// listed zero of them, eight times in a row. A model cannot disambiguate from
-    /// an empty list, so it guessed, and the guesses looked like incompetence.
+    /// The first instance was an error message that promised context and showed
+    /// none -- the ambiguous-anchor message said "the anchor matched multiple
+    /// places" and listed zero of them, eight times in a row. The tool now shows
+    /// the matches, so the detector moved up to the run's own guidance: a model
+    /// given whitespace for a task guesses, and the guesses look like incompetence.
     EmptyGuidance,
     /// A read failed on a path the harness itself put there.
     ///

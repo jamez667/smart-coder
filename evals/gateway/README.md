@@ -43,13 +43,13 @@ whether routing changes the solve rate — only the live A/B does that.
 Needs marked `expect = "refuse"` are genuinely ambiguous and should stay
 refused; they keep the file from becoming a list of only-winnable cases.
 
-## 4. The A/B — `cargo run -p sc-eval --bin gateway-ab`
+## 4. The A/B — `cargo run -p sc-eval --bin ladder-ab`
 
 The expensive one, and the only one that answers the actual question: does a
 small model *solve more tasks* with one classified `ask` than with the measured
 six tools?
 
-    cargo run --release -p sc-eval --bin gateway-ab -- \
+    cargo run --release -p sc-eval --bin ladder-ab -- \
         --url http://localhost:11436/v1 --model tiel-coder-35b --repeat 3
 
 Both arms run through the same `run_task`, so the TDD invariants are enforced

@@ -110,12 +110,27 @@ state itself.
 The unifying rule: **bad model behavior is expected and handled**, never acted
 on blindly and never a crash.
 
+The mirror of that rule: harness misbehaviour is expected too, and is named
+rather than left to read as the model's. `AgentEvent::HarnessFault { kind, .. }`
+is emitted when the harness damaged the model's turn — a reply cut at the token
+cap, a blind observation cut that hid more than it showed (`ObservationTruncated`),
+a pinned focus file it cannot read (`UnreadablePath`), a blank task or system
+prompt (`EmptyGuidance`), a prompt over budget, a timed-out command — and the
+counts per kind ride in `AgentReport.harness_faults`. Each kind exists because a
+real shipped bug was first blamed on the model, and each must be forced by a
+test; a kind that never fires is not a detector.
+
 ## Determinism & replay
 
-With a pinned seed and recorded sampling params, the event log is a replayable
-transcript: same inputs → same decisions. This is the primary debugging tool for
-"why did the agent do that?" and for regression-testing harness changes against
-fixed model behavior.
+The event log is a replayable transcript without a model:
+`sc_model::ReplayBackend` feeds the recorded `ModelTurn.raw` replies (from a
+`JsonLinesSink` session log or an `sc-model` transcript) back into the loop, and
+`crates/sc-core/tests/replay.rs` asserts the same tool calls, in order, and the
+same stop reason. That is how a harness change is regression-tested against
+fixed model behavior, with no inference, GPU or seed involved; a replay that
+asks for one more turn than the recording has is itself a behaviour change and
+fails. The replayed backend must advertise the capabilities of the one that made
+the recording, or the prompt budget — and so the loop's choices — differ.
 
 ## Human-in-the-loop (v1)
 

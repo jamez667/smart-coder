@@ -321,6 +321,37 @@ pub(super) fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
     }
 }
 
+/// Did `truncate_observation` cut `obs` down to `trimmed` BLIND -- a head/tail slice
+/// with no error line to anchor on -- and hide more than it showed? Returns
+/// `(total_lines, lines_shown)` when so, `None` for an uncut result, an error-first
+/// cut (which kept the signal by construction), or a cut that still showed the
+/// model at least half.
+///
+/// The two paths are told apart by the marker the truncator leaves: the blind slice
+/// writes one `… [N line(s) truncated] …` line, the error-first path writes
+/// `… [N line(s) skipped] …` between the lines it kept. Only the marker lines are
+/// discounted from the shown count.
+pub(super) fn blind_cut(obs: &str, trimmed: &str) -> Option<(usize, usize)> {
+    let total = obs.lines().count();
+    let mut shown = 0usize;
+    let mut markers = 0usize;
+    for l in trimmed.lines() {
+        if l.contains("line(s) skipped]") {
+            return None;
+        }
+        if l.contains("line(s) truncated]") {
+            markers += 1;
+        } else {
+            shown += 1;
+        }
+    }
+    if markers == 0 || shown >= total {
+        return None;
+    }
+    let dropped = total - shown;
+    (dropped > shown).then_some((total, shown))
+}
+
 /// The key argument of a call, for the repeat-dedup history record (path or
 /// query/name). For a windowed `read_file` the window (`start`/`limit`) is folded
 /// into the key so paging THROUGH a file — `read_file(a.rs, start=1)` then

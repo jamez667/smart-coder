@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "local-tiel": {
+      "baseUrl": "http://localhost:11436/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "models": [
+        {
+          "id": "tiel-coder-35b",
+          "name": "tiel-coder-35b",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 32768,
+          "maxTokens": 4096,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}

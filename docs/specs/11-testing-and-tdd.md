@@ -148,6 +148,31 @@ tool schemas/validation, context budgeter, planner, integration logic). The
 agent's own test suite is part of every milestone's definition of done — if we
 expect tiny models to work red→green, the harness that drives them must too.
 
+### The harness is measured, not assumed
+
+Every ladder number is "model plus harness", so the harness itself is measured
+by A/B: `ladder-ab --arms control,raw,pi,gateway` runs `evals/ladder` once per
+arm against the same model, step cap and `run_task` grader, so red-first, frozen
+contract tests and the tamper check apply identically and no arm can pass by
+editing a test. `raw` is the model with native tool calling and no harness at
+all (no repo map, plan, nudges, stall detection or repair) — the control that
+says whether a gain or loss belongs to the harness or the model. `pi` is an
+external coding agent (`evals/pi/`) on the same model, a calibration point: a
+rung pi solves that the in-tree loop cannot is a harness gap, not a model one.
+A single pass over ~10 tasks is a signal, not a result; `--repeat N` shows the
+spread, and a difference that does not survive repetition is not a difference.
+
+Every (task, arm, model, commit, repeat) is appended as one JSON line to
+`rows.jsonl` under `--out` (`sc_eval::ResultRow`), so a run outlives its
+scrollback and rows from different commits are never mistaken for the same
+experiment. Dated baselines are committed under `evals/results/`. Beside
+outcome, steps, wall time, total/peak prompt tokens and harness-fault counts, a
+`MetricsSink` on the event stream records how the task was solved, not only
+whether: `turns_to_first_edit` (the step of the first mutating call — twenty
+turns of reading first is deliberation a solve rate cannot see), `re_reads` (a
+read-only call repeated verbatim: harness amnesia or model thrash, told apart by
+the prompt size beside it), and `wasted_turns` (stalls plus repair prompts).
+
 ## Relationship to other specs
 
 - Defines the VERIFY gate of the loop ([03](03-agent-loop.md)).

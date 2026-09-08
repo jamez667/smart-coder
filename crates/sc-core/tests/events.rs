@@ -965,3 +965,220 @@ fn a_reply_that_fills_the_cap_counts_as_truncated_without_a_finish_reason() {
         report.steps
     );
 }
+
+/// Every `HarnessFault` of `kind` in the stream, as `(detail, step)`.
+fn faults_of(events: &[AgentEvent], kind: FaultKind) -> Vec<(String, usize)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::HarnessFault {
+                kind: k,
+                detail,
+                step,
+            } if *k == kind => Some((detail.clone(), *step)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **The truncation detector must be seen to fire -- and only on the blind cut.**
+///
+/// A `list_dir` of twenty entries under a four-line cap has no error line to keep, so
+/// the truncator slices head and tail and drops the middle unseen. The model then
+/// picks a file from a list it saw a fifth of, and the pick reads as carelessness.
+/// One fault, on the turn it happened, naming the tool and the lines dropped.
+#[test]
+fn reports_a_harness_fault_when_an_observation_was_cut_blind() {
+    let ws = temp("obs-cut");
+    for i in 0..20 {
+        std::fs::write(ws.join(format!("f{i:02}.txt")), "x").unwrap();
+    }
+
+    let backend = Scripted::new(vec![
+        r#"{"tool":"list_dir","path":"."}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let cfg = AgentConfig {
+        observation_line_cap: 4,
+        ..AgentConfig::default()
+    };
+    run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "list the files",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let faults = faults_of(&events, FaultKind::ObservationTruncated);
+    assert_eq!(
+        faults.len(),
+        1,
+        "exactly the one clipped observation raises a fault, got: {faults:#?}"
+    );
+    let (detail, step) = &faults[0];
+    assert_eq!(*step, 1, "raised on the turn it happened");
+    assert!(
+        detail.contains("`list_dir`") && detail.contains("dropped 17"),
+        "the detail must name the tool and the lines dropped, got: {detail}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **A cut that keeps the error lines is not a fault.**
+///
+/// Error-first truncation exists so a 5k-line test log comes back as the failures.
+/// That is the harness working, not hiding the answer; reporting it would make the
+/// count noise people learn to ignore.
+#[test]
+fn an_error_first_cut_is_not_a_fault() {
+    let ws = temp("obs-cut-errors");
+    // A few entries look like errors and FIT the cap, so the truncator anchors on
+    // them and skips the rest -- the informed cut, not the blind one.
+    for i in 0..3 {
+        std::fs::write(ws.join(format!("error{i:02}.txt")), "x").unwrap();
+    }
+    for i in 3..20 {
+        std::fs::write(ws.join(format!("f{i:02}.txt")), "x").unwrap();
+    }
+
+    let backend = Scripted::new(vec![
+        r#"{"tool":"list_dir","path":"."}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let cfg = AgentConfig {
+        observation_line_cap: 4,
+        ..AgentConfig::default()
+    };
+    run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "list the files",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    assert!(
+        faults_of(&events, FaultKind::ObservationTruncated).is_empty(),
+        "an error-first cut kept the signal and is not a fault"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **The unreadable-path detector must be seen to fire.**
+///
+/// A focus file the harness pins but cannot read is skipped silently by the prompt
+/// renderer: the model is told "the file to edit" and shown nothing. Test files were
+/// once delivered as directories across 185 instances and every run read them as
+/// failed and moved on. The fault names the path, once, before the first turn.
+#[test]
+fn reports_a_harness_fault_when_a_focus_file_is_unreadable() {
+    let ws = temp("unreadable-focus");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+    // The historical shape of the bug: the "file" is a directory.
+    std::fs::create_dir_all(ws.join("tests.py")).unwrap();
+
+    let backend = Scripted::new(vec![r#"{"tool":"finish"}"#]);
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let cfg = AgentConfig {
+        focus_files: vec!["a.txt".to_string(), "tests.py".to_string()],
+        ..AgentConfig::default()
+    };
+    run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "edit tests.py",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let faults = faults_of(&events, FaultKind::UnreadablePath);
+    assert_eq!(
+        faults.len(),
+        1,
+        "the one unreadable focus file raises one fault; the readable one none, got: {faults:#?}"
+    );
+    let (detail, step) = &faults[0];
+    assert_eq!(
+        *step, 0,
+        "raised at run start, before a turn is spent on it"
+    );
+    assert!(
+        detail.contains("`tests.py`") && !detail.contains("`a.txt`"),
+        "the detail must name the unreadable path only, got: {detail}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **The empty-guidance detector must be seen to fire.**
+///
+/// A whitespace instruction still runs: the model is asked to act on nothing,
+/// guesses, and the guesses look like incompetence. The fault says so once, at run
+/// start, so the caller that sent a blank task is the one blamed.
+#[test]
+fn reports_a_harness_fault_when_the_instruction_is_blank() {
+    let ws = temp("blank-task");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let run = |instruction: &str| {
+        let backend = Scripted::new(vec![r#"{"tool":"finish"}"#]);
+        let log = Mutex::new(Vec::new());
+        let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+        run_agent_observed(
+            &backend,
+            None,
+            &default_registry(),
+            &ParseRepair,
+            instruction,
+            &ws,
+            &AgentConfig::default(),
+            &sink,
+        )
+        .unwrap();
+        faults_of(&log.into_inner().unwrap(), FaultKind::EmptyGuidance)
+    };
+
+    let faults = run("  \n\t ");
+    assert_eq!(
+        faults.len(),
+        1,
+        "a blank task raises one fault, got: {faults:#?}"
+    );
+    assert_eq!(faults[0].1, 0, "raised at run start");
+    assert!(
+        faults[0].0.contains("blank"),
+        "the detail must say the instruction was blank, got: {}",
+        faults[0].0
+    );
+
+    // The healthy case MUST be silent.
+    assert!(
+        run("read a.txt").is_empty(),
+        "a real instruction is not a fault"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

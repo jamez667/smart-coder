@@ -486,6 +486,12 @@ capture, and this removes the load-bearing cases from its shoulders.
     immediately: the first capture showed every run's opening command failing
     under the wrong shell, a harness bug that had been reading as model
     flakiness ([04](04-tools.md)).
+  - `sc-eval` also ships `ladder-ab`, the N-arm comparison over the same ladder
+    (arms, rows and metrics in [11](11-testing-and-tdd.md)); a separate binary
+    because it is an experiment with a caveat-carrying report, not a scoring
+    run. Its control arm builds the backend exactly as `sc-eval --agent` does
+    (detected context, native tools), so it scores the runner's strategy rather
+    than an approximation of it.
   - **SWE-bench was tried and dropped.** The adapter was built, ran against two
     local models, and was removed. It cost 126 GB of per-instance Docker images
     and minutes per instance, and the comparison it promised never materialised:

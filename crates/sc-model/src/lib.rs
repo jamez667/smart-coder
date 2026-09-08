@@ -19,10 +19,12 @@
 mod constraint;
 mod dotenv;
 mod openai;
+pub mod replay;
 pub mod transcript;
 pub use constraint::{OutputConstraint, ToolCalling, ToolSchema};
 pub use dotenv::load_dotenv;
 pub use openai::OpenAiBackend;
+pub use replay::ReplayBackend;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
