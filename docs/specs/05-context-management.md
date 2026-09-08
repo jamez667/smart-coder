@@ -84,7 +84,13 @@ keyed by content hash; the recent window is whole turns, appended and never
 trimmed by count. So turn N's messages are a byte-identical prefix of turn
 N+1's (`crates/sc-core/tests/prefix_stability.rs`) and the backend's prefix KV
 cache is reused instead of re-prefilling the whole prompt every turn
-([02](02-model-backends.md)). The one deliberate break is the repeat-dedup
+([02](02-model-backends.md)). That reuse is measured, not assumed: the prompt
+tokens the harness *sends* are identical whether the prefix held or not, so the
+evidence is the server's own split ([02](02-model-backends.md)), accumulated per
+run as cached-versus-prefilled tokens and reported per ladder row
+([11](11-testing-and-tdd.md)). A probe under
+`evals/results/2026-09-08-cache-probe/` shows an appended turn reusing 694 of 721
+tokens — 27 prefilled instead of 698, 132ms against 931ms. The one deliberate break is the repeat-dedup
 nudge, which overwrites the newest user message in place.
 
 ### 3. Aggressive observation truncation

@@ -205,7 +205,12 @@ heuristic estimator with a safety margin. `GenerateResponse.prompt_tokens`
 carries the server's own `usage.prompt_tokens` from both the streaming and
 blocking paths, so the builder's count can be checked against the tokenizer that
 actually ran. The Context Manager ([05](05-context-management.md)) always
-budgets against this count.
+budgets against this count. Beside it the adapter reads back the server's split
+of that prompt — `cached_prompt_tokens`, `prefilled_prompt_tokens` and
+`prompt_ms`, from llama.cpp's `timings.cache_n`/`prompt_n`/`prompt_ms` or, as a
+fallback, OpenAI's `usage.prompt_tokens_details.cached_tokens` with the prefilled
+half derived — each `None` on a server that reports neither, which is not the
+same as zero.
 
 ## Backend behavior the harness must tolerate
 

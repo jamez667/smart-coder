@@ -159,8 +159,23 @@ all (no repo map, plan, nudges, stall detection or repair) — the control that
 says whether a gain or loss belongs to the harness or the model. `pi` is an
 external coding agent (`evals/pi/`) on the same model, a calibration point: a
 rung pi solves that the in-tree loop cannot is a harness gap, not a model one.
-A single pass over ~10 tasks is a signal, not a result; `--repeat N` shows the
+A single pass over ~14 tasks is a signal, not a result; `--repeat N` shows the
 spread, and a difference that does not survive repetition is not a difference.
+Rungs are graded on two axes, because the first alone stopped ranking:
+diagnostic distance (how far the fix sits from the symptom, `rung:stated`
+through `rung:invariant`) and *spread* — how many files one correct change must
+touch. Six of the ten distance rungs scored identically for every arm every
+round, so the `rung:cross-file-*` family makes a change span three or four files
+(a new enum variant handled at three sites, a parameter whose right value
+differs at four call sites, an off-by-one in a helper the failing test does not
+name, a trait method that cannot be copy-pasted), each built so the shortcut — a
+`_ =>` catch-all, patching the file the test points at — provably fails.
+
+Each row also records `cached_prompt_tokens`, `prefilled_prompt_tokens` and
+`cache_hit_percent` — what the server reused versus re-prefilled
+([02](02-model-backends.md)) — which `ab_report` prints as a "prefix cache"
+table. An arm whose backend reports no split prints "not reported", never a 0%
+it did not observe.
 
 Every (task, arm, model, commit, repeat) is appended as one JSON line to
 `rows.jsonl` under `--out` (`sc_eval::ResultRow`), so a run outlives its
