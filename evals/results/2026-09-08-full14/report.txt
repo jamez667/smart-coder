@@ -1,0 +1,63 @@
+
+=== ladder A/B ===
+
+arm         solved      of   rate
+control(6)      41      42    98%
+raw             42      42   100%
+pi              40      42    95%
+
+--- per rung (solved/total across 3 round(s)) ---
+rung                 control(6)        raw         pi
+stated                      3/3        3/3        3/3
+located                     3/3        3/3        3/3
+symptomatic                 3/3        3/3        3/3
+misdirected                 3/3        3/3        3/3
+two-stage                   3/3        3/3        3/3
+invariant                   3/3        3/3        3/3
+engine-additive             3/3        3/3        3/3
+engine-two-layer            3/3        3/3        2/3
+engine-multi-site           3/3        3/3        3/3
+engine-novel-generic        2/3        3/3        3/3
+cross-file-variant          3/3        3/3        3/3
+cross-file-signature        3/3        3/3        3/3
+cross-file-cause            3/3        3/3        3/3
+cross-file-trait            3/3        3/3        2/3
+
+--- context cost (prompt tokens summed over every turn) ---
+arm               total     per task   vs first
+control(6)      1565722        37279       100%
+raw             2828091        67335       181%
+pi                    0            0          -
+
+  task                  control(6)        raw         pi
+  rust-stated                 6258       8711          0
+  rust-located                9724      61213          0
+  rust-symptomatic           12860      18458          0
+  rust-misdirected           17167      30425          0
+  rust-two-stage             19155      24118          0
+  rust-invariant             13842      30256          0
+  engine-diagonal-path       74191     113212          0
+  engine-diagonal-wired     165906     407569          0
+  engine-grid-scan          266660     819004          0
+  engine-ecs-query          506988     194001          0
+  rust-multi-site           125316     138973          0
+  rust-signature-change     162905     147651          0
+  rust-hidden-invariant      14626     280103          0
+  rust-trait-impl           170124     554397          0
+
+--- prefix cache (what the SERVER re-prefilled, vs what we sent) ---
+arm                sent    prefilled       cached  hit rate
+control(6)      1565722       233045      1498504       87%
+raw             2828091            -            - not reported
+pi                    0            -            - not reported
+  a HIGH hit rate is the append-only prompt working: only the newly appended tokens
+  were prefilled. A rate near 0% on a multi-turn task means the prefix is NOT holding.
+
+--- process (per task, averaged) ---
+arm         steps  first edit  re-reads  wasted     secs
+control(6)    6.6         3.7       0.0     0.6       33
+raw          12.0       never       0.0     0.0       61
+pi            7.7       never       0.0     0.0       25
+
+--- reading this ---
+  11 of 14 tasks scored identically on every arm every round — only the remaining 3 could show a difference at all.

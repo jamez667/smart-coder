@@ -8,6 +8,8 @@ per task, arm, model, commit and repeat), plus the run's report and progress log
 | `2026-09-07-baseline` | `2a4c557` | before the harness work | control, raw, pi |
 | `2026-09-08-phase1` | `d7d5044` | append-only prompt, observation last | control |
 | `2026-09-08-phase123` | `e04abe5` | + guard consolidation, six tools, numbered reads | control |
+| `2026-09-08-cache-probe` | — | direct llama.cpp KV-cache probe (2 requests) | — |
+| `2026-09-08-full14` | `fa1a82f` | 14 rungs incl. 4 cross-file, + cache metrics | control, raw, pi |
 
 ## What the baseline said
 
@@ -37,7 +39,15 @@ Two things this measurement cannot see:
   the hardest rung, not a regression; totals-of-sums double because of it,
   which is why the medians above are the honest read.
 
-The next real signal needs harder multi-file rungs (the four that move are not
-enough) and the cache counters. Until then, treat these rows as a floor: the
-harness did not get worse, and it stopped doing several things that were
-provably wrong.
+Both of those were then built, and `2026-09-08-full14` is the answer:
+
+- **The cache counters settled it.** 87% hit rate over 126 runs: the harness
+  sends 1.57M prompt tokens and the server re-prefills 233k. The append-only
+  work does what it was supposed to; this column could never have shown it.
+- **The harness halves the work.** Against a bare model with native tool
+  calling and no harness: 199% of the tokens, 200% of the wall-clock, 2x the
+  median steps for the same tasks.
+- **The harder rungs did NOT discriminate.** All four are 3/3 for every arm, so
+  11 of 14 tasks are now flat. Cross-file spread was the wrong axis — see that
+  run's README for what to try instead (a budget ceiling is the leading
+  candidate, since cost is where the arms already separate 2:1).
