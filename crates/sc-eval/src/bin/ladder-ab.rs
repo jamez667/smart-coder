@@ -99,6 +99,17 @@ fn main() {
         .with_detected_context()
         .with_native_tools();
     let commit = current_commit();
+    // The ladder's verify commands are POSIX (`... && ./t_stated.exe`). Without an
+    // `sh` on PATH, sc-verify falls back to `cmd /C`, every verification fails,
+    // and the run scores a model that was never allowed to pass -- measured: a
+    // baseline launched from PowerShell went 0-for-everything for exactly this
+    // reason. Refuse loudly rather than record a number that means nothing.
+    if !posix_sh_available() {
+        eprintln!(
+            "error: no POSIX `sh` on PATH. The ladder's verify commands need one;              launch from Git Bash or put Git's usr/bin on PATH."
+        );
+        std::process::exit(2);
+    }
     let labels: Vec<&str> = arms.iter().map(|a| a.label()).collect();
     eprintln!(
         "model {model} at {url}, commit {commit} ({} tasks x {repeat} run(s) x {} arm(s): {})\n",
@@ -131,7 +142,7 @@ fn main() {
                     short(&result.outcome),
                     wall_ms as f64 / 1000.0
                 );
-                rows.push(ResultRow::new(
+                let row = ResultRow::new(
                     task,
                     arm.label(),
                     &model,
@@ -140,7 +151,15 @@ fn main() {
                     &result,
                     &observed,
                     wall_ms,
-                ));
+                );
+                // Append as we go: a run that dies at task 80 keeps 79 rows.
+                if let Err(e) = write_rows(&out_dir, std::slice::from_ref(&row)) {
+                    eprintln!(
+                        "warning: could not write a row to {}: {e}",
+                        out_dir.display()
+                    );
+                }
+                rows.push(row);
             }
             if let Some(stats) = run.ask_stats() {
                 merge(&mut ask_totals, stats);
@@ -148,18 +167,27 @@ fn main() {
         }
     }
 
-    match write_rows(&out_dir, &rows) {
-        Ok(path) => eprintln!("\nrows appended to {}", path.display()),
-        Err(e) => eprintln!(
-            "\nwarning: could not write rows to {}: {e}",
-            out_dir.display()
-        ),
-    }
+    eprintln!(
+        "
+rows appended to {}",
+        out_dir.join("rows.jsonl").display()
+    );
 
     print!("{}", sc_eval::ab_report(&rows, repeat));
     if arms.contains(&Arm::Gateway) {
         print!("{}", ask_report(&ask_totals));
     }
+}
+
+/// Is there a POSIX `sh` this process can run? (`sc_verify` falls back to `cmd /C`
+/// without one, silently.)
+fn posix_sh_available() -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// What `ask` did on the gateway arm, and the reading that goes with it.
