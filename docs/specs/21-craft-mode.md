@@ -478,7 +478,7 @@ A recursive layout tree, persisted:
 Layout := Leaf(PanelKind)
         | Split { id: String, axis: Horizontal | Vertical, a: Layout, b: Layout }
 
-PanelKind := Files | Git | Editor(EditorId) | Bottom | Chat
+PanelKind := Files | Git | Editor(EditorId) | Bottom | Chat | Claude | Flame
 ```
 
 `Editor` is the one kind that may appear **more than once** in a tree, and its
@@ -736,6 +736,25 @@ reason, never fail silently.
 - This is **not** a Unity integration. No play mode, no asset pipeline, no editor
   extension. Compile and report — nothing that requires understanding Unity
   beyond invoking it.
+
+### The second consumer of the seam: the profiler
+
+"Does it compile" is the first question Craft mode has to answer without an
+agent. "Why is it slow" is the second, and it reuses the same seam — *project
+type → command → parsed output* — rather than inventing a parallel one.
+
+The Profiler panel ([24](24-profiler.md)) records with `samply record` or
+`cargo flamegraph` through `proc::command`, off the UI thread and cancellable,
+and parses folded stacks into a flame graph. It is **not** `needs_model()`, so
+Craft mode keeps it: reading a profile contacts nothing, and this is exactly the
+mode in which there is nobody to ask why the code is slow.
+
+Two differences from Compile worth stating, because they are what the seam had
+to stretch to cover. Recording is **Cargo-only**, and every other project kind
+still gets the whole viewer by opening a folded file — so a missing recorder
+never disables the section. And cancelling must kill the **process tree**
+(`proc::kill_tree`), not the child: a recording is a sampler wrapping cargo
+wrapping the profiled binary, and killing the middle one strands the rest.
 
 ## Corrections found during implementation
 

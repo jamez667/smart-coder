@@ -1,0 +1,13 @@
+[package]
+name = "sc-flame"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Folded-stack profiles: parsing, the call tree, flame-graph layout (spec 24)."
+
+# No dependencies, deliberately. Parsing folded stacks is string handling, and the
+# tree it builds is plain data. This crate is shared by the desktop panel and the
+# agent's `profile_hotspots` tool, so anything it pulled in would land in BOTH —
+# `sc-cargo` and `sc-comply` set this precedent.
+[dependencies]

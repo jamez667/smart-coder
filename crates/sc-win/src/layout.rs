@@ -65,6 +65,12 @@ pub enum PanelKind {
     /// it — the first attempt hung a button off the Chat composer, which both buried it inside
     /// an Assistant-only panel and left the run with nowhere to appear.
     Claude,
+    /// The profiler: a flame graph over a recorded or imported profile (spec 24).
+    ///
+    /// Not `needs_model()`. Reading a profile is a local, deterministic act — no model is
+    /// contacted — so this panel survives Craft mode, where "why is my code slow" is exactly
+    /// the question you are left with once there is no agent to ask.
+    Flame,
 }
 
 impl PanelKind {
@@ -90,6 +96,7 @@ impl PanelKind {
             PanelKind::Bottom => Cow::Borrowed("bottom"),
             PanelKind::Chat => Cow::Borrowed("chat"),
             PanelKind::Claude => Cow::Borrowed("claude"),
+            PanelKind::Flame => Cow::Borrowed("flame"),
         }
     }
 
@@ -105,6 +112,7 @@ impl PanelKind {
             "bottom" => Some(PanelKind::Bottom),
             "chat" => Some(PanelKind::Chat),
             "claude" => Some(PanelKind::Claude),
+            "flame" => Some(PanelKind::Flame),
             rest => rest
                 .strip_prefix("editor:")
                 .and_then(|n| n.parse().ok())
@@ -125,6 +133,7 @@ impl PanelKind {
             PanelKind::Bottom => "Panel",
             PanelKind::Chat => "Chat",
             PanelKind::Claude => "Claude Code",
+            PanelKind::Flame => "Profiler",
         }
     }
 
@@ -171,6 +180,7 @@ pub fn menu_panels(layout: &Layout) -> Vec<PanelKind> {
     out.push(PanelKind::Bottom);
     out.push(PanelKind::Chat);
     out.push(PanelKind::Claude);
+    out.push(PanelKind::Flame);
     out
 }
 
@@ -1005,6 +1015,35 @@ mod tests {
             Layout::assistant_default(),
             "falls back rather than rendering something unusable"
         );
+    }
+
+    #[test]
+    fn the_profiler_panel_round_trips_through_its_slug() {
+        // The slug is the persisted spelling AND the seed for the split ids in splits.json;
+        // if `from_slug` ever stopped recognising it, a saved layout would silently lose the
+        // panel on the next start and its dividers would reset.
+        assert_eq!(PanelKind::Flame.slug(), "flame");
+        assert_eq!(PanelKind::from_slug("flame"), Some(PanelKind::Flame));
+        assert_eq!(PanelKind::Flame.label(), "Profiler");
+        assert_eq!(PanelKind::Flame.menu_label(), "Profiler");
+
+        // Craft mode must KEEP it: reading a profile contacts no model, and Craft mode is
+        // exactly where a user has no agent to ask about performance.
+        assert!(!PanelKind::Flame.needs_model());
+        assert!(!PanelKind::Flame.is_editor());
+    }
+
+    #[test]
+    fn the_view_menu_offers_the_profiler_in_both_modes() {
+        // Silent-bug guard: a panel missing from `menu_panels` can be hidden and then never
+        // brought back, because this menu is the only way to restore one.
+        for craft in [false, true] {
+            let l = Layout::default_for(craft);
+            assert!(
+                menu_panels(&l).contains(&PanelKind::Flame),
+                "craft={craft}: the profiler must be offered"
+            );
+        }
     }
 
     #[test]

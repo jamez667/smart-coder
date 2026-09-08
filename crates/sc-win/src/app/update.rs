@@ -2,8 +2,30 @@
 
 use super::*;
 
+pub(crate) fn __perf_log(line: &str) {
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("sc-win-perf.log"))
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 impl App {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let __label: String = format!("{message:?}").chars().take(60).collect();
+        let __t = std::time::Instant::now();
+        let __r = self.__update_inner(message);
+        let __ms = __t.elapsed().as_millis();
+        if __ms >= 3 {
+            __perf_log(&format!("update {__ms:>6}ms  {__label}"));
+        }
+        __r
+    }
+
+    pub(crate) fn __update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::IntentChanged(s) => self.intent = s,
             Message::ModelChanged(s) => self.model_input = s,
@@ -847,6 +869,32 @@ impl App {
                 self.layouts.save();
                 self.open_menu = None;
             }
+            // ---- the profiler (spec 24) ----
+            Message::OpenProfile => return self.open_profile(),
+            Message::ProfileLoaded(src, r) => self.profile_loaded(src, r),
+            Message::RecordProfile => return self.record_profile(),
+            Message::CancelProfile => {
+                // Cooperative: the worker notices the flag between polls and kills the child.
+                if let Some(c) = &self.flame_cancel {
+                    c.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Message::ProfileRecorded(r) => return self.profile_recorded(r),
+            Message::FlameZoom(path) => self.flame_zoom_to(path),
+            Message::FlameHover(h) => self.flame_hover = h.map(|b| *b),
+            Message::FlameSearch(q) => self.flame_search = q,
+            Message::FlameTarget(t) => self.flame_target = t,
+            Message::FlameArgs(a) => self.flame_args = a,
+            Message::RecheckProfiler => self.recheck_flame_tool(),
+            Message::CopyInstallHint => {
+                // Whichever tool we'd rather they installed; samply first, matching `detect`.
+                return iced::clipboard::write(
+                    sc_win::flame::tool::Profiler::Samply
+                        .install_hint()
+                        .to_string(),
+                );
+            }
+
             Message::GitRowMenu(path, status) => {
                 self.git_menu_at = self.cursor_pos;
                 self.git_menu = Some((path, status));

@@ -1,10 +1,21 @@
 //! App view: view(), explorer, sync bar, files tab, git tab.
+use crate::app::update::__perf_log;
 
 use super::*;
 use iced::widget::{column, row};
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
+        let __t = std::time::Instant::now();
+        let __r = self.__view_inner();
+        let __ms = __t.elapsed().as_millis();
+        if __ms >= 3 {
+            __perf_log(&format!("view   {__ms:>6}ms"));
+        }
+        __r
+    }
+
+    pub(crate) fn __view_inner(&self) -> Element<'_, Message> {
         // The IDE body is now a PANEL TREE (spec 21): the arrangement is data, so which panels
         // are on screen and how they're split is the user's choice rather than three hardcoded
         // columns. Craft mode simply gets a tree without a Chat leaf in it.

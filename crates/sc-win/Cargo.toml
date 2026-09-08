@@ -25,6 +25,8 @@ path = "src/lib.rs"
 craft-only = []
 
 [dependencies]
+# The folded-stack parser and flame layout, shared with the agent tool. Zero deps.
+sc-flame = { path = "../sc-flame" }
 sc-comply = { path = "../sc-comply" }
 sc-comply-author = { path = "../sc-comply-author" }
 sc-core = { path = "../sc-core" }

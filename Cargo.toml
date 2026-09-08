@@ -15,6 +15,7 @@ members = [
     "crates/sc-trace",
     "crates/sc-cargo",
     "crates/sc-comply",
+    "crates/sc-flame",
     "crates/sc-android",
     "crates/sc-core",
     "crates/sc-comply-author",

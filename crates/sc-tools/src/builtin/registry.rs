@@ -93,6 +93,27 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
         ToolSpec {
+            name: "profile_hotspots",
+            // Names no other tool, per the rule above. Says READ, not "profile", because the
+            // tool cannot record one -- a model that thinks it can will ask for something the
+            // harness has no way to deliver.
+            description: "Read a recorded CPU profile (a folded-stack file) and list the                           functions that cost the most time, hottest first. Use this to answer                           WHY code is slow instead of guessing from the source. The file must                           already exist -- this does not run a profiler.",
+            params: vec![
+                ParamSpec::new(
+                    "path",
+                    ParamType::String,
+                    "path to the folded-stack file, relative to the project root                      (e.g. 'target/sc-profile.folded')",
+                ),
+                ParamSpec::new(
+                    "limit",
+                    ParamType::OptionalInteger,
+                    "how many frames to list (omit for a sensible default)",
+                ),
+            ],
+            side_effect: SideEffect::ReadOnly,
+            permission: Permission::Auto,
+        },
+        ToolSpec {
             name: "write_file",
             description: "Create or overwrite a file with the given full contents.",
             params: vec![
@@ -300,7 +321,13 @@ pub fn read_only_registry() -> ToolRegistry {
     // six against sixteen -- it says nothing about seven. Growing it on a hunch would
     // spend the only frozen model-facing contract here to find out. It joins the day a
     // probe says it earns the slot, the way `SC_INVESTIGATE_LEADS` was decided.
-    const EXCLUDE: [&str; 3] = ["update_plan", "ask_user", "cargo_info"];
+    //
+    // `profile_hotspots` is excluded on that same ground. It is read-only and genuinely
+    // useful -- "which function is slow" is a question this loop could be asked -- but it
+    // needs a profile file that usually does not exist, so on most repositories it is a
+    // seventh menu entry that can only answer "could not read". It joins when a probe says
+    // it earns the slot, not before.
+    const EXCLUDE: [&str; 4] = ["update_plan", "ask_user", "cargo_info", "profile_hotspots"];
     let specs: Vec<ToolSpec> = default_registry()
         .specs()
         .iter()

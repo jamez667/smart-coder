@@ -189,6 +189,10 @@ impl App {
                 BottomTab::Build => "Build".to_string(),
             },
             PanelKind::Chat => format!("{} messages", self.chat_turns.len()),
+            PanelKind::Flame => match &self.flame_profile {
+                Some(p) => format!("{} samples", p.total()),
+                None => "no profile".to_string(),
+            },
             PanelKind::Claude => {
                 if self.claude_run && self.session.is_some() {
                     "running…".to_string()
@@ -511,6 +515,7 @@ impl App {
                 }
             }
             PanelKind::Claude => self.view_claude_panel(),
+            PanelKind::Flame => self.view_flame_panel(),
         }
     }
 }

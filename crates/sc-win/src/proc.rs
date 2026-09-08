@@ -33,6 +33,36 @@ pub fn git() -> Command {
     command("git")
 }
 
+/// Kill a process **and everything it spawned**.
+///
+/// `Child::kill` terminates only the process you hold a handle to. That is the wrong tool for
+/// anything that shells out: `samply record -- cargo run` is three processes deep, and killing
+/// the middle one leaves the profiled binary running with nobody watching it. Windows has no
+/// process-group signal, so the tree walk is `taskkill /T`; elsewhere the negative pid signals
+/// the process group.
+///
+/// Best-effort and non-blocking: the child is already being waited on by its caller, and the
+/// resulting stream close delivers the normal exit path.
+pub fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = command("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = command("kill");
+        // The NEGATIVE pid is the process group — the POSIX equivalent of `/T`.
+        c.args(["-TERM", &format!("-{pid}")]);
+        c
+    };
+    let _ = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Open a local file in the user's default application (the browser, for HTML).
 ///
 /// Windows has no `xdg-open`; the shell verb lives in `explorer.exe`, which takes

@@ -17,6 +17,7 @@ fn default_registry_has_the_v1_tools() {
             "search_code",
             "find_symbol",
             "cargo_info",
+            "profile_hotspots",
             "write_file",
             "create_file",
             "append_file",
@@ -172,4 +173,35 @@ fn process_tools_are_real_registry_tools() {
             "NOT_EXECUTED_HERE names {name}, which the registry does not declare"
         );
     }
+}
+
+/// The investigation menu is SIX tools, and stays six.
+///
+/// This is the one model-facing contract in the project with a measurement behind it
+/// (six tools: `run_command` 12/12; sixteen: 3/12). `read_only_registry` derives itself
+/// from `SideEffect::ReadOnly`, which is the right default for safety but means **any
+/// read-only tool added later joins this menu automatically** — silently turning the
+/// measured six into a seven nobody probed.
+///
+/// So the list is pinned here. A tool that belongs in it should be added deliberately,
+/// with a probe behind the decision; a tool that does not belongs in `EXCLUDE`.
+#[test]
+fn the_investigation_menu_is_still_the_measured_six() {
+    let names: Vec<_> = crate::read_only_registry()
+        .specs()
+        .iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "read_file",
+            "list_dir",
+            "search_code",
+            "find_symbol",
+            "read_function",
+            "finish",
+        ],
+        "the read-only menu changed; if that is deliberate, probe it and update this test"
+    );
 }

@@ -173,6 +173,9 @@ pub fn run() -> iced::Result {
             // would be absurd, and the answer cannot change without the user installing
             // something — which is a restart-shaped event anyway.
             app.claude_available = sc_win::claudecode::detect();
+            // The sampling profiler, for the same reason and at the same cost: one `--version`
+            // spawn at boot rather than one per frame the Profiler panel is visible.
+            app.probe_flame_tool();
             // Boot is deferred while the first-run question is open (spec 21): opening a
             // conversation is Assistant-shaped, and doing it before the user has said which mode
             // they want would mean undoing it the moment they answer "Just code".
@@ -236,12 +239,14 @@ mod logic_a;
 mod logic_b;
 mod logic_c;
 mod logic_compile;
+mod logic_flame;
 mod logic_save;
 mod update;
 mod view_claude;
 mod view_code;
 mod view_comply;
 mod view_core;
+mod view_flame;
 mod view_layout;
 pub(crate) use view_layout::{Drag, DragSubject};
 mod view_menus;

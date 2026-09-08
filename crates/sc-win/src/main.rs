@@ -7,6 +7,7 @@
 
 mod app;
 mod canvas;
+mod flamecanvas;
 mod minimap;
 
 fn main() -> iced::Result {

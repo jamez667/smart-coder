@@ -223,6 +223,35 @@ pub(crate) struct App {
     pub(crate) compile_report: Option<sc_win::diagnostics::CompileReport>,
     /// A compile is in flight — the button reads "Compiling…" and offers cancel.
     pub(crate) compiling: bool,
+
+    // ---- the profiler (spec 24) ----
+    /// The loaded profile, if any. `None` is the section's resting state, not a failure.
+    pub(crate) flame_profile: Option<sc_win::flame::Profile>,
+    /// Where the loaded profile came from, for the header line.
+    pub(crate) flame_source: String,
+    /// The subtree currently zoomed to, as a path from the root. Empty ⇒ the whole profile.
+    ///
+    /// A path rather than a borrowed `&Frame` because the profile can be replaced underneath
+    /// it; `flame::at_path` returns `None` for a stale path and the view falls back to the root.
+    pub(crate) flame_zoom: Vec<String>,
+    /// The search box's contents; matching frames are highlighted.
+    pub(crate) flame_search: String,
+    /// The frame under the cursor, for the detail line.
+    pub(crate) flame_hover: Option<sc_win::flame::Placed>,
+    /// Which sampling profiler was found on PATH. Probed ONCE at startup, like
+    /// [`Self::claude_available`] — a `--version` spawn per frame would be absurd.
+    pub(crate) flame_tool: Option<sc_win::flame::tool::Profiler>,
+    /// What a recorded run should profile.
+    pub(crate) flame_target: sc_win::flame::tool::Target,
+    /// Extra arguments passed to the profiled program, after `--`.
+    pub(crate) flame_args: String,
+    /// A recording run is in flight.
+    pub(crate) flame_running: bool,
+    /// Cooperative cancel for the recording run, mirroring the compile flow.
+    pub(crate) flame_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The last run's or load's failure, if it failed.
+    pub(crate) flame_error: Option<String>,
+
     /// Whether the `claude` CLI is on PATH (spec 22). Probed ONCE at startup, because probing
     /// spawns a process and the menu is rebuilt every frame. `false` ⇒ the run kind is not
     /// offered at all, rather than offered-and-failing.
@@ -537,6 +566,19 @@ impl Default for App {
             project_kind: sc_win::project::ProjectKind::Unknown,
             compile_report: None,
             compiling: false,
+            flame_profile: None,
+            flame_source: String::new(),
+            flame_zoom: Vec::new(),
+            flame_search: String::new(),
+            flame_hover: None,
+            // Probed at boot for the same reason `claude_available` is: constructing an App in
+            // a test must not spawn processes.
+            flame_tool: None,
+            flame_target: sc_win::flame::tool::Target::Bin(None),
+            flame_args: String::new(),
+            flame_running: false,
+            flame_cancel: None,
+            flame_error: None,
             // Probed at boot rather than here: `App::default()` runs in tests, and spawning a
             // process per constructed App would make the suite slow and machine-dependent.
             claude_available: false,
@@ -980,6 +1022,32 @@ pub(crate) enum Message {
     PanelDrop,
     /// Put the panels back the way they started.
     ResetLayout,
+
+    // ---- the profiler (spec 24) ----
+    /// Open a folded-stack file through the system picker.
+    OpenProfile,
+    /// A profile finished loading (or failed to): `(source label, result)`.
+    ProfileLoaded(String, Result<Box<sc_win::flame::Profile>, String>),
+    /// Record a new profile with the detected tool.
+    RecordProfile,
+    /// Stop a recording run.
+    CancelProfile,
+    /// A recording run finished: the folded text it produced, or why it didn't.
+    ProfileRecorded(Result<String, String>),
+    /// Zoom to a frame; the payload is its path from the root. Empty ⇒ zoom all the way out.
+    FlameZoom(Vec<String>),
+    /// The cursor moved onto a frame, or off every frame.
+    FlameHover(Option<Box<sc_win::flame::Placed>>),
+    /// The search box changed.
+    FlameSearch(String),
+    /// The record target changed.
+    FlameTarget(sc_win::flame::tool::Target),
+    /// The extra-arguments box changed.
+    FlameArgs(String),
+    /// Copy the install hint for the missing profiler to the clipboard.
+    CopyInstallHint,
+    /// Look for a sampling profiler again, after the user installed one.
+    RecheckProfiler,
     /// Split the focused editor, moving its active tab into a new pane beside it.
     ///
     /// The tab MOVES rather than being copied — a path lives in exactly one pane (see

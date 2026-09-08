@@ -12,6 +12,9 @@ sc-index = { path = "../sc-index" }
 # The crate graph behind `cargo_info`. Zero dependencies of its own, so this adds
 # nothing to the build but a manifest reader.
 sc-cargo = { path = "../sc-cargo" }
+# The folded-stack parser behind `profile_hotspots`. Zero dependencies of its own,
+# and shared with the desktop client so both read a profile the same way.
+sc-flame = { path = "../sc-flame" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
