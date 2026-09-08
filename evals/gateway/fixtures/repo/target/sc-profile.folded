@@ -1,0 +1,7 @@
+main;parse;lex 4200
+main;parse;build_ast 1800
+main;typecheck;unify 900
+main;typecheck;subst 400
+main;codegen;emit 250
+main;io;read_file 90
+main;io;write_file 60

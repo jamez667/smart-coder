@@ -1,0 +1,291 @@
+# The gateway benchmark (spec 23 — Measurement).
+#
+# Model-free, GPU-free, deterministic — the same argument as the retrieval eval:
+# routing is a pure function of the need text and the capability table, so a
+# vocabulary change that makes routing worse fails the build with the need named,
+# instead of quietly making every agent run slightly dumber.
+#
+# Each case is a need phrased THE WAY A CALLER TYPES IT — conversational, with
+# filler words, not in the vocabulary the capability table happens to use. A need
+# written in the table's own words tests nothing but the table's spelling.
+#
+# Grading has three parts, kept separate because they fail independently:
+#
+#   routing        did it reach the right capability (or refuse, when declared)
+#   reduction      bytes the capability produced vs. bytes the model sees
+#   sufficiency    did `must_contain` survive the reduction
+#
+# `must_contain` is what stops the reduction score from being gameable: without
+# it, a simplifier that returns the empty string scores a perfect 0% retained.
+#
+# ---------------------------------------------------------------------------
+# DECLARED REFUSALS
+#
+# Cases with `expect = "refuse"` are needs the gateway is SUPPOSED to decline —
+# genuinely ambiguous phrasings, or ones naming no target. They pass by being
+# refused. If one starts routing, this suite goes red on purpose: a refusal
+# turning into an answer is news either way, and a suite of only-winnable needs
+# quietly becomes a suite somebody tuned the table against.
+# ---------------------------------------------------------------------------
+
+# --- file.read ------------------------------------------------------------
+
+[[cases]]
+id = "read-named-file"
+need = "read src/lib.rs"
+fixture = "fixtures/repo"
+capability = "file.read"
+must_contain = ["run_demo"]
+
+[[cases]]
+id = "read-conversational"
+need = "can you open up crates/demo-core/src/lib.rs for me"
+fixture = "fixtures/repo"
+capability = "file.read"
+must_contain = ["parse_duration"]
+
+[[cases]]
+id = "read-line-window"
+need = "read lines 1-6 of src/agent/stall.rs"
+fixture = "fixtures/repo"
+capability = "file.read"
+must_contain = ["handle_timeout"]
+# The window must actually narrow: StallDetector lives past line 6.
+must_not_contain = ["StallDetector"]
+
+# --- file.list ------------------------------------------------------------
+
+[[cases]]
+id = "list-dir-scoped"
+need = "list what is in there"
+scope = "src"
+fixture = "fixtures/repo"
+capability = "file.list"
+must_contain = ["lib.rs"]
+
+# --- code.search ----------------------------------------------------------
+
+[[cases]]
+id = "search-for-symbol-text"
+need = "search for all occurrences of handle_timeout"
+fixture = "fixtures/repo"
+capability = "code.search"
+must_contain = ["stall.rs"]
+
+[[cases]]
+id = "grep-phrasing"
+need = "grep the codebase for StallDetector"
+fixture = "fixtures/repo"
+capability = "code.search"
+must_contain = ["stall.rs"]
+
+# --- code.function --------------------------------------------------------
+
+[[cases]]
+id = "one-function-body"
+need = "show me the body of the handle_timeout function"
+scope = "src/agent/stall.rs"
+fixture = "fixtures/repo"
+capability = "code.function"
+must_contain = ["handle_timeout"]
+# The point of the capability: one function, not the file around it.
+must_not_contain = ["record_no_progress"]
+
+# --- cargo.info -----------------------------------------------------------
+
+[[cases]]
+id = "crate-dependencies"
+need = "what does the demo-core crate depend on"
+fixture = "fixtures/repo"
+capability = "cargo.info"
+must_contain = ["demo-core"]
+
+# --- perf.hotspots --------------------------------------------------------
+
+[[cases]]
+id = "hotspots-plain"
+need = "what are the hotspots"
+scope = "target/sc-profile.folded"
+fixture = "fixtures/repo"
+capability = "perf.hotspots"
+must_contain = ["lex"]
+
+[[cases]]
+id = "hotspots-top-n"
+need = "show me the top 3 slowest functions"
+scope = "target/sc-profile.folded"
+fixture = "fixtures/repo"
+capability = "perf.hotspots"
+must_contain = ["lex"]
+# "top 3" must be honoured — a fourth ranked row means the count was ignored.
+must_not_contain = ["  4. "]
+
+# --- repo.map -------------------------------------------------------------
+
+[[cases]]
+id = "repo-overview"
+need = "give me an overview of this codebase"
+fixture = "fixtures/repo"
+capability = "repo.map"
+
+# ---------------------------------------------------------------------------
+# Declared refusals — the promise that the classifier declines rather than
+# guessing. Each of these is a need a naive router would answer WRONGLY.
+# ---------------------------------------------------------------------------
+
+[[cases]]
+id = "refuse-read-with-no-path"
+need = "read the file"
+fixture = "fixtures/repo"
+expect = "refuse"
+
+[[cases]]
+id = "refuse-pure-noise"
+need = "do the thing please"
+fixture = "fixtures/repo"
+expect = "refuse"
+
+[[cases]]
+id = "refuse-bare-noun"
+need = "file"
+fixture = "fixtures/repo"
+expect = "refuse"
+
+[[cases]]
+id = "list-crates-routes-to-the-manifests"
+# WAS a declared refusal: "list" and "crates" were one verb each and tied.
+# Inflection matching ("crate" now covers "crates") broke the tie toward
+# cargo.info, which is what a person actually means here — file.list would
+# return directories, which is the wrong answer, not a different one.
+#
+# What must still never happen is this reaching the network.
+need = "list the crates in this workspace"
+fixture = "fixtures/repo"
+capability = "cargo.info"
+
+[[cases]]
+id = "refuse-live-with-no-model"
+# A live capability with no model configured must refuse cleanly rather than
+# falling back to something that would answer confidently and wrongly.
+need = "explain why this design uses a trait"
+fixture = "fixtures/repo"
+expect = "refuse"
+
+[[cases]]
+id = "refuse-web-with-no-network"
+need = "check the latest serde version online"
+fixture = "fixtures/repo"
+expect = "refuse"
+
+[[cases]]
+id = "refuse-verify-with-no-command"
+# The gateway never invents a test command — a wrong guess would run something
+# arbitrary and report its output as the suite result.
+need = "run the tests"
+fixture = "fixtures/repo"
+expect = "refuse"
+
+# ---------------------------------------------------------------------------
+# CAPTURED FROM A REAL A/B RUN.
+#
+# Every need below is a phrasing Tiel-Coder-35B actually typed at `ask` during
+# the ladder A/B, and every one was REFUSED by the classifier as it stood. They
+# are the most valuable cases in this file precisely because nobody invented
+# them: a hand-written suite tests the vocabulary its author already had in
+# mind, which is exactly the vocabulary the table already handles.
+#
+# Three bugs produced this list, all now fixed:
+#   * path stripping deleted the filename before scoring, so "lines 40-90 of
+#     pathfind.rs" lost the one word marking it a file read;
+#   * `needs_path` was defeated by a trailing sentence period ("test.rs.");
+#   * `read_file` typed as prose never matched the verb `read`.
+#
+# 22.7% of calls in that run were refused. These pin the fixes.
+# ---------------------------------------------------------------------------
+
+[[cases]]
+id = "captured-full-contents-period"
+need = "please show me the full contents of test.rs."
+fixture = "fixtures/repo"
+capability = "file.read"
+
+[[cases]]
+id = "captured-line-range-prose"
+need = "show me lines 40 through 90 of pathfind.rs exactly."
+fixture = "fixtures/repo"
+capability = "file.read"
+
+[[cases]]
+id = "captured-tool-name-as-prose"
+need = "read_file src/lib.rs lines 30-114"
+fixture = "fixtures/repo"
+capability = "file.read"
+
+[[cases]]
+id = "captured-verbatim-request"
+need = "entire untruncated source of src/lib.rs from line 1 to the final line, verbatim."
+fixture = "fixtures/repo"
+capability = "file.read"
+
+[[cases]]
+id = "captured-function-by-name"
+need = "i need the exact source code of the handle_timeout function in stall.rs. please output its full text verbatim."
+scope = "src/agent/stall.rs"
+fixture = "fixtures/repo"
+capability = "code.function"
+
+# ---------------------------------------------------------------------------
+# CAPTURED, ROUND 2 — the structural rules.
+#
+# After the lexical fixes above, the second A/B still refused 18 of 77 calls,
+# and 14 were the SAME shape: a decisive primary signal ("pathfind.rs lines
+# 42-65") tied into a refusal by the explanation trailing it ("the body of
+# astar_tile_grid"). The classifier was punishing the model for being specific
+# — a vaguer need would have routed fine.
+#
+# Six rounds of vocabulary tuning had each fixed one phrasing and broken
+# another, so these are handled structurally instead: what a need CONTAINS and
+# what a capability can DO with it, rather than what the wording sounds like.
+#
+#   * a stated line range weighs in the SCORE for a windowed capability, and
+#     against one that cannot honour it;
+#   * a whole-file request subsumes a narrower read of part of that file.
+#
+# These cases pin both. They matter because the model wrote them, not us.
+# ---------------------------------------------------------------------------
+
+[[cases]]
+id = "captured-range-with-explanation"
+need = "please show me src/agent/stall.rs lines 1 through 6 (the body of handle_timeout)."
+fixture = "fixtures/repo"
+capability = "file.read"
+must_contain = ["handle_timeout"]
+# The range must be honoured, not just the route: StallDetector is past line 6.
+must_not_contain = ["StallDetector"]
+
+[[cases]]
+id = "captured-whole-file-with-mention"
+need = "show me the full contents of src/agent/stall.rs, especially the handle_timeout function and the StallDetector struct."
+fixture = "fixtures/repo"
+capability = "file.read"
+must_contain = ["handle_timeout", "StallDetector"]
+
+[[cases]]
+id = "captured-range-over-symbol-mention"
+need = "show me lines 1 to 7 of src/agent/stall.rs so i can see where the handle_timeout function sits relative to the impl block."
+fixture = "fixtures/repo"
+capability = "file.read"
+must_contain = ["handle_timeout"]
+# The window is honoured: StallDetector starts after line 7.
+must_not_contain = ["StallDetector"]
+
+[[cases]]
+id = "captured-truncated-middle"
+# Captured, and it still refuses — correctly. "the middle portion" names no
+# line range and asks for no whole file, so a file read and a function read are
+# genuinely equal readings. Kept as a DECLARED REFUSAL rather than deleted: it
+# is the honest boundary of what the structural rules can settle, and if a
+# later change starts routing it, that is news worth seeing.
+need = "i need the middle portion of the src/lib.rs file that was truncated. please paste the run_demo function and the module declarations."
+fixture = "fixtures/repo"
+expect = "refuse"

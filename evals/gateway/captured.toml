@@ -1,0 +1,131 @@
+# Every need Tiel-Coder-35B typed at `ask` that the classifier REFUSED.
+#
+# Captured verbatim from two ladder A/B runs. Nothing here was written by hand,
+# which is exactly why it is worth keeping: a suite invented by the person who
+# wrote the capability table tests the vocabulary that author already had in
+# mind — the vocabulary the table already handles.
+#
+# ## Why this file exists separately from suite.toml
+#
+# Measuring the refusal rate used to mean a 40-minute A/B run against a live
+# 35B model, and the last one produced NO data at all: back-to-back runs
+# degraded throughput to 11 tok/s, requests timed out, and autoheal restarted
+# the container mid-suite. Replaying the captured needs answers the same
+# question — what fraction of real phrasings can the classifier route — in
+# milliseconds, deterministically, with no GPU.
+#
+# The live A/B still measures what this cannot: whether routing changes the
+# solve rate. This measures whether the model can get an answer at all.
+#
+# ## How to read `expect`
+#
+# `route` — the classifier should now handle this. It refused when captured.
+# `refuse` — genuinely ambiguous even to a careful reader; refusing is correct
+#            and a change that starts routing it is news worth seeing.
+#
+# ## Round 1 (lexical bugs)
+#
+# 31 of 83 calls refused. Causes: path-stripping deleted the filename before
+# scoring; `needs_path` was defeated by a trailing sentence period; a tool name
+# typed as prose never matched its own verb.
+
+[[needs]]
+text = "please show me the full contents of test.rs."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "show me lines 45-66 of pathfind.rs — the heur closure, the neighbors array/list, the blocks closure, and the for loop over neighbors."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "entire untruncated source of src/tilegrid.rs from line 1 to the final line, verbatim."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "read_file pathfind.rs lines 30-114"
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "i need the exact source code of the astar_bool_grid function and the idx helper function in pathfind.rs. please output their full text verbatim."
+expect = "route"
+capability = "code.function"
+
+[[needs]]
+text = "show me the astar_bool_grid function definition and body from pathfind.rs."
+expect = "route"
+capability = "code.function"
+
+# ## Round 2 (structural)
+#
+# 18 of 77 calls refused, and 14 were one shape: a decisive primary signal
+# ("pathfind.rs lines 42-65") tied into a refusal by the explanation trailing
+# it ("the body of astar_tile_grid"). The classifier was punishing the model
+# for being specific — a vaguer need would have routed fine.
+
+[[needs]]
+text = "please show me pathfind.rs lines 42 through 65 (the body of astar_tile_grid)."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "please show me pathfind.rs lines 42-72 (the body of astar_tile_grid)."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "show me lines 180 to 225 of src/tilegrid.rs so i can see where my inserted methods landed relative to the impl block and the rotate function."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "show me src/world.rs lines 1 through 120 — i need the world struct definition, iter2, iter, alive/generations, storage, and despawn"
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "show me the full contents of nav.rs, especially the astar_grid_exterior function and how it calls astar_tile_grid"
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "show me the full contents of pathfind.rs, especially the astar_tile_grid function and the tilesource trait and step definitions."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "full contents of src/module.rs and src/tilegrid.rs so i can see the module struct and the existing tilegrid implementation."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "full contents of src/tilegrid.rs from the top (struct definition, new, new_filled, width, height, tile_at, set methods)"
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "the middle portion of tests/contract.rs (lines ~15 through ~95) showing the tilegrid::find_first and tilegrid::regions test cases and their exact expected outputs."
+expect = "route"
+capability = "file.read"
+
+[[needs]]
+text = "i need the middle portion of the world.rs file that was truncated. please paste the world struct definition, its fields (alive, generations, storage), the storage method, and the iter method."
+expect = "route"
+capability = "file.read"
+
+# Genuinely ambiguous. "the middle of world.rs" names no line range and asks
+# for no whole file, so a file read and a symbol lookup are equal readings of
+# it. Kept rather than deleted: it is the honest boundary of what the
+# structural rules settle.
+[[needs]]
+text = "show me the middle of src/world.rs that was truncated — specifically the world struct definition, the iter method, the storage method, and how alive/generations fields work."
+expect = "refuse"
+
+# Names no file at all — the caller wants a line whose location they cannot
+# state. A refusal is the only honest answer.
+[[needs]]
+text = "what is the exact text of the impl block opening line for tilegrid (the line starting with 'impl') and the exact text of the last method before the impl block closes?"
+expect = "refuse"

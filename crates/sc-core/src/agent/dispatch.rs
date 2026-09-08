@@ -12,6 +12,28 @@ use crate::text::first_line;
 
 use super::AgentConfig;
 
+/// A tool this crate does not know how to execute, supplied by the caller.
+///
+/// The loop consults this **before** its own routing, for exactly one purpose:
+/// to let an experiment offer a tool surface `sc-core` has no dependency on.
+/// The gateway experiment (`sc-gateway`) is the motivating case — measuring
+/// whether one classified `ask` beats a menu of six needs the agent to be able
+/// to CALL it, and wiring that into this crate directly would ship the thing
+/// being measured.
+///
+/// Defaulted to `None` everywhere, so a run that supplies nothing behaves
+/// byte-for-byte as before. Returning `None` from [`execute`] falls through to
+/// the loop's normal routing, so an implementor handles only what it claims.
+///
+/// [`execute`]: ExternalTool::execute
+///
+/// `Send + Sync` for the same reason as [`Confirmer`](crate::Confirmer): the agent
+/// runs on a worker thread and the config is moved into it.
+pub trait ExternalTool: Send + Sync {
+    /// Handle `call`, or return `None` to let the loop route it as usual.
+    fn execute(&self, call: &sc_tools::ValidatedCall, workspace: &Path) -> Option<ToolOutcome>;
+}
+
 /// Outcome of the whole-suite gate at `finish`.
 pub(super) enum FinishGate {
     /// Finish is honored; the bool is the verified state (None → no verify cmd).
@@ -62,6 +84,7 @@ pub(super) fn dispatch(
     verify_command: &Option<String>,
     dry_run: bool,
     workspace: &Path,
+    external: Option<&dyn ExternalTool>,
 ) -> ToolOutcome {
     // Permission gate — the harness decides, outside the model's control (spec 04).
     if let Some(spec) = registry.get(&call.name) {
@@ -129,6 +152,15 @@ pub(super) fn dispatch(
                 "[dry-run] would {}{target}; no changes written",
                 call.name
             ));
+        }
+    }
+
+    // The caller's own tools first (spec 04 — the harness decides what a tool is).
+    // Checked after the permission and dry-run gates above, so an external tool is
+    // no less governed than a built-in one.
+    if let Some(ext) = external {
+        if let Some(outcome) = ext.execute(call, workspace) {
+            return outcome;
         }
     }
 
@@ -263,6 +295,10 @@ pub(super) fn is_idempotent_tool(tool: &str) -> bool {
             | "find_symbol"
             | "cargo_info"
             | "run_verification"
+            // A gateway `ask` is a read like any other: repeating one verbatim
+            // cannot produce new information, so it counts toward the loop
+            // detector exactly as `read_file` does.
+            | "ask"
     )
 }
 
@@ -276,7 +312,11 @@ pub(super) fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
         // carries the underlying exception the model must see — both need real room. A
         // runaway command/test log keeps the tight default where error-first truncation
         // does the work.
-        "read_file" | "run_verification" => cfg.read_file_line_cap,
+        // `ask` returns whatever capability answered — usually a file — so it
+        // gets the same generous cap. Capping it at 40 lines truncated whole-file
+        // answers mid-source, which is the harness hiding the very code the model
+        // asked for, and it re-asks.
+        "read_file" | "run_verification" | "ask" => cfg.read_file_line_cap,
         _ => cfg.observation_line_cap,
     }
 }
@@ -312,7 +352,15 @@ pub(super) fn key_arg(call: &sc_tools::ValidatedCall) -> String {
     // `cargo_info`'s only parameter, and omitting it would hash every call about
     // every crate to the same empty key -- asking about `sc-proto` and then
     // `sc-core` would read as a repeat, which is the third instance of this bug.
-    for k in ["path", "query", "name", "crate"] {
+    // `need` is a gateway `ask`'s question, and omitting it is the FOURTH
+    // instance of the bug the three comments above describe: every ask would
+    // hash to the same empty key, so asking about one file and then another
+    // read as a repeat and got nudged away as a false stall.
+    // `need` FIRST: an `ask` carries both `need` and an optional `path`, and
+    // keying on the path would make two different questions about the same file
+    // hash identically -- a false repeat, which is what this whole function
+    // exists to avoid.
+    for k in ["need", "path", "query", "name", "crate"] {
         if let Some(v) = call.str(k) {
             let start = call.int("start");
             let limit = call.int("limit");
@@ -521,6 +569,7 @@ mod tests {
             &None,
             dry_run,
             &ws,
+            None,
         );
         let _ = std::fs::remove_dir_all(&ws);
         match outcome {

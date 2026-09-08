@@ -1,0 +1,57 @@
+# The reduction benchmark — how much context does the gateway actually save?
+#
+# Separate from `suite.toml` for a reason the first run made obvious: the routing
+# fixtures are small, clean files, so every case reported 100% retained and the
+# reduction column measured nothing. Extraction only fires on output that CARRIES
+# waste.
+#
+# Every sample here is CAPTURED FROM A REAL CARGO RUN in this workspace, not
+# written by hand. A hand-written "messy output" fixture measures the fixture
+# author's idea of mess — which is exactly the fixture an extractor gets tuned
+# against, scoring beautifully and helping nobody.
+#
+# `max_retained_percent` is a CEILING, not a target. Beating it is good news and
+# the printed number says by how much; missing it means the extractor stopped
+# recognising this shape, which is the regression worth failing a build over.
+#
+# `must_contain` is what stops the score being gamed: without it, a simplifier
+# that returns the empty string scores a perfect 0% retained.
+
+[[outputs]]
+id = "cargo-build-failure"
+file = "cargo_failure.txt"
+# A real `cargo build` with five warnings burying two errors — the common shape
+# when a model breaks a build and needs to know only what to fix.
+must_contain = [
+    "E0308",            # the error code
+    "types.rs",         # where
+    "expected `usize`", # what is actually wrong
+]
+must_not_contain = [
+    "unused_a",         # a warning's variable name
+    "unused_b",
+]
+max_retained_percent = 40
+
+[[outputs]]
+id = "cargo-test-failure"
+file = "cargo_test_fail.txt"
+# A real failing `cargo test`: 30 passing tests around the ones that broke. The
+# passes are the single largest source of useless context in an agent run.
+must_contain = [
+    "__bench_capture_a", # the failing test
+    "FAILED",            # the verdict
+]
+must_not_contain = [
+    "refuses_pure_noise ... ok", # a passing test line
+]
+max_retained_percent = 70
+
+[[outputs]]
+id = "cargo-test-green"
+file = "cargo_test_pass.txt"
+# An all-green run. The interesting case for the OPPOSITE reason: there is
+# almost nothing to say, and the reduction must still leave the verdict legible
+# rather than collapsing to silence.
+must_contain = ["test result:"]
+max_retained_percent = 60

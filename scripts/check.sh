@@ -70,6 +70,16 @@ CARGO_TARGET_DIR="$CRAFT_TARGET" cargo test -p sc-win --features craft-only
 echo "==> retrieval eval"
 cargo test --quiet -p sc-eval retrieval:: -- --nocapture
 
+# The gateway benchmark: does routing a plain-language need reach the right
+# capability, and does the reduction still leave the caller what they needed?
+# Model-free and deterministic for the same reason as the retrieval eval above --
+# routing is a pure function of the need text and the capability table -- so a
+# vocabulary change that starts misrouting fails the build with the need named.
+#
+# Printed for the same reason: a score nobody sees is a score nobody watches.
+echo "==> gateway benchmark"
+cargo test --quiet -p sc-gateway --test bench -- --nocapture
+
 # Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
 # Deterministic and model-free, so it costs nothing to run every time. `unknown`
 # never gates and an ungoverned crate only warns — this fails on BROKEN or STALE.

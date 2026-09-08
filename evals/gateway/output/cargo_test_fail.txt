@@ -1,0 +1,61 @@
+   Compiling sc-gateway v0.0.0 (C:\Users\mail\working\Personal\SmartCoder\smart-coder\crates\sc-gateway)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
+     Running tests\classify.rs (target\debug\deps\classify-9cbd4f7ef40bc43f.exe)
+
+running 32 tests
+test __bench_capture_a ... FAILED
+test __bench_capture_b ... FAILED
+test every_capability_declares_at_least_one_verb ... ok
+test no_verb_is_claimed_by_two_capabilities ... ok
+test a_word_inside_a_path_still_counts_as_that_word ... ok
+test refuses_when_a_single_hint_is_the_only_evidence ... ok
+test refuses_a_genuine_tie_rather_than_picking_by_noise ... ok
+test routes_performance_questions_to_the_profile ... ok
+test a_hint_advantage_breaks_a_tie_when_the_verbs_are_unequal ... ok
+test a_refusal_reads_as_a_refusal_to_the_model ... ok
+test lists_a_directory ... ok
+test the_refusal_names_what_it_considered ... ok
+test asks_for_a_repo_overview ... ok
+test refuses_an_empty_need ... ok
+test live_capability_refuses_with_no_model_configured ... ok
+test a_scope_satisfies_the_path_requirement ... ok
+test refuses_pure_noise ... ok
+test reads_a_named_file ... ok
+test refuses_a_read_with_no_path ... ok
+test routes_crate_questions_to_the_manifests ... ok
+test a_crate_question_never_goes_to_the_network ... ok
+test finds_a_symbol_definition ... ok
+test free_and_repeatable_agree_with_the_class_split ... ok
+test routes_outward_questions_to_web ... ok
+test searches_for_literal_text ... ok
+test substrings_do_not_trigger_a_route ... ok
+test web_capability_refuses_with_no_web_configured ... ok
+test every_capability_has_a_distinct_name ... ok
+test a_verb_on_one_capability_is_not_a_hint_on_another ... ok
+test routes_open_questions_to_the_live_model ... ok
+test routes_suite_questions_to_verification ... ok
+test min_score_is_reachable_by_a_single_verb ... ok
+
+failures:
+
+---- __bench_capture_a stdout ----
+
+thread '__bench_capture_a' (47824) panicked at crates\sc-gateway\tests\classify.rs:408:26:
+assertion `left == right` failed: deliberate failure for fixture capture
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- __bench_capture_b stdout ----
+
+thread '__bench_capture_b' (31740) panicked at crates\sc-gateway\tests\classify.rs:410:52:
+empty vec
+
+
+failures:
+    __bench_capture_a
+    __bench_capture_b
+
+test result: FAILED. 30 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p sc-gateway --test classify`

@@ -22,11 +22,14 @@ sc-tools = { path = "../sc-tools" }
 # The retrieval eval (spec 23) scores sc-index's search with no model at all.
 sc-index = { path = "../sc-index" }
 sc-verify = { path = "../sc-verify" }
+# The A/B arm under test. The eval depends on it; sc-core deliberately does not.
+sc-gateway = { path = "../sc-gateway" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 # The live SWE-bench test fetches the gold patch (the answer) at run time rather
 # than vendoring it beside the tasks. Same client the model backends use.
 ureq = { version = "3", features = ["json"] }

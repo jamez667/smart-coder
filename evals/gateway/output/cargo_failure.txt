@@ -1,0 +1,38 @@
+   Compiling sc-gateway v0.0.0 (C:\Users\mail\working\Personal\SmartCoder\smart-coder\crates\sc-gateway)
+error[E0308]: mismatched types
+   --> crates\sc-gateway\src\types.rs:149:56
+    |
+149 | fn __break() -> usize { let s: String = String::new(); s }
+    |                 -----                                  ^ expected `usize`, found `String`
+    |                 |
+    |                 expected `usize` because of return type
+
+warning: unused variable: `unused_a`
+   --> crates\sc-gateway\src\types.rs:146:17
+    |
+146 | fn __w1() { let unused_a = 1; let unused_b = 2; let unused_c = 3; }
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_a`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `unused_b`
+   --> crates\sc-gateway\src\types.rs:146:35
+    |
+146 | fn __w1() { let unused_a = 1; let unused_b = 2; let unused_c = 3; }
+    |                                   ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_b`
+
+warning: unused variable: `unused_c`
+   --> crates\sc-gateway\src\types.rs:146:53
+    |
+146 | fn __w1() { let unused_a = 1; let unused_b = 2; let unused_c = 3; }
+    |                                                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_c`
+
+warning: unused variable: `y`
+   --> crates\sc-gateway\src\types.rs:148:38
+    |
+148 | fn __w2() { let x = vec![1,2,3]; let y = x.len(); }
+    |                                      ^ help: if this is intentional, prefix it with an underscore: `_y`
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `sc-gateway` (lib) generated 4 warnings
+error: could not compile `sc-gateway` (lib) due to 1 previous error; 4 warnings emitted

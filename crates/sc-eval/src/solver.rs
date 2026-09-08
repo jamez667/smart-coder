@@ -58,6 +58,9 @@ pub struct RunInfo {
     pub self_verified: Option<bool>,
     /// How many times the harness intervened to recover the run.
     pub interventions: usize,
+    /// Prompt tokens summed over every turn — what the task actually COST in
+    /// context, as opposed to whether any single prompt fit.
+    pub total_prompt_tokens: usize,
     /// The largest reply the model produced, in tokens.
     ///
     /// Reported so `response_reserve_tokens` can be checked against reality. The
@@ -167,7 +170,7 @@ where
 /// harness graded it afterwards. `contract_tests` become `frozen_paths` for the same
 /// reason the SWE-bench path freezes test files -- the cheapest way to pass is to
 /// edit the test.
-fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
+pub(crate) fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
     AgentConfig {
         max_steps: 40,
         // 4096, down from 12288 -- MEASURED, not guessed.
@@ -349,6 +352,7 @@ impl Solver for AgentSolver<'_> {
             stop_reason: format!("{:?}", report.stop_reason),
             self_verified: report.verified,
             interventions: report.interventions,
+            total_prompt_tokens: report.total_prompt_tokens,
             peak_reply_tokens: report.peak_reply_tokens,
             harness_faults: report.harness_faults.clone(),
         }));

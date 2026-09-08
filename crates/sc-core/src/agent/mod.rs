@@ -17,8 +17,9 @@ use sc_model::{GenerateRequest, Message, ModelBackend};
 use sc_proto::Result;
 use sc_tools::{Journal, ToolOutcome, ToolRegistry};
 
+use config::{task_prefix_for, FOCUS_TASK_PREFIX, INVESTIGATE_TASK_PREFIX, TASK_PREFIX_SHELL};
 pub use config::{AgentConfig, AgentReport};
-use config::{FOCUS_TASK_PREFIX, INVESTIGATE_TASK_PREFIX, TASK_PREFIX, TASK_PREFIX_SHELL};
+pub use dispatch::ExternalTool;
 
 use crate::event::{AgentEvent, EventSink, FaultKind, NullSink};
 use crate::metrics::ToolCallMetrics;
@@ -172,14 +173,33 @@ pub fn run_agent_observed(
         .specs()
         .iter()
         .all(|s| s.side_effect == sc_tools::SideEffect::ReadOnly);
+    // Shell is derived from the REGISTRY, not from the permission flag.
+    //
+    // `allow_shell` says the policy would permit `run_command`; it does not say
+    // the tool is on the menu. When those disagree the prompt names a tool the
+    // model cannot call, and a model does what it is told — the same failure
+    // this file already documents for `INVESTIGATE_TASK_PREFIX`, where a build
+    // prompt over a read-only registry sent a model hunting for `edit_file` and
+    // dumping prose for four turns.
+    //
+    // Measured here too: an experimental registry offering `ask` instead of
+    // `read_file`/`run_command` still received TASK_PREFIX_SHELL ("1) run_command
+    // to investigate"), and spent ~2 extra turns per task looking for a tool it
+    // did not have — a uniform ~5,000-token overhead on tasks whose entire
+    // fixture is 1.4 KB.
+    let has_shell = registry.get("run_command").is_some();
+    let build_prefix;
     let prefix = if read_only_run {
         INVESTIGATE_TASK_PREFIX
     } else if !cfg.focus_files.is_empty() {
         FOCUS_TASK_PREFIX
-    } else if cfg.permission.allow_shell {
+    } else if cfg.permission.allow_shell && has_shell {
         TASK_PREFIX_SHELL
     } else {
-        TASK_PREFIX
+        // Names the tools this registry actually has, rather than assuming
+        // read_file/edit_file.
+        build_prefix = task_prefix_for(registry);
+        build_prefix.as_str()
     };
     let mut system = format!("{prefix}{}", strategy.system_preamble(registry));
     if let Some(suffix) = &cfg.system_suffix {
@@ -255,6 +275,11 @@ pub fn run_agent_observed(
     let mut history: Vec<TurnRecord> = Vec::new();
     let mut recent: Vec<Message> = Vec::new();
     let mut peak_prompt_tokens = 0usize;
+    // Cumulative prompt tokens across every turn. The PEAK says whether a single
+    // prompt fit the window; this says what the whole task cost, which is the
+    // number that separates a run that read the right file once from one that
+    // re-read four files six times.
+    let mut total_prompt_tokens = 0usize;
     // Largest reply seen, so the reply reserve can be checked against reality.
     let mut peak_reply_tokens = 0usize;
     let mut journal = Journal::new();
@@ -341,6 +366,7 @@ pub fn run_agent_observed(
                 steps: step,
                 metrics,
                 peak_prompt_tokens,
+                total_prompt_tokens,
                 peak_reply_tokens,
                 harness_faults: runlog.lock().fault_counts(),
                 prompt_budget: budget,
@@ -366,6 +392,7 @@ pub fn run_agent_observed(
 
         let built = builder.build(segments);
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
+        total_prompt_tokens += built.tokens_used;
 
         // The assembled prompt did not fit, and there was nothing left to drop.
         //
@@ -627,6 +654,7 @@ pub fn run_agent_observed(
                 &journal,
                 metrics,
                 peak_prompt_tokens,
+                total_prompt_tokens,
                 peak_reply_tokens,
                 faults,
                 budget,
@@ -713,6 +741,7 @@ pub fn run_agent_observed(
                                 &journal,
                                 metrics,
                                 peak_prompt_tokens,
+                                total_prompt_tokens,
                                 peak_reply_tokens,
                                 runlog.lock().fault_counts(),
                                 budget,
@@ -784,6 +813,7 @@ pub fn run_agent_observed(
                         &cfg.verify_command,
                         cfg.dry_run,
                         workspace,
+                        cfg.external_tool.as_deref(),
                     );
                     let changed = pre
                         .map(|(path, before)| {
@@ -813,6 +843,7 @@ pub fn run_agent_observed(
                                         steps: step + 1,
                                         metrics,
                                         peak_prompt_tokens,
+                                        total_prompt_tokens,
                                         peak_reply_tokens,
                                         harness_faults: runlog.lock().fault_counts(),
                                         prompt_budget: budget,
@@ -898,6 +929,7 @@ pub fn run_agent_observed(
                                         steps: step + 1,
                                         metrics,
                                         peak_prompt_tokens,
+                                        total_prompt_tokens,
                                         peak_reply_tokens,
                                         harness_faults: runlog.lock().fault_counts(),
                                         prompt_budget: budget,
@@ -1038,6 +1070,7 @@ pub fn run_agent_observed(
                         &journal,
                         metrics,
                         peak_prompt_tokens,
+                        total_prompt_tokens,
                         peak_reply_tokens,
                         faults,
                         budget,
@@ -1334,6 +1367,7 @@ pub fn run_agent_observed(
                         steps: step + 1,
                         metrics,
                         peak_prompt_tokens,
+                        total_prompt_tokens,
                         peak_reply_tokens,
                         harness_faults: runlog.lock().fault_counts(),
                         prompt_budget: budget,
@@ -1396,6 +1430,7 @@ pub fn run_agent_observed(
                     &journal,
                     metrics,
                     peak_prompt_tokens,
+                    total_prompt_tokens,
                     peak_reply_tokens,
                     runlog.lock().fault_counts(),
                     budget,
@@ -1420,6 +1455,7 @@ pub fn run_agent_observed(
         &journal,
         metrics,
         peak_prompt_tokens,
+        total_prompt_tokens,
         peak_reply_tokens,
         faults,
         budget,

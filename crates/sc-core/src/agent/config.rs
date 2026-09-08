@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use sc_tools::PermissionPolicy;
+use sc_tools::{PermissionPolicy, ToolRegistry};
 
 use crate::confirm::Confirmer;
 use crate::event::FaultKind;
@@ -85,6 +85,14 @@ pub struct AgentConfig {
     /// GUI's approve/deny buttons and the CLI's interactive prompt drive. `Arc` keeps
     /// `AgentConfig: Clone` and lets the handle cross to the worker thread.
     pub confirmer: Option<Arc<dyn Confirmer>>,
+    /// An extra tool surface supplied by the caller, consulted before the loop's
+    /// own routing (spec 04 — the harness decides what a tool is).
+    ///
+    /// `None` in every shipping path, so a normal run is unaffected. It exists so
+    /// an experiment can offer the model a tool this crate has no dependency on —
+    /// the `sc-gateway` A/B needs the agent to CALL a gateway, and wiring that in
+    /// directly would ship the thing being measured.
+    pub external_tool: Option<Arc<dyn crate::agent::dispatch::ExternalTool>>,
     /// Where `run_verification` runs (spec 12): the host, or a per-run Docker container.
     /// Docker gives generated code a pinned toolkit + a known layout so the tests run
     /// against a reproducible env (the GUI defaults to it). Defaults to the host.
@@ -132,6 +140,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("verbose", &self.verbose)
             // `dyn Confirmer` isn't `Debug`; report presence only.
             .field("confirmer", &self.confirmer.is_some())
+            .field("external_tool", &self.external_tool.is_some())
             .field("sandbox", &self.sandbox)
             .field("diagnose", &self.diagnose)
             .finish()
@@ -178,6 +187,7 @@ impl Default for AgentConfig {
             dry_run: false,
             verbose: false,
             confirmer: None,
+            external_tool: None,
             sandbox: sc_verify::Sandbox::default(),
             diagnose: false,
             stream: false,
@@ -199,6 +209,14 @@ pub struct AgentReport {
     /// it was kept under (spec 05 — the window is a hard-budgeted resource).
     pub peak_prompt_tokens: usize,
     pub prompt_budget: usize,
+    /// Prompt tokens summed over EVERY turn of the run.
+    ///
+    /// The peak answers "did a prompt fit?"; this answers "what did the task
+    /// cost?" — and they diverge exactly where it matters. A run that reads the
+    /// right file once and a run that re-reads four files six times can share a
+    /// peak and differ several-fold here, which is the whole premise behind
+    /// giving a small model less to look at.
+    pub total_prompt_tokens: usize,
     /// The largest REPLY the model produced, in tokens.
     ///
     /// Reported so `response_reserve_tokens` can be checked against reality rather
@@ -230,14 +248,45 @@ pub struct AgentReport {
     pub interventions: usize,
 }
 
-pub(super) const TASK_PREFIX: &str = "You are a coding agent working in a project directory. \
-Make the failing test pass. Follow this loop: \
-1) read_file the file you need to change (don't just search repeatedly); \
-2) edit_file it with a precise change; \
-3) run_verification to run the tests (use run_verification, NOT run_command — \
-shell is blocked); read which tests still fail and fix them; \
-4) finish only when the tests pass. \
-Take a concrete action every turn — prefer editing over searching.\n\n";
+/// The build loop, with the reading and editing tools named from the registry.
+///
+/// [`TASK_PREFIX`] hardcodes `read_file`. A registry offering a different reading
+/// tool gets a prompt naming one it does not have, and a model does what it is
+/// told — the same failure this file already documents for
+/// [`INVESTIGATE_TASK_PREFIX`], where a build prompt over a read-only registry
+/// sent a model hunting for `edit_file` and dumping prose for four turns.
+///
+/// Measured here too: an experimental registry offering `ask` in place of
+/// `read_file`/`run_command` still received a prompt naming both, and spent
+/// roughly two extra turns per task looking for tools it did not have — a
+/// uniform ~5,000-token overhead on tasks whose entire fixture is 1.4 KB.
+///
+/// The tool names in a prompt are part of the tool contract, so they come from
+/// the registry like everything else about it.
+pub(super) fn task_prefix_for(registry: &ToolRegistry) -> String {
+    let pick = |candidates: &[&'static str], fallback: &'static str| -> &'static str {
+        candidates
+            .iter()
+            .copied()
+            .find(|t| registry.get(t).is_some())
+            .unwrap_or(fallback)
+    };
+    let read = pick(
+        &["read_file", "ask", "read_function", "search_code"],
+        "read_file",
+    );
+    let edit = pick(&["edit_file", "write_file"], "edit_file");
+    format!(
+        "You are a coding agent working in a project directory. \
+         Make the failing test pass. Follow this loop: \
+         1) {read} the file you need to change (don't just search repeatedly); \
+         2) {edit} it with a precise change; \
+         3) run_verification to run the tests (use run_verification, NOT run_command -- \
+         shell is blocked); read which tests still fail and fix them; \
+         4) finish only when the tests pass. \
+         Take a concrete action every turn -- prefer editing over searching.\n\n"
+    )
+}
 
 /// The loop for a READ-ONLY run: answer a question about the code, change nothing.
 ///
