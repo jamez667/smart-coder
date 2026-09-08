@@ -25,7 +25,7 @@ use crate::event::{AgentEvent, EventSink, FaultKind, NullSink};
 use crate::metrics::ToolCallMetrics;
 use crate::plan::PlanState;
 use crate::planner::make_plan;
-use crate::recovery::{action_hash, StallDetector, StopReason};
+use crate::recovery::{action_hash, failure_signature, StallDetector, StopReason};
 use crate::strategy::ToolCallStrategy;
 use crate::text::{first_line, mentioned_identifiers};
 
@@ -43,6 +43,16 @@ use crate::text::{first_line, mentioned_identifiers};
 /// `edit_lines` is the user's business, not a harness fault. Only the system prompt
 /// and harness-authored guidance are checked.
 fn unoffered_tool_mentioned(messages: &[Message], registry: &ToolRegistry) -> Option<String> {
+    messages
+        .iter()
+        // Only harness-authored text. A user instruction naming a tool is not our bug.
+        .filter(|m| m.role != sc_model::Role::User)
+        .find_map(|m| unoffered_tool_in(&m.content, registry))
+}
+
+/// [`unoffered_tool_mentioned`] for one harness-authored string: the first built-in tool
+/// it names in backticks that `registry` does not offer.
+fn unoffered_tool_in(text: &str, registry: &ToolRegistry) -> Option<String> {
     // Every tool the harness knows how to build, taken from the DEFAULT registry
     // rather than a hand-kept list.
     //
@@ -52,23 +62,38 @@ fn unoffered_tool_mentioned(messages: &[Message], registry: &ToolRegistry) -> Op
     // trimmed registry was invisible to this detector -- which is exactly what it
     // exists to catch. Deriving it means a new tool is covered the day it is added.
     let known = sc_tools::default_registry();
-    let known: Vec<&str> = known.specs().iter().map(|s| s.name).collect();
+    known
+        .specs()
+        .iter()
+        .map(|s| s.name)
+        .filter(|name| registry.get(name).is_none())
+        .find(|name| text.contains(&format!("`{name}`")))
+        .map(str::to_string)
+}
 
-    for m in messages {
-        // Only harness-authored text. A user instruction naming a tool is not our bug.
-        if m.role == sc_model::Role::User {
-            continue;
-        }
-        for name in &known {
-            if registry.get(name).is_some() {
-                continue;
-            }
-            if m.content.contains(&format!("`{name}`")) {
-                return Some((*name).to_string());
-            }
-        }
+/// Check a directive the harness is about to inject, at the point it is injected, and
+/// report a `ToolNotOffered` fault if it names a tool this run cannot call.
+///
+/// The step-0 scan over the assembled prompt covers the static guidance; this covers the
+/// strings composed mid-run (a steer after a failed edit, a self-recovery directive), which
+/// are exactly the ones that used to hardcode a tool name. Cheap: one short string, only on
+/// the turns that inject one.
+pub(super) fn report_if_unoffered(
+    text: &str,
+    registry: &ToolRegistry,
+    step: usize,
+    sink: &dyn EventSink,
+) {
+    if let Some(missing) = unoffered_tool_in(text, registry) {
+        sink.record(&AgentEvent::HarnessFault {
+            kind: FaultKind::ToolNotOffered,
+            detail: format!(
+                "a harness directive steers the model toward `{missing}`, which is not in \
+                 this run's registry; it cannot call it"
+            ),
+            step: step + 1,
+        });
     }
-    None
 }
 
 pub fn run_agent(
@@ -337,14 +362,10 @@ pub fn run_agent_observed(
     let mut peak_reply_tokens = 0usize;
     let mut journal = Journal::new();
     let mut stall_detector = StallDetector::default();
-    // The harness's in-loop intervention bookkeeping: the running intervention count, the
-    // bounded diagnosis/self-recovery counters the stall ladder spends, and the previous-action
-    // hash the repeat-dedup guard clears on recovery (spec 02/03). See [`stall::Interventions`].
+    // The harness's in-loop intervention bookkeeping: the running intervention count and the
+    // bounded diagnosis/advisor/self-recovery counters the ladder spends (spec 02/03). See
+    // [`stall::Interventions`].
     let mut interv = stall::Interventions::default();
-    // How many turns in a row we've had to nudge the model off an idempotent
-    // repeat. If a nudge doesn't land, escalate to the advisor rather than nudging
-    // forever (spec 02 — junior asks senior).
-    let mut nudge_streak = 0usize;
     // A failing `edit_file` on this path, and how many times in a row. A small model
     // often anchors `edit_file` on code it *imagines* it wrote (e.g. a `jsonify(...)`
     // line that isn't in the file), so the anchor never matches and it loops. After a
@@ -359,45 +380,25 @@ pub fn run_agent_observed(
     // fires (the call never parsed). After a couple, steer it to `edit_lines`, which takes line
     // NUMBERS and no big `old_str`, sidestepping the encoding problem (observed live 2026-07-15).
     let mut malformed_streak = 0usize;
-    // Read-thrash guard: how many read_file calls have happened since the last workspace change.
-    // A small model often re-reads the same files many times before acting (observed live on
-    // void-claim: schema.rs read 6+ times in one run, burning budget). Paging through a large
-    // file is legitimate, so we don't block reads — but past a threshold with NO edit, we inject
-    // a firm "you have enough; act now" nudge and reset. Cleared on any change.
-    // Reads before a read-only run is FORCED to answer. Deliberately below the read-thrash
-    // nudge limit: by the time the advice has been ignored once, more advice will not help.
+    // Reads before a read-only run is FORCED to answer (the grammar is narrowed to `finish`
+    // below). A count of reads over the WHOLE run: on a read-only run nothing ever changes
+    // the workspace, so "reads since a change" would be the same number under a name that
+    // invites resetting it.
     const FORCE_FINISH_AFTER: usize = 11;
-    // Total reads this run. NOT `reads_since_change`, which the read-thrash guard resets to
-    // zero every 5 reads -- so a threshold above 5 on that counter can never be reached, and
-    // the force silently never fired. On a read-only run nothing ever changes the workspace,
-    // so "since change" means "since the last nudge", which is not the question being asked.
     let mut total_reads = 0usize;
-    let mut reads_since_change = 0usize;
     // How many replies this run have run to the token cap. Each costs a full prompt pass
     // plus a maximum-length generation -- most of a minute on a 35B model -- and carries no
     // tool call, so a run that keeps hitting it is burning time whether or not the waste is
     // contiguous.
     let mut capped_replies = 0usize;
-    // How many times the read-thrash nudge has fired since the last edit.
-    //
-    // The nudge alone is not enough. It resets its own counter when it fires, so it
-    // warns every N reads forever and never escalates -- measured on a real run:
-    // 27 turns, four files cycled, ZERO edits, the "do not read again" nudge
-    // delivered twice and ignored both times. Past a second warning the harness
-    // stops asking and starts refusing the read outright.
-    let mut read_nudges_since_change = 0usize;
-    // Every (tool, argument) pair already read, so a REPEAT can be answered differently
-    // from a new read. The volume guard below counts reads; it cannot tell a model
-    // working through a directory from one re-opening the same file, and those want
-    // opposite advice.
-    let mut already_read: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    // The same verification failure, seen N times in a row. A model stuck on a hard bug
-    // edits ineffectively (each edit resets the stall, so the stall detector never trips)
-    // or spams run_verification — burning the whole budget while the SAME tests keep
-    // failing. When the failure signature is unchanged across several verifications, the
-    // harness escalates: quote the exact failing tests and demand a full rewrite of the
-    // offending file (observed live 2026-06-15: the ladder's expr-eval/root-cause rungs
-    // looped ~10 verifications on an unchanged failure and died at the step budget).
+    // The auto-verify failure signature and how many consecutive verifications have carried
+    // it. An edit is only progress if it moves the suite: once the same failure has come
+    // back this many times in a row, the byte changes are noise and the stall detector is
+    // told so (observed live 2026-06-15: ~10 verifications on an unchanged failure, every
+    // edit resetting the stall, the run dying at the step budget instead of escalating).
+    const UNCHANGED_FAILURE_LIMIT: usize = 3;
+    let mut last_failure_sig: Option<u64> = None;
+    let mut failure_sig_streak = 0usize;
     // Shell-command approvals accumulated this run via `Confirmation::AllowRemember`
     // (spec 06). Owned by the loop and mutated in place, so `cfg` stays shared and
     // `PermissionPolicy` is never mutated. Checked in addition to the static policy.
@@ -715,13 +716,14 @@ pub fn run_agent_observed(
             sink.record(&AgentEvent::Stopped {
                 reason: reason.clone(),
             });
-            let faults = runlog.lock().fault_counts();
+            let (faults, verified) = {
+                let log = runlog.lock();
+                (log.fault_counts(), log.last_verification_green())
+            };
             return Ok(stopped(
                 reason,
                 step + 1,
-                &cfg.sandbox,
-                &cfg.verify_command,
-                workspace,
+                verified,
                 &journal,
                 metrics,
                 peak_prompt_tokens,
@@ -733,7 +735,6 @@ pub fn run_agent_observed(
             ));
         }
 
-        // Decode the tool call.
         // Decode the tool call. If extraction fails but the model replied with a fenced code
         // block AND the step is scoped to a single file (a per-file step), recover a
         // `write_file` of that block to the focused file — the model "thought out loud" and
@@ -786,38 +787,33 @@ pub fn run_agent_observed(
                     };
                     (obs, action, false, tool, arg)
                 } else if call.name == "ask_user" {
-                    // Junior asks senior (spec 02). Consult the advisor for a nudge.
+                    // Junior asks senior (spec 02). Consult the advisor for a nudge, on the
+                    // same budget the stall ladder spends.
                     let question = call.str("question").unwrap_or_default();
-                    match escalate(advisor, instruction, &plan, &history, question) {
+                    let trigger = format!("ask_user: {question}");
+                    match interv.consult(advisor, instruction, &plan, &history, question) {
                         Some(advice) => {
-                            interv.count += 1;
                             stall_detector.reset();
                             sink.record(&AgentEvent::Advice {
-                                trigger: format!("ask_user: {question}"),
+                                trigger,
                                 advice: advice.clone(),
                             });
                             (advice, action, false, tool, arg)
                         }
                         None => {
-                            let reason = StopReason::Escalated(question.to_string());
-                            sink.record(&AgentEvent::Stopped {
-                                reason: reason.clone(),
+                            // No senior (or none left to ask). Ending the run here threw
+                            // away everything the model had built up over a question it
+                            // could usually answer itself; tell it so and let it decide.
+                            interv.count += 1;
+                            let advice = String::from(
+                                "No one is available to answer. Decide for yourself from \
+                                 what you have and continue.",
+                            );
+                            sink.record(&AgentEvent::Advice {
+                                trigger,
+                                advice: advice.clone(),
                             });
-                            return Ok(stopped(
-                                reason,
-                                step + 1,
-                                &cfg.sandbox,
-                                &cfg.verify_command,
-                                workspace,
-                                &journal,
-                                metrics,
-                                peak_prompt_tokens,
-                                total_prompt_tokens,
-                                peak_reply_tokens,
-                                runlog.lock().fault_counts(),
-                                budget,
-                                interv.count,
-                            ));
+                            (advice, action, false, tool, arg)
                         }
                     }
                 } else if call.name == "read_file"
@@ -831,20 +827,27 @@ pub fn run_agent_observed(
                     // immediate-repeat guard misses interleaved re-reads (read a, read b, read
                     // a). Redirect it to the shown copy instead of spending a turn on the read.
                     let path = call.str("path").unwrap_or_default().to_string();
-                    // Only name a tool the model can actually call. A trimmed registry
-                    // (spec 04/08 — fewer choices, more action) may not carry
-                    // `edit_lines`, and steering to a tool that is not offered wastes
-                    // the turn and teaches the model to distrust the harness.
-                    let how = if registry.get("edit_lines").is_some() {
-                        "prefer `edit_lines` (give the line numbers shown, no snippet to copy)"
-                    } else {
-                        "use `edit_file` with a short, unique anchor"
+                    // Only name a tool the model can actually call (see `mention`).
+                    let how = match mention(
+                        registry,
+                        &["edit_lines", "edit_file", "edit_function", "write_file"],
+                    ) {
+                        Some("edit_lines") => {
+                            "prefer `edit_lines` (give the line numbers shown, no snippet to copy)"
+                        }
+                        Some("edit_file") => "use `edit_file` with a short, unique anchor",
+                        Some("edit_function") => {
+                            "use `edit_function` with the function's name and its full new body"
+                        }
+                        Some(_) => "use `write_file` with the ENTIRE corrected contents",
+                        None => "work from the copy shown",
                     };
                     let obs = format!(
                         "`{path}` is ALREADY SHOWN IN FULL above with LINE NUMBERS and updates \
                          after each edit — you do not need to read it. Edit it directly: {how}. \
                          Make your next change now."
                     );
+                    report_if_unoffered(&obs, registry, step, sink);
                     (obs, action, false, tool, arg)
                 } else {
                     // Batched whole-file writes (spec 03 / thread 3): a capable model emits
@@ -1023,12 +1026,21 @@ pub fn run_agent_observed(
                             // head landed. Tell the model to CONTINUE with append_file rather than
                             // re-writing the whole file (which would truncate at the same place).
                             let o = if salvaged_truncated_write {
-                                format!(
-                                    "{o}\nNOTE: your reply was cut off, so only the part above was \
-                                     saved. Do NOT re-send the whole file — continue it with \
-                                     append_file (same path), adding the NEXT chunk only. Repeat \
-                                     append_file until the file is complete."
-                                )
+                                let note = match mention(registry, &["append_file"]) {
+                                    Some(append) => format!(
+                                        "{o}\nNOTE: your reply was cut off, so only the part above \
+                                         was saved. Do NOT re-send the whole file — continue it \
+                                         with `{append}` (same path), adding the NEXT chunk only. \
+                                         Repeat `{append}` until the file is complete."
+                                    ),
+                                    None => format!(
+                                        "{o}\nNOTE: your reply was cut off, so only the part above \
+                                         was saved. Write the file again in SMALLER pieces: keep \
+                                         each reply well under the length that was cut."
+                                    ),
+                                };
+                                report_if_unoffered(&note, registry, step, sink);
+                                note
                             } else {
                                 o
                             };
@@ -1053,7 +1065,7 @@ pub fn run_agent_observed(
                 if !was_cut_off {
                     malformed_streak += 1;
                 }
-                let mut detail = e.repair_prompt();
+                let mut detail = e.repair_prompt_for(registry);
                 // A read-only run that just ran to the cap was THINKING, not malformed.
                 //
                 // The generic repair prompt explains JSON syntax, which is useless advice for
@@ -1075,22 +1087,41 @@ pub fn run_agent_observed(
                 // multi-line `edit_file` `old_str` as JSON and mangling it. Steer to `edit_lines`
                 // (line numbers, no old_str) so the encoding problem disappears.
                 if malformed_streak >= 2 {
-                    // Again, only if the registry actually has it — see the
-                    // read-redirect above.
-                    detail.push_str(if registry.get("edit_lines").is_some() {
-                        "\n\nYou have produced an unparseable reply more than once — this usually \
-                         happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
-                         hard to encode as JSON. STOP using edit_file for this. Use `edit_lines` \
-                         instead: {\"tool\":\"edit_lines\",\"path\":\"<file>\",\"start\":<n>,\
-                         \"end\":<m>,\"new_text\":\"<the replacement>\"}. It takes the LINE NUMBERS \
-                         shown in the file view (no snippet to copy), so the reply stays short and \
-                         valid."
-                    } else {
-                        "\n\nYou have produced an unparseable reply more than once — this usually \
-                         happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
-                         hard to encode as JSON. Keep `old_str` SHORT: one or two distinct lines \
-                         are enough to anchor on, and the reply stays valid."
-                    });
+                    // Again, only tools the registry actually has -- see `mention`.
+                    let steer = match (
+                        mention(registry, &["edit_lines"]),
+                        mention(registry, &["edit_file"]),
+                    ) {
+                        (Some(_), Some(_)) => {
+                            "\n\nYou have produced an unparseable reply more than once — this usually \
+                             happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
+                             hard to encode as JSON. STOP using edit_file for this. Use `edit_lines` \
+                             instead: {\"tool\":\"edit_lines\",\"path\":\"<file>\",\"start\":<n>,\
+                             \"end\":<m>,\"new_text\":\"<the replacement>\"}. It takes the LINE NUMBERS \
+                             shown in the file view (no snippet to copy), so the reply stays short and \
+                             valid."
+                        }
+                        (None, Some(_)) => {
+                            "\n\nYou have produced an unparseable reply more than once — this usually \
+                             happens when `edit_file`'s `old_str` is a long multi-line snippet that is \
+                             hard to encode as JSON. Keep `old_str` SHORT: one or two distinct lines \
+                             are enough to anchor on, and the reply stays valid."
+                        }
+                        (Some(_), None) => {
+                            "\n\nYou have produced an unparseable reply more than once — this usually \
+                             happens when a long multi-line snippet is hard to encode as JSON. Use \
+                             `edit_lines`: {\"tool\":\"edit_lines\",\"path\":\"<file>\",\"start\":<n>,\
+                             \"end\":<m>,\"new_text\":\"<the replacement>\"}. It takes LINE NUMBERS, \
+                             so the reply stays short and valid."
+                        }
+                        (None, None) => {
+                            "\n\nYou have produced an unparseable reply more than once. Keep the \
+                             reply to ONE short JSON object: no prose around it, and no long \
+                             multi-line strings inside it."
+                        }
+                    };
+                    detail.push_str(steer);
+                    report_if_unoffered(steer, registry, step, sink);
                     interv.count += 1;
                 }
                 sink.record(&AgentEvent::RepairTriggered {
@@ -1131,13 +1162,14 @@ pub fn run_agent_observed(
                     sink.record(&AgentEvent::Stopped {
                         reason: reason.clone(),
                     });
-                    let faults = runlog.lock().fault_counts();
+                    let (faults, verified) = {
+                        let log = runlog.lock();
+                        (log.fault_counts(), log.last_verification_green())
+                    };
                     return Ok(stopped(
                         reason,
                         step + 1,
-                        &cfg.sandbox,
-                        &cfg.verify_command,
-                        workspace,
+                        verified,
                         &journal,
                         metrics,
                         peak_prompt_tokens,
@@ -1158,77 +1190,11 @@ pub fn run_agent_observed(
             }
         };
 
-        // Repeat-dedup (spec 03): a tiny model often re-issues the *same*
-        // idempotent call (`read_file mathlib.py`, or `run_verification` over and
-        // over) instead of acting on what it already has — burning the budget until
-        // the stall trips. When the action exactly repeats such a tool with nothing
-        // changed between, replace the (identical) observation with a terse nudge
-        // toward the actual edit. This breaks the loop a turn earlier than the stall
-        // detector and points the model at the next concrete move.
-        let (obs, action, changed, tool, arg) =
-            if interv.prev_action == Some(action) && is_idempotent_tool(&tool) {
-                nudge_streak += 1;
-                // If a nudge already failed to move the model, stop nudging and ask
-                // the senior for a concrete hint (spec 02). The advisor sees the
-                // recent history and the workspace state via the predicament.
-                let escalated = if nudge_streak >= 2 {
-                    escalate(
-                        advisor,
-                        instruction,
-                        &plan,
-                        &history,
-                        &format!("model keeps repeating `{tool}` without making the fix"),
-                    )
-                } else {
-                    None
-                };
-                let obs = match escalated {
-                    Some(advice) => {
-                        interv.count += 1;
-                        nudge_streak = 0;
-                        sink.record(&AgentEvent::Advice {
-                            trigger: format!("repeating {tool}"),
-                            advice: advice.clone(),
-                        });
-                        advice
-                    }
-                    None if tool == "run_verification" => {
-                        "You just ran the tests and nothing has changed since — re-running \
-                         gives the same result. The suite is still failing: change the code \
-                         to fix the reported failure (use `write_file` to write/overwrite a \
-                         whole file, or `edit_file` for a small anchored change), then \
-                         run_verification."
-                            .to_string()
-                    }
-                    None => format!(
-                        "You already have the result of `{tool}` — re-running it changes \
-                         nothing. Take a CONCRETE next action now: if a source file the tests \
-                         need does not exist yet, create it with `write_file` (the ENTIRE file \
-                         contents in one shot); if it exists but a test is failing, fix it with \
-                         `write_file` (whole file) or `edit_file` (anchored change), then \
-                         run_verification."
-                    ),
-                };
-                // Fix #2: the PRIOR turn's successful result of this same idempotent call is
-                // still the last user message in `recent` — the model trusts that concrete
-                // "it worked" output over the nudge sitting next to it. Supersede it so the
-                // nudge isn't drowned by a visible success of the very call we're discouraging.
-                recent.replace_last_user(&format!(
-                    "[earlier `{tool}` result superseded — act on the note below]"
-                ));
-                (obs, action, false, tool, arg)
-            } else {
-                nudge_streak = 0;
-                (obs, action, changed, tool, arg)
-            };
-        interv.prev_action = Some(action);
-
         // edit_file anchor-loop breaker (spec 03): a non-matching `edit_file` (the
-        // anchor isn't in the file) is a mutating call that errored, so the
-        // idempotent-repeat path above never catches it — yet a small model will
-        // re-submit the same imagined anchor until the stall kills it. Track repeated
+        // anchor isn't in the file) is a mutating call that errored, yet a small model
+        // will re-submit the same imagined anchor until the stall kills it. Track repeated
         // misses on the same path and, after a couple, steer it to rewrite the whole
-        // file with `create_file` instead of hunting for an anchor that doesn't exist.
+        // file instead of hunting for an anchor that doesn't exist.
         // Two failure modes, one cure (`write_file`):
         //  - `edit_file` whose anchor isn't in the file (model imagines the contents).
         //  - `create_file` on a path that already exists (create_file refuses to
@@ -1267,34 +1233,59 @@ pub fn run_agent_observed(
             let big_existing = std::fs::read_to_string(workspace.join(&arg))
                 .map(|s| s.lines().count() > 150)
                 .unwrap_or(false);
-            let directive = if create_clash && !big_existing {
-                format!(
+            // Every tool named below comes from `mention`: whichever way the model was
+            // failing, the way out has to be a tool it can actually call.
+            let whole = mention(registry, &["write_file"]);
+            let surgical = mention(registry, &["edit_function", "edit_lines"]);
+            let directive = match (create_clash && !big_existing, big_existing, whole, surgical) {
+                (true, _, Some(w), _) => format!(
                     "`{arg}` already exists — `create_file` will NOT overwrite it, so \
-                     repeating it does nothing. To change it, call `write_file` with `path` \
-                     `{arg}` and the ENTIRE new file contents in one shot (write_file \
+                     repeating it does nothing. To change it, call `{w}` with `path` \
+                     `{arg}` and the ENTIRE new file contents in one shot ({w} \
                      overwrites). Make the fix the failing test needs."
-                )
-            } else if big_existing {
-                format!(
+                ),
+                (_, true, _, Some("edit_function")) => format!(
                     "Editing `{arg}` by exact snippet is failing — you keep matching code that \
-                     isn't in the file. STOP using edit_file on this large file. If the code you \
+                     isn't in the file. STOP editing this large file by snippet. If the code you \
                      want to change is inside a function/method, use `edit_function`: pass its \
                      `name` and the FULL new function text as `new_body` — no snippet to copy and \
                      no line numbers to get right (the tool finds the function for you). This is \
-                     the easiest way to add a match arm or change a body. Otherwise use \
-                     `edit_lines` (address lines by NUMBER from the `N| ` view; do NOT include the \
-                     `N| ` prefix; to INSERT before line N pass start=N, end=N-1). Make the change \
-                     now with edit_function or edit_lines."
-                )
-            } else {
-                format!(
-                    "Your `edit_file` anchor does not exist in `{arg}` — you are matching \
-                     against code that isn't in the file. STOP editing by anchor. Instead call \
-                     `write_file` with `path` `{arg}` and the ENTIRE corrected file contents in \
-                     one shot (write_file overwrites the existing file). Base it on the file \
-                     shown in the error above plus the fix the failing test needs."
-                )
+                     the easiest way to add a match arm or change a body.{} Make the change now.",
+                    if registry.get("edit_lines").is_some() {
+                        " Otherwise use `edit_lines` (address lines by NUMBER from the `N: ` view; \
+                         do NOT include the `N: ` prefix; to INSERT before line N pass start=N, \
+                         end=N-1)."
+                    } else {
+                        ""
+                    }
+                ),
+                (_, true, _, Some(_)) => format!(
+                    "Editing `{arg}` by exact snippet is failing — you keep matching code that \
+                     isn't in the file. STOP editing this large file by snippet. Use `edit_lines` \
+                     (address lines by NUMBER from the `N: ` view; do NOT include the `N: ` \
+                     prefix; to INSERT before line N pass start=N, end=N-1). Make the change now."
+                ),
+                (_, false, Some(w), _) => format!(
+                    "Your edit anchor does not exist in `{arg}` — you are matching against \
+                     code that isn't in the file. STOP editing by anchor. Instead call `{w}` \
+                     with `path` `{arg}` and the ENTIRE corrected file contents in one shot \
+                     ({w} overwrites the existing file). Base it on the file shown in the error \
+                     above plus the fix the failing test needs."
+                ),
+                (_, _, None, Some(s)) => format!(
+                    "Repeating that call on `{arg}` does nothing — you are working from code \
+                     that isn't in the file. STOP guessing at its contents: use `{s}` on the \
+                     file as it is actually shown above, and make the fix the failing test needs."
+                ),
+                // A big file with no surgical tool, or nothing that writes at all: the only
+                // honest advice is to stop imagining the file and work from the shown copy.
+                _ => format!(
+                    "Repeating that call on `{arg}` does nothing — you are working from code \
+                     that isn't in the file. Re-read the file as it is actually shown above and \
+                     copy the anchor from it exactly."
+                ),
             };
+            report_if_unoffered(&directive, registry, step, sink);
             sink.record(&AgentEvent::Advice {
                 trigger: if create_clash {
                     "create_file keeps clashing with an existing file".to_string()
@@ -1303,102 +1294,23 @@ pub fn run_agent_observed(
                 },
                 advice: directive.clone(),
             });
-            directive
+            // Appended to the tool's real error, never in place of it: the error names the
+            // anchor that missed (or the file that exists), and that is the evidence the
+            // model needs to follow the directive.
+            format!("{obs}\n\n{directive}")
         } else {
             obs
         };
 
-        // Read-thrash guard: count reads since the last change; on a change, reset. Past the
-        // threshold with no edit, append a firm "you have enough — act now" nudge so the model
-        // stops re-reading files it already has in context and makes a concrete edit. Paging a
-        // large file is fine up to the threshold; this only fires when reads pile up WITHOUT any
-        // workspace change (the observed void-claim thrash: schema.rs read 6+ times, no edit).
-        const READ_THRASH_LIMIT: usize = 5;
-        if changed {
-            reads_since_change = 0;
-            // DECAY the escalation rather than clearing it. A full reset means one
-            // edit buys a whole fresh read budget, so a model can alternate
-            // 5-reads-then-one-edit indefinitely and never be refused -- measured on
-            // the run this was found in: 25 reads against 2 edits, 12:1, with the
-            // refusal firing and then being reset away twice. Decaying keeps the
-            // pressure on a model that is mostly reading while still rewarding an
-            // edit, and a genuinely productive run drops back to zero within a
-            // couple of edits.
-            read_nudges_since_change = read_nudges_since_change.saturating_sub(1);
-        } else if matches!(
+        // Reads are counted, not judged. Re-reading is the stall detector's business
+        // (a non-novel action since the last change is non-progress, and it trips
+        // `Stuck`); the count only feeds the read-only force-finish above.
+        if matches!(
             tool.as_str(),
             "read_file" | "read_function" | "search_code" | "list_dir"
         ) {
-            reads_since_change += 1;
             total_reads += 1;
         }
-        // A REPEAT of a read already performed. Tracked separately from the volume
-        // count because it means something different: reading ten files is a search,
-        // reading one file twice is the amnesia loop, and telling a model that is
-        // searching to "answer now" is wrong while telling one that is looping the same
-        // thing is exactly right.
-        //
-        // Observed on a live investigation: hyperspace_fx.rs opened at step 1 and again
-        // at step 11, with nine unrelated files between -- far enough apart that the
-        // 5-read volume guard had been reset by then and never fired on the repetition.
-        let repeated_read = matches!(
-            tool.as_str(),
-            "read_file" | "read_function" | "search_code" | "list_dir"
-        ) && !already_read.insert(format!("{tool}\u{1}{arg}"));
-        let obs = if repeated_read {
-            interv.count += 1;
-            // A read-only run has no edit tool: telling it to "make a change" is the
-            // ToolNotOffered failure. Answering is the only move it has.
-            let next_move = if read_only_run {
-                "If you have the answer, call `finish` NOW with it in `summary`."
-            } else {
-                "Move on: make the change, or read something you have not read yet."
-            };
-            // Naming the repeat is the whole point: a model that re-opens a file has
-            // forgotten it read it, and the fix is to remind it rather than to nudge it
-            // about volume it may not have reached.
-            format!(
-                "{obs}\n\n[harness] You have ALREADY read this exact thing earlier in \
-                 this run, and it has not changed. Its contents are above. Do not read \
-                 it again -- use what you have. {next_move}"
-            )
-        } else if reads_since_change >= READ_THRASH_LIMIT {
-            reads_since_change = 0;
-            read_nudges_since_change += 1;
-            interv.count += 1;
-            // A read-only run has no edit tool and no tests, so both nudges below are
-            // impossible instructions -- the `ToolNotOffered` failure, spoken by the harness
-            // itself. Measured: a run read one irrelevant file SIX times in different
-            // windows, was told to "make a concrete edit", could not, and burned all 14 steps
-            // without answering. What it should do is answer with what it already has.
-            if read_only_run {
-                format!(
-                    "{obs}
-
-[harness] You have read {READ_THRASH_LIMIT}+ times. You already                      have what you read above, and there is nothing to edit here -- this is a                      question. If you have the answer, call `finish` NOW with it in `summary`.                      If you are reading the wrong file, say that in `finish` rather than                      reading on."
-                )
-            }
-            // Asking twice is generous; a third round means the words are not
-            // working and repeating them just burns the budget.
-            else if read_nudges_since_change >= 2 {
-                format!(
-                    "{obs}\n\n[harness] STOP READING. This is the second time you have been told \
-                     you already have what you need. Make one concrete edit THIS turn."
-                )
-            } else {
-                // Names no specific edit tool: the registry may be trimmed, and
-                // steering toward one the model was not given wastes the turn. This
-                // used to name `edit_function`, which a six-tool run cannot call.
-                format!(
-                    "{obs}\n\n[harness] You have read {READ_THRASH_LIMIT}+ times without changing any \
-                     file. You already have what you read in the context above — re-reading won't \
-                     help. Make a CONCRETE edit THIS turn with one of the edit tools you were \
-                     given, then run the tests."
-                )
-            }
-        } else {
-            obs
-        };
 
         // Record the turn and detect stalls (spec 03 — VERIFY, cheap every turn).
         let was_error = looks_like_failure(&obs);
@@ -1446,8 +1358,14 @@ pub fn run_agent_observed(
                 // for the diagnostic) and the parsed report (the failure-first form the model
                 // reacts to). Before, only the compact observation was kept and the raw dump
                 // was lost — so the diagnostic had to re-run the suite to recover it.
-                let cmd_result = sc_verify::run_command_in(&cfg.sandbox, workspace, cmd);
-                let report = sc_verify::parse(cmd, &cmd_result.output, cmd_result.ok);
+                // Uncapped: the parser must see the whole suite, or a long run loses its
+                // FAILED lines to the 16 KB command cap. The model only ever sees the
+                // parsed, failure-first report, so the cap is not needed here.
+                let cmd_result = sc_verify::run_command_full(&cfg.sandbox, workspace, cmd);
+                let mut report = sc_verify::parse(cmd, &cmd_result.output, cmd_result.ok);
+                // Same delta the model-invoked run_verification gets: "same N failures as
+                // last run" is the signal that an edit did nothing.
+                report.delta = sc_verify::note_run(cmd, &report);
                 sink.record(&AgentEvent::Verification {
                     green: report.all_green(),
                     summary: first_line(&report.observation()),
@@ -1472,11 +1390,19 @@ pub fn run_agent_observed(
                         interventions: interv.count,
                     });
                 } else {
+                    let observation = report.observation();
+                    let sig = failure_signature(&observation);
+                    if last_failure_sig == Some(sig) {
+                        failure_sig_streak += 1;
+                    } else {
+                        last_failure_sig = Some(sig);
+                        failure_sig_streak = 1;
+                    }
+                    if failure_sig_streak >= UNCHANGED_FAILURE_LIMIT {
+                        stall_detector.note_unchanged_failure();
+                    }
                     // Surface the failing tests so the next turn is grounded.
-                    let fb = format!(
-                        "(harness ran the tests after your edit)\n{}",
-                        report.observation()
-                    );
+                    let fb = format!("(harness ran the tests after your edit)\n{observation}");
                     // Use the generous read_file cap, not the tight log cap: the report
                     // is failure-first and carries the underlying exception (e.g.
                     // TemplateNotFound) that the model must see to fix the bug. At the
@@ -1488,16 +1414,15 @@ pub fn run_agent_observed(
                         cfg.read_file_line_cap,
                         true,
                     ));
-                    // A failed auto-verify resets the stall streak: real progress
-                    // was attempted, so don't count the edit+verify as "stuck".
-                    stall_detector.reset();
                 }
             }
         }
 
         match stall::handle_stall(
+            step,
             action,
             changed,
+            registry,
             &mut interv,
             &mut stall_detector,
             &mut recent,
@@ -1516,18 +1441,20 @@ pub fn run_agent_observed(
                 sink.record(&AgentEvent::Stopped {
                     reason: reason.clone(),
                 });
+                let (faults, verified) = {
+                    let log = runlog.lock();
+                    (log.fault_counts(), log.last_verification_green())
+                };
                 return Ok(stopped(
                     reason,
                     step + 1,
-                    &cfg.sandbox,
-                    &cfg.verify_command,
-                    workspace,
+                    verified,
                     &journal,
                     metrics,
                     peak_prompt_tokens,
                     total_prompt_tokens,
                     peak_reply_tokens,
-                    runlog.lock().fault_counts(),
+                    faults,
                     budget,
                     interv.count,
                 ));
@@ -1540,13 +1467,14 @@ pub fn run_agent_observed(
     });
     // Bound before the call: taking the lock inline makes the guard a temporary of
     // the tail expression, which outlives `runlog` itself.
-    let faults = runlog.lock().fault_counts();
+    let (faults, verified) = {
+        let log = runlog.lock();
+        (log.fault_counts(), log.last_verification_green())
+    };
     Ok(stopped(
         StopReason::BudgetExhausted,
         cfg.max_steps,
-        &cfg.sandbox,
-        &cfg.verify_command,
-        workspace,
+        verified,
         &journal,
         metrics,
         peak_prompt_tokens,
@@ -1573,9 +1501,9 @@ mod test_util;
 mod tests;
 
 use dispatch::{
-    blind_cut, dispatch, gate_finish, is_idempotent_tool, key_arg, looks_like_failure,
-    mutating_path, observation_cap_for, pre_apply_batched_writes, FinishGate,
+    blind_cut, dispatch, gate_finish, key_arg, looks_like_failure, mutating_path,
+    observation_cap_for, pre_apply_batched_writes, FinishGate,
 };
-use escalation::{escalate, stopped};
+use escalation::{mention, stopped};
 use stable::StableContext;
 use window::{role_word, RecentWindow};

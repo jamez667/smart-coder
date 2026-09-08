@@ -6,7 +6,8 @@
 //! first, then any notes injected the same turn (a failed auto-verify report, advisor
 //! advice, a diagnosis). Eviction always removes a whole turn, so the window can never start
 //! on an orphaned assistant message or lose the note that belonged to an observation. The
-//! window is append-only between evictions -- what the prefix KV cache needs.
+//! window is append-only between evictions -- what the prefix KV cache needs -- and nothing
+//! ever rewrites a message already in it: an observation, once shown, stays as shown.
 
 use sc_context::{Segment, Zone};
 use sc_model::Message;
@@ -48,26 +49,6 @@ impl RecentWindow {
         match self.turns.last_mut() {
             Some(t) => t.notes.push(msg),
             None => self.head.push(msg),
-        }
-    }
-
-    /// Overwrite the content of the most recent `user` message in the window, in place. Used
-    /// by the repeat-dedup nudge (Fix #2): when an idempotent call is repeated, the prior
-    /// turn's *successful* result of that same call is the last user message — leaving it
-    /// verbatim lets the model trust "it worked" over the nudge. Replacing it with a short
-    /// superseded marker keeps the window honest (that result was already consumed) without
-    /// dropping the turn structure. No-op if there is no user message yet.
-    ///
-    /// This is the one mutation of an earlier message the window still allows; it breaks the
-    /// cached prefix from that message on, by design (the nudge is worth more than the cache).
-    pub(super) fn replace_last_user(&mut self, marker: &str) {
-        let last = self
-            .turns
-            .last_mut()
-            .and_then(|t| t.notes.last_mut())
-            .or_else(|| self.head.last_mut());
-        if let Some(m) = last {
-            m.content = marker.to_string();
         }
     }
 
@@ -164,17 +145,5 @@ mod tests {
         let left: Vec<&str> = w.messages().map(|m| m.content.as_str()).collect();
         assert_eq!(left, vec!["a2", "obs2"]);
         assert_eq!(w.messages().next().unwrap().role, sc_model::Role::Assistant);
-    }
-
-    #[test]
-    fn replace_last_user_hits_the_newest_user_message_only() {
-        let mut w = RecentWindow::default();
-        w.push_turn("a1", "obs1");
-        w.push_turn("a2", "obs2");
-        w.replace_last_user("[superseded]");
-        let got: Vec<&str> = w.messages().map(|m| m.content.as_str()).collect();
-        assert_eq!(got, vec!["a1", "obs1", "a2", "[superseded]"]);
-        // With nothing in the window it is a no-op, not a panic.
-        RecentWindow::default().replace_last_user("x");
     }
 }

@@ -186,7 +186,7 @@ pub(super) fn render_focus_files(
             let numbered = content
                 .lines()
                 .enumerate()
-                .map(|(i, l)| format!("{}| {}", i + 1, l))
+                .map(|(i, l)| format!("{}: {}", i + 1, l))
                 .collect::<Vec<_>>()
                 .join("\n");
             s.push_str(&format!(

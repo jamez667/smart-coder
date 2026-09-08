@@ -102,7 +102,7 @@ state itself.
 | --- | --- |
 | Malformed tool call | Repair loop: re-prompt with the exact parse/schema error (bounded retries). |
 | Tool error (e.g. file not found) | Feed error back as observation; let the model adjust once; then re-plan. |
-| Same action repeated (loop) | Detect via action hash; force a re-plan or ask the user. |
+| Same action repeated (loop), or three verification runs in a row failing with the same signature (same counts, same failing test names) even though edits changed the workspace | Detect via action hash / failure signature; run the stall ladder — diagnosis, then one advisor consult from the shared budget, then a self-recovery directive built only from tools this run's registry offers, then stop. |
 | Build/test fails after edit | Feed failure output; re-attempt step; cap attempts, then escalate. |
 | Step budget exceeded | Stop the step, mark `failed`, re-plan or surface to user. |
 | Model output empty/garbage | Retry with lower temperature; if still bad, escalate to user. |

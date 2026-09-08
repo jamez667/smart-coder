@@ -646,65 +646,6 @@ fn propagates_backend_errors() {
 }
 
 #[test]
-fn a_repeated_read_is_nudged_not_re_served() {
-    use crate::event::AgentEvent;
-    use std::sync::Mutex;
-
-    let ws = temp_dir("read-dedup");
-    std::fs::write(ws.join("f.txt"), "FILE_BODY_MARKER").unwrap();
-
-    // The model reads the same file twice, then finishes. The second read must
-    // come back as a nudge — not the file body again.
-    let backend = MockBackend::new([
-        json!({"tool":"read_file","path":"f.txt"}).to_string(),
-        json!({"tool":"read_file","path":"f.txt"}).to_string(),
-        json!({"tool":"finish"}).to_string(),
-    ]);
-
-    #[derive(Default)]
-    struct Rec {
-        results: Mutex<Vec<String>>,
-    }
-    impl crate::event::EventSink for Rec {
-        fn record(&self, e: &AgentEvent) {
-            if let AgentEvent::ToolResult { full, .. } = e {
-                self.results.lock().unwrap().push(full.clone());
-            }
-        }
-    }
-
-    let registry = sc_tools::default_registry();
-    let strategy = crate::strategy::select_strategy(&backend.capabilities());
-    let sink = Rec::default();
-    let report = run_agent_observed(
-        &backend,
-        None,
-        &registry,
-        strategy.as_ref(),
-        "read it",
-        &ws,
-        &AgentConfig::default(),
-        &sink,
-    )
-    .unwrap();
-    assert!(report.finished);
-
-    let results = sink.results.lock().unwrap();
-    // First read returns the file body; the second is the de-dup nudge.
-    assert!(
-        results[0].contains("FILE_BODY_MARKER"),
-        "first read serves the file: {:?}",
-        results[0]
-    );
-    assert!(
-        results[1].contains("already have the result") && !results[1].contains("FILE_BODY_MARKER"),
-        "second identical read is nudged, not re-served: {:?}",
-        results[1]
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-#[test]
 fn no_advisor_self_recovers_before_giving_up() {
     use crate::event::AgentEvent;
     use std::sync::Mutex;
@@ -940,4 +881,158 @@ fn unoffered_tool_detector_fires_only_on_harness_text_naming_a_missing_tool() {
     assert_eq!(unoffered_tool_mentioned(&unrelated, &trimmed), None);
 
     let _ = Role::System;
+}
+
+/// A registry holding only the named built-in tools (plus nothing else).
+fn registry_of(names: &[&str]) -> sc_tools::ToolRegistry {
+    let full = sc_tools::default_registry();
+    sc_tools::ToolRegistry::new(
+        full.specs()
+            .iter()
+            .filter(|s| names.contains(&s.name))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// `mention` is the one way a directive may name a tool: best preference first, and
+/// only ever a tool the registry has.
+#[test]
+fn mention_returns_the_first_preferred_tool_the_registry_offers() {
+    use super::escalation::mention;
+    let full = sc_tools::default_registry();
+    assert_eq!(
+        mention(&full, &["edit_lines", "edit_file"]),
+        Some("edit_lines")
+    );
+    let no_lines = registry_of(&["read_file", "edit_file", "finish"]);
+    assert_eq!(
+        mention(&no_lines, &["edit_lines", "edit_file"]),
+        Some("edit_file")
+    );
+    let read_only = registry_of(&["read_file", "finish"]);
+    assert_eq!(mention(&read_only, &["edit_lines", "edit_file"]), None);
+}
+
+/// A directive is checked where it is injected, not only on the step-0 prompt scan.
+#[test]
+fn an_injected_directive_naming_an_unoffered_tool_is_a_fault_at_that_step() {
+    use crate::event::{AgentEvent, FaultKind};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Faults(Mutex<Vec<(FaultKind, usize)>>);
+    impl crate::event::EventSink for Faults {
+        fn record(&self, e: &AgentEvent) {
+            if let AgentEvent::HarnessFault { kind, step, .. } = e {
+                self.0.lock().unwrap().push((*kind, *step));
+            }
+        }
+    }
+
+    let trimmed = registry_of(&["read_file", "write_file", "finish"]);
+    let sink = Faults::default();
+    report_if_unoffered("STOP. Use `edit_lines` now.", &trimmed, 6, &sink);
+    assert_eq!(
+        *sink.0.lock().unwrap(),
+        vec![(FaultKind::ToolNotOffered, 7)],
+        "names the missing tool on the turn it was injected"
+    );
+
+    // The same text against a registry that has it: silent.
+    let sink = Faults::default();
+    report_if_unoffered(
+        "STOP. Use `edit_lines` now.",
+        &sc_tools::default_registry(),
+        6,
+        &sink,
+    );
+    assert!(sink.0.lock().unwrap().is_empty());
+}
+
+/// The self-recovery directive is built from the registry: it names only tools the run
+/// has, and on a read-only run it tells the model to answer rather than to edit.
+#[test]
+fn self_recovery_directive_never_names_a_tool_the_run_cannot_call() {
+    use super::escalation::self_recovery_directive;
+    let recent = vec!["read_file".to_string()];
+
+    let full = self_recovery_directive(&recent, &sc_tools::default_registry());
+    assert!(full.contains("`write_file`") && full.contains("`edit_file`"));
+    assert!(full.contains("`run_verification`"));
+
+    let six = registry_of(&["read_file", "write_file", "edit_lines", "finish"]);
+    let d = self_recovery_directive(&recent, &six);
+    assert!(
+        d.contains("`write_file`") && d.contains("`edit_lines`"),
+        "{d}"
+    );
+    assert!(
+        !d.contains("`edit_file`") && !d.contains("`run_verification`"),
+        "{d}"
+    );
+    assert_eq!(unoffered_tool_in(&d, &six), None);
+
+    let read_only = registry_of(&["read_file", "finish"]);
+    let d = self_recovery_directive(&recent, &read_only);
+    assert!(d.contains("`finish`"), "{d}");
+    assert_eq!(unoffered_tool_in(&d, &read_only), None, "{d}");
+}
+
+/// `ask_user` and the stall ladder spend ONE advisor budget between them. Before, only
+/// the ladder checked `ADVISOR_LIMIT`; a model could `ask_user` the senior forever.
+#[test]
+fn ask_user_shares_the_advisor_budget_with_the_stall_ladder() {
+    use super::escalation::ADVISOR_LIMIT;
+    use crate::event::AgentEvent;
+    use std::sync::Mutex;
+
+    let ws = temp_dir("ask-budget");
+    let ask = json!({"tool":"ask_user","question":"which file?"}).to_string();
+    let mut turns = vec![ask; ADVISOR_LIMIT + 1];
+    turns.push(json!({"tool":"finish"}).to_string());
+    let backend = MockBackend::new(turns);
+    // The advisor has exactly ADVISOR_LIMIT answers in it; a further consult would exhaust
+    // it and error the run, so a green run proves the limit gated the last ask.
+    let advisor = MockBackend::new(vec!["Look in app.py.".to_string(); ADVISOR_LIMIT]);
+
+    #[derive(Default)]
+    struct Rec(Mutex<Vec<String>>);
+    impl crate::event::EventSink for Rec {
+        fn record(&self, e: &AgentEvent) {
+            if let AgentEvent::Advice { advice, .. } = e {
+                self.0.lock().unwrap().push(advice.clone());
+            }
+        }
+    }
+    let registry = sc_tools::default_registry();
+    let strategy = crate::strategy::select_strategy(&backend.capabilities());
+    let sink = Rec::default();
+    let cfg = AgentConfig {
+        max_steps: 10,
+        repeat_limit: 99,
+        no_progress_limit: 99,
+        ..Default::default()
+    };
+    let report = run_agent_observed(
+        &backend,
+        Some(&advisor),
+        &registry,
+        strategy.as_ref(),
+        "fix it",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    assert!(report.finished, "{:?}", report.stop_reason);
+    assert_eq!(report.interventions, ADVISOR_LIMIT + 1);
+    let advice = sink.0.lock().unwrap();
+    assert_eq!(advice.len(), ADVISOR_LIMIT + 1);
+    assert!(
+        advice.last().unwrap().contains("No one is available"),
+        "past the budget the model is told to decide for itself: {advice:?}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
 }

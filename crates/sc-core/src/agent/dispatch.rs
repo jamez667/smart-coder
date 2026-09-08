@@ -281,27 +281,6 @@ pub(super) fn mutating_path(
     call.str("path").map(|s| s.to_string())
 }
 
-/// Tools whose result is fully determined by the current workspace + args, so
-/// issuing the *same* call twice in a row (with nothing changed between) yields
-/// the same observation — used by the repeat-dedup nudge. `run_verification` is
-/// included: re-running the suite without an intervening edit can only reprint
-/// the same failures, and a tiny model loves to re-verify instead of fixing.
-pub(super) fn is_idempotent_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "read_file"
-            | "list_dir"
-            | "search_code"
-            | "find_symbol"
-            | "cargo_info"
-            | "run_verification"
-            // A gateway `ask` is a read like any other: repeating one verbatim
-            // cannot produce new information, so it counts toward the loop
-            // detector exactly as `read_file` does.
-            | "ask"
-    )
-}
-
 /// The line cap to truncate a tool's observation to before it re-enters context. A
 /// `read_file` returns source the model must edit, so it gets the generous
 /// `read_file_line_cap` (whole small/medium files); a runaway command/test log gets the

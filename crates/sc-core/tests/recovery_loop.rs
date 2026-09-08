@@ -153,94 +153,79 @@ fn an_advisor_nudge_breaks_a_loop_and_lets_it_finish() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// **An edit that leaves the same test red is not progress.**
+///
+/// Every edit changes bytes, and a workspace change used to reset the stall detector
+/// outright -- so a model alternating two useless edits, each followed by the same red
+/// auto-verify, could never stall and always ran to the step budget. Now the harness
+/// hashes the failure after each auto-verify; three identical failures in a row are
+/// reported to the detector as non-progress, and the recovery ladder runs and gives up.
 #[test]
-fn idempotent_nudge_names_write_file_and_supersedes_the_stale_result() {
-    // When a model repeats an idempotent call (read/list) with no advisor, the harness
-    // injects a text NUDGE. This test pins the two fixes that make the nudge actually land
-    // on a coder model (it was ignored 30/30 times on the live scale ladder):
-    //   Fix #1 — the nudge names the APPLICABLE tool (`write_file` to create the missing
-    //            file), not `edit_file` on a file that doesn't exist yet.
-    //   Fix #2 — the PRIOR turn's successful result of the same call is superseded in the
-    //            window, so the nudge isn't drowned by a visible "it worked".
-    use sc_core::select_strategy;
-    use sc_core::{run_agent_observed, AgentEvent, FnSink};
-    use std::sync::Mutex;
-
-    let ws = temp("nudge-text");
-    std::fs::write(ws.join("a.txt"), "hello-from-a-txt").unwrap();
-
-    // read, read (the 2nd trips the dedup nudge), then a productive write. repeat_limit is
-    // high so the stall STOP can't fire first — we're isolating the nudge path.
-    let backend = Scripted::new(vec![
-        r#"{"tool":"read_file","path":"a.txt"}"#,
-        r#"{"tool":"read_file","path":"a.txt"}"#,
-        r#"{"tool":"write_file","path":"out.py","content":"x = 1\n"}"#,
-        r#"{"tool":"finish"}"#,
-    ]);
-    let cfg = AgentConfig {
-        max_steps: 10,
-        repeat_limit: 8,
-        no_progress_limit: 8,
-        // Verbose so we can inspect the assembled window and confirm Fix #2 superseded the
-        // stale identical result (it lives in `recent`, surfaced via PromptAssembled).
-        verbose: true,
-        ..Default::default()
-    };
-
-    let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
-    let sink = FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
-    let registry = default_registry();
-    let strategy = select_strategy(&backend.capabilities());
-    let report = run_agent_observed(
-        &backend,
-        None,
-        &registry,
-        strategy.as_ref(),
-        "fix it",
-        &ws,
-        &cfg,
-        &sink,
+fn edits_that_keep_the_same_test_red_stall_instead_of_exhausting_the_budget() {
+    let ws = temp("same-failure");
+    std::fs::write(ws.join("impl.sh"), "is_even() { return 1; }\n").unwrap();
+    std::fs::write(
+        ws.join("test.sh"),
+        ". ./impl.sh\nis_even 4 || exit 1\nif is_even 3; then exit 1; fi\nexit 0\n",
     )
     .unwrap();
 
-    // The model reached the productive write (it wasn't stalled out before acting).
-    assert!(
-        report.change_summary.contains("out.py"),
-        "should reach the write_file, got change: {:?}",
-        report.change_summary
-    );
+    // Two edits that each change the file and neither of which fixes anything, alternating
+    // so the action hash never repeats and every turn is a genuine workspace change.
+    let to_two =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 1;","new_str":"return 2;"}"#;
+    let to_one =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 2;","new_str":"return 1;"}"#;
+    let backend = Scripted::new(vec![
+        to_two, to_one, to_two, to_one, to_two, to_one, to_two, to_one, to_two, to_one, to_two,
+        to_one,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 12,
+        verify_command: Some("sh test.sh".to_string()),
+        ..Default::default()
+    };
+    let report = run(&backend, None, &ws, &cfg);
 
-    let evs = events.lock().unwrap();
-    // Fix #1: the injected nudge observation names write_file, NOT the impossible edit_file.
-    let nudge = evs.iter().find_map(|e| match e {
-        AgentEvent::ToolResult { full, .. } if full.contains("re-running it changes nothing") => {
-            Some(full.clone())
-        }
-        _ => None,
-    });
-    let nudge = nudge.expect("a dedup nudge should have been injected");
+    assert!(!report.finished);
     assert!(
-        nudge.contains("write_file"),
-        "nudge must name write_file (Fix #1), got: {nudge}"
+        matches!(report.stop_reason, StopReason::Stalled(_)),
+        "the unchanged failure should end the run stalled, got {:?} after {} steps",
+        report.stop_reason,
+        report.steps
     );
     assert!(
-        !nudge.contains("now with edit_file"),
-        "nudge must NOT prescribe the old edit_file-only wording: {nudge}"
+        report.steps < 12,
+        "should stop before the budget, took {}",
+        report.steps
     );
-    // Fix #2: the prior identical result was superseded IN THE WINDOW. The marker lives in
-    // `recent`, so it shows up in a later assembled prompt — and crucially the original
-    // successful body ("hello-from-a-txt") must NOT still be sitting next to the nudge.
-    let superseded_in_prompt = evs.iter().any(|e| {
-        matches!(
-            e,
-            AgentEvent::PromptAssembled { messages, .. }
-                if messages.iter().any(|m| m.content.contains("superseded"))
-        )
-    });
-    assert!(
-        superseded_in_prompt,
-        "the prior identical result should be superseded in the assembled window (Fix #2)"
-    );
+    // The ladder ran (self-recovery directives) before it gave up.
+    assert!(report.interventions >= 1, "{report:?}");
+    // `verified` is what the run log saw last (red), not a fresh run of the suite.
+    assert_eq!(report.verified, Some(false));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A stop report's `verified` comes from the run log. When the suite never ran -- a
+/// verify command was configured but no edit ever triggered it -- the answer is `None`,
+/// not a re-run at stop time.
+#[test]
+fn a_stalled_run_that_never_verified_reports_verified_as_none() {
+    let ws = temp("stall-unverified");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+    std::fs::write(ws.join("test.sh"), "exit 1\n").unwrap();
+
+    let backend = Scripted::new(vec![r#"{"tool":"read_file","path":"a.txt"}"#]);
+    let cfg = AgentConfig {
+        max_steps: 20,
+        repeat_limit: 3,
+        verify_command: Some("sh test.sh".to_string()),
+        ..Default::default()
+    };
+    let report = run(&backend, None, &ws, &cfg);
+
+    assert!(matches!(report.stop_reason, StopReason::Stalled(_)));
+    assert_eq!(report.verified, None, "{report:?}");
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -262,17 +247,46 @@ fn ask_user_consults_the_advisor_and_continues() {
 }
 
 #[test]
-fn ask_user_with_no_advisor_escalates_cleanly() {
-    // No senior to ask -> a clean Escalated stop carrying the question.
-    let ws = temp("ask-none");
-    let backend = Scripted::new(vec![r#"{"tool":"ask_user","question":"what now?"}"#]);
-    let report = run(&backend, None, &ws, &AgentConfig::default());
+fn ask_user_with_no_advisor_is_told_to_decide_and_continues() {
+    // No senior to ask. The run used to stop dead here (`Escalated`), throwing away
+    // everything built up over a question the model could usually settle itself. Now the
+    // harness answers in-band -- "no one is available, decide for yourself" -- counts the
+    // intervention, and the model carries on.
+    use sc_core::select_strategy;
+    use sc_core::{run_agent_observed, AgentEvent, FnSink};
+    use std::sync::Mutex;
 
-    assert!(!report.finished);
-    match report.stop_reason {
-        StopReason::Escalated(q) => assert!(q.contains("what now?")),
-        other => panic!("expected Escalated, got {other:?}"),
-    }
+    let ws = temp("ask-none");
+    let backend = Scripted::new(vec![
+        r#"{"tool":"ask_user","question":"what now?"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let events: Mutex<Vec<AgentEvent>> = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| events.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    let strategy = select_strategy(&backend.capabilities());
+    let report = run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        "fix it",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    assert!(report.finished, "{:?}", report.stop_reason);
+    assert_eq!(report.interventions, 1);
+    let evs = events.lock().unwrap();
+    let told = evs.iter().any(|e| {
+        matches!(e, AgentEvent::ToolResult { full, .. } if full.contains("No one is available to answer"))
+    });
+    assert!(
+        told,
+        "the model should be told to decide for itself: {evs:?}"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -294,44 +308,6 @@ fn plan_first_produces_a_plan_and_still_finishes() {
     let report = run(&backend, None, &ws, &cfg);
     assert!(report.finished);
     let _ = std::fs::remove_dir_all(&ws);
-}
-
-/// **A file re-read far later in the run is still a re-read.**
-///
-/// Observed on a live investigation: `hyperspace_fx.rs` was opened at step 1 and again
-/// at step 11, with nine unrelated files between them. The volume guard
-/// (`READ_THRASH_LIMIT`, five reads without a change) had been reset by the intervening
-/// work and never fired, because it counts HOW MUCH was read, not whether the same
-/// thing was read twice. Reading ten files is a search; reading one file twice is the
-/// amnesia loop, and they want opposite advice.
-#[test]
-fn re_reading_the_same_file_is_called_out_however_far_apart() {
-    let ws = temp("repeat-read");
-    for n in ["a.txt", "b.txt", "c.txt"] {
-        std::fs::write(ws.join(n), "contents").unwrap();
-    }
-
-    // Read a, then two others, then a AGAIN -- never five in a row, so the volume
-    // guard cannot be what catches it.
-    let backend = Scripted::new(vec![
-        r#"{"tool":"read_file","path":"a.txt"}"#,
-        r#"{"tool":"read_file","path":"b.txt"}"#,
-        r#"{"tool":"read_file","path":"c.txt"}"#,
-        r#"{"tool":"read_file","path":"a.txt"}"#,
-        r#"{"tool":"finish"}"#,
-    ]);
-    let cfg = AgentConfig {
-        max_steps: 12,
-        // High, so a repeat cannot be mistaken for the generic repeat-limit guard.
-        repeat_limit: 99,
-        ..Default::default()
-    };
-    let report = run(&backend, None, &ws, &cfg);
-
-    assert!(
-        report.interventions >= 1,
-        "the repeated read should have been called out: {report:?}"
-    );
 }
 
 /// Reading DIFFERENT files is a search, and must not be nudged.

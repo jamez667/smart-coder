@@ -65,7 +65,17 @@ impl RunLog {
         })
     }
 
-    /// Every verification event, in order — for tracing how the suite evolved over the run.
+    /// Whether the most recent verification was green, or `None` if the suite was never run
+    /// this run. The stop report's `verified` reads this instead of re-running the suite:
+    /// the harness already saw the answer, and a re-run at stop time cost a subprocess and
+    /// could disagree with what the model had been shown.
+    pub fn last_verification_green(&self) -> Option<bool> {
+        self.events.iter().rev().find_map(|e| match e {
+            AgentEvent::Verification { green, .. } => Some(*green),
+            _ => None,
+        })
+    }
+
     /// Harness faults seen this run, by kind, most frequent first.
     ///
     /// The faults were always on the stream and never counted anywhere a caller
@@ -85,6 +95,7 @@ impl RunLog {
         counts
     }
 
+    /// Every verification event, in order — for tracing how the suite evolved over the run.
     pub fn verifications(&self) -> Vec<&AgentEvent> {
         self.events
             .iter()
@@ -183,6 +194,17 @@ mod tests {
             arg: "a.py".into(),
         });
         assert_eq!(sink.lock().last_verification(), Some("NEW output"));
+    }
+
+    #[test]
+    fn last_verification_green_is_the_latest_outcome_or_none() {
+        let sink = RunLogSink::new();
+        assert_eq!(sink.lock().last_verification_green(), None);
+        sink.record(&verif(true, "green first"));
+        sink.record(&verif(false, "then red"));
+        assert_eq!(sink.lock().last_verification_green(), Some(false));
+        sink.record(&verif(true, "green again"));
+        assert_eq!(sink.lock().last_verification_green(), Some(true));
     }
 
     #[test]

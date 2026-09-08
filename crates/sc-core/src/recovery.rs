@@ -48,6 +48,11 @@ pub struct StallDetector {
     /// model mid-investigation (observed live: a 5-file integration pass died after 4 distinct
     /// reads, never reaching the fix) while still catching genuine spinning.
     seen_since_progress: std::collections::HashSet<u64>,
+    /// Set by [`StallDetector::note_unchanged_failure`]: the last edit changed bytes but not
+    /// the outcome. A workspace change is the one signal this detector treats as unambiguous
+    /// progress, so a model making one ineffective edit every few turns could never stall --
+    /// each edit reset the streak. This flag makes the next `observe` report `Stuck` instead.
+    unchanged_failure: bool,
 }
 
 /// What the detector recommends after observing a turn.
@@ -85,10 +90,14 @@ impl StallDetector {
         // read this window) is investigation toward a fix, so it also resets the streak; only
         // a NON-novel action (re-reading the same file, re-running verification) — true
         // idling — increments it. The repeat detector still catches back-to-back duplicates.
-        if changed_workspace {
+        //
+        // The exception: a change the harness has already judged ineffective (the same
+        // failure, again). That is idling that happens to touch bytes, and it counts as such.
+        let same_failure = std::mem::take(&mut self.unchanged_failure);
+        if changed_workspace && !same_failure {
             self.no_progress_count = 0;
             self.seen_since_progress.clear();
-        } else if self.seen_since_progress.insert(action) {
+        } else if self.seen_since_progress.insert(action) && !same_failure {
             // First time we've seen this action since the last change → investigation.
             self.no_progress_count = 0;
         } else {
@@ -98,11 +107,21 @@ impl StallDetector {
 
         if self.repeat_count + 1 >= repeat_limit {
             Progress::Looping
-        } else if self.no_progress_count >= no_progress_limit {
+        } else if same_failure || self.no_progress_count >= no_progress_limit {
             Progress::Stuck
         } else {
             Progress::Ok
         }
+    }
+
+    /// The edit just made left the suite failing exactly as before. The loop calls this when
+    /// the verification failure signature (see [`failure_signature`]) has repeated enough
+    /// times that the edits are demonstrably not converging; the next [`observe`] then
+    /// reports [`Progress::Stuck`] rather than crediting the byte change as progress.
+    ///
+    /// [`observe`]: StallDetector::observe
+    pub fn note_unchanged_failure(&mut self) {
+        self.unchanged_failure = true;
     }
 
     /// Reset after an intervention (re-plan / advice) so the agent gets a fresh
@@ -112,7 +131,22 @@ impl StallDetector {
         self.repeat_count = 0;
         self.no_progress_count = 0;
         self.seen_since_progress.clear();
+        self.unchanged_failure = false;
     }
+}
+
+/// A cheap identity for a verification failure, so the loop can tell "the same tests are
+/// still failing the same way" from "a different failure now". Hashes the report's first
+/// line (the failed/passed counts, or the generic exit line) plus the names of the failing
+/// cases -- NOT their messages or the raw output, which carry line numbers and timings that
+/// shift under edits that change nothing of substance.
+pub fn failure_signature(observation: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    observation.lines().next().unwrap_or("").hash(&mut h);
+    for case in observation.lines().filter(|l| l.starts_with('✗')) {
+        case.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Hash a (tool, key-args) action so repeats are detectable regardless of any
@@ -190,6 +224,45 @@ mod tests {
         d.observe(a, false, 5, 2);
         let b = action_hash("edit_file", "b.rs");
         assert_eq!(d.observe(b, true, 5, 2), Progress::Ok); // change resets
+    }
+
+    #[test]
+    fn an_unchanged_failure_makes_the_next_observe_stuck_despite_a_workspace_change() {
+        // Edits that change bytes but leave the same tests red used to reset the streak
+        // every time, so a model alternating two useless edits could never stall.
+        let mut d = StallDetector::default();
+        let a = action_hash("edit_file", "a.rs");
+        let b = action_hash("edit_file", "b.rs");
+        assert_eq!(d.observe(a, true, 3, 4), Progress::Ok);
+        assert_eq!(d.observe(b, true, 3, 4), Progress::Ok);
+        d.note_unchanged_failure();
+        // A novel action AND a workspace change: neither is credited this time.
+        let c = action_hash("edit_file", "c.rs");
+        assert_eq!(d.observe(c, true, 3, 4), Progress::Stuck);
+        // The note is consumed: the next real change counts as progress again.
+        assert_eq!(d.observe(a, true, 3, 4), Progress::Ok);
+    }
+
+    #[test]
+    fn reset_drops_a_pending_unchanged_failure() {
+        let mut d = StallDetector::default();
+        d.note_unchanged_failure();
+        d.reset();
+        assert_eq!(d.observe(action_hash("x", "y"), true, 3, 3), Progress::Ok);
+    }
+
+    #[test]
+    fn failure_signature_ignores_messages_but_not_which_tests_fail() {
+        let one = "run_verification: 1 failed, 2 passed:\n✗ test_a\n    assert 1 == 2 (line 10)";
+        let same_moved =
+            "run_verification: 1 failed, 2 passed:\n✗ test_a\n    assert 1 == 3 (line 12)";
+        let other = "run_verification: 1 failed, 2 passed:\n✗ test_b\n    assert 1 == 2 (line 10)";
+        assert_eq!(failure_signature(one), failure_signature(same_moved));
+        assert_ne!(failure_signature(one), failure_signature(other));
+        assert_ne!(
+            failure_signature(one),
+            failure_signature("run_verification: 2 failed, 1 passed:\n✗ test_a\n✗ test_b")
+        );
     }
 
     #[test]

@@ -24,10 +24,21 @@ pub enum RepairError {
 }
 
 impl RepairError {
-    /// Render the actionable repair instruction sent back to the model. Includes
-    /// a concrete example, because a small model needs the *shape* — telling it
-    /// "you got it wrong" isn't enough; showing a valid call is (spec 04).
+    /// Render the actionable repair instruction sent back to the model, with examples
+    /// drawn from the default registry. Prefer [`RepairError::repair_prompt_for`] in the
+    /// loop, which only shows calls the run's registry can honor.
     pub fn repair_prompt(&self) -> String {
+        self.repair_prompt_for(&sc_tools::default_registry())
+    }
+
+    /// Render the actionable repair instruction sent back to the model. Includes
+    /// concrete examples, because a small model needs the *shape* — telling it
+    /// "you got it wrong" isn't enough; showing a valid call is (spec 04).
+    ///
+    /// The examples name only tools in `registry`: a model does what the example shows,
+    /// and an `edit_file` example on a registry without `edit_file` steers it toward a
+    /// call that will be rejected, which is the harness's failure and not the model's.
+    pub fn repair_prompt_for(&self, registry: &ToolRegistry) -> String {
         let detail = match self {
             RepairError::NoJson => "no JSON tool object found in your reply".to_string(),
             RepairError::BadJson(e) => format!("the JSON was malformed: {e}"),
@@ -38,14 +49,33 @@ impl RepairError {
                     .to_string()
             }
         };
+        // One example per shape the model might need: a read, an edit, a bare call. Each
+        // only if the registry offers it; `finish` is always there, so the list is never
+        // empty.
+        let offered = |name: &str| registry.get(name).is_some();
+        let mut examples: Vec<&str> = Vec::new();
+        if offered("read_file") {
+            examples.push("{\"tool\":\"read_file\",\"path\":\"file.py\"}");
+        }
+        if offered("edit_file") {
+            examples.push(
+                "{\"tool\":\"edit_file\",\"path\":\"file.py\",\"old_str\":\"old\",\"new_str\":\"new\"}",
+            );
+        } else if offered("write_file") {
+            examples.push("{\"tool\":\"write_file\",\"path\":\"file.py\",\"content\":\"...\"}");
+        }
+        if offered("run_verification") {
+            examples.push("{\"tool\":\"run_verification\"}");
+        }
+        if examples.is_empty() {
+            examples.push("{\"tool\":\"finish\",\"summary\":\"...\"}");
+        }
         format!(
             "ERROR: {detail}.\n\
              Every reply MUST be exactly one JSON object with a \"tool\" field — \
-             do NOT invent tool output or describe results. Examples:\n\
-             {{\"tool\":\"read_file\",\"path\":\"file.py\"}}\n\
-             {{\"tool\":\"edit_file\",\"path\":\"file.py\",\"old_str\":\"old\",\"new_str\":\"new\"}}\n\
-             {{\"tool\":\"run_verification\"}}\n\
-             Reply with ONE such object and nothing else."
+             do NOT invent tool output or describe results. Examples:\n{}\n\
+             Reply with ONE such object and nothing else.",
+            examples.join("\n")
         )
     }
 }

@@ -7,12 +7,13 @@
 //! finally gives up. Each rung that fires injects an observation and resets the stall so the
 //! model gets a fresh turn; only the last rung stops the run.
 //!
-//! The intervention bookkeeping (how many diagnoses/self-recoveries we've spent, the running
-//! intervention count, and the previous-action hash the repeat guard clears on recovery) lives
-//! in [`Interventions`], threaded through the whole loop.
+//! The intervention bookkeeping (how many diagnoses/advisor consults/self-recoveries we've
+//! spent, and the running intervention count) lives in [`Interventions`], threaded through
+//! the whole loop.
 
 use sc_context::TurnRecord;
 use sc_model::ModelBackend;
+use sc_tools::ToolRegistry;
 
 use crate::event::{AgentEvent, EventSink};
 use crate::plan::PlanState;
@@ -27,8 +28,7 @@ use super::prompt::gather_sources;
 use super::window::RecentWindow;
 use super::AgentConfig;
 
-/// Running counts of the harness's in-loop interventions, plus the previous-action hash the
-/// repeat-dedup guard clears whenever a recovery injects a fresh directive.
+/// Running counts of the harness's in-loop interventions.
 #[derive(Default)]
 pub(super) struct Interventions {
     /// Total interventions this run (advice, nudges, diagnoses) — reported as `interventions`.
@@ -47,9 +47,31 @@ pub(super) struct Interventions {
     /// spend on the expensive T1 model -- and `StopReason::Stalled` was unreachable
     /// for that configuration.
     pub(super) advisor_nudges: usize,
-    /// The previous turn's action hash, used by the repeat-dedup guard. Cleared to `None` on a
-    /// recovery so the next (steered) action is never mistaken for a repeat.
-    pub(super) prev_action: Option<u64>,
+}
+
+impl Interventions {
+    /// Consult the advisor (junior asks senior, spec 02), spending one unit of the run's
+    /// advisor budget. The ONE place `escalate` is reached from: `ask_user` and the stall
+    /// ladder both come through here, so [`ADVISOR_LIMIT`] bounds the senior's total spend
+    /// however the consults are triggered. `None` when the budget is spent, there is no
+    /// advisor, or it had nothing to say -- the caller then falls back to something bounded
+    /// of its own.
+    pub(super) fn consult(
+        &mut self,
+        advisor: Option<&dyn ModelBackend>,
+        task: &str,
+        plan: &PlanState,
+        history: &[TurnRecord],
+        trigger: &str,
+    ) -> Option<String> {
+        if self.advisor_nudges >= ADVISOR_LIMIT {
+            return None;
+        }
+        let advice = escalate(advisor, task, plan, history, trigger)?;
+        self.advisor_nudges += 1;
+        self.count += 1;
+        Some(advice)
+    }
 }
 
 /// What the loop should do after the stall ladder runs.
@@ -66,8 +88,10 @@ pub(super) enum StallDecision {
 /// intervention counters, the stall detector, and the recent window as rungs fire.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_stall(
+    step: usize,
     action: u64,
     changed: bool,
+    registry: &ToolRegistry,
     interv: &mut Interventions,
     stall: &mut StallDetector,
     recent: &mut RecentWindow,
@@ -111,7 +135,6 @@ pub(super) fn handle_stall(
             interv.diagnoses += 1;
             interv.count += 1;
             stall.reset();
-            interv.prev_action = None;
             sink.record(&AgentEvent::Diagnosis {
                 trigger: stuck.to_string(),
                 report: report.clone(),
@@ -121,29 +144,12 @@ pub(super) fn handle_stall(
         }
     }
 
-    // Junior asks senior for a nudge (spec 02). With no advisor (the single-model setup), the
-    // harness steers the model back in-band a bounded number of times before giving up — a
-    // capable model just needs a firm directive, not a senior.
-    let advice = if interv.advisor_nudges < ADVISOR_LIMIT {
-        escalate(advisor, instruction, plan, history, stuck)
-    } else {
-        // Budget spent: fall through to the bounded self-recovery rung rather than
-        // consulting the senior again.
-        None
-    };
-    match advice {
+    // Junior asks senior for a nudge (spec 02). With no advisor (the single-model setup) or
+    // the advisor budget spent, the harness steers the model back in-band a bounded number
+    // of times before giving up — a capable model just needs a firm directive, not a senior.
+    match interv.consult(advisor, instruction, plan, history, stuck) {
         Some(advice) => {
-            interv.advisor_nudges += 1;
-            interv.count += 1;
             stall.reset();
-            // Clear the repeat-dedup guard, exactly as the diagnosis and
-            // self-recovery rungs do. Without this the advisor's steer was routinely
-            // masked: the model's next action after advice usually hashes the same as
-            // the pre-stall one (it re-reads the file the advisor pointed at), so the
-            // dedup guard discarded the observation and replaced it with a generic
-            // "you already have that" nudge -- paying for a T1 call and then throwing
-            // its effect away.
-            interv.prev_action = None;
             sink.record(&AgentEvent::Advice {
                 trigger: stuck.to_string(),
                 advice: advice.clone(),
@@ -155,8 +161,8 @@ pub(super) fn handle_stall(
             interv.self_recoveries += 1;
             interv.count += 1;
             stall.reset();
-            interv.prev_action = None;
-            let advice = self_recovery_directive(&recent_tools(history));
+            let advice = self_recovery_directive(&recent_tools(history), registry);
+            super::report_if_unoffered(&advice, registry, step, sink);
             sink.record(&AgentEvent::Advice {
                 trigger: stuck.to_string(),
                 advice: advice.clone(),
