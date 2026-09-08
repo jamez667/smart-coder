@@ -1,0 +1,40 @@
+
+=== ladder A/B ===
+
+arm         solved      of   rate
+control(6)      30      30   100%
+
+--- per rung (solved/total across 3 round(s)) ---
+rung                 control(6)
+stated                      3/3
+located                     3/3
+symptomatic                 3/3
+misdirected                 3/3
+two-stage                   3/3
+invariant                   3/3
+engine-additive             3/3
+engine-two-layer            3/3
+engine-multi-site           3/3
+engine-novel-generic        3/3
+
+--- context cost (prompt tokens summed over every turn) ---
+arm               total     per task   vs first
+control(6)       484203        16140       100%
+
+  task                  control(6)
+  rust-stated                 3705
+  rust-located                6877
+  rust-symptomatic           15431
+  rust-misdirected           19887
+  rust-two-stage              8628
+  rust-invariant              8217
+  engine-diagonal-path       36083
+  engine-diagonal-wired     197352
+  engine-grid-scan          137908
+  engine-ecs-query           50115
+
+--- process (per task, averaged) ---
+arm         steps  first edit  re-reads  wasted     secs
+control(6)    4.8         3.3       0.0     0.0       22
+
+--- reading this ---
