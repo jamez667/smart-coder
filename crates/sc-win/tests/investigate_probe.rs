@@ -66,6 +66,7 @@ fn probe_the_star_trail_question() {
                     step,
                     prompt_tokens,
                     raw,
+                    ..
                 } => {
                     turns += 1;
                     let _ = writeln!(

@@ -56,6 +56,7 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
             step,
             prompt_tokens,
             raw,
+            ..
         } => {
             // The turn header — always shown.
             let mut rows = vec![Row::ok("·", format!("turn {step}   ({prompt_tokens} tok)"))];
@@ -441,11 +442,7 @@ mod tests {
     fn model_turn_surfaces_the_narration_before_the_tool_call() {
         let raw = "I'll add the water module and wire it into the terrain builder.\n\
                    {\"tool\":\"write_file\",\"path\":\"water.rs\",\"content\":\"x\"}";
-        let rows = agent_rows(&AgentEvent::ModelTurn {
-            step: 2,
-            prompt_tokens: 100,
-            raw: raw.to_string(),
-        });
+        let rows = agent_rows(&AgentEvent::model_turn(2, 100, raw));
         assert_eq!(rows.len(), 2, "turn header + narration");
         assert_eq!(rows[1].icon, "💭");
         assert!(rows[1].text.contains("add the water module"));
@@ -459,11 +456,7 @@ mod tests {
     fn model_turn_narration_strips_a_think_block() {
         let raw = "<think>which file first?</think>Creating the water surface renderer.\n\
                    {\"tool\":\"create_file\",\"path\":\"water.rs\"}";
-        let rows = agent_rows(&AgentEvent::ModelTurn {
-            step: 1,
-            prompt_tokens: 50,
-            raw: raw.to_string(),
-        });
+        let rows = agent_rows(&AgentEvent::model_turn(1, 50, raw));
         assert_eq!(rows.len(), 2);
         assert!(rows[1].text.contains("water surface renderer"));
         assert!(
@@ -475,11 +468,11 @@ mod tests {
     #[test]
     fn model_turn_with_no_narration_yields_only_the_header() {
         // Pure tool call, no prose → just the turn row, no empty 💭 line.
-        let rows = agent_rows(&AgentEvent::ModelTurn {
-            step: 3,
-            prompt_tokens: 20,
-            raw: "{\"tool\":\"read_file\",\"path\":\"a.rs\"}".to_string(),
-        });
+        let rows = agent_rows(&AgentEvent::model_turn(
+            3,
+            20,
+            "{\"tool\":\"read_file\",\"path\":\"a.rs\"}",
+        ));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].icon, "·");
     }

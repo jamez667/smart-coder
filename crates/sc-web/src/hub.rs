@@ -179,22 +179,14 @@ mod tests {
     fn hub_sink_forwards_into_the_hub() {
         let hub = Hub::new();
         let sink = HubSink::new(hub.clone());
-        sink.record(&AgentEvent::ModelTurn {
-            step: 1,
-            prompt_tokens: 50,
-            raw: String::new(),
-        });
+        sink.record(&AgentEvent::model_turn(1, 50, ""));
         assert_eq!(hub.len(), 1);
     }
 
     #[test]
     fn since_past_the_end_is_safe() {
         let hub = Hub::new();
-        hub.push(AgentEvent::ModelTurn {
-            step: 1,
-            prompt_tokens: 1,
-            raw: String::new(),
-        });
+        hub.push(AgentEvent::model_turn(1, 1, ""));
         // Asking from beyond the end returns empty, not a panic.
         let (batch, next, _) = hub.since(999);
         assert!(batch.is_empty());

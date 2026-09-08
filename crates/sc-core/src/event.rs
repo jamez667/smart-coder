@@ -55,6 +55,20 @@ pub enum AgentEvent {
     ModelTurn {
         step: usize,
         prompt_tokens: usize,
+        /// How many of `prompt_tokens` the backend served from its KV cache
+        /// rather than re-evaluating, when it reports it.
+        ///
+        /// `prompt_tokens` is what the harness SENT, so the append-only prompt
+        /// work -- keeping the prefix byte-stable so the server can reuse it --
+        /// is invisible in it by construction. This is where that work shows up.
+        /// `None` on a backend that does not report a cache split (mocks,
+        /// replay, every server but llama.cpp), which is not the same as zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_prompt_tokens: Option<usize>,
+        /// How many of `prompt_tokens` the backend actually PREFILLED this turn.
+        /// The other half of the ratio above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefilled_prompt_tokens: Option<usize>,
         raw: String,
     },
     /// A token delta as the model generates the current turn (only emitted when streaming is
@@ -137,6 +151,26 @@ pub enum AgentEvent {
     },
     /// The run ended. Carries the structured reason.
     Stopped { reason: StopReason },
+}
+
+impl AgentEvent {
+    /// A [`ModelTurn`](AgentEvent::ModelTurn) from a source with no prefix-cache
+    /// accounting to report.
+    ///
+    /// Only the agent loop talks to a backend that reports what the server
+    /// re-prefilled; every other producer of this event -- a UI replaying a
+    /// Claude Code stream, a test fixture -- has nothing to say about the KV
+    /// cache. This spells that out once, so those callers do not each have to
+    /// write `None` for a measurement they never made.
+    pub fn model_turn(step: usize, prompt_tokens: usize, raw: impl Into<String>) -> Self {
+        Self::ModelTurn {
+            step,
+            prompt_tokens,
+            cached_prompt_tokens: None,
+            prefilled_prompt_tokens: None,
+            raw: raw.into(),
+        }
+    }
 }
 
 /// The kinds of self-inflicted damage the harness can recognize.
@@ -501,6 +535,8 @@ mod tests {
             AgentEvent::ModelTurn {
                 step: 1,
                 prompt_tokens: 10,
+                cached_prompt_tokens: Some(8),
+                prefilled_prompt_tokens: Some(2),
                 raw: "raw".into(),
             },
             AgentEvent::Verification {
@@ -549,6 +585,8 @@ mod tests {
             sink.record(&AgentEvent::ModelTurn {
                 step: 1,
                 prompt_tokens: 790,
+                cached_prompt_tokens: None,
+                prefilled_prompt_tokens: None,
                 raw: r#"{"tool":"write_file","path":"store.py","content":"x=1"}"#.into(),
             });
             sink.record(&AgentEvent::ToolResult {

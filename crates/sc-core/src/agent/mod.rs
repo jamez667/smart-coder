@@ -366,6 +366,13 @@ pub fn run_agent_observed(
     // number that separates a run that read the right file once from one that
     // re-read four files six times.
     let mut total_prompt_tokens = 0usize;
+    // The same total split by what the SERVER had to do with it: how many of those
+    // tokens it served from its KV cache, and how many it re-prefilled. The
+    // append-only prompt exists to move tokens from the second into the first, and
+    // `total_prompt_tokens` is blind to that move -- it counts what we sent, which
+    // is identical either way. Both stay 0 on a backend that reports no split.
+    let mut total_cached_prompt_tokens = 0usize;
+    let mut total_prefilled_prompt_tokens = 0usize;
     // Largest reply seen, so the reply reserve can be checked against reality.
     let mut peak_reply_tokens = 0usize;
     let mut journal = Journal::new();
@@ -429,6 +436,8 @@ pub fn run_agent_observed(
                 metrics,
                 peak_prompt_tokens,
                 total_prompt_tokens,
+                total_cached_prompt_tokens,
+                total_prefilled_prompt_tokens,
                 peak_reply_tokens,
                 harness_faults: runlog.lock().fault_counts(),
                 prompt_budget: budget,
@@ -618,9 +627,17 @@ pub fn run_agent_observed(
         // Emit the model's full raw output for this turn (spec 06 — show what the
         // model actually said).
         peak_reply_tokens = peak_reply_tokens.max(counter.count(&resp.content));
+        // What the SERVER did with the prompt we just sent: how much of it it reused
+        // from its KV cache versus re-prefilled. A backend that says nothing adds
+        // nothing, so an arm running against one stays at 0 rather than reporting a
+        // cache miss it never observed.
+        total_cached_prompt_tokens += resp.cached_prompt_tokens.unwrap_or(0);
+        total_prefilled_prompt_tokens += resp.prefilled_prompt_tokens.unwrap_or(0);
         sink.record(&AgentEvent::ModelTurn {
             step: step + 1,
             prompt_tokens: built.tokens_used,
+            cached_prompt_tokens: resp.cached_prompt_tokens,
+            prefilled_prompt_tokens: resp.prefilled_prompt_tokens,
             raw: resp.content.clone(),
         });
 
@@ -736,6 +753,8 @@ pub fn run_agent_observed(
                 metrics,
                 peak_prompt_tokens,
                 total_prompt_tokens,
+                total_cached_prompt_tokens,
+                total_prefilled_prompt_tokens,
                 peak_reply_tokens,
                 faults,
                 budget,
@@ -926,6 +945,8 @@ pub fn run_agent_observed(
                                         metrics,
                                         peak_prompt_tokens,
                                         total_prompt_tokens,
+                                        total_cached_prompt_tokens,
+                                        total_prefilled_prompt_tokens,
                                         peak_reply_tokens,
                                         harness_faults: runlog.lock().fault_counts(),
                                         prompt_budget: budget,
@@ -1012,6 +1033,8 @@ pub fn run_agent_observed(
                                         metrics,
                                         peak_prompt_tokens,
                                         total_prompt_tokens,
+                                        total_cached_prompt_tokens,
+                                        total_prefilled_prompt_tokens,
                                         peak_reply_tokens,
                                         harness_faults: runlog.lock().fault_counts(),
                                         prompt_budget: budget,
@@ -1182,6 +1205,8 @@ pub fn run_agent_observed(
                         metrics,
                         peak_prompt_tokens,
                         total_prompt_tokens,
+                        total_cached_prompt_tokens,
+                        total_prefilled_prompt_tokens,
                         peak_reply_tokens,
                         faults,
                         budget,
@@ -1389,6 +1414,8 @@ pub fn run_agent_observed(
                         metrics,
                         peak_prompt_tokens,
                         total_prompt_tokens,
+                        total_cached_prompt_tokens,
+                        total_prefilled_prompt_tokens,
                         peak_reply_tokens,
                         harness_faults: runlog.lock().fault_counts(),
                         prompt_budget: budget,
@@ -1461,6 +1488,8 @@ pub fn run_agent_observed(
                     metrics,
                     peak_prompt_tokens,
                     total_prompt_tokens,
+                    total_cached_prompt_tokens,
+                    total_prefilled_prompt_tokens,
                     peak_reply_tokens,
                     faults,
                     budget,
@@ -1487,6 +1516,8 @@ pub fn run_agent_observed(
         metrics,
         peak_prompt_tokens,
         total_prompt_tokens,
+        total_cached_prompt_tokens,
+        total_prefilled_prompt_tokens,
         peak_reply_tokens,
         faults,
         budget,

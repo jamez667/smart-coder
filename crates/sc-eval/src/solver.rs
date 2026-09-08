@@ -61,6 +61,21 @@ pub struct RunInfo {
     /// Prompt tokens summed over every turn — what the task actually COST in
     /// context, as opposed to whether any single prompt fit.
     pub total_prompt_tokens: usize,
+    /// Of those, how many the backend served from its KV cache instead of
+    /// re-evaluating, summed over the run.
+    ///
+    /// **`total_prompt_tokens` cannot measure the append-only prompt.** It counts
+    /// what the harness SENT, and a byte-stable prefix sends exactly as many
+    /// tokens as a shifting one -- the work lands on the server, in the prefill it
+    /// does not have to redo. This and `total_prefilled_prompt_tokens` are that
+    /// measurement.
+    ///
+    /// `0` on an arm whose backend never reports a split -- which is how the raw
+    /// and pi arms stay honestly zero rather than claiming a cache miss.
+    pub total_cached_prompt_tokens: usize,
+    /// Of `total_prompt_tokens`, how many the backend actually PREFILLED. The
+    /// compute the run really cost, as opposed to the context it carried.
+    pub total_prefilled_prompt_tokens: usize,
     /// The largest reply the model produced, in tokens.
     ///
     /// Reported so `response_reserve_tokens` can be checked against reality. The
@@ -338,6 +353,8 @@ impl Solver for AgentSolver<'_> {
             self_verified: report.verified,
             interventions: report.interventions,
             total_prompt_tokens: report.total_prompt_tokens,
+            total_cached_prompt_tokens: report.total_cached_prompt_tokens,
+            total_prefilled_prompt_tokens: report.total_prefilled_prompt_tokens,
             peak_reply_tokens: report.peak_reply_tokens,
             harness_faults: report.harness_faults.clone(),
         }));

@@ -522,6 +522,8 @@ The change is verified by running: {}
             self_verified: report.verified,
             interventions: report.interventions,
             total_prompt_tokens: report.total_prompt_tokens,
+            total_cached_prompt_tokens: report.total_cached_prompt_tokens,
+            total_prefilled_prompt_tokens: report.total_prefilled_prompt_tokens,
             peak_reply_tokens: report.peak_reply_tokens,
             harness_faults: report.harness_faults.clone(),
         }));

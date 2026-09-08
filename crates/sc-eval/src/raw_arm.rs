@@ -204,6 +204,10 @@ impl Solver for RawSolver<'_> {
             self_verified,
             interventions: 0,
             total_prompt_tokens,
+            // This arm counts the prompt itself and never reads the server's
+            // `usage`/`timings`, so it has no cache split to report.
+            total_cached_prompt_tokens: 0,
+            total_prefilled_prompt_tokens: 0,
             peak_reply_tokens,
             harness_faults: Vec::new(),
         }));

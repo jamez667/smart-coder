@@ -238,6 +238,23 @@ pub struct AgentReport {
     /// peak and differ several-fold here, which is the whole premise behind
     /// giving a small model less to look at.
     pub total_prompt_tokens: usize,
+    /// Of `total_prompt_tokens`, how many the backend served from its KV cache
+    /// instead of re-evaluating -- summed over every turn that reported it.
+    ///
+    /// **`total_prompt_tokens` cannot see the append-only prompt work.** It
+    /// counts what the harness sent, and a stable prefix sends exactly as many
+    /// tokens as a shifting one; what changes is how many the server has to
+    /// re-prefill. This pair is that measurement: against
+    /// `total_prefilled_prompt_tokens`, a healthy run re-prefills only the newly
+    /// appended tokens each turn and this dominates.
+    ///
+    /// `0` when the backend never reported a split, which is indistinguishable
+    /// here from a genuine zero -- the per-turn `ModelTurn` events keep the
+    /// `Option` if a caller needs to tell them apart.
+    pub total_cached_prompt_tokens: usize,
+    /// Of `total_prompt_tokens`, how many the backend actually PREFILLED --
+    /// summed over every turn that reported it. The compute the run really cost.
+    pub total_prefilled_prompt_tokens: usize,
     /// The largest REPLY the model produced, in tokens.
     ///
     /// Reported so `response_reserve_tokens` can be checked against reality rather

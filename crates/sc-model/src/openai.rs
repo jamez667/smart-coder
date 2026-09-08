@@ -444,6 +444,8 @@ impl OpenAiBackend {
         let mut full = String::new();
         let mut finish_reason: Option<String> = None;
         let mut prompt_tokens: Option<usize> = None;
+        // The prefix-cache split arrives on the same final chunk as `usage`.
+        let mut split = CacheSplit::default();
         for line in reader.lines() {
             // Cooperative cancel: if the caller flagged a stop, quit reading and drop the
             // reader/connection so the request aborts. Return the partial text gathered so far.
@@ -479,6 +481,11 @@ impl OpenAiBackend {
             if let Some(n) = parse_stream_prompt_tokens(payload) {
                 prompt_tokens = Some(n);
             }
+            // Keep the last chunk that carried a split; earlier chunks have none.
+            let chunk_split = parse_cache_split(payload);
+            if chunk_split != CacheSplit::default() {
+                split = chunk_split;
+            }
             if let Some(delta) = parse_stream_delta(payload) {
                 if !delta.is_empty() {
                     full.push_str(&delta);
@@ -499,6 +506,9 @@ impl OpenAiBackend {
         let full = unwrap_reasoning_only(&full).unwrap_or(full);
         let mut out = GenerateResponse::with_finish_reason(full, finish_reason);
         out.prompt_tokens = prompt_tokens;
+        out.cached_prompt_tokens = split.cached;
+        out.prefilled_prompt_tokens = split.prefilled;
+        out.prompt_ms = split.prompt_ms;
         Ok(out)
     }
 }
@@ -579,12 +589,110 @@ struct WireResponse {
     /// the number the harness's counter is checked against.
     #[serde(default)]
     usage: Option<WireUsage>,
+    /// llama.cpp's per-response timings, which carry the prefix-cache split
+    /// (`cache_n` / `prompt_n`) the OpenAI schema has no field for. Absent on
+    /// every other server.
+    #[serde(default)]
+    timings: Option<WireTimings>,
 }
 
 #[derive(Deserialize)]
 struct WireUsage {
     #[serde(default)]
     prompt_tokens: Option<usize>,
+    /// OpenAI's (and llama.cpp's) breakdown of the prompt count. The fallback
+    /// source for the cached half when `timings` is absent.
+    #[serde(default)]
+    prompt_tokens_details: Option<WirePromptDetails>,
+}
+
+#[derive(Deserialize)]
+struct WirePromptDetails {
+    #[serde(default)]
+    cached_tokens: Option<usize>,
+}
+
+/// llama.cpp's `timings` block. The authoritative split: `cache_n` tokens came
+/// from the KV cache, `prompt_n` tokens were actually prefilled, and `prompt_ms`
+/// is what that prefill cost in wall clock.
+#[derive(Deserialize)]
+struct WireTimings {
+    #[serde(default)]
+    cache_n: Option<usize>,
+    #[serde(default)]
+    prompt_n: Option<usize>,
+    #[serde(default)]
+    prompt_ms: Option<f64>,
+}
+
+/// The prefix-cache split for one response: `(cached, prefilled, prompt_ms)`.
+///
+/// Every field is independently optional because the two sources disagree about
+/// what they carry: llama.cpp's `timings` has all three, OpenAI's
+/// `prompt_tokens_details` has only the cached count (so the prefilled half is
+/// derived), and a server with neither yields all `None` rather than a
+/// fabricated zero -- "the server did not say" and "nothing was cached" are
+/// different facts and must not print the same.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct CacheSplit {
+    cached: Option<usize>,
+    prefilled: Option<usize>,
+    prompt_ms: Option<f64>,
+}
+
+/// Reduce the two reporting shapes to one [`CacheSplit`].
+///
+/// `timings` wins when present: it is measured by the server for this request,
+/// whereas the OpenAI-shaped details only ever carry the cached side. When only
+/// the details are there the prefilled half is `prompt_tokens - cached`, which is
+/// exact as long as the server counts them over the same prompt (llama.cpp does;
+/// its own `cache_n + prompt_n == prompt_tokens`).
+fn cache_split(
+    timings: Option<&WireTimings>,
+    details: Option<&WirePromptDetails>,
+    prompt_tokens: Option<usize>,
+) -> CacheSplit {
+    if let Some(t) = timings {
+        if t.cache_n.is_some() || t.prompt_n.is_some() {
+            return CacheSplit {
+                cached: t.cache_n,
+                prefilled: t.prompt_n,
+                prompt_ms: t.prompt_ms,
+            };
+        }
+    }
+    let cached = details.and_then(|d| d.cached_tokens);
+    CacheSplit {
+        cached,
+        // Only derivable when the server said how big the prompt was.
+        prefilled: match (prompt_tokens, cached) {
+            (Some(total), Some(c)) => Some(total.saturating_sub(c)),
+            _ => None,
+        },
+        prompt_ms: timings.and_then(|t| t.prompt_ms),
+    }
+}
+
+/// Pull the cache split out of one JSON object (a whole response body, or one SSE
+/// chunk -- llama.cpp puts `timings` and `usage` on the final chunk of a stream in
+/// the same shape it uses for a non-streamed body).
+fn parse_cache_split(payload: &str) -> CacheSplit {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return CacheSplit::default();
+    };
+    let timings: Option<WireTimings> = v
+        .get("timings")
+        .and_then(|t| serde_json::from_value(t.clone()).ok());
+    let details: Option<WirePromptDetails> = v
+        .get("usage")
+        .and_then(|u| u.get("prompt_tokens_details"))
+        .and_then(|d| serde_json::from_value(d.clone()).ok());
+    let prompt_tokens = v
+        .get("usage")
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(|n| n.as_u64())
+        .map(|n| n as usize);
+    cache_split(timings.as_ref(), details.as_ref(), prompt_tokens)
 }
 
 #[derive(Deserialize)]
@@ -847,7 +955,16 @@ impl OpenAiBackend {
             })?;
         let finish_reason = choice.finish_reason;
         let message = choice.message;
-        let prompt_tokens = parsed.usage.and_then(|u| u.prompt_tokens);
+        let (prompt_tokens, split) = {
+            let timings = parsed.timings;
+            let usage = parsed.usage;
+            let prompt_tokens = usage.as_ref().and_then(|u| u.prompt_tokens);
+            let details = usage
+                .as_ref()
+                .and_then(|u| u.prompt_tokens_details.as_ref());
+            let split = cache_split(timings.as_ref(), details, prompt_tokens);
+            (prompt_tokens, split)
+        };
 
         // Prefer a native tool call (normalized to the uniform string shape); else
         // plain text content; else the reasoning block (thinking models that ran
@@ -865,6 +982,9 @@ impl OpenAiBackend {
 
         let mut out = GenerateResponse::with_finish_reason(content, finish_reason);
         out.prompt_tokens = prompt_tokens;
+        out.cached_prompt_tokens = split.cached;
+        out.prefilled_prompt_tokens = split.prefilled;
+        out.prompt_ms = split.prompt_ms;
         Ok(out)
     }
 }
@@ -1149,6 +1269,102 @@ Connection: close
             .unwrap();
         assert_eq!(resp.prompt_tokens, Some(17));
         assert_eq!(resp.content, "ok");
+    }
+
+    /// **The prefix-cache split reaches the caller, on both paths.**
+    ///
+    /// `prompt_tokens` counts what we SEND, which an append-only prompt cannot
+    /// move; `cache_n`/`prompt_n` count what the server had to RE-PREFILL, which
+    /// is the only place the work shows up. Pinned with the exact body llama.cpp
+    /// b10015 returns, verified live at localhost:11436.
+    #[test]
+    fn parses_the_prefix_cache_split_from_llama_cpp_timings() {
+        const BODY: &str = r#"{"choices":[{"message":{"role":"assistant","content":"hi"},
+                "finish_reason":"stop"}],
+            "usage":{"prompt_tokens":191,"completion_tokens":5,"total_tokens":196,
+                     "prompt_tokens_details":{"cached_tokens":179}},
+            "timings":{"cache_n":179,"prompt_n":12,"prompt_ms":538.0,
+                       "predicted_n":5,"predicted_ms":296.8}}"#;
+        let (base, _rx) = stub_server(BODY);
+        let resp = OpenAiBackend::new(base, "m")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+        assert_eq!(resp.prompt_tokens, Some(191));
+        assert_eq!(resp.cached_prompt_tokens, Some(179));
+        assert_eq!(resp.prefilled_prompt_tokens, Some(12));
+        assert_eq!(resp.prompt_ms, Some(538.0));
+        // 179 of 191 served from cache.
+        assert_eq!(resp.cache_hit_percent(), Some(94));
+
+        // Streaming: llama.cpp repeats `timings` on the final chunk.
+        const SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\
+             \"usage\":{\"prompt_tokens\":191,\"prompt_tokens_details\":{\"cached_tokens\":179}},\
+             \"timings\":{\"cache_n\":179,\"prompt_n\":12,\"prompt_ms\":538.0}}\n\n\
+             data: [DONE]\n\n";
+        let (base, _rx) = stub_server_raw(SSE, "text/event-stream");
+        let resp = OpenAiBackend::new(base, "m")
+            .generate_streaming(
+                &GenerateRequest::new(vec![Message::user("hi")]),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(resp.content, "hi");
+        assert_eq!(resp.cached_prompt_tokens, Some(179));
+        assert_eq!(resp.prefilled_prompt_tokens, Some(12));
+        assert_eq!(resp.prompt_ms, Some(538.0));
+    }
+
+    /// **A server that reports only the OpenAI-shaped detail still yields both halves.**
+    ///
+    /// `prompt_tokens_details.cached_tokens` is the cached side alone; the
+    /// prefilled side is the remainder of the prompt, which is only derivable
+    /// because the same `usage` says how big the prompt was.
+    #[test]
+    fn derives_the_prefilled_half_when_only_usage_details_are_reported() {
+        let (base, _rx) = stub_server(
+            r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],
+                "usage":{"prompt_tokens":1000,"prompt_tokens_details":{"cached_tokens":900}}}"#,
+        );
+        let resp = OpenAiBackend::new(base, "m")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+        assert_eq!(resp.cached_prompt_tokens, Some(900));
+        assert_eq!(resp.prefilled_prompt_tokens, Some(100));
+        assert_eq!(resp.prompt_ms, None, "no timings block, no prefill time");
+        assert_eq!(resp.cache_hit_percent(), Some(90));
+    }
+
+    /// **A server that reports neither says nothing, not zero.**
+    ///
+    /// Every non-llama.cpp backend lands here, and a run against one must not
+    /// print "0% cache hit" -- that is a claim the server never made.
+    #[test]
+    fn a_server_without_cache_reporting_yields_all_none() {
+        const BODY: &str = r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],
+            "usage":{"prompt_tokens":42,"completion_tokens":1}}"#;
+        let (base, _rx) = stub_server(BODY);
+        let resp = OpenAiBackend::new(base, "m")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+        assert_eq!(resp.prompt_tokens, Some(42));
+        assert_eq!(resp.cached_prompt_tokens, None);
+        assert_eq!(resp.prefilled_prompt_tokens, None);
+        assert_eq!(resp.prompt_ms, None);
+        assert_eq!(resp.cache_hit_percent(), None);
+
+        // And the same over a stream with no usage at all.
+        const SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                           data: [DONE]\n\n";
+        let (base, _rx) = stub_server_raw(SSE, "text/event-stream");
+        let resp = OpenAiBackend::new(base, "m")
+            .generate_streaming(
+                &GenerateRequest::new(vec![Message::user("hi")]),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(resp.cached_prompt_tokens, None);
+        assert_eq!(resp.prefilled_prompt_tokens, None);
     }
 
     /// **Against the real server: the counter agrees with the tokenizer that ran.**

@@ -1852,12 +1852,11 @@ mod tests {
     #[test]
     fn fix_feed_line_surfaces_model_narration() {
         // The execute/iterate feed shows the model's thinking, not just file touches.
-        let line = fix_feed_line(&sc_core::AgentEvent::ModelTurn {
-            step: 1,
-            prompt_tokens: 10,
-            raw: "I'll add the water module and wire it in.\n{\"tool\":\"write_file\",\"path\":\"w.rs\"}"
-                .to_string(),
-        });
+        let line = fix_feed_line(&sc_core::AgentEvent::model_turn(
+            1,
+            10,
+            "I'll add the water module and wire it in.\n{\"tool\":\"write_file\",\"path\":\"w.rs\"}",
+        ));
         let line = line.expect("narration surfaced");
         assert!(line.starts_with("💭"));
         assert!(line.contains("water module"));

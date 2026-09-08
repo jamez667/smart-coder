@@ -354,13 +354,12 @@ fn assistant_block(b: &serde_json::Value) -> Option<AgentEvent> {
             if raw.trim().is_empty() {
                 return None;
             }
-            Some(AgentEvent::ModelTurn {
-                step: 0,
+            Some(AgentEvent::model_turn(
+                0,
                 // Claude Code manages its own context; we did not assemble this prompt and
                 // have no honest count for it.
-                prompt_tokens: 0,
-                raw,
-            })
+                0, raw,
+            ))
         }
         Some("tool_use") => {
             let tool = b.get("name").and_then(|n| n.as_str())?.to_string();
@@ -451,11 +450,11 @@ mod tests {
     fn a_text_block_becomes_a_model_turn() {
         assert_eq!(
             parse_line(TEXT),
-            vec![Line::Event(AgentEvent::ModelTurn {
-                step: 0,
-                prompt_tokens: 0,
-                raw: "`hello.txt` contains a single line: `world`.".to_string(),
-            })]
+            vec![Line::Event(AgentEvent::model_turn(
+                0,
+                0,
+                "`hello.txt` contains a single line: `world`.",
+            ))]
         );
     }
 

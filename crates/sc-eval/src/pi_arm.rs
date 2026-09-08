@@ -256,6 +256,8 @@ impl Solver for PiSolver {
             self_verified: None,
             interventions: 0,
             total_prompt_tokens: 0,
+            total_cached_prompt_tokens: 0,
+            total_prefilled_prompt_tokens: 0,
             peak_reply_tokens: 0,
             harness_faults: Vec::new(),
         }));

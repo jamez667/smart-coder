@@ -150,6 +150,30 @@ pub struct GenerateResponse {
     /// model. `None` when the server does not say (mocks, and servers without
     /// `usage`).
     pub prompt_tokens: Option<usize>,
+    /// How many of those prompt tokens the server served from its KV cache
+    /// instead of re-evaluating (llama.cpp's `timings.cache_n`, or OpenAI's
+    /// `usage.prompt_tokens_details.cached_tokens`).
+    ///
+    /// **This is the number that makes an append-only prompt visible.**
+    /// `prompt_tokens` counts what the harness SENDS, so keeping the prefix
+    /// byte-stable between turns cannot move it at all -- the work saved happens
+    /// on the server, in what it does NOT have to prefill. A stable prefix shows
+    /// up here as a cached count that grows with the conversation; a prompt whose
+    /// prefix shifts shows up as a cached count near zero every turn.
+    ///
+    /// `None` when the server does not report it (mocks, and every non-llama.cpp
+    /// server without `prompt_tokens_details`).
+    pub cached_prompt_tokens: Option<usize>,
+    /// How many prompt tokens the server actually PREFILLED this turn
+    /// (llama.cpp's `timings.prompt_n`); derived as `prompt_tokens - cached` when
+    /// only the OpenAI-shaped `prompt_tokens_details` is available.
+    ///
+    /// The other half of the ratio: `prefilled + cached` is the whole prompt, and
+    /// `prefilled` alone is the compute the turn actually cost.
+    pub prefilled_prompt_tokens: Option<usize>,
+    /// Milliseconds the server spent on the prefill (llama.cpp's
+    /// `timings.prompt_ms`) -- the wall-clock consequence of the two counts above.
+    pub prompt_ms: Option<f64>,
 }
 
 impl GenerateResponse {
@@ -159,6 +183,9 @@ impl GenerateResponse {
             content: content.into(),
             finish_reason: None,
             prompt_tokens: None,
+            cached_prompt_tokens: None,
+            prefilled_prompt_tokens: None,
+            prompt_ms: None,
         }
     }
 
@@ -168,7 +195,23 @@ impl GenerateResponse {
             content: content.into(),
             finish_reason: reason,
             prompt_tokens: None,
+            cached_prompt_tokens: None,
+            prefilled_prompt_tokens: None,
+            prompt_ms: None,
         }
+    }
+
+    /// What fraction of this turn's prompt the server served from cache, as a
+    /// whole percent. `None` unless the server reported both halves.
+    ///
+    /// Near 100% means the prefix held and only the newly-appended tokens were
+    /// prefilled; near 0% means the server re-evaluated the whole prompt, which is
+    /// exactly what an append-only prompt exists to prevent.
+    pub fn cache_hit_percent(&self) -> Option<u32> {
+        let cached = self.cached_prompt_tokens?;
+        let prefilled = self.prefilled_prompt_tokens?;
+        let total = cached + prefilled;
+        (total > 0).then(|| ((cached as f64 / total as f64) * 100.0).round() as u32)
     }
 
     /// Did the server stop because it hit the token cap?

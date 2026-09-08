@@ -23,11 +23,7 @@ fn renders_a_live_run_frame() {
         AgentEvent::Planned {
             steps: vec!["read impl".into(), "fix it".into(), "run tests".into()],
         },
-        AgentEvent::ModelTurn {
-            step: 1,
-            prompt_tokens: 800,
-            raw: "{\"tool\":\"read_file\",\"path\":\"impl.sh\"}".into(),
-        },
+        AgentEvent::model_turn(1, 800, "{\"tool\":\"read_file\",\"path\":\"impl.sh\"}"),
         AgentEvent::ToolCall {
             tool: "read_file".into(),
             arg: "impl.sh".into(),

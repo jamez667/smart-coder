@@ -317,6 +317,61 @@ pub fn ab_report(rows: &[ResultRow], repeat: usize) -> String {
         }
     }
 
+    // **Prefix-cache reuse: the number the token totals above cannot show.**
+    //
+    // `total` is what the harness SENT. Keeping the prompt prefix byte-stable
+    // between turns does not change that by a single token -- what it changes is
+    // how much of it the server has to RE-PREFILL, and that only appears here. A
+    // high hit rate means the append-only prompt is reaching the server intact; a
+    // rate near 0 on a multi-turn task means it is not, however stable the prefix
+    // looked on our side.
+    //
+    // Only arms whose backend reports the split appear; the rest say "not
+    // reported", because a zero here would be a claim about the cache rather than
+    // about the reporting.
+    let _ = write!(
+        s,
+        "\n--- prefix cache (what the SERVER re-prefilled, vs what we sent) ---\n"
+    );
+    let _ = writeln!(
+        s,
+        "{:<width$} {:>12} {:>12} {:>12} {:>9}",
+        "arm", "sent", "prefilled", "cached", "hit rate"
+    );
+    let mut any_reported = false;
+    for arm in &arms {
+        let rs: Vec<&ResultRow> = by_arm(rows, arm).collect();
+        let (sent, _) = tokens(rs.iter().copied());
+        let reported: Vec<&&ResultRow> = rs
+            .iter()
+            .filter(|r| r.cache_hit_percent.is_some())
+            .collect();
+        if reported.is_empty() {
+            let _ = writeln!(
+                s,
+                "{arm:<width$} {sent:>12} {:>12} {:>12} {:>9}",
+                "-", "-", "not reported"
+            );
+            continue;
+        }
+        any_reported = true;
+        let prefilled: usize = reported.iter().map(|r| r.prefilled_prompt_tokens).sum();
+        let cached: usize = reported.iter().map(|r| r.cached_prompt_tokens).sum();
+        let hit = format!("{}%", pct(cached, cached + prefilled));
+        let _ = writeln!(
+            s,
+            "{arm:<width$} {sent:>12} {prefilled:>12} {cached:>12} {hit:>9}"
+        );
+    }
+    if any_reported {
+        let _ = writeln!(
+            s,
+            "  a HIGH hit rate is the append-only prompt working: only the newly \
+             appended tokens\n  were prefilled. A rate near 0% on a multi-turn task \
+             means the prefix is NOT holding."
+        );
+    }
+
     // How each arm got there. A solve rate cannot see a model that reads for
     // twenty turns before its first edit, or one that re-reads what the harness
     // just evicted.
@@ -402,6 +457,9 @@ mod ab_tests {
             outcome: if pass { "PASS" } else { "STILL-RED" }.into(),
             steps: 5,
             total_prompt_tokens: tokens,
+            cached_prompt_tokens: tokens * 8 / 10,
+            prefilled_prompt_tokens: tokens * 2 / 10,
+            cache_hit_percent: Some(80),
             peak_prompt_tokens: tokens / 2,
             peak_reply_tokens: 100,
             wall_ms: 2000,

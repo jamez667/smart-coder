@@ -42,6 +42,29 @@ pub struct ResultRow {
     pub outcome: String,
     pub steps: usize,
     pub total_prompt_tokens: usize,
+    /// Of `total_prompt_tokens`, how many the backend served from its KV cache.
+    ///
+    /// `total_prompt_tokens` measures what the harness SENT, which the
+    /// append-only prompt work cannot move by design -- a byte-stable prefix
+    /// sends the same tokens a shifting one does. This is what the server did
+    /// with them, and it is where the work becomes visible.
+    ///
+    /// `0` on an arm whose backend reports no split (raw, pi, and every
+    /// non-llama.cpp server), summed off the `ModelTurn` events so an arm that
+    /// never reported one stays at zero rather than being credited or blamed.
+    pub cached_prompt_tokens: usize,
+    /// Of `total_prompt_tokens`, how many the backend actually PREFILLED.
+    pub prefilled_prompt_tokens: usize,
+    /// `cached / (cached + prefilled)` as a whole percent. `None` when the
+    /// backend reported no split at all -- a run against a server that says
+    /// nothing must not print `0%`, which is a claim about the cache rather than
+    /// about the reporting.
+    ///
+    /// **This is the number that says whether the append-only prefix works.** A
+    /// stable prefix re-prefills only the newly appended tokens each turn, so a
+    /// healthy multi-turn run sits high; a run that re-prefills the whole prompt
+    /// every turn sits near zero.
+    pub cache_hit_percent: Option<u32>,
     pub peak_prompt_tokens: usize,
     pub peak_reply_tokens: usize,
     pub wall_ms: u128,
@@ -90,6 +113,11 @@ impl ResultRow {
             outcome: result.outcome.symbol().to_string(),
             steps: run.map(|r| r.steps).unwrap_or(0),
             total_prompt_tokens: run.map(|r| r.total_prompt_tokens).unwrap_or(0),
+            // From the sink, not the report: the sink sees every `ModelTurn` on
+            // every arm, including the ones whose solver builds its own `RunInfo`.
+            cached_prompt_tokens: metrics.cached_prompt_tokens,
+            prefilled_prompt_tokens: metrics.prefilled_prompt_tokens,
+            cache_hit_percent: metrics.cache_hit_percent(),
             // The agent report carries a peak too, but `RunInfo` does not, and the
             // sink sees every `ModelTurn`, so the two agree by construction.
             peak_prompt_tokens: metrics.peak_prompt_tokens,
@@ -181,6 +209,28 @@ pub struct RunMetrics {
     pub wasted_turns: usize,
     /// The largest assembled prompt, from the `ModelTurn` events.
     pub peak_prompt_tokens: usize,
+    /// Prompt tokens the backend served from its KV cache, summed over the
+    /// `ModelTurn` events that reported a split. Stays 0 for an arm whose
+    /// backend reports none, which is the honest answer for the raw and pi arms.
+    pub cached_prompt_tokens: usize,
+    /// Prompt tokens the backend actually prefilled, summed the same way.
+    pub prefilled_prompt_tokens: usize,
+    /// Whether ANY turn reported a split. Without this, "the server said nothing"
+    /// and "nothing was cached" both read as two zeroes.
+    pub reported_cache: bool,
+}
+
+impl RunMetrics {
+    /// The share of the prompt the backend served from cache, as a whole percent.
+    /// `None` when no turn reported a split.
+    pub fn cache_hit_percent(&self) -> Option<u32> {
+        if !self.reported_cache {
+            return None;
+        }
+        let total = self.cached_prompt_tokens + self.prefilled_prompt_tokens;
+        (total > 0)
+            .then(|| ((self.cached_prompt_tokens as f64 / total as f64) * 100.0).round() as u32)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -230,10 +280,21 @@ impl EventSink for MetricsSink {
             AgentEvent::ModelTurn {
                 step,
                 prompt_tokens,
+                cached_prompt_tokens,
+                prefilled_prompt_tokens,
                 ..
             } => {
                 st.current_step = *step;
                 st.metrics.peak_prompt_tokens = st.metrics.peak_prompt_tokens.max(*prompt_tokens);
+                // Summed off the events rather than the report so every arm is
+                // measured the same way -- and a turn the backend said nothing
+                // about adds nothing, so an arm against a server with no split
+                // reporting stays at 0 instead of looking like a total cache miss.
+                if cached_prompt_tokens.is_some() || prefilled_prompt_tokens.is_some() {
+                    st.metrics.reported_cache = true;
+                }
+                st.metrics.cached_prompt_tokens += cached_prompt_tokens.unwrap_or(0);
+                st.metrics.prefilled_prompt_tokens += prefilled_prompt_tokens.unwrap_or(0);
             }
             AgentEvent::ToolCall { tool, arg } => {
                 if EDIT_TOOLS.contains(&tool.as_str()) {
@@ -269,8 +330,53 @@ mod tests {
         AgentEvent::ModelTurn {
             step,
             prompt_tokens,
+            cached_prompt_tokens: None,
+            prefilled_prompt_tokens: None,
             raw: String::new(),
         }
+    }
+
+    /// A turn whose backend reported the prefix-cache split.
+    fn cached_turn(
+        step: usize,
+        prompt_tokens: usize,
+        cached: usize,
+        prefilled: usize,
+    ) -> AgentEvent {
+        AgentEvent::ModelTurn {
+            step,
+            prompt_tokens,
+            cached_prompt_tokens: Some(cached),
+            prefilled_prompt_tokens: Some(prefilled),
+            raw: String::new(),
+        }
+    }
+
+    /// **The sink sums the split, and says nothing when the backend said nothing.**
+    ///
+    /// The whole point of the column: a run whose prefix held re-prefills only the
+    /// appended tokens, so the cached side dominates. An arm against a backend with
+    /// no reporting (raw, pi, any non-llama.cpp server) must come out `None`, not
+    /// `0%` -- the second is a claim about the cache that nobody measured.
+    #[test]
+    fn the_sink_sums_the_prefix_cache_split_only_when_reported() {
+        let sink = MetricsSink::new();
+        sink.record(&cached_turn(1, 200, 0, 200));
+        sink.record(&cached_turn(2, 260, 200, 60));
+        sink.record(&cached_turn(3, 300, 260, 40));
+        let m = sink.snapshot();
+        assert_eq!(m.cached_prompt_tokens, 460);
+        assert_eq!(m.prefilled_prompt_tokens, 300);
+        assert_eq!(m.cache_hit_percent(), Some(61));
+
+        // A backend that reports nothing is unknown, not a miss.
+        let quiet = MetricsSink::new();
+        quiet.record(&turn(1, 200));
+        quiet.record(&turn(2, 400));
+        let m = quiet.snapshot();
+        assert_eq!(m.cached_prompt_tokens, 0);
+        assert_eq!(m.prefilled_prompt_tokens, 0);
+        assert_eq!(m.cache_hit_percent(), None);
     }
 
     fn call(tool: &str, arg: &str) -> AgentEvent {
@@ -380,6 +486,8 @@ mod tests {
                 self_verified: Some(true),
                 interventions: 1,
                 total_prompt_tokens: 12_000,
+                total_cached_prompt_tokens: 10_000,
+                total_prefilled_prompt_tokens: 2_000,
                 peak_reply_tokens: 900,
                 harness_faults: vec![(sc_core::FaultKind::ReplyTruncated, 2)],
             }),
@@ -389,6 +497,9 @@ mod tests {
             re_reads: 1,
             wasted_turns: 0,
             peak_prompt_tokens: 4_000,
+            cached_prompt_tokens: 10_000,
+            prefilled_prompt_tokens: 2_000,
+            reported_cache: true,
         };
         let row = ResultRow::new(
             &t,
@@ -404,6 +515,10 @@ mod tests {
         assert_eq!(row.rung.as_deref(), Some("stated"));
         assert_eq!(row.steps, 7);
         assert_eq!(row.peak_prompt_tokens, 4_000);
+        // The cache split comes off the sink and the percentage is derived from it.
+        assert_eq!(row.cached_prompt_tokens, 10_000);
+        assert_eq!(row.prefilled_prompt_tokens, 2_000);
+        assert_eq!(row.cache_hit_percent, Some(83));
         assert_eq!(row.faults, vec![("reply truncated".to_string(), 2)]);
         assert_eq!(row.turns_to_first_edit, Some(3));
 
