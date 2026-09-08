@@ -11,7 +11,10 @@
 
 use std::path::Path;
 
-use sc_context::{prompt_budget, truncate_observation, ContextBuilder, TokenCounter, TurnRecord};
+use sc_context::{
+    prompt_budget, truncate_observation, truncate_paged_read, ContextBuilder, TokenCounter,
+    TurnRecord,
+};
 use sc_index::Boosts;
 use sc_model::{GenerateRequest, Message, ModelBackend};
 use sc_proto::Result;
@@ -1376,13 +1379,35 @@ pub fn run_agent_observed(
             is_error: was_error,
         });
         history.push(TurnRecord::new(tool.clone(), arg, was_error));
-        let trimmed = truncate_observation(&obs, observation_cap_for(&tool, cfg), true);
+        // Two different shapes of output need two different cuts, and the cap
+        // (`observation_cap_for`) is the same source of truth for both.
+        //
+        // A paged file read is CONTIGUOUS source the model is about to edit, and it can
+        // always ask for the next page — so it is cut to a contiguous prefix that names
+        // the start which resumes it. The head/tail slice used to drop the MIDDLE of a
+        // big read while the header still claimed the full range: a model that asked for
+        // 2800-5800 got 2800-3199 and 5401-5800 and a hole where the code it wanted was,
+        // with no way to name the missing region. That was the reported "cannot read
+        // around line 2800" on an 8,000-line file.
+        //
+        // Everything else — a verification report, a shell log, an `ask` answer — keeps
+        // the error-first path: those genuinely want the failing lines over the leading
+        // ones, and their lines are not a range the model can re-request.
+        let cap = observation_cap_for(&tool, cfg);
+        let trimmed = if matches!(tool.as_str(), "read_file" | "read_function") {
+            truncate_paged_read(&obs, cap)
+        } else {
+            truncate_observation(&obs, cap, true)
+        };
         // Did the cap just hide the answer? Capping is usually right -- error-first
-        // truncation keeps the failing lines, and a paged read keeps its "read the next
-        // chunk" tail. The case worth a fault is the BLIND cut: no error line to anchor
-        // on, so a head/tail slice dropped the middle unseen, and it dropped more than
-        // it kept. The model then decides on less than half the evidence and its next
-        // call looks like it ignored the output.
+        // truncation keeps the failing lines, and a paged read keeps a contiguous prefix
+        // and names the `start` that fetches the rest. The case worth a fault is the
+        // BLIND cut: no error line to anchor on, so a head/tail slice dropped the middle
+        // unseen, and it dropped more than it kept. The model then decides on less than
+        // half the evidence and its next call looks like it ignored the output. A cut
+        // paged read is NOT that -- it is a page boundary the model can turn -- and
+        // `blind_cut` keys on a marker only the head/tail slice writes, so it stays
+        // quiet for one however much it left behind.
         if let Some((total, shown)) = blind_cut(&obs, &trimmed) {
             sink.record(&AgentEvent::HarnessFault {
                 kind: FaultKind::ObservationTruncated,

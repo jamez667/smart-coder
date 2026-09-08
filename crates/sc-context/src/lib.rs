@@ -19,4 +19,4 @@ mod truncate;
 pub use budget::{prompt_budget, BuiltContext, ContextBuilder, Role, Segment, Zone};
 pub use history::{split_for_compaction, summarize_history, TurnRecord};
 pub use tokens::{estimate_tokens, TokenCounter};
-pub use truncate::truncate_observation;
+pub use truncate::{truncate_observation, truncate_paged_read};

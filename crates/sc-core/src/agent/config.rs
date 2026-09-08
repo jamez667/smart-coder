@@ -194,6 +194,17 @@ impl Default for AgentConfig {
             observation_line_cap: 200,
             // The model must read the failing test; clipping it mid-file is the
             // harness hiding the answer.
+            //
+            // KEPT AT 800 now that a read is cut cleanly rather than gutted. The old
+            // cut was worth arguing about because it was lossy in a way the model
+            // could not recover from — the middle of the window disappeared and
+            // nothing said where. A prefix cut is not: it hands back a contiguous run
+            // and the `start` that fetches the next one, so the cap now bounds the
+            // page SIZE, not the reachable region, and the whole file stays available
+            // one call at a time. 800 lines is the largest page that still leaves room
+            // in a small window for the system prompt, the retrieved zone and the
+            // recent turns; raising it buys fewer round-trips at the cost of the
+            // context the model needs to use them.
             read_file_line_cap: 800,
             // 3 turns cannot hold a multi-file task: on a four-file task the first
             // file is compacted to a summary before the fourth is read, so the model

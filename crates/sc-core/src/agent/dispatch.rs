@@ -306,10 +306,20 @@ pub(super) fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
 /// cut (which kept the signal by construction), or a cut that still showed the
 /// model at least half.
 ///
-/// The two paths are told apart by the marker the truncator leaves: the blind slice
-/// writes one `… [N line(s) truncated] …` line, the error-first path writes
-/// `… [N line(s) skipped] …` between the lines it kept. Only the marker lines are
-/// discounted from the shown count.
+/// The paths are told apart by the marker the truncator leaves. Only the blind slice
+/// ([`sc_context::truncate_observation`]'s head/tail fallback) writes
+/// `… [N line(s) truncated] …`; the error-first path writes `… [N line(s) skipped] …`
+/// between the lines it kept, and the paged-read path
+/// ([`sc_context::truncate_paged_read`]) writes a `pass start=N for the next page` /
+/// `trailing line(s) not shown` note. Only the marker lines are discounted from the
+/// shown count.
+///
+/// A cut PAGED READ is deliberately not a blind cut, however much it dropped. Its
+/// kept region is a contiguous prefix — nothing went missing from inside what the
+/// model can see — and the note names the exact `start` that fetches the rest, so it
+/// is an ordinary, recoverable page boundary rather than evidence the model never
+/// knew it was missing. Raising a fault on every page turn of a large file would be
+/// noise, and would push the operator to raise a cap that is working as intended.
 pub(super) fn blind_cut(obs: &str, trimmed: &str) -> Option<(usize, usize)> {
     let total = obs.lines().count();
     let mut shown = 0usize;
@@ -522,6 +532,61 @@ mod tests {
         assert_eq!(observation_cap_for("run_verification", &cfg), 400);
         assert_eq!(observation_cap_for("run_command", &cfg), 40);
         assert_eq!(observation_cap_for("list_dir", &cfg), 40);
+    }
+
+    /// A paged read cut cleanly is a page boundary, not a blind cut: the kept region
+    /// is contiguous and the note names the `start` that resumes it, so the model can
+    /// recover the rest by asking. Raising `ObservationTruncated` for that would fire
+    /// on every page turn of a large file.
+    #[test]
+    fn a_cut_paged_read_is_not_a_blind_cut() {
+        use sc_context::truncate_paged_read;
+
+        let body: String = (2800..=5800)
+            .map(|i| {
+                format!(
+                    "{i}: // line {i}
+"
+                )
+            })
+            .collect();
+        let obs = format!(
+            "read_file big.rs (lines 2800-5800 of 8000):
+{body}"
+        );
+        let trimmed = truncate_paged_read(&obs, 800);
+
+        assert!(
+            trimmed.contains("pass start=3598"),
+            "the model is told how to continue"
+        );
+        assert_eq!(
+            blind_cut(&obs, &trimmed),
+            None,
+            "a contiguous prefix that names its next page is not a blind cut"
+        );
+    }
+
+    /// ...and the genuinely blind cut it exists to catch still fires.
+    #[test]
+    fn a_head_tail_slice_of_an_error_free_log_still_raises() {
+        let obs: String = (1..=2000)
+            .map(|i| {
+                format!(
+                    "quiet line {i}
+"
+                )
+            })
+            .collect::<String>();
+        let trimmed = truncate_observation(&obs, 200, true);
+
+        assert!(
+            trimmed.contains("line(s) truncated]"),
+            "no error line to anchor on, so it is a head/tail slice"
+        );
+        let (total, shown) = blind_cut(&obs, &trimmed).expect("the blind cut must still be caught");
+        assert_eq!(total, 2000);
+        assert_eq!(shown, 200);
     }
 
     // --- Confirm-gated run_command (spec 04 / spec 06) -----------------------
