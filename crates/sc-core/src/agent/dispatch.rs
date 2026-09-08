@@ -295,7 +295,12 @@ pub(super) fn observation_cap_for(tool: &str, cfg: &AgentConfig) -> usize {
         // gets the same generous cap. Capping it at 40 lines truncated whole-file
         // answers mid-source, which is the harness hiding the very code the model
         // asked for, and it re-asks.
-        "read_file" | "run_verification" | "ask" => cfg.read_file_line_cap,
+        // `read_function` is a file read too, and it takes the same paged path, so it
+        // gets the same generous cap. It used to draw the 200-line command cap: a
+        // function longer than that was cut and had to be paged through, which is the
+        // harness rationing source code the model asked for BY NAME. Rare (a "giant"
+        // function is 120 lines) but pure loss when it happens.
+        "read_file" | "read_function" | "run_verification" | "ask" => cfg.read_file_line_cap,
         _ => cfg.observation_line_cap,
     }
 }
@@ -439,6 +444,26 @@ pub(super) fn looks_like_failure(obs: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A named function read is source, not command output: it gets the file cap.
+    ///
+    /// It took the 200-line command cap while ALSO taking the paged-read path, so a
+    /// long function was rationed a page at a time even though the model had asked
+    /// for it by name.
+    #[test]
+    fn read_function_gets_the_same_generous_cap_as_read_file() {
+        let cfg = AgentConfig::default();
+        assert_eq!(
+            observation_cap_for("read_function", &cfg),
+            cfg.read_file_line_cap,
+            "a function read is a file read"
+        );
+        assert_eq!(
+            observation_cap_for("run_command", &cfg),
+            cfg.observation_line_cap,
+            "command output keeps the tight cap"
+        );
+    }
+
     use super::*;
     use crate::confirm::Confirmation;
     use sc_context::truncate_observation;
