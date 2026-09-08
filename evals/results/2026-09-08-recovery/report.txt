@@ -1,0 +1,54 @@
+
+=== ladder A/B ===
+
+arm         solved      of   rate
+control(6)      41      42    98%
+
+--- per rung (solved/total across 3 round(s)) ---
+rung                 control(6)
+stated                      3/3
+located                     3/3
+symptomatic                 3/3
+misdirected                 3/3
+two-stage                   3/3
+invariant                   3/3
+engine-additive             3/3
+engine-two-layer            3/3
+engine-multi-site           3/3
+engine-novel-generic        3/3
+cross-file-variant          2/3
+cross-file-signature        3/3
+cross-file-cause            3/3
+cross-file-trait            3/3
+
+--- context cost (prompt tokens summed over every turn) ---
+arm               total     per task   vs first
+control(6)      1106951        26355       100%
+
+  task                  control(6)
+  rust-stated                 6258
+  rust-located               11289
+  rust-symptomatic           21471
+  rust-misdirected           16333
+  rust-two-stage             17767
+  rust-invariant             13842
+  engine-diagonal-path       58116
+  engine-diagonal-wired     149755
+  engine-grid-scan          170966
+  engine-ecs-query           92436
+  rust-multi-site           147627
+  rust-signature-change     147870
+  rust-hidden-invariant      20872
+  rust-trait-impl           232349
+
+--- prefix cache (what the SERVER re-prefilled, vs what we sent) ---
+arm                sent    prefilled       cached  hit rate
+control(6)      1106951       205315      1055471       84%
+  a HIGH hit rate is the append-only prompt working: only the newly appended tokens
+  were prefilled. A rate near 0% on a multi-turn task means the prefix is NOT holding.
+
+--- process (per task, averaged) ---
+arm         steps  first edit  re-reads  wasted     secs
+control(6)    6.1         3.8       0.0     0.3       28
+
+--- reading this ---
