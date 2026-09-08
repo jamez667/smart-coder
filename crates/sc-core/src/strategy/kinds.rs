@@ -171,6 +171,25 @@ impl ToolCallStrategy for NativeTools {
         req.constraint = Some(OutputConstraint::Tools(tool_schemas(registry)));
     }
 
+    fn request_overhead_text(&self, registry: &ToolRegistry) -> String {
+        // The same `{"type":"function","function":{...}}` shape the backend sends,
+        // so the count matches what the server tokenizes.
+        let defs: Vec<serde_json::Value> = tool_schemas(registry)
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect();
+        serde_json::Value::Array(defs).to_string()
+    }
+
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError> {
         ParseRepair.extract(raw, registry)
     }

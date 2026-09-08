@@ -162,12 +162,29 @@ impl Default for AgentConfig {
             // Pooled across runs, solves landed at step 33, 35 and 48. A 25-step cap
             // discards those and reports them as failures.
             max_steps: 40,
-            effective_context_fraction: 0.75,
+            // The fraction of the window the PROMPT may fill. It sat at 0.75 while
+            // the only counter was a char-based estimator that undercounted llama.cpp
+            // by 23%: the missing quarter was headroom for the estimator, not for the
+            // model. Now the backend's own tokenizer answers wherever llama.cpp serves
+            // one, and the per-message template cost is charged explicitly, so the
+            // margin no longer needs to cover an unknown. What stays reserved is for
+            // the reply (`response_reserve_tokens` below), and a small margin for the
+            // template's remaining unknowns and for the native `tools` JSON on a
+            // backend that has not told the builder its size.
+            effective_context_fraction: 0.9,
             // A reasoning model spends tokens before it emits the call, and a
             // truncated turn yields NO call -- indistinguishable from declining to
             // act. At 1024, one edit request in five returned nothing at all.
-            // 6144 is ~1.8x the largest reply observed across a full ten-rung run.
-            response_reserve_tokens: 6144,
+            //
+            // Sized from what was measured, not guessed: across a full ten-rung run
+            // Tiel's largest reply was 1,328 tokens (see `AgentReport::peak_reply_tokens`,
+            // which exists so this number can be checked). 2048 is ~1.5x that peak;
+            // the previous 6144 was subtracted from EVERY prompt of every turn to
+            // hold room that was never used. A reasoning model that spends more
+            // before it answers -- a rambling model on the same suite hit 14,202 --
+            // must raise this, and the run report says when it should: watch
+            // `peak_reply_tokens` and the `ReplyTruncated` harness fault.
+            response_reserve_tokens: 2048,
             // 40 lines amputates a test traceback exactly where the assertion is.
             observation_line_cap: 200,
             // The model must read the failing test; clipping it mid-file is the

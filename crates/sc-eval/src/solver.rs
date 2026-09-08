@@ -189,14 +189,14 @@ pub(crate) fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
         // model given more room to read writes longer replies, so the reserve
         // cannot be sized from a run taken at a different budget.
         //
-        // 6144 is ~1.8x the largest reply yet observed. The prompt budget is 32k x
-        // 0.75 - 6144 = 18,432 tokens, still 50% more than the 12,288 it replaced,
-        // at no VRAM cost.
+        // 2048 is ~1.5x the largest reply yet observed on the ladder (1,328 tokens,
+        // Tiel). Every token reserved here is a token the PROMPT cannot use on every
+        // turn, so the reserve is sized to the measured peak, not to a guess.
         //
         // Do not tune this by eye: `largest reply: N tokens` in the suite summary is
         // the number to size against, and any reply that does hit the cap raises
-        // HarnessFault::ReplyTruncated, which the summary now prints loudly.
-        response_reserve_tokens: 6144,
+        // HarnessFault::ReplyTruncated, which the summary prints loudly.
+        response_reserve_tokens: 2048,
         observation_line_cap: 200,
         read_file_line_cap: 800,
         // Hold enough turns to keep a MULTI-FILE task in view.

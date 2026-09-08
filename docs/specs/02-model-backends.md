@@ -196,9 +196,15 @@ thesis — set T1 to something larger. The split is config, not code.
 ## Tokenizer & budgeting
 
 Accurate token counts matter more on small models because the window is tiny.
-The gateway prefers, in order: (1) a backend-provided `count_tokens`, (2) a
-bundled tokenizer matching the model family, (3) a heuristic estimator with a
-safety margin. The Context Manager ([05](05-context-management.md)) always
+The counter prefers a backend-provided `count_tokens` — the OpenAI-compatible
+adapter POSTs llama.cpp's `/tokenize` at the server root (beside `/v1`, not
+under it), memoised by content hash, probed once and disabled for the run after
+its first failure, off for hosts without the endpoint (Gemini, `api.openai.com`)
+and forced either way with `OpenAiBackend::with_tokenizer` — and otherwise a
+heuristic estimator with a safety margin. `GenerateResponse.prompt_tokens`
+carries the server's own `usage.prompt_tokens` from both the streaming and
+blocking paths, so the builder's count can be checked against the tokenizer that
+actually ran. The Context Manager ([05](05-context-management.md)) always
 budgets against this count.
 
 ## Backend behavior the harness must tolerate

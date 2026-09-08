@@ -240,7 +240,15 @@ pub fn run_agent_observed(
         cfg.effective_context_fraction,
         cfg.response_reserve_tokens,
     );
-    let builder = ContextBuilder::new(&counter, budget);
+    // Charge the request for what rides outside the messages: native tool schemas
+    // are sent as `tools`, which the server tokenizes into the same window.
+    let overhead_text = strategy.request_overhead_text(registry);
+    let request_overhead = if overhead_text.is_empty() {
+        0
+    } else {
+        counter.count(&overhead_text)
+    };
+    let builder = ContextBuilder::new(&counter, budget).with_fixed_overhead(request_overhead);
 
     // The repo map is stable retrieval; boost task-named symbols (spec 05, aider).
     let repo_map = sc_index::repo_map(

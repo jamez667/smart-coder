@@ -142,6 +142,14 @@ pub struct GenerateResponse {
     /// reason needs to set it.
     #[doc(hidden)]
     pub finish_reason: Option<String>,
+    /// How many tokens the server counted in the PROMPT, when it reports `usage`.
+    ///
+    /// The one number that checks the harness's own accounting against the
+    /// tokenizer that actually ran: the context builder's `tokens_used` should land
+    /// within a few percent of this, and a gap is the counter being wrong, not the
+    /// model. `None` when the server does not say (mocks, and servers without
+    /// `usage`).
+    pub prompt_tokens: Option<usize>,
 }
 
 impl GenerateResponse {
@@ -150,6 +158,7 @@ impl GenerateResponse {
         Self {
             content: content.into(),
             finish_reason: None,
+            prompt_tokens: None,
         }
     }
 
@@ -158,6 +167,7 @@ impl GenerateResponse {
         Self {
             content: content.into(),
             finish_reason: reason,
+            prompt_tokens: None,
         }
     }
 

@@ -8,6 +8,11 @@
 //! The [`ModelBackend`] trait is synchronous, so this uses a blocking HTTP client
 //! (`ureq`) — no async runtime, in keeping with the rest of the gateway.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
 use sc_proto::{DcError, Result};
 use serde::Deserialize;
 
@@ -38,7 +43,27 @@ pub struct OpenAiBackend {
     /// unknown names with HTTP 400**, so a hosted backend turns it off via
     /// [`OpenAiBackend::with_prompt_cache`].
     prompt_cache: bool,
+    /// Ask llama.cpp's `/tokenize` for exact counts (see
+    /// [`ModelBackend::count_tokens`]). Off for the hosted providers that have no
+    /// such endpoint; [`OpenAiBackend::with_tokenizer`] overrides either way.
+    tokenizer: bool,
+    /// `/tokenize` answers by content hash, so a stable prompt prefix (the system
+    /// preamble, a pinned file) costs one round-trip per run, not one per turn.
+    tokenize_cache: Mutex<HashMap<u64, usize>>,
+    /// Set the first time `/tokenize` fails or answers non-2xx. After that every
+    /// count is `None` without a request: a server without the endpoint costs one
+    /// refused call, not one per segment per turn.
+    tokenizer_dead: AtomicBool,
+    /// A short-timeout client for `/tokenize`. The main agent's five-minute timeout
+    /// suits a slow generation, not a count -- a server that has stopped answering
+    /// must not stall the prompt builder for five minutes per segment.
+    tokenize_agent: ureq::Agent,
 }
+
+/// Memoised `/tokenize` answers kept before the memo is cleared. Clear-when-full
+/// is deliberately simpler than eviction: a whole run fits well inside this, and
+/// the cost of a miss is one fast request.
+const TOKENIZE_CACHE_CAPACITY: usize = 4096;
 
 /// Does this base URL belong to a hosted provider that answers an unknown JSON field with
 /// HTTP 400? Gemini's OpenAI-compat endpoint does (`Invalid JSON payload received. Unknown
@@ -93,7 +118,52 @@ impl OpenAiBackend {
             // Off by default for the hosted providers known to reject unknown fields;
             // on for everything else (llama.cpp is the one that uses it).
             prompt_cache: !rejects_unknown_fields(&base_url),
+            // The same providers have no `/tokenize`; everything else gets one probe.
+            tokenizer: !rejects_unknown_fields(&base_url),
+            tokenize_cache: Mutex::new(HashMap::new()),
+            tokenizer_dead: AtomicBool::new(false),
+            tokenize_agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .build()
+                .into(),
         }
+    }
+
+    /// Whether to ask the server's `/tokenize` endpoint for exact token counts
+    /// (default: on, except for the hosted providers that have no such endpoint).
+    /// With it off, [`ModelBackend::count_tokens`] answers `None` and the context
+    /// manager falls back to its estimator.
+    pub fn with_tokenizer(mut self, enabled: bool) -> Self {
+        self.tokenizer = enabled;
+        self
+    }
+
+    /// The server root: llama.cpp mounts its own endpoints (`/tokenize`, `/props`,
+    /// `/health`) beside the OpenAI-compatible `/v1`, not under it.
+    fn server_root(&self) -> &str {
+        self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url)
+    }
+
+    /// POST `{root}/tokenize` with `text` and count the tokens it returns. `None` on
+    /// any failure -- transport, non-2xx, or a body without a `tokens` array.
+    fn fetch_token_count(&self, text: &str) -> Option<usize> {
+        let url = format!("{}/tokenize", self.server_root());
+        let mut call = self
+            .tokenize_agent
+            .post(&url)
+            .header("Content-Type", "application/json");
+        if let Some(key) = &self.api_key {
+            call = call.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut resp = call
+            .send_json(serde_json::json!({ "content": text }))
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = resp.body_mut().read_to_string().ok()?;
+        parse_token_count(&body)
     }
 
     /// Whether to send llama.cpp's `cache_prompt: true` on every request (default: on).
@@ -373,6 +443,7 @@ impl OpenAiBackend {
         let reader = std::io::BufReader::new(resp.body_mut().as_reader());
         let mut full = String::new();
         let mut finish_reason: Option<String> = None;
+        let mut prompt_tokens: Option<usize> = None;
         for line in reader.lines() {
             // Cooperative cancel: if the caller flagged a stop, quit reading and drop the
             // reader/connection so the request aborts. Return the partial text gathered so far.
@@ -405,6 +476,9 @@ impl OpenAiBackend {
             if let Some(r) = parse_stream_finish_reason(payload) {
                 finish_reason = Some(r);
             }
+            if let Some(n) = parse_stream_prompt_tokens(payload) {
+                prompt_tokens = Some(n);
+            }
             if let Some(delta) = parse_stream_delta(payload) {
                 if !delta.is_empty() {
                     full.push_str(&delta);
@@ -423,7 +497,9 @@ impl OpenAiBackend {
         // A grammar-constrained reply arrives entirely inside `reasoning_content`; unwrap it
         // so the tool call survives instead of being stripped as thinking.
         let full = unwrap_reasoning_only(&full).unwrap_or(full);
-        Ok(GenerateResponse::with_finish_reason(full, finish_reason))
+        let mut out = GenerateResponse::with_finish_reason(full, finish_reason);
+        out.prompt_tokens = prompt_tokens;
+        Ok(out)
     }
 }
 
@@ -499,6 +575,16 @@ fn unwrap_reasoning_only(full: &str) -> Option<String> {
 #[derive(Deserialize)]
 struct WireResponse {
     choices: Vec<WireChoice>,
+    /// The server's own token accounting, when it reports it. `prompt_tokens` is
+    /// the number the harness's counter is checked against.
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    prompt_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -555,6 +641,30 @@ fn parse_n_ctx(body: &str) -> Option<usize> {
     (n > 0).then_some(n as usize)
 }
 
+/// The token count in a `/tokenize` reply: `{"tokens":[...]}`. `None` if the body
+/// does not parse or has no `tokens` array (any other shape is not a count).
+fn parse_token_count(body: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(v.get("tokens")?.as_array()?.len())
+}
+
+/// Pull `usage.prompt_tokens` out of one SSE chunk, when it carries one. llama.cpp
+/// puts `usage` on the final chunk; most chunks have none.
+fn parse_stream_prompt_tokens(payload: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    v.get("usage")?
+        .get("prompt_tokens")?
+        .as_u64()
+        .map(|n| n as usize)
+}
+
+/// The memo key for a piece of text.
+fn content_hash(text: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
 fn role_str(role: Role) -> &'static str {
     match role {
         Role::System => "system",
@@ -605,6 +715,51 @@ impl ModelBackend for OpenAiBackend {
         let result = self.generate_inner(req);
         self.log_call("generate", req, started, &result);
         result
+    }
+
+    /// Exact count from llama.cpp's `/tokenize`, memoised by content.
+    ///
+    /// The estimator this replaces undercounted the same server by 23% (see
+    /// `sc_context::estimate_tokens`), and every margin stacked to cover it -- the
+    /// effective-window fraction, the reply reserve -- was context the model never
+    /// got to use. Asking the server means the budget is measured against the
+    /// tokenizer that will actually run.
+    ///
+    /// Probed once: the first failure (no such endpoint, a transport error, a body
+    /// without `tokens`) marks the tokenizer dead and every later call answers
+    /// `None` at once, so the context manager settles on its estimator after a
+    /// single refused request rather than one per segment.
+    fn count_tokens(&self, text: &str) -> Option<usize> {
+        if !self.tokenizer || self.tokenizer_dead.load(Ordering::Relaxed) {
+            return None;
+        }
+        if text.is_empty() {
+            return Some(0);
+        }
+        let key = content_hash(text);
+        if let Some(n) = self.lock_tokenize_cache().get(&key) {
+            return Some(*n);
+        }
+        let Some(n) = self.fetch_token_count(text) else {
+            self.tokenizer_dead.store(true, Ordering::Relaxed);
+            return None;
+        };
+        let mut cache = self.lock_tokenize_cache();
+        if cache.len() >= TOKENIZE_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, n);
+        Some(n)
+    }
+}
+
+impl OpenAiBackend {
+    fn lock_tokenize_cache(&self) -> std::sync::MutexGuard<'_, HashMap<u64, usize>> {
+        // A poisoned memo is still a valid memo: a panic mid-insert leaves at worst
+        // a missing entry, never a wrong one.
+        self.tokenize_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -692,6 +847,7 @@ impl OpenAiBackend {
             })?;
         let finish_reason = choice.finish_reason;
         let message = choice.message;
+        let prompt_tokens = parsed.usage.and_then(|u| u.prompt_tokens);
 
         // Prefer a native tool call (normalized to the uniform string shape); else
         // plain text content; else the reasoning block (thinking models that ran
@@ -707,7 +863,9 @@ impl OpenAiBackend {
             }
         };
 
-        Ok(GenerateResponse::with_finish_reason(content, finish_reason))
+        let mut out = GenerateResponse::with_finish_reason(content, finish_reason);
+        out.prompt_tokens = prompt_tokens;
+        Ok(out)
     }
 }
 
@@ -717,7 +875,8 @@ mod tests {
     use crate::Message;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::mpsc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{mpsc, Arc};
     use std::thread;
 
     /// Read a full HTTP/1.1 request off `sock`: headers up to the blank line,
@@ -805,6 +964,242 @@ Connection: close
         });
 
         (format!("http://{addr}/v1"), rx)
+    }
+
+    /// Like [`stub_server`] but answers EVERY connection with the same reply, with a
+    /// caller-chosen status line, and counts the requests it served. For the
+    /// tokenizer tests, whose whole point is how many requests were made.
+    fn counting_stub(
+        status_line: &'static str,
+        response: &'static str,
+    ) -> (String, Arc<AtomicUsize>, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel();
+
+        let counter = Arc::clone(&hits);
+        thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { break };
+                let raw = drain_http_request(&mut sock);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(raw);
+                let reply = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                let _ = sock.write_all(reply.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+
+        (format!("http://{addr}/v1"), hits, rx)
+    }
+
+    /// **`/tokenize` is asked once per text, at the server root.**
+    ///
+    /// The prompt is rebuilt from mostly the same segments every turn, and each
+    /// count is an HTTP round-trip; memoising by content is what makes exact
+    /// counting affordable. And the endpoint lives beside `/v1`, not under it --
+    /// `/v1/tokenize` is a 404 on llama.cpp.
+    #[test]
+    fn count_tokens_asks_tokenize_once_per_text() {
+        let (base, hits, rx) = counting_stub("200 OK", r#"{"tokens":[1,2,3,4,5]}"#);
+        let backend = OpenAiBackend::new(base, "m");
+
+        assert_eq!(backend.count_tokens("hello there"), Some(5));
+        let raw = rx.recv().unwrap();
+        assert!(raw.starts_with("POST /tokenize "), "got: {raw}");
+        let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(r#""content":"hellothere""#), "got: {raw}");
+
+        assert_eq!(backend.count_tokens("hello there"), Some(5));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the second count is a memo hit"
+        );
+
+        assert_eq!(backend.count_tokens("something else"), Some(5));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "new text is a new question");
+
+        // Empty text needs no server to count.
+        assert_eq!(backend.count_tokens(""), Some(0));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// **A server without `/tokenize` is asked exactly once.**
+    ///
+    /// Ollama, vLLM and LM Studio all speak `/v1/chat/completions` and none serve
+    /// llama.cpp's `/tokenize`. One 404 settles it; after that every count is
+    /// `None` with no request, so the context manager estimates instead of paying
+    /// a failed round-trip per segment per turn.
+    #[test]
+    fn a_missing_tokenize_endpoint_is_probed_once() {
+        let (base, hits, _rx) = counting_stub("404 Not Found", r#"{"error":"no such route"}"#);
+        let backend = OpenAiBackend::new(base, "m");
+
+        assert_eq!(backend.count_tokens("first"), None);
+        assert_eq!(backend.count_tokens("second"), None);
+        assert_eq!(backend.count_tokens("first"), None);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "probed once, then remembered"
+        );
+    }
+
+    /// A 200 whose body is not a token list is just as dead as a 404.
+    #[test]
+    fn a_tokenize_reply_without_tokens_marks_the_tokenizer_dead() {
+        let (base, hits, _rx) = counting_stub("200 OK", r#"{"message":"ok"}"#);
+        let backend = OpenAiBackend::new(base, "m");
+        assert_eq!(backend.count_tokens("x"), None);
+        assert_eq!(backend.count_tokens("y"), None);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// The hosted providers that reject unknown fields have no `/tokenize` either:
+    /// they are off by default, and an explicit opt-out makes no request at all.
+    #[test]
+    fn strict_hosted_providers_and_opt_outs_never_probe() {
+        for url in [
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "https://api.openai.com/v1",
+        ] {
+            let b = OpenAiBackend::new(url, "m");
+            assert!(!b.tokenizer, "{url} must not probe /tokenize");
+            assert_eq!(b.count_tokens("x"), None);
+        }
+
+        let (base, hits, _rx) = counting_stub("200 OK", r#"{"tokens":[1]}"#);
+        let off = OpenAiBackend::new(base.clone(), "m").with_tokenizer(false);
+        assert_eq!(off.count_tokens("x"), None);
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "opted out: no request");
+
+        // And a local server is on by default, overridable either way.
+        assert!(OpenAiBackend::new("http://localhost:11436/v1", "m").tokenizer);
+        assert!(
+            OpenAiBackend::new("https://api.openai.com/v1", "m")
+                .with_tokenizer(true)
+                .tokenizer
+        );
+    }
+
+    #[test]
+    fn server_root_strips_only_the_v1_suffix() {
+        assert_eq!(
+            OpenAiBackend::new("http://localhost:11436/v1/", "m").server_root(),
+            "http://localhost:11436"
+        );
+        // A base without /v1 is its own root.
+        assert_eq!(
+            OpenAiBackend::new("http://localhost:8080", "m").server_root(),
+            "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn parses_a_tokenize_reply() {
+        assert_eq!(parse_token_count(r#"{"tokens":[1,2,3]}"#), Some(3));
+        assert_eq!(parse_token_count(r#"{"tokens":[]}"#), Some(0));
+        // With pieces, still one entry per token.
+        assert_eq!(
+            parse_token_count(r#"{"tokens":[{"id":1,"piece":"a"},{"id":2,"piece":"b"}]}"#),
+            Some(2)
+        );
+        assert_eq!(parse_token_count(r#"{"error":"x"}"#), None);
+        assert_eq!(parse_token_count("not json"), None);
+    }
+
+    /// **The server's own prompt count reaches the caller**, on both paths -- it is
+    /// the one number the harness's accounting can be checked against.
+    #[test]
+    fn parses_the_servers_prompt_token_count() {
+        let (base, _rx) = stub_server(
+            r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],
+                "usage":{"prompt_tokens":42,"completion_tokens":1,"total_tokens":43}}"#,
+        );
+        let resp = OpenAiBackend::new(base, "m")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+        assert_eq!(resp.prompt_tokens, Some(42));
+
+        // Absent usage is unknown, not zero.
+        let (base, _rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#);
+        let resp = OpenAiBackend::new(base, "m")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+        assert_eq!(resp.prompt_tokens, None);
+
+        // Streaming: llama.cpp puts usage on the final chunk.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\
+                   \"usage\":{\"prompt_tokens\":17,\"completion_tokens\":1}}\n\n\
+                   data: [DONE]\n\n";
+        let (base, _rx) = stub_server_raw(sse, "text/event-stream");
+        let resp = OpenAiBackend::new(base, "m")
+            .generate_streaming(
+                &GenerateRequest::new(vec![Message::user("hi")]),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(resp.prompt_tokens, Some(17));
+        assert_eq!(resp.content, "ok");
+    }
+
+    /// **Against the real server: the counter agrees with the tokenizer that ran.**
+    ///
+    /// Needs llama.cpp serving tiel-coder-35b at localhost:11436 (the ops repo's
+    /// compose), so it is ignored by default:
+    /// `cargo test -p sc-model live_tokenizer -- --ignored --nocapture`.
+    ///
+    /// The prompt is made large on purpose: `count_tokens` counts TEXT, and the
+    /// chat template wraps each message in a few tokens of markup the server also
+    /// counts. On a two-line chat that markup is a fifth of the total; on a couple
+    /// of thousand tokens it is inside the 5% this asserts. A miss here means the
+    /// template costs more than the per-message allowance the context manager adds,
+    /// which is the number to revisit.
+    #[test]
+    #[ignore = "needs llama.cpp at localhost:11436"]
+    fn live_tokenizer_matches_the_servers_prompt_count() {
+        let backend = OpenAiBackend::new("http://localhost:11436/v1", "tiel-coder-35b");
+        let code: String = (0..250)
+            .map(|i| format!("fn compute_{i}(x: u32) -> u32 {{ x.wrapping_mul({i}) + 1 }}\n"))
+            .collect();
+        let messages = vec![
+            Message::system("You are terse. Reply with one word."),
+            Message::user(format!("Say ok. Here is some code for context:\n{code}")),
+        ];
+        let counted: usize = messages
+            .iter()
+            .map(|m| {
+                backend
+                    .count_tokens(&m.content)
+                    .expect("the server serves /tokenize")
+            })
+            .sum();
+
+        let mut req = GenerateRequest::new(messages);
+        req.max_tokens = 8;
+        let resp = backend.generate(&req).unwrap();
+        let served = resp
+            .prompt_tokens
+            .expect("llama.cpp reports usage.prompt_tokens");
+
+        let gap = (served as f64 - counted as f64).abs() / served as f64;
+        eprintln!(
+            "counted {counted} vs served {served}: gap {:.1}%",
+            gap * 100.0
+        );
+        assert!(
+            gap <= 0.05,
+            "count_tokens {counted} is {:.1}% off the server's {served}",
+            gap * 100.0
+        );
     }
 
     #[test]

@@ -10,13 +10,23 @@ irrelevant context long before it runs out of tokens). So the discipline holds:
 for `smart-coder`, deciding *what goes into each prompt* is the difference between
 a working agent and a confused one. The Context Manager (`sc-context`) treats the
 window as a scarce, hard-budgeted resource — budgeting against an **effective**
-limit (a configurable fraction of the advertised window), not the nominal max.
+limit (`effective_context_fraction`, default 0.9 of the advertised window), not
+the nominal max. The fraction is headroom for what the counter cannot see — the
+estimator's error, residual template markup — not a law about the model; it
+shrank from 0.75 once counts became exact, and shrinks further as the
+accounting does.
 
 ## The budget
 
 Every prompt is assembled to fit a **hard token budget** derived from the
 backend's real context size ([02](02-model-backends.md)), minus a reserve for
-the model's response. The budget is split into zones. Each zone has a
+the model's response. On a native function-calling backend the tool schemas do
+not sit in the system prompt: they ride beside the messages as `tools`, and the
+server tokenizes them into the same window. The strategy reports that text in
+wire shape (`ToolCallStrategy::request_overhead_text`; ~2k tokens for eighteen
+schemas) and the builder charges it before fitting
+(`ContextBuilder::with_fixed_overhead`), so `tokens_used` is what the request
+really costs. The budget is split into zones. Each zone has a
 **priority** (what survives under pressure) and, separately, a **layout rank**
 (where it sits in the prompt): the prompt reads System, Task anchor, Retrieved,
 History summary, Focus file(s), Recent observations — the observation the model
@@ -97,10 +107,13 @@ model reliably knows where it is.
 
 ## Accurate accounting
 
-The manager budgets against real token counts from the gateway's tokenizer
-([02](02-model-backends.md)), with a safety margin — never a naive char/4
-guess at the edges, because overflowing a small window silently truncates the
-*most recent* (most important) content on many runtimes.
+The manager budgets against exact counts from the backend's tokenizer when it
+has one ([02](02-model-backends.md); probed once per run, memoised by content so
+a stable prefix is counted once, not once per turn), falling back to the
+heuristic estimator — whose safety margin applies only on that path — when the
+backend declines; never a naive char/4 guess at the edges, because overflowing a
+small window silently truncates the *most recent* (most important) content on
+many runtimes.
 
 ## What stays sacred
 
@@ -121,7 +134,12 @@ available.
 
 ## Tuning knobs (config)
 
-- `context_tokens` cap and response reserve.
+- `context_tokens` cap and response reserve. `response_reserve_tokens` (default
+  2048) is sized to ~1.5x the measured peak reply (`AgentReport::peak_reply_tokens`;
+  1,328 on the ladder), never guessed — every reserved token is one the prompt
+  loses on every turn. A reply that hits the cap raises the `ReplyTruncated`
+  harness fault, printed loudly in the run summary; that fault and a rising
+  `peak_reply_tokens` are the only reasons to raise it.
 - Retrieval top-K (ranking is lexical; see [23](23-repo-intelligence.md)).
 - Observation truncation limits.
 - `keep_recent_turns` — the **minimum** number of whole turns kept verbatim (a

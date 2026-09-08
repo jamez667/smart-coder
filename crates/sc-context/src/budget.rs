@@ -124,6 +124,10 @@ pub struct BuiltContext {
     pub tokens_used: usize,
     /// The hard budget it was fit into.
     pub budget: usize,
+    /// Tokens the request carries OUTSIDE the messages -- the native `tools` JSON
+    /// on a function-calling backend -- charged against the budget and included
+    /// in `tokens_used`. Zero when the caller declared none.
+    pub fixed_overhead: usize,
     /// Zones dropped entirely under budget pressure (for logging/inspection).
     pub dropped: Vec<Zone>,
 }
@@ -249,11 +253,34 @@ fn sc_context_message_overhead() -> usize {
 pub struct ContextBuilder<'a> {
     counter: &'a TokenCounter<'a>,
     budget: usize,
+    /// Tokens the request carries that are not in any message, subtracted from the
+    /// budget before fitting. See [`ContextBuilder::with_fixed_overhead`].
+    fixed_overhead: usize,
 }
 
 impl<'a> ContextBuilder<'a> {
     pub fn new(counter: &'a TokenCounter<'a>, budget: usize) -> Self {
-        Self { counter, budget }
+        Self {
+            counter,
+            budget,
+            fixed_overhead: 0,
+        }
+    }
+
+    /// Declare tokens the request will carry OUTSIDE the messages this builder
+    /// assembles, so they are charged against the budget too.
+    ///
+    /// The case that motivates it: a native function-calling backend sends the tool
+    /// schemas as a `tools` array beside the messages, and the server tokenizes
+    /// that array into the same window -- about 2k tokens for eighteen schemas --
+    /// while this builder, which only ever sees messages, counted none of it. The
+    /// builder cannot see the request's constraint, so the caller that attaches
+    /// it says how much it weighs. Fitting then targets `budget - overhead`; the
+    /// returned `tokens_used` includes the overhead so it compares to `budget`
+    /// honestly.
+    pub fn with_fixed_overhead(mut self, tokens: usize) -> Self {
+        self.fixed_overhead = tokens;
+        self
     }
 
     /// Fit `segments` into the budget, evicting whole non-sacred segments from the
@@ -279,8 +306,13 @@ impl<'a> ContextBuilder<'a> {
         let cost = |s: &Segment| self.counter.count(&s.text) + sc_context_message_overhead();
         let total: usize = segments.iter().map(cost).sum();
 
+        // What the MESSAGES may fill: the budget less whatever the request carries
+        // beside them. A zero here is honest -- the overhead alone fills the window
+        // -- and shows up as `tokens_used > budget` below.
+        let fit = self.budget.saturating_sub(self.fixed_overhead);
+
         let mut dropped = Vec::new();
-        if total > self.budget {
+        if total > fit {
             // Evict lowest-priority (highest Zone value) non-sacred segments first.
             // Walk zones from least to most important.
             let mut running = total;
@@ -290,7 +322,7 @@ impl<'a> ContextBuilder<'a> {
 
             let mut evicted = vec![false; segments.len()];
             for idx in evict_order {
-                if running <= self.budget {
+                if running <= fit {
                     break;
                 }
                 if segments[idx].zone.is_sacred() {
@@ -320,7 +352,7 @@ impl<'a> ContextBuilder<'a> {
         // fit, keeping its head and tail (imports/types up top, the code being edited often near
         // where the model is working) with a marked cut.
         let mut running: usize = segments.iter().map(cost).sum();
-        while running > self.budget {
+        while running > fit {
             // Shrink the LARGEST truncatable sacred segment. Prefer the focus file / observations
             // (bulky, safe to middle-clip); the System and TaskAnchor zones are the true minimum
             // and only clipped if nothing else is left. A single large read observation or a huge
@@ -356,7 +388,7 @@ impl<'a> ContextBuilder<'a> {
                 // raises a harness fault on it.
                 break;
             };
-            let over = running - self.budget;
+            let over = running - fit;
             let before = cost(&segments[idx]);
             // Shrink toward what this segment must give up, but NEVER ask for zero.
             //
@@ -380,12 +412,16 @@ impl<'a> ContextBuilder<'a> {
             running = running - before + after;
         }
 
-        let tokens_used = segments.iter().map(cost).sum();
+        // Report what the REQUEST costs, overhead included, against the full
+        // budget: the two are then comparable, and `tokens_used > budget` means
+        // exactly what the agent loop takes it to mean.
+        let tokens_used = segments.iter().map(cost).sum::<usize>() + self.fixed_overhead;
         let messages = segments.iter().map(Segment::to_message).collect();
         BuiltContext {
             messages,
             tokens_used,
             budget: self.budget,
+            fixed_overhead: self.fixed_overhead,
             dropped,
         }
     }
@@ -423,6 +459,61 @@ mod tests {
             let b = prompt_budget(window, 0.75, 6144);
             assert!(b > 0, "window {window} produced a zero budget");
         }
+    }
+
+    /// **The native `tools` JSON is part of the prompt, and the budget must know.**
+    ///
+    /// A function-calling backend sends the schemas beside the messages and the
+    /// server tokenizes them into the same window. The builder never sees them,
+    /// so the caller declares their weight; the fitting budget shrinks by it and
+    /// the report carries it, so `tokens_used` is what the request really costs.
+    #[test]
+    fn fixed_overhead_reduces_the_fitting_budget_and_is_reported() {
+        let c = counter();
+        let per_msg = crate::tokens::MESSAGE_OVERHEAD_TOKENS;
+        let history = "summary ".repeat(50);
+        let everything = crate::tokens::estimate_tokens("system")
+            + crate::tokens::estimate_tokens("task")
+            + crate::tokens::estimate_tokens("obs")
+            + crate::tokens::estimate_tokens(&history)
+            + 4 * per_msg;
+        let segments = || {
+            vec![
+                Segment::system(Zone::System, "system"),
+                Segment::user(Zone::TaskAnchor, "task"),
+                Segment::user(Zone::RecentObservation, "obs"),
+                Segment::user(Zone::HistorySummary, history.clone()),
+            ]
+        };
+
+        // Exactly enough for every message -- with no overhead, nothing is dropped.
+        let built = ContextBuilder::new(&c, everything).build(segments());
+        assert!(built.dropped.is_empty());
+        assert_eq!(built.fixed_overhead, 0);
+        assert_eq!(built.tokens_used, everything);
+
+        // The same budget with 2,000 tokens of tool schemas beside the messages:
+        // the history no longer fits, and the report shows why.
+        let built = ContextBuilder::new(&c, everything)
+            .with_fixed_overhead(2_000)
+            .build(segments());
+        assert_eq!(built.dropped, vec![Zone::HistorySummary]);
+        assert_eq!(built.fixed_overhead, 2_000);
+        assert_eq!(built.budget, everything, "the declared budget is unchanged");
+        let sacred = everything - crate::tokens::estimate_tokens(&history) - per_msg;
+        assert_eq!(
+            built.tokens_used,
+            sacred + 2_000,
+            "tokens_used is messages plus the overhead"
+        );
+
+        // With room for both, everything stays and the overhead is still counted.
+        let built = ContextBuilder::new(&c, everything + 2_000)
+            .with_fixed_overhead(2_000)
+            .build(segments());
+        assert!(built.dropped.is_empty());
+        assert_eq!(built.tokens_used, everything + 2_000);
+        assert!(built.tokens_used <= built.budget);
     }
 
     #[test]

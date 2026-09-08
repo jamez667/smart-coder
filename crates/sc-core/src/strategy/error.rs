@@ -101,6 +101,15 @@ pub trait ToolCallStrategy {
     /// for the plain-completion parse+repair path.
     fn prepare_request(&self, _req: &mut GenerateRequest, _registry: &ToolRegistry) {}
 
+    /// The text this strategy adds to the REQUEST outside the messages -- the native
+    /// `tools` JSON, for a strategy that sends schemas structurally -- so the prompt
+    /// budget can charge for it. Empty when the schemas already ride in the counted
+    /// system preamble (parse-and-repair, grammar). Measured: 18 schemas are ~2k
+    /// tokens the budget never saw, on a 12k-token prompt.
+    fn request_overhead_text(&self, _registry: &ToolRegistry) -> String {
+        String::new()
+    }
+
     /// Turn raw model output into a validated call or a structured repair error.
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError>;
 }
