@@ -313,9 +313,20 @@ pub fn run_agent_observed(
         });
     }
 
+    // The retrieved-zone material, rendered ONCE and refreshed only on a workspace change
+    // (and then only the parts whose source moved), so the prompt prefix is byte-stable
+    // between turns and the backend's KV cache holds. Built after planning, which is the
+    // repo map's other consumer.
+    let mut stable = StableContext::new(workspace, cfg, registry, instruction, repo_map);
+
     let mut metrics = ToolCallMetrics::default();
     let mut history: Vec<TurnRecord> = Vec::new();
-    let mut recent: Vec<Message> = Vec::new();
+    let mut recent = RecentWindow::default();
+    // How many of the oldest turns have been evicted from `recent` into the history summary.
+    // Every window turn has exactly one `history` record (pushed the same iteration), so
+    // `history[..evicted_turns]` is precisely the evicted set and the summary changes only
+    // when an eviction happens.
+    let mut evicted_turns = 0usize;
     let mut peak_prompt_tokens = 0usize;
     // Cumulative prompt tokens across every turn. The PEAK says whether a single
     // prompt fit the window; this says what the whole task cost, which is the
@@ -418,21 +429,39 @@ pub fn run_agent_observed(
                 interventions: interv.count,
             });
         }
-        // Assemble the budgeted, zoned prompt (spec 05): compact older turns, zone the plan +
-        // retrieval + sacred recent window, and note which files are pinned in full this turn.
-        let (segments, pinned_full_files) = assemble::assemble_segments(
-            cfg,
-            workspace,
-            instruction,
-            &system,
-            &repo_map,
-            plan.render(),
-            &history,
-            &recent,
-            registry,
-        );
-
-        let built = builder.build(segments);
+        // Assemble the budgeted, zoned prompt (spec 05): the cached retrieval, the plan, the
+        // summary of the evicted turns and the sacred recent window; note which files are
+        // pinned in full this turn.
+        //
+        // The recent window is bounded by BUDGET, not by a message count. If the builder had
+        // to drop or clip anything to fit, the oldest whole turn is evicted from the window
+        // into the compacted summary and the prompt is rebuilt, until it fits or the window
+        // is down to `keep_recent_turns` (the verbatim minimum). Evicting from the FRONT is
+        // what keeps the prompt append-only between turns: nothing after the summary moves
+        // unless a turn actually leaves.
+        let (built, pinned_full_files) = loop {
+            let (segments, pinned) = assemble::assemble_segments(
+                cfg,
+                instruction,
+                &system,
+                &stable,
+                &plan,
+                &history[..evicted_turns],
+                &recent,
+            );
+            // The builder never adds text: fewer chars out than in means it dropped a zone
+            // or clipped a sacred segment -- the prompt did not fit as assembled.
+            let raw_chars: usize = segments.iter().map(|s| s.text.len()).sum();
+            let built = builder.build(segments);
+            let built_chars: usize = built.messages.iter().map(|m| m.content.len()).sum();
+            let over = built.tokens_used > built.budget || built_chars < raw_chars;
+            if over && recent.len() > cfg.keep_recent_turns.max(1) {
+                recent.evict_oldest();
+                evicted_turns += 1;
+                continue;
+            }
+            break (built, pinned);
+        };
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);
         total_prompt_tokens += built.tokens_used;
 
@@ -1184,10 +1213,9 @@ pub fn run_agent_observed(
                 // still the last user message in `recent` — the model trusts that concrete
                 // "it worked" output over the nudge sitting next to it. Supersede it so the
                 // nudge isn't drowned by a visible success of the very call we're discouraging.
-                replace_last_user(
-                    &mut recent,
-                    &format!("[earlier `{tool}` result superseded — act on the note below]"),
-                );
+                recent.replace_last_user(&format!(
+                    "[earlier `{tool}` result superseded — act on the note below]"
+                ));
                 (obs, action, false, tool, arg)
             } else {
                 nudge_streak = 0;
@@ -1399,7 +1427,14 @@ pub fn run_agent_observed(
                 step: step + 1,
             });
         }
-        push_recent(&mut recent, &resp.content, &trimmed, cfg.keep_recent_turns);
+        recent.push_turn(&resp.content, &trimmed);
+        // Re-render the cached retrieval only if this turn changed the workspace, and then
+        // only the parts whose bytes moved; an unchanged turn keeps the prompt prefix intact.
+        // `changed` only tracks the path-carrying edit tools, but a shell command can edit
+        // anything (`sed -i`, a build that generates a file), so a `run_command` turn is
+        // treated as a possible change: the refresh compares content hashes, so a command
+        // that changed nothing costs a few reads and re-renders nothing.
+        stable.refresh_if_changed(workspace, cfg, registry, changed || tool == "run_command");
 
         // Auto test-repair (spec 03): the moment an edit lands, the harness runs
         // the suite itself — the model shouldn't have to remember to verify. If
@@ -1442,17 +1477,17 @@ pub fn run_agent_observed(
                         "(harness ran the tests after your edit)\n{}",
                         report.observation()
                     );
-                    push_observation(
-                        &mut recent,
-                        // Use the generous read_file cap, not the tight log cap: the report
-                        // is failure-first and carries the underlying exception (e.g.
-                        // TemplateNotFound) that the model must see to fix the bug. At the
-                        // 40-line log cap the `✗`/assert headers crowded the real exception
-                        // out, so the model only saw a bare `assert ... == ...` (observed
-                        // live) and looped blind. 400 lines still bounds a degenerate suite.
-                        &truncate_observation(&fb, cfg.read_file_line_cap, true),
-                        cfg.keep_recent_turns,
-                    );
+                    // Use the generous read_file cap, not the tight log cap: the report
+                    // is failure-first and carries the underlying exception (e.g.
+                    // TemplateNotFound) that the model must see to fix the bug. At the
+                    // 40-line log cap the `✗`/assert headers crowded the real exception
+                    // out, so the model only saw a bare `assert ... == ...` (observed
+                    // live) and looped blind. 400 lines still bounds a degenerate suite.
+                    recent.push_observation(&truncate_observation(
+                        &fb,
+                        cfg.read_file_line_cap,
+                        true,
+                    ));
                     // A failed auto-verify resets the stall streak: real progress
                     // was attempted, so don't count the edit+verify as "stuck".
                     stall_detector.reset();
@@ -1528,6 +1563,7 @@ mod config;
 mod dispatch;
 mod escalation;
 mod prompt;
+mod stable;
 mod stall;
 mod window;
 
@@ -1541,4 +1577,5 @@ use dispatch::{
     mutating_path, observation_cap_for, pre_apply_batched_writes, FinishGate,
 };
 use escalation::{escalate, stopped};
-use window::{push_observation, push_recent, replace_last_user, role_word};
+use stable::StableContext;
+use window::{role_word, RecentWindow};

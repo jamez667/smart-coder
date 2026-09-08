@@ -4,7 +4,9 @@
 //! Every function here is a pure `workspace → String` (or `→ Vec<…>`) read: the repo
 //! signature map, the progress ledger of files that already exist, the pinned bodies of
 //! the focused file(s) and the files they import, and the source blob the diagnostic
-//! pass reads. None depend on the rest of the loop, so they live apart from it.
+//! pass reads. None depend on the rest of the loop, so they live apart from it. The
+//! renders are cached by [`super::stable::StableContext`] and re-run only when their
+//! source changes, so none of them is called every turn.
 
 use std::path::Path;
 
@@ -108,7 +110,7 @@ pub(super) fn render_other_files_map(workspace: &Path, exclude: &[String], top_k
 }
 
 /// Render the filesystem progress ledger: the source files that ACTUALLY exist in
-/// `workspace` right now (read fresh each turn), framed so a small model stops re-creating
+/// `workspace` right now (re-walked after a change), framed so a small model stops re-creating
 /// files it already wrote and notices required files it has not made yet. Excludes the
 /// frozen tests and tooling caches (via `sc_tools::source_files`).
 pub(super) fn render_progress_ledger(workspace: &Path) -> String {
@@ -135,8 +137,8 @@ pub(super) fn render_progress_ledger(workspace: &Path) -> String {
 }
 
 /// Render the current contents of the focused files for the retrieved zone, with
-/// line numbers so a small model can copy an exact, unique `old_str`. Re-read from
-/// the workspace each turn, so it always reflects edits already made.
+/// line numbers so a small model can copy an exact, unique `old_str`. Re-read whenever
+/// the files' bytes change, so it always reflects edits already made.
 pub(super) fn render_focus_files(
     workspace: &Path,
     files: &[String],
@@ -201,7 +203,7 @@ pub(super) fn render_focus_files(
 
 /// Render the full bodies of READ-ONLY CONTEXT files (the ones the focused file imports
 /// from), clearly distinguished from the file-to-edit so the model doesn't confuse which to
-/// change. Re-read fresh each turn so the view never goes stale. Empty if none readable.
+/// change. Re-read when their bytes change so the view never goes stale. Empty if none readable.
 pub(super) fn render_context_files(workspace: &Path, files: &[String]) -> String {
     if files.is_empty() {
         return String::new();

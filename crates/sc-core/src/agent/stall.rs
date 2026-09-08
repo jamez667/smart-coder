@@ -24,7 +24,7 @@ use super::escalation::{
     SELF_RECOVERY_LIMIT,
 };
 use super::prompt::gather_sources;
-use super::window::push_observation;
+use super::window::RecentWindow;
 use super::AgentConfig;
 
 /// Running counts of the harness's in-loop interventions, plus the previous-action hash the
@@ -70,7 +70,7 @@ pub(super) fn handle_stall(
     changed: bool,
     interv: &mut Interventions,
     stall: &mut StallDetector,
-    recent: &mut Vec<sc_model::Message>,
+    recent: &mut RecentWindow,
     history: &[TurnRecord],
     plan: &PlanState,
     cfg: &AgentConfig,
@@ -116,11 +116,7 @@ pub(super) fn handle_stall(
                 trigger: stuck.to_string(),
                 report: report.clone(),
             });
-            push_observation(
-                recent,
-                &crate::diagnose::diagnosis_observation(&report),
-                cfg.keep_recent_turns,
-            );
+            recent.push_observation(&crate::diagnose::diagnosis_observation(&report));
             return StallDecision::Recovered;
         }
     }
@@ -152,7 +148,7 @@ pub(super) fn handle_stall(
                 trigger: stuck.to_string(),
                 advice: advice.clone(),
             });
-            push_observation(recent, &advice, cfg.keep_recent_turns);
+            recent.push_observation(&advice);
             StallDecision::Recovered
         }
         None if interv.self_recoveries < SELF_RECOVERY_LIMIT => {
@@ -165,7 +161,7 @@ pub(super) fn handle_stall(
                 trigger: stuck.to_string(),
                 advice: advice.clone(),
             });
-            push_observation(recent, &advice, cfg.keep_recent_turns);
+            recent.push_observation(&advice);
             StallDecision::Recovered
         }
         None => StallDecision::GiveUp(crate::recovery::StopReason::Stalled(stuck.to_string())),

@@ -78,6 +78,12 @@ pub struct GenerateRequest {
     /// strategy sets this; a backend applies the variant it supports and ignores
     /// the rest. `None` means plain completion (prompt + parse + repair).
     pub constraint: Option<OutputConstraint>,
+    /// Sampling seed, when the caller wants a reproducible draw (spec 02/03). `None`
+    /// leaves it to the server; a backend that honours it sends it as `seed`.
+    pub seed: Option<u64>,
+    /// Stop sequences: generation ends when the model emits any of these (spec 02).
+    /// Empty means none; a backend sends them as `stop` only when set.
+    pub stop: Vec<String>,
 }
 
 impl GenerateRequest {
@@ -87,12 +93,30 @@ impl GenerateRequest {
             max_tokens: 1024,
             temperature: 0.2,
             constraint: None,
+            seed: None,
+            stop: Vec::new(),
         }
     }
 
     /// Attach an output constraint (builder style).
     pub fn with_constraint(mut self, constraint: OutputConstraint) -> Self {
         self.constraint = Some(constraint);
+        self
+    }
+
+    /// Pin the sampling seed (builder style).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Set the stop sequences (builder style).
+    pub fn with_stop<I, S>(mut self, stop: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.stop = stop.into_iter().map(Into::into).collect();
         self
     }
 }

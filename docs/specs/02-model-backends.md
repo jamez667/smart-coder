@@ -80,7 +80,14 @@ schema paths matter most for models that lack it.
 
 1. **OpenAI-compatible HTTP** — covers vLLM, LM Studio, llama.cpp's
    `--api`, text-generation-webui, and Ollama's OpenAI-compat endpoint. One
-   adapter, broad coverage. *Primary path.*
+   adapter, broad coverage. *Primary path.* It builds one request body for
+   both `generate` and `stream` (so a streamed call carries the same
+   `tools`/`grammar`, `seed` and `stop` as a blocking one), and sends
+   llama.cpp's `cache_prompt: true` by default so the stable prompt prefix
+   ([05](05-context-management.md)) is served from the KV cache. The flag is
+   off for hosts that reject unknown fields (Gemini's compat endpoint,
+   `api.openai.com`) and can be forced either way with
+   `OpenAiBackend::with_prompt_cache`.
 2. **Ollama native** — `/api/chat` + `/api/generate`, model pull/list, and
    Ollama-specific options. First-class because it's the easiest local setup.
 3. **llama.cpp (direct/server)** — to expose **GBNF grammar** constrained

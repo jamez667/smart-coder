@@ -32,6 +32,21 @@ pub struct OpenAiBackend {
     /// stops reading the SSE and drops the connection (aborting the request). `None` =
     /// not cancellable (the default).
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Send llama.cpp's `cache_prompt: true` so a shared prefix (the system prompt, the
+    /// conversation so far) is reused across calls instead of re-evaluated. Other local
+    /// servers ignore the unknown field, but **Gemini's OpenAI-compat endpoint rejects
+    /// unknown names with HTTP 400**, so a hosted backend turns it off via
+    /// [`OpenAiBackend::with_prompt_cache`].
+    prompt_cache: bool,
+}
+
+/// Does this base URL belong to a hosted provider that answers an unknown JSON field with
+/// HTTP 400? Gemini's OpenAI-compat endpoint does (`Invalid JSON payload received. Unknown
+/// name "cache_prompt"`), and OpenAI's own API is strict too. A local llama.cpp, Ollama or
+/// vLLM ignores what it does not know, so everything else defaults to sending the flag.
+fn rejects_unknown_fields(base_url: &str) -> bool {
+    let url = base_url.to_ascii_lowercase();
+    url.contains("generativelanguage.googleapis.com") || url.contains("api.openai.com")
 }
 
 impl OpenAiBackend {
@@ -75,7 +90,18 @@ impl OpenAiBackend {
                 .build()
                 .into(),
             cancel: None,
+            // Off by default for the hosted providers known to reject unknown fields;
+            // on for everything else (llama.cpp is the one that uses it).
+            prompt_cache: !rejects_unknown_fields(&base_url),
         }
+    }
+
+    /// Whether to send llama.cpp's `cache_prompt: true` on every request (default: on).
+    /// Turn it off for a provider that rejects unknown fields — Gemini's OpenAI-compat
+    /// endpoint answers `Invalid JSON payload received. Unknown name ...` with a 400.
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.prompt_cache = enabled;
+        self
     }
 
     /// Attach a cooperative cancel flag. When another thread sets it true, an in-flight
@@ -225,6 +251,72 @@ impl OpenAiBackend {
         format!("{}/chat/completions", self.base_url)
     }
 
+    /// The one request body both paths send — `stream` is the only difference.
+    ///
+    /// The streaming path used to build its own body without the constraint, so a
+    /// streamed run silently lost its `tools`/`grammar` while the transcript still
+    /// recorded the constraint as sent. One builder means the two cannot drift again.
+    fn build_body(&self, req: &GenerateRequest, stream: bool) -> serde_json::Value {
+        let messages: Vec<serde_json::Value> = req
+            .messages
+            .iter()
+            .map(|m| serde_json::json!({"role": role_str(m.role), "content": m.content}))
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": req.temperature,
+            "max_tokens": req.max_tokens,
+            "stream": stream,
+        });
+
+        // llama.cpp's prompt cache: reuse the evaluated shared prefix across calls.
+        // Gated because Gemini's compat endpoint 400s on any unknown field.
+        if self.prompt_cache {
+            body["cache_prompt"] = serde_json::Value::Bool(true);
+        }
+        if let Some(seed) = req.seed {
+            body["seed"] = serde_json::json!(seed);
+        }
+        if !req.stop.is_empty() {
+            body["stop"] = serde_json::json!(req.stop);
+        }
+
+        // Apply the request's output constraint with whatever this server speaks.
+        // Native FC → tools/tool_choice; GBNF → llama.cpp's `grammar` extension.
+        // A constraint the backend can't honor is simply not attached — the
+        // strategy layer only sends one it negotiated via capabilities (spec 02).
+        match &req.constraint {
+            Some(OutputConstraint::Tools(tools))
+                if self.caps.tool_calling == ToolCalling::OpenAiStyle =>
+            {
+                let defs: Vec<serde_json::Value> = tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.name,
+                                "description": t.description,
+                                "parameters": t.parameters,
+                            }
+                        })
+                    })
+                    .collect();
+                body["tools"] = serde_json::Value::Array(defs);
+                body["tool_choice"] = serde_json::json!("required");
+            }
+            Some(OutputConstraint::Grammar(g)) if self.caps.tool_calling == ToolCalling::Gbnf => {
+                // llama.cpp accepts a GBNF grammar via this non-standard field.
+                body["grammar"] = serde_json::Value::String(g.clone());
+            }
+            _ => {}
+        }
+
+        body
+    }
+
     /// Streaming completion: like [`ModelBackend::generate`], but sets `"stream": true` and
     /// invokes `on_token` with each content delta as the server emits it (SSE). Returns the
     /// full concatenated text at the end (so callers get the same result as `generate` plus a
@@ -252,18 +344,7 @@ impl OpenAiBackend {
     ) -> Result<GenerateResponse> {
         use std::io::BufRead;
 
-        let messages: Vec<serde_json::Value> = req
-            .messages
-            .iter()
-            .map(|m| serde_json::json!({"role": role_str(m.role), "content": m.content}))
-            .collect();
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "temperature": req.temperature,
-            "max_tokens": req.max_tokens,
-            "stream": true,
-        });
+        let body = self.build_body(req, true);
 
         let mut call = self.agent.post(&self.endpoint());
         if let Some(key) = &self.api_key {
@@ -573,50 +654,7 @@ impl OpenAiBackend {
     /// The real request/response body of [`ModelBackend::generate`], split out so the public
     /// method can time it and log the transcript around it.
     fn generate_inner(&self, req: &GenerateRequest) -> Result<GenerateResponse> {
-        let messages: Vec<serde_json::Value> = req
-            .messages
-            .iter()
-            .map(|m| serde_json::json!({"role": role_str(m.role), "content": m.content}))
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "temperature": req.temperature,
-            "max_tokens": req.max_tokens,
-            "stream": false,
-        });
-
-        // Apply the request's output constraint with whatever this server speaks.
-        // Native FC → tools/tool_choice; GBNF → llama.cpp's `grammar` extension.
-        // A constraint the backend can't honor is simply not attached — the
-        // strategy layer only sends one it negotiated via capabilities (spec 02).
-        match &req.constraint {
-            Some(OutputConstraint::Tools(tools))
-                if self.caps.tool_calling == ToolCalling::OpenAiStyle =>
-            {
-                let defs: Vec<serde_json::Value> = tools
-                    .iter()
-                    .map(|t| {
-                        serde_json::json!({
-                            "type": "function",
-                            "function": {
-                                "name": t.name,
-                                "description": t.description,
-                                "parameters": t.parameters,
-                            }
-                        })
-                    })
-                    .collect();
-                body["tools"] = serde_json::Value::Array(defs);
-                body["tool_choice"] = serde_json::json!("required");
-            }
-            Some(OutputConstraint::Grammar(g)) if self.caps.tool_calling == ToolCalling::Gbnf => {
-                // llama.cpp accepts a GBNF grammar via this non-standard field.
-                body["grammar"] = serde_json::Value::String(g.clone());
-            }
-            _ => {}
-        }
+        let body = self.build_body(req, false);
 
         let mut call = self.agent.post(&self.endpoint());
         if let Some(key) = &self.api_key {
@@ -996,6 +1034,117 @@ Connection: close
 
         let raw = rx.recv().unwrap();
         assert!(!raw.contains("tool_choice"), "must not force tools: {raw}");
+    }
+
+    /// A minimal SSE reply, for tests that only care about the request that was sent.
+    const DONE_SSE: &str =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n";
+
+    /// **The streaming path must carry the constraint too.**
+    ///
+    /// It built its own body without `tools`/`tool_choice`, so every streamed run
+    /// (the desktop and web interactive path) lost its native-FC constraint while
+    /// the transcript still recorded the constraint as sent. Pinned at the wire.
+    #[test]
+    fn a_streamed_request_carries_native_tools() {
+        let (base, rx) = stub_server_raw(DONE_SSE, "text/event-stream");
+        let backend = OpenAiBackend::new(base, "m").with_native_tools();
+        let req = GenerateRequest::new(vec![Message::user("read a.txt")]).with_constraint(
+            OutputConstraint::Tools(vec![crate::ToolSchema {
+                name: "read_file".into(),
+                description: "Read a file.".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]),
+        );
+        backend.generate_streaming(&req, &mut |_: &str| {}).unwrap();
+
+        let raw = rx.recv().unwrap();
+        let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("\"stream\":true"), "got: {raw}");
+        assert!(compact.contains("\"tools\":["), "got: {raw}");
+        assert!(compact.contains("\"name\":\"read_file\""), "got: {raw}");
+        assert!(
+            compact.contains("\"tool_choice\":\"required\""),
+            "got: {raw}"
+        );
+    }
+
+    /// The same drift for GBNF: a streamed llama.cpp run must send `grammar`.
+    #[test]
+    fn a_streamed_request_carries_the_grammar() {
+        let (base, rx) = stub_server_raw(DONE_SSE, "text/event-stream");
+        let backend = OpenAiBackend::llama_cpp(base, "m.gguf");
+        let req = GenerateRequest::new(vec![Message::user("go")])
+            .with_constraint(OutputConstraint::Grammar("root ::= \"{}\"".into()));
+        backend.generate_streaming(&req, &mut |_: &str| {}).unwrap();
+
+        let raw = rx.recv().unwrap();
+        assert!(raw.contains("\"grammar\""), "grammar field missing: {raw}");
+    }
+
+    /// Both bodies ask llama.cpp to reuse the evaluated prefix; a provider that 400s
+    /// on unknown fields (Gemini's compat endpoint) opts out via the builder.
+    #[test]
+    fn a_strict_hosted_provider_never_gets_the_cache_flag_by_default() {
+        for url in [
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "https://api.openai.com/v1",
+        ] {
+            let b = OpenAiBackend::new(url, "m");
+            let body = b.build_body(&GenerateRequest::new(vec![]), false);
+            assert!(
+                body.get("cache_prompt").is_none(),
+                "{url} must not get cache_prompt"
+            );
+        }
+        let local = OpenAiBackend::new("http://localhost:11436/v1", "m");
+        let body = local.build_body(&GenerateRequest::new(vec![]), false);
+        assert_eq!(body["cache_prompt"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn every_body_asks_for_the_prompt_cache_unless_opted_out() {
+        let req = GenerateRequest::new(vec![Message::user("hi")]);
+        let backend = OpenAiBackend::new("http://x/v1", "m");
+        for stream in [false, true] {
+            let body = backend.build_body(&req, stream);
+            assert_eq!(body["cache_prompt"], true, "stream={stream}: {body}");
+            assert_eq!(body["stream"], stream);
+        }
+
+        let hosted = OpenAiBackend::new("http://x/v1", "m").with_prompt_cache(false);
+        for stream in [false, true] {
+            let body = hosted.build_body(&req, stream);
+            assert!(
+                body.get("cache_prompt").is_none(),
+                "stream={stream}: must not send an unknown field to a strict provider: {body}"
+            );
+        }
+    }
+
+    /// `seed` and `stop` are sent only when the request sets them — an absent seed
+    /// must not become `null` on the wire, and an empty stop list must not be sent.
+    #[test]
+    fn seed_and_stop_appear_only_when_set() {
+        let backend = OpenAiBackend::new("http://x/v1", "m");
+
+        let bare = backend.build_body(&GenerateRequest::new(vec![Message::user("hi")]), false);
+        assert!(bare.get("seed").is_none(), "got: {bare}");
+        assert!(bare.get("stop").is_none(), "got: {bare}");
+
+        let pinned = GenerateRequest::new(vec![Message::user("hi")])
+            .with_seed(42)
+            .with_stop(["</answer>", "\n\n"]);
+        for stream in [false, true] {
+            let body = backend.build_body(&pinned, stream);
+            assert_eq!(body["seed"], 42, "stream={stream}: {body}");
+            assert_eq!(
+                body["stop"],
+                serde_json::json!(["</answer>", "\n\n"]),
+                "stream={stream}: {body}"
+            );
+        }
     }
 
     /// The whole streaming path must carry the stop reason through, not just the

@@ -34,8 +34,12 @@ pub struct AgentConfig {
     /// edit, so it re-reads or guesses. Give file reads real room to hold whole small/medium
     /// files; the general `observation_line_cap` still tames noisy command output.
     pub read_file_line_cap: usize,
-    /// How many most-recent turns stay verbatim before older ones are compacted
-    /// into a rolling summary (spec 05).
+    /// The MINIMUM number of most-recent turns kept verbatim (spec 05). This is a floor,
+    /// not a cap: the recent window grows freely while the prompt fits the budget, and only
+    /// when it does not fit does the loop evict the OLDEST whole turn (the action, its
+    /// observation, and any harness note attached to it) into the rolling history summary,
+    /// one at a time, never below this many. Appending rather than trimming keeps the prompt
+    /// prefix byte-stable between turns so the backend's KV cache is reused.
     pub keep_recent_turns: usize,
     /// How many top-ranked symbols the repo map injects into the retrieved zone.
     pub repo_map_top_k: usize,

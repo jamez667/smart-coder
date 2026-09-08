@@ -13,6 +13,11 @@ use crate::tokens::TokenCounter;
 /// A prompt zone, in *descending* priority. Lower-priority zones are evicted
 /// first when the budget is tight (spec 05). The order of the variants encodes
 /// the priority: earlier = more important = evicted later.
+///
+/// Priority is NOT layout. The derived `Ord` answers "what goes first under
+/// pressure" (eviction, [`Zone::is_sacred`]); [`Zone::layout_rank`] answers "where
+/// does it sit in the prompt". The two differ on purpose: the observation the
+/// model must react to is high priority AND must be the LAST thing it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Zone {
     /// Role, current step, tool schemas. Fixed and minimal. Sacred.
@@ -39,6 +44,26 @@ impl Zone {
             self,
             Zone::System | Zone::TaskAnchor | Zone::FocusFile | Zone::RecentObservation
         )
+    }
+
+    /// Where the zone sits in the assembled prompt (spec 05's layout diagram), lowest
+    /// first. Used ONLY for the final message order — never for eviction, which goes by
+    /// the enum's priority order.
+    ///
+    /// Background (plan render, repo map, ledger, history summary) comes before the
+    /// focus file, and the recent observation is last so the model's next action
+    /// follows directly from the thing it must react to. Sorting the prompt by
+    /// priority instead put those background renders AFTER the observation, as
+    /// trailing user messages.
+    pub fn layout_rank(self) -> u8 {
+        match self {
+            Zone::System => 0,
+            Zone::TaskAnchor => 1,
+            Zone::Retrieved => 2,
+            Zone::HistorySummary => 3,
+            Zone::FocusFile => 4,
+            Zone::RecentObservation => 5,
+        }
     }
 }
 
@@ -236,12 +261,15 @@ impl<'a> ContextBuilder<'a> {
     /// sacred set alone exceeds budget, they're kept anyway — truncation of their
     /// *contents* is the truncation layer's job, not eviction's).
     ///
-    /// Prompt order is stable and zone-sorted (System → TaskAnchor → … → History)
-    /// regardless of eviction, so the model always sees a consistent layout.
+    /// Prompt order is stable and zone-sorted by [`Zone::layout_rank`]
+    /// (System → TaskAnchor → Retrieved → HistorySummary → FocusFile →
+    /// RecentObservation) regardless of eviction, so the model always sees a
+    /// consistent layout and the observation it must react to is always last.
     pub fn build(&self, mut segments: Vec<Segment>) -> BuiltContext {
-        // Stable order for the final prompt: by zone priority, preserving input
-        // order within a zone.
-        segments.sort_by_key(|s| s.zone);
+        // Stable order for the final prompt: by zone LAYOUT (not priority),
+        // preserving input order within a zone. Eviction below indexes by zone
+        // priority directly and never relies on this position.
+        segments.sort_by_key(|s| s.zone.layout_rank());
 
         // Cost a segment as the REQUEST will carry it: its text plus the chat
         // template markup wrapped around every message. Omitting the wrapper is
@@ -551,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn output_is_ordered_by_zone_priority() {
+    fn output_is_ordered_by_zone_layout() {
         let c = counter();
         let b = ContextBuilder::new(&c, 10_000);
         // Supplied out of order; output must be System, TaskAnchor, Retrieved.
@@ -563,6 +591,109 @@ mod tests {
         assert_eq!(built.messages[0].content, "system");
         assert_eq!(built.messages[1].content, "task");
         assert_eq!(built.messages[2].content, "retrieved");
+    }
+
+    /// **Layout is not priority.** With one segment of every zone, the prompt
+    /// reads System, TaskAnchor, Retrieved, HistorySummary, FocusFile,
+    /// RecentObservation -- background first, the observation the model must
+    /// react to LAST. Sorting by the priority enum instead put the plan render,
+    /// repo map, ledger and history summary after the observation as trailing
+    /// user messages, with the thing to react to buried in the middle.
+    #[test]
+    fn layout_puts_the_recent_observation_last() {
+        let c = counter();
+        let b = ContextBuilder::new(&c, 10_000);
+        // Supplied in PRIORITY order, which is exactly the order that was wrong.
+        let built = b.build(vec![
+            Segment::system(Zone::System, "system"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::FocusFile, "focus"),
+            Segment::user(Zone::RecentObservation, "observation"),
+            Segment::user(Zone::Retrieved, "retrieved"),
+            Segment::user(Zone::HistorySummary, "history"),
+        ]);
+        let got: Vec<&str> = built.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(
+            got,
+            [
+                "system",
+                "task",
+                "retrieved",
+                "history",
+                "focus",
+                "observation"
+            ]
+        );
+        assert_eq!(
+            built.messages.last().map(|m| m.content.as_str()),
+            Some("observation"),
+            "the observation the model must react to is the last message"
+        );
+    }
+
+    /// The layout change must not touch eviction: under pressure HistorySummary
+    /// still goes before Retrieved, and no sacred zone is ever dropped -- even
+    /// though HistorySummary now sits AFTER Retrieved in the prompt and the sacred
+    /// FocusFile/RecentObservation sit last of all.
+    #[test]
+    fn eviction_still_follows_priority_not_layout() {
+        let c = counter();
+        let per_msg = crate::tokens::MESSAGE_OVERHEAD_TOKENS;
+        let retrieved = "code ".repeat(20);
+        let history = "summary ".repeat(20);
+        let sacred_cost = crate::tokens::estimate_tokens("system")
+            + crate::tokens::estimate_tokens("task")
+            + crate::tokens::estimate_tokens("focus")
+            + crate::tokens::estimate_tokens("observation")
+            + 4 * per_msg;
+        // Room for the sacred set plus Retrieved, but not History as well.
+        let budget = sacred_cost + crate::tokens::estimate_tokens(&retrieved) + per_msg + 1;
+        let b = ContextBuilder::new(&c, budget);
+        let built = b.build(vec![
+            Segment::system(Zone::System, "system"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::Retrieved, retrieved.clone()),
+            Segment::user(Zone::HistorySummary, history),
+            Segment::user(Zone::FocusFile, "focus"),
+            Segment::user(Zone::RecentObservation, "observation"),
+        ]);
+        assert_eq!(built.dropped, vec![Zone::HistorySummary]);
+        assert!(built.tokens_used <= built.budget);
+        let got: Vec<&str> = built.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(
+            got,
+            ["system", "task", retrieved.as_str(), "focus", "observation"]
+        );
+
+        // Squeeze harder: Retrieved goes too, the sacred four never do.
+        let b = ContextBuilder::new(&c, sacred_cost + 1);
+        let built = b.build(vec![
+            Segment::system(Zone::System, "system"),
+            Segment::user(Zone::TaskAnchor, "task"),
+            Segment::user(Zone::Retrieved, retrieved.clone()),
+            Segment::user(Zone::HistorySummary, "summary ".repeat(20)),
+            Segment::user(Zone::FocusFile, "focus"),
+            Segment::user(Zone::RecentObservation, "observation"),
+        ]);
+        assert_eq!(built.dropped, vec![Zone::HistorySummary, Zone::Retrieved]);
+        let got: Vec<&str> = built.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(got, ["system", "task", "focus", "observation"]);
+    }
+
+    /// Several segments in one zone keep their input order: the recent window is a
+    /// conversation, and the layout sort must not reshuffle it.
+    #[test]
+    fn segments_within_a_zone_keep_their_input_order() {
+        let c = counter();
+        let b = ContextBuilder::new(&c, 10_000);
+        let built = b.build(vec![
+            Segment::user(Zone::RecentObservation, "first"),
+            Segment::system(Zone::System, "system"),
+            Segment::assistant(Zone::RecentObservation, "second"),
+            Segment::user(Zone::RecentObservation, "third"),
+        ]);
+        let got: Vec<&str> = built.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(got, ["system", "first", "second", "third"]);
     }
 
     /// **The builder must fit the budget, even when everything is sacred.**

@@ -16,7 +16,11 @@ limit (a configurable fraction of the advertised window), not the nominal max.
 
 Every prompt is assembled to fit a **hard token budget** derived from the
 backend's real context size ([02](02-model-backends.md)), minus a reserve for
-the model's response. The budget is split into zones with priorities:
+the model's response. The budget is split into zones. Each zone has a
+**priority** (what survives under pressure) and, separately, a **layout rank**
+(where it sits in the prompt): the prompt reads System, Task anchor, Retrieved,
+History summary, Focus file(s), Recent observations — the observation the model
+must react to is always last — while eviction goes by priority alone:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -26,9 +30,11 @@ the model's response. The budget is split into zones with priorities:
 ├─────────────────────────────────────────────────────────┤
 │  Retrieved context (only the snippets relevant NOW)      │  budgeted, ranked
 ├─────────────────────────────────────────────────────────┤
-│  Recent observations (last tool result(s))               │  budgeted
+│  History summary (the turns evicted from the window)     │  budgeted, optional
 ├─────────────────────────────────────────────────────────┤
-│  History summary (compacted older turns)                 │  budgeted, optional
+│  Focus file(s) (pinned in full, hash-keyed)              │  sacred
+├─────────────────────────────────────────────────────────┤
+│  Recent observations (the verbatim recent window)        │  sacred, last
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -61,10 +67,15 @@ dependency structure instead of asking a small model to navigate. This measurabl
 beats naive file inclusion on edit accuracy and is a strong default for the
 relevance ranking above. See [10 — Prior art](10-prior-art.md).
 
-### 2. Just-in-time, step-scoped context
-Context is rebuilt **per step**, not accumulated forever. When the loop moves to
-a new step, stale snippets from the previous step are dropped and fresh ones
-retrieved for the new step. The window reflects *what matters right now*.
+### 2. Prefix stability (append-only between evictions)
+The retrieved zone (plan doc, repo map, ledger, imports, signature map, focus
+files) is rendered once per run and re-rendered only when the workspace changes,
+keyed by content hash; the recent window is whole turns, appended and never
+trimmed by count. So turn N's messages are a byte-identical prefix of turn
+N+1's (`crates/sc-core/tests/prefix_stability.rs`) and the backend's prefix KV
+cache is reused instead of re-prefilling the whole prompt every turn
+([02](02-model-backends.md)). The one deliberate break is the repeat-dedup
+nudge, which overwrites the newest user message in place.
 
 ### 3. Aggressive observation truncation
 Tool results are summarized to fit before re-entering the prompt
@@ -74,8 +85,10 @@ so the model knows it can request more.
 
 ### 4. History compaction (rolling summary)
 Older turns are compressed into a short running summary ("decisions made, files
-changed, what's verified") rather than kept verbatim. The summary itself is
-budgeted and refreshed. Recent turns stay verbatim; distant ones become summary.
+changed, what's verified") rather than kept verbatim. The summary covers exactly
+the turns evicted from the recent window, so it changes only when an eviction
+happens (which keeps the prefix stable). Recent turns stay verbatim; evicted
+ones become summary.
 
 ### 5. Structured state instead of prose
 Plan status, working-set file list, and budgets are rendered as compact
@@ -111,7 +124,11 @@ available.
 - `context_tokens` cap and response reserve.
 - Retrieval top-K (ranking is lexical; see [23](23-repo-intelligence.md)).
 - Observation truncation limits.
-- History compaction threshold (when to start summarizing).
+- `keep_recent_turns` — the **minimum** number of whole turns kept verbatim (a
+  floor, not a cap). The window grows freely while the prompt fits; only when
+  the built prompt is over budget is the oldest whole turn (action, observation,
+  any attached harness note) evicted into the summary, one at a time, never
+  below the floor.
 
 Defaults are conservative for tiny windows; users on a roomier 12B model can
 loosen them.
