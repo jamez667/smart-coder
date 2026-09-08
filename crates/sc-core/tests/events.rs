@@ -1182,3 +1182,68 @@ fn reports_a_harness_fault_when_the_instruction_is_blank() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// A BUILD run whose reply ran to the token cap gets told to ACT, not JSON syntax.
+///
+/// The read-only path already had this steer; the build path got the generic
+/// "your JSON was malformed" repair prompt, which is advice for a problem the model
+/// does not have. Measured on a 126-run ladder: 38 replies ran to the cap and burned
+/// 21% of the wall-clock, several of them literally narrating "I keep planning
+/// without acting" before planning for another 2,000 tokens.
+#[test]
+fn a_capped_build_reply_is_told_to_act_not_to_fix_its_json() {
+    let ws = temp("capped-build-steer");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    let cfg = AgentConfig {
+        // The steer is delivered in the NEXT turn's prompt, so the run needs a second
+        // turn, and `verbose` is what puts the assembled messages on the event stream.
+        verbose: true,
+        max_steps: 2,
+        ..AgentConfig::default()
+    };
+    run_agent_observed(
+        &Truncating(std::cell::RefCell::new(0)),
+        None,
+        &registry,
+        &ParseRepair,
+        "fix the bug in a.txt",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let prompts: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::PromptAssembled { messages, .. } => {
+                Some(messages.iter().map(|m| m.content.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    let second = prompts
+        .get(1)
+        .expect("a second turn must be assembled after the capped reply");
+
+    assert!(
+        second.contains("ran to the token limit without emitting a tool call"),
+        "the capped build reply must be told it produced nothing, got:\n{second}"
+    );
+    assert!(
+        second.contains("planning instead of acting"),
+        "it must name the actual failure, not JSON syntax, got:\n{second}"
+    );
+    // It must steer toward a tool this run can actually call (spec 04 / `mention`).
+    assert!(
+        second.contains("`write_file`") || second.contains("`edit_file`"),
+        "the steer must name an edit tool the registry offers, got:\n{second}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

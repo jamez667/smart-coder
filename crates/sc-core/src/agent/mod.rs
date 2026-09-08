@@ -1113,6 +1113,29 @@ pub fn run_agent_observed(
                         // string once already.
                         "\n\nYour reply was cut off because it ran too long. You are THINKING OUT LOUD instead of answering. Do not re-read anything - the code you need is already above. Reply with ONE JSON object now: {\"tool\":\"finish\",\"summary\":\"<your answer: the file, the line, the cause, the fix>\"}. Keep it under 200 words.",
                     );
+                } else if was_cut_off {
+                    // A BUILD run that ran to the cap without emitting a call was reasoning,
+                    // not malforming -- and until now it got only the generic JSON-syntax
+                    // repair prompt, which is advice for a problem it does not have.
+                    //
+                    // Measured on the 126-run ladder: 38 replies ran to the 2048-token cap
+                    // and consumed 787 of 3,705 seconds -- 21% of the wall-clock for 5% of
+                    // the calls. Their text is unmistakable and self-aware: "I keep planning
+                    // without acting. Let me just write the implementation", followed by
+                    // another 2,000 tokens of planning. The model knew; nothing was telling
+                    // it to stop.
+                    //
+                    // The cap itself was raised past the distribution's shoulder (see
+                    // `response_reserve_tokens`), so this is the backstop for the turns that
+                    // still run long, not the primary fix.
+                    let how = match mention(registry, &["write_file", "edit_file", "create_file"]) {
+                        Some(t) => format!("call `{t}` with the change"),
+                        None => "make the change".to_string(),
+                    };
+                    detail.push_str(&format!(
+                        // ONE LINE, for the rustfmt-reflow reason given just above.
+                        "\n\nYour reply was cut off: it ran to the token limit without emitting a tool call, so this turn did nothing. You are planning instead of acting. Stop reasoning and {how} NOW, in ONE JSON object, as your very first output - no preamble, no explanation. If the change is large, make the smallest correct part of it this turn."
+                    ));
                 }
                 // Repeated malformed replies usually mean the model is trying to encode a long
                 // multi-line `edit_file` `old_str` as JSON and mangling it. Steer to `edit_lines`

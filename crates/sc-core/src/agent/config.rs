@@ -176,15 +176,20 @@ impl Default for AgentConfig {
             // truncated turn yields NO call -- indistinguishable from declining to
             // act. At 1024, one edit request in five returned nothing at all.
             //
-            // Sized from what was measured, not guessed: across a full ten-rung run
-            // Tiel's largest reply was 1,328 tokens (see `AgentReport::peak_reply_tokens`,
-            // which exists so this number can be checked). 2048 is ~1.5x that peak;
-            // the previous 6144 was subtracted from EVERY prompt of every turn to
-            // hold room that was never used. A reasoning model that spends more
-            // before it answers -- a rambling model on the same suite hit 14,202 --
-            // must raise this, and the run report says when it should: watch
-            // `peak_reply_tokens` and the `ReplyTruncated` harness fault.
-            response_reserve_tokens: 2048,
+            // Sized from the DISTRIBUTION, not from one peak. 2048 was set from a
+            // ten-rung run whose largest reply was 1,328 tokens, and it was wrong:
+            // over the next 781-call run 5.5% of replies hit ~90% of that ceiling,
+            // and every one of those turns cost a full maximum-length generation --
+            // 38 near-cap replies took 787 of 3,705 seconds, 21% of the wall-clock
+            // for 5% of the calls. The reply-length distribution has a hard shoulder
+            // just above 2048: at a 3072 cap, ZERO of those same 781 replies reach
+            // 90% of it (p99 = 2,421 estimated tokens, p100 = 2,750).
+            //
+            // So the rule is not "1.5x the peak" but "past the shoulder": raise it
+            // until `ReplyTruncated` stops firing, then stop. Every token here is
+            // taken from EVERY prompt of every turn, so it is not free -- 6144, the
+            // value before 2048, held room that was never used.
+            response_reserve_tokens: 3072,
             // 40 lines amputates a test traceback exactly where the assertion is.
             observation_line_cap: 200,
             // The model must read the failing test; clipping it mid-file is the
