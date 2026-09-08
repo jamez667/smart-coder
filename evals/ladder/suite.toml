@@ -359,3 +359,97 @@ verify_cmd = "rustc --test --edition 2021 -o t_trait_impl.exe test.rs && ./t_tra
 contract_tests = ["test.rs"]
 tags = ["rung:cross-file-trait", "lang:rust"]
 timeout_secs = 300
+
+# --- Recovery rungs ----------------------------------------------------------
+#
+# WHY THESE EXIST -- do not delete them as duplicates of the rungs above.
+#
+# Measured over 42 control runs of the 14 rungs above: ZERO re-reads, zero
+# looping interventions, and all 24 wasted turns traced to one unrelated cause
+# (replies hitting the token cap). The harness's recovery machinery -- the stall
+# detector, the unchanged-failure detector, the anchor-miss breaker -- was never
+# once exercised, because no rung above has a FIRST PLAUSIBLE MOVE THAT IS WRONG.
+# Every one of them rewards "read the test, read the file it names, fix it".
+#
+# That machinery is the part of the harness we most need to justify or delete,
+# and a suite that never triggers it cannot tell us which. These three rungs each
+# make the obvious first fix wrong, in the three specific ways the three
+# detectors exist to catch. Each is still solvable in one further step -- the
+# point is to measure recovery, not to build an unsolvable task.
+#
+#   rust-plausible-wrong-fix  targets RE-PLANNING after a changed signature.
+#                             The obvious fix compiles, makes the NAMED test
+#                             pass, and breaks two others (verified: 1 failed/3
+#                             passed becomes 2 failed/2 passed, different names).
+#                             A run that only watches the named test declares
+#                             victory; a run that reads the suite must re-plan.
+#
+#   rust-ineffective-edit     targets StallDetector::note_unchanged_failure
+#                             (recovery.rs) -- three verification runs failing
+#                             with the SAME failure_signature across edits that
+#                             DID change bytes. The decoy is in the file every
+#                             failing assertion names, next to a helper that
+#                             visibly exists to fix exactly this symptom; two
+#                             separate decoy edits were verified to compile
+#                             warning-free and leave 4 passed/5 failed with the
+#                             same five test names. The real fix is one `% 60`
+#                             in the helper module nothing points at.
+#
+#   rust-shifting-anchor      targets the edit_file anchor path in
+#                             builtin/write.rs (ambiguous-match and
+#                             closest-block output) and the failed-edit-streak
+#                             breaker in agent/mod.rs. Five near-identical zone
+#                             bodies differ only in their constants, so every
+#                             anchor a model would reach for matches 2-5 times
+#                             and none is a unique whole line (so the whole-line
+#                             disambiguator cannot rescue it). The correct edit
+#                             needs a multi-line anchor carrying the zone's own
+#                             constants, or edit_lines.
+#
+# Same rules as every rung above: Rust only, std only, single `rustc --test`, and
+# a unique exe name per task.
+
+[[tasks]]
+id = "rust-plausible-wrong-fix"
+description = """
+The log sink escapes each record onto a single line. A field containing a \
+Windows path comes back mangled: `unescape(escape(s))` does not return `s` when \
+`s` holds a backslash. Find the cause and fix it so the tests pass."""
+fixture = "tasks/rust-plausible-wrong-fix/fixture"
+solution = "tasks/rust-plausible-wrong-fix/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_plausible.exe test.rs && ./t_plausible.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:recovery-replan", "lang:rust"]
+timeout_secs = 300
+
+[[tasks]]
+id = "rust-ineffective-edit"
+description = """
+The run summary shows a wrong duration past the hour mark: a 1h 25m 30s run \
+renders as `1:85:30` instead of `1:25:30`, and its short label reads `1h 85m`. \
+The minute field is supposed to be the minutes within the hour. Find the cause \
+and fix it so the tests pass."""
+fixture = "tasks/rust-ineffective-edit/fixture"
+solution = "tasks/rust-ineffective-edit/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_ineffective.exe test.rs && ./t_ineffective.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:recovery-unchanged-failure", "lang:rust"]
+timeout_secs = 300
+
+[[tasks]]
+id = "rust-shifting-anchor"
+description = """
+Every shipping zone prices a parcel the same way, so the five quote functions \
+are identical in shape and differ only in their constants. One zone gets the \
+oversize rule wrong: a parcel exactly AT the zone's size limit is inside it and \
+must not be surcharged, but that zone surcharges it anyway.
+
+Find which zone, and fix only that one — the other four already behave \
+correctly and must keep doing so. The tests in test.rs specify the rule; make \
+them pass."""
+fixture = "tasks/rust-shifting-anchor/fixture"
+solution = "tasks/rust-shifting-anchor/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_shifting.exe test.rs && ./t_shifting.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:recovery-anchor-miss", "lang:rust"]
+timeout_secs = 300
