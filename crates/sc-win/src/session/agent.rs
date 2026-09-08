@@ -91,7 +91,7 @@ pub fn run_iterate(
         return;
     };
     let advisor = cfg.advisor();
-    let registry = sc_tools::default_registry();
+    let registry = sc_tools::six_tool_registry();
     let strategy = sc_core::select_strategy(&backend.capabilities());
     let confirmer = Arc::new(ChannelConfirmer::new(pending_tx));
 

@@ -243,22 +243,7 @@ pub(crate) fn task_config(base: AgentConfig, task: &EvalTask) -> AgentConfig {
 /// pinned to what the benchmark measured and must not drift because this one
 /// changed.
 fn task_registry() -> sc_tools::ToolRegistry {
-    const KEEP: [&str; 6] = [
-        "read_file",
-        "edit_file",
-        "write_file",
-        "run_command",
-        "run_verification",
-        "finish",
-    ];
-    let specs: Vec<sc_tools::ToolSpec> = sc_tools::default_registry()
-        .specs()
-        .iter()
-        .filter(|s| KEEP.contains(&s.name))
-        .cloned()
-        .collect();
-    debug_assert_eq!(specs.len(), KEEP.len(), "a kept tool is missing by name");
-    sc_tools::ToolRegistry::new(specs)
+    sc_tools::six_tool_registry()
 }
 
 /// The real solver: runs the `sc_core` agent loop, driven by a model backend, to

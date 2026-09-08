@@ -10,8 +10,8 @@
 use std::path::Path;
 
 use super::guards::{delimiter_regression, duplicate_definition, is_code_path};
-use super::read::locate_function;
-use super::util::safe_join;
+use super::read::{locate_function, Located};
+use super::util::{from_lf, number_lines, safe_join, to_lf, uses_crlf};
 
 /// A file with more than this many lines is too large to safely OVERWRITE with `write_file`:
 /// a small/mid model can't faithfully reproduce that much code and drops functions or leaves an
@@ -93,6 +93,13 @@ pub fn append_file(workspace: &Path, path: &str, content: &str) -> String {
             // existing definition. Only for code files that already exist; a brand-new file can't
             // duplicate anything.
             let existing = std::fs::read_to_string(&p).unwrap_or_default();
+            // A CRLF file stays CRLF: the appended text takes the file's endings. A new
+            // or LF file gets the content exactly as given.
+            let content = if uses_crlf(&existing) {
+                from_lf(&to_lf(content), true)
+            } else {
+                content.to_string()
+            };
             if is_code_path(path) && !existing.is_empty() {
                 let after = format!("{existing}{content}");
                 if let Some(msg) = duplicate_definition(&existing, &after) {
@@ -124,7 +131,13 @@ pub fn append_file(workspace: &Path, path: &str, content: &str) -> String {
 /// Replace a whole function/method by name with `new_body`. Resolves the function's span via
 /// tree-sitter, then splices — no exact snippet or line numbers for the model to get wrong.
 pub fn edit_function(workspace: &Path, path: &str, name: &str, new_body: &str) -> String {
-    let (src, start, end, count) = match locate_function(workspace, path, name) {
+    let Located {
+        src,
+        start,
+        end,
+        count,
+        crlf,
+    } = match locate_function(workspace, path, name) {
         Ok(v) => v,
         Err(e) => return format!("edit_function {e}"),
     };
@@ -132,7 +145,7 @@ pub fn edit_function(workspace: &Path, path: &str, name: &str, new_body: &str) -
         Ok(p) => p,
         Err(e) => return format!("edit_function {path} rejected: {e}"),
     };
-    let new_body = new_body.replace("\r\n", "\n").replace('\r', "\n");
+    let new_body = to_lf(new_body);
     let had_trailing_nl = src.ends_with('\n');
     let lines: Vec<&str> = src.lines().collect();
 
@@ -157,7 +170,7 @@ pub fn edit_function(workspace: &Path, path: &str, name: &str, new_body: &str) -
         }
     }
 
-    match std::fs::write(&p, &joined) {
+    match std::fs::write(&p, from_lf(&joined, crlf)) {
         Ok(()) => {
             let dup = if count > 1 {
                 format!(" (note: {count} functions named `{name}`; edited the FIRST)")
@@ -176,8 +189,8 @@ pub fn edit_function(workspace: &Path, path: &str, name: &str, new_body: &str) -
 /// Replace lines `start..=end` (1-based, inclusive) with `new_text`. The line-addressed edit:
 /// no snippet to reproduce, so a model editing a large file it holds imperfectly can't fail on
 /// a hallucinated anchor — it just names the line numbers shown in the file view. An empty range
-/// (`end == start - 1`) inserts before `start`. Line endings are normalized to LF (matches
-/// edit_file). Self-correcting errors on an out-of-range or inverted span.
+/// (`end == start - 1`) inserts before `start`. Edits in LF and writes back the file's own
+/// line endings (matches edit_file). Self-correcting errors on an out-of-range or inverted span.
 pub fn edit_lines(
     workspace: &Path,
     path: &str,
@@ -196,8 +209,9 @@ pub fn edit_lines(
     let (Some(start), Some(end)) = (start, end) else {
         return format!("edit_lines {path} error: start and end must be integers (1-based lines)");
     };
-    let content = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
+    let crlf = uses_crlf(&raw);
+    let content = to_lf(&raw);
+    let new_text = to_lf(new_text);
     let had_trailing_nl = content.ends_with('\n');
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len() as i64;
@@ -264,7 +278,7 @@ pub fn edit_lines(
             );
         }
     }
-    match std::fs::write(&p, &joined) {
+    match std::fs::write(&p, from_lf(&joined, crlf)) {
         Ok(()) => {
             let action = if insert {
                 format!("inserted before line {start}")
@@ -299,10 +313,12 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
     // match and EVERY edit fails (observed live 2026-07-15: the 30B's first, correct anchor on a
     // CRLF terrain.rs missed, and it spiralled into corrupting the file trying to "fix" it). Strip
     // `\r` from the file AND from old_str/new_str so a CRLF-copied anchor matches. We edit in LF
-    // space and write LF — correct for source files.
-    let content = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let old_str = old_str.replace("\r\n", "\n").replace('\r', "\n");
-    let new_str = new_str.replace("\r\n", "\n").replace('\r', "\n");
+    // space and write back whichever endings the file had, so one edit never flips a CRLF
+    // checkout to LF and shows up as a whole-file diff.
+    let crlf = uses_crlf(&raw);
+    let content = to_lf(&raw);
+    let old_str = to_lf(old_str);
+    let new_str = to_lf(new_str);
     // Small models also emit a literal backslash-n (`\\n`) instead of a real
     // newline inside a multi-line old_str. Resolve the anchor to whichever form the
     // (normalized) file actually contains, un-escaping new_str to match.
@@ -326,7 +342,7 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
             return format!("edit_file {path} rejected: {msg}");
         }
     }
-    edit_file_with(&p, path, &content, &old_owned, &new_owned)
+    edit_file_with(&p, path, &content, &old_owned, &new_owned, crlf)
 }
 
 /// Turn literal escape sequences a model may have emitted as text (`\n`, `\t`,
@@ -367,27 +383,26 @@ fn unescape_literal(s: &str) -> String {
     out
 }
 
-/// Render `content` with 1-based line numbers, so an edit error can point a small
-/// model at exact anchors to copy.
-fn number_lines(content: &str) -> String {
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, l)| format!("  {}: {}", i + 1, l))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Apply an `old_str`→`new_str` replacement to already-read `content` at `p`,
 /// enforcing the exactly-once rule (with whole-line disambiguation and
 /// self-correcting errors for small models).
 ///
 /// The "exactly once" rule is the small-model safety net (spec 04): an ambiguous
 /// anchor (0 or >1 matches) is rejected with a precise count instead of guessing.
-fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &str) -> String {
+///
+/// `content`, `old_str` and `new_str` are LF; `crlf` says what the file on disk uses,
+/// and every write here restores it.
+fn edit_file_with(
+    p: &Path,
+    path: &str,
+    content: &str,
+    old_str: &str,
+    new_str: &str,
+    crlf: bool,
+) -> String {
     let count = content.matches(old_str).count();
     if count == 0 {
-        // Exact match failed. Before giving up, try a WHITESPACE-TOLERANT multi-line match: a
+        // Exact match failed. Before giving up, try a WHITESPACE-TOLERANT line match: a
         // model editing a large file often reproduces the block's TEXT correctly but gets the
         // indentation or inner spacing slightly wrong, so a byte-exact `old_str` never matches
         // and it thrashes (observed live: the 30B looping read→edit→write_file on terrain.rs).
@@ -395,21 +410,16 @@ fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &
         // line's whitespace-collapsed text), replace that real run — the edit lands despite the
         // spacing drift.
         if let Some(fuzzed) = fuzzy_line_block_replace(content, old_str, new_str) {
-            return match std::fs::write(p, &fuzzed) {
+            return match std::fs::write(p, from_lf(&fuzzed, crlf)) {
                 Ok(()) => format!("edit_file {path} ok (1 replacement, whitespace-tolerant match)"),
                 Err(e) => format!("edit_file {path} error: {e}"),
             };
         }
-        // The anchor isn't in the file. The usual cause for a small model is that
-        // the edit already landed (or it's working from a stale view), so it keeps
-        // re-proposing a change that's no longer applicable. Show the CURRENT file
-        // with line numbers so it re-anchors on what's actually there now.
-        let numbered = number_lines(content);
-        return format!(
-            "edit_file {path} error: old_str {old_str:?} not found (0 matches). The file may \
-             already have that change. Here is the CURRENT content — pick your next anchor \
-             from these exact lines:\n{numbered}"
-        );
+        // The anchor isn't in the file in any form. The usual cause for a small model is
+        // that the edit already landed (or it's working from a stale view), so it keeps
+        // re-proposing a change that's no longer applicable. Show it the place in the
+        // CURRENT file that most resembles what it asked for, so it re-anchors there.
+        return anchor_not_found(path, content, old_str);
     }
     if count > 1 {
         // Whole-line disambiguation (spec 04 — do the work the small model can't).
@@ -436,7 +446,7 @@ fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &
             if trailing_newline {
                 joined.push('\n');
             }
-            return match std::fs::write(p, &joined) {
+            return match std::fs::write(p, from_lf(&joined, crlf)) {
                 Ok(()) => format!(
                     "edit_file {path} ok (1 replacement, matched whole line {})",
                     i + 1
@@ -469,13 +479,16 @@ fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &
             }
         }
         if shown.is_empty() {
-            // Nothing matched even the first line: the anchor is not in the file in any
-            // recognisable form, so show the file rather than an empty promise.
+            // Nothing matched even the first line (an anchor that opens with a blank line,
+            // say): show the closest block rather than an empty promise -- and never the
+            // whole file.
             return format!(
-                "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches) but \
-                 no single line of it could be located to show you. Here is the CURRENT file — \
-                 pick your anchor from these exact lines:\n{}",
-                number_lines(content)
+                "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches); \
+                 pick a UNIQUE anchor from the lines near the closest match below:\n{}",
+                anchor_not_found(path, content, old_str)
+                    .split_once('\n')
+                    .map(|(_, block)| block.to_string())
+                    .unwrap_or_default()
             );
         }
         return format!(
@@ -486,10 +499,76 @@ fn edit_file_with(p: &Path, path: &str, content: &str, old_str: &str, new_str: &
         );
     }
     let updated = content.replacen(old_str, new_str, 1);
-    match std::fs::write(p, &updated) {
+    match std::fs::write(p, from_lf(&updated, crlf)) {
         Ok(()) => format!("edit_file {path} ok (1 replacement)"),
         Err(e) => format!("edit_file {path} error: {e}"),
     }
+}
+
+/// Lines of context shown either side of the closest block on a missed anchor.
+const MISS_CONTEXT: usize = 3;
+/// The most lines a missed-anchor message ever shows. A whole-file dump is what this
+/// replaces: on a 900-line file it cost the model its window and told it nothing about
+/// WHERE it had been looking.
+const MISS_MAX_LINES: usize = 30;
+
+/// The missed-anchor observation: `edit_file <path>: anchor not found; closest match:`
+/// and the numbered lines around the file line that most resembles the anchor's first
+/// line, [`MISS_CONTEXT`] either side of the anchor-length block, never more than
+/// [`MISS_MAX_LINES`].
+fn anchor_not_found(path: &str, content: &str, old_str: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let anchor: Vec<&str> = old_str.lines().collect();
+    let probe = anchor
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .copied()
+        .unwrap_or("");
+    let Some(best) = closest_line(&lines, probe) else {
+        return format!(
+            "edit_file {path}: anchor not found; no line of the file resembles the anchor \
+             ({} lines in the file -- read it again before editing)",
+            lines.len()
+        );
+    };
+    let lo = best.saturating_sub(MISS_CONTEXT);
+    let hi = (best + anchor.len().max(1) + MISS_CONTEXT)
+        .min(lines.len())
+        .min(lo + MISS_MAX_LINES);
+    format!(
+        "edit_file {path}: anchor not found; closest match:\n{}",
+        number_lines(&lines[lo..hi], lo + 1)
+    )
+}
+
+/// The index of the file line that shares the most whitespace-split tokens with
+/// `probe` — the whitespace-signature overlap. Ties go to the line whose token count is
+/// nearest the probe's, then to the earlier line. `None` when no line shares a token.
+fn closest_line(lines: &[&str], probe: &str) -> Option<usize> {
+    let probe_tokens: Vec<&str> = probe.split_whitespace().collect();
+    if probe_tokens.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, usize, usize)> = None; // (overlap, length distance, idx)
+    for (i, line) in lines.iter().enumerate() {
+        let mut remaining: Vec<&str> = line.split_whitespace().collect();
+        let len_distance = remaining.len().abs_diff(probe_tokens.len());
+        let mut overlap = 0;
+        for t in &probe_tokens {
+            if let Some(pos) = remaining.iter().position(|r| r == t) {
+                remaining.swap_remove(pos);
+                overlap += 1;
+            }
+        }
+        let better = match best {
+            None => overlap > 0,
+            Some((o, d, _)) => overlap > o || (overlap == o && len_distance < d),
+        };
+        if better {
+            best = Some((overlap, len_distance, i));
+        }
+    }
+    best.map(|(_, _, i)| i)
 }
 
 /// Collapse a line to its whitespace-insensitive signature: trimmed, with internal runs of
@@ -503,18 +582,19 @@ fn line_sig(line: &str) -> Option<String> {
     Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-/// Whitespace-tolerant multi-line replace: when `old_str` doesn't match byte-exactly, try to
-/// find a UNIQUE run of file lines whose signatures equal the anchor's non-blank line
-/// signatures, and replace that real run with `new_str`. Returns the whole new file content, or
-/// `None` if there's no unique multi-line match (so the caller falls back to the error path).
+/// Whitespace-tolerant line replace: when `old_str` doesn't match byte-exactly, try to find a
+/// UNIQUE run of file lines whose signatures equal the anchor's non-blank line signatures, and
+/// replace that real run with `new_str`. Returns the whole new file content, or `None` if
+/// there's no unique match (so the caller falls back to the error path).
 ///
-/// Only fires for a genuine multi-line anchor (≥2 non-blank lines) — a single-line fuzzy match
-/// would be too eager and the exact/whole-line paths already handle single lines. `new_str` is
-/// re-indented to the matched block's leading whitespace so the replacement sits correctly.
+/// A single-line anchor qualifies too: the drift a model introduces on one line (its
+/// indentation, a tab for four spaces, trailing whitespace) is the same drift it introduces
+/// on ten, and uniqueness is what keeps the match safe, not length. `new_str` is re-indented
+/// to the matched block's leading whitespace so the replacement sits correctly.
 fn fuzzy_line_block_replace(content: &str, old_str: &str, new_str: &str) -> Option<String> {
     let anchor_sigs: Vec<String> = old_str.lines().filter_map(line_sig).collect();
-    if anchor_sigs.len() < 2 {
-        return None; // single-line anchors handled elsewhere; don't fuzzy-match those
+    if anchor_sigs.is_empty() {
+        return None; // a blank anchor matches nothing
     }
     let lines: Vec<&str> = content.lines().collect();
     // File-line signatures, keeping the original index (skip blank lines when aligning).

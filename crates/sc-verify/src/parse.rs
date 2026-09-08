@@ -82,6 +82,7 @@ fn parse_cargo(output: &str, command_ok: bool) -> TestReport {
         command_ok,
         generic: false,
         raw: None,
+        delta: None,
     }
 }
 
@@ -233,6 +234,7 @@ fn parse_pytest(output: &str, command_ok: bool) -> TestReport {
         command_ok,
         generic: false,
         raw: None,
+        delta: None,
     }
 }
 

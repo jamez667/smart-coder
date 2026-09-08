@@ -1,9 +1,14 @@
 //! The tool schemas: what the model is offered, and in what order.
 //!
-//! Two registries — the full v1 surface ([`default_registry`]) and the
-//! three-tool worker surface ([`minimal_worker_registry`]). Descriptions are
-//! written *at* a small model: they say which tool to prefer for which shape of
-//! change, because the choice between twelve options is itself a failure mode.
+//! The full v1 surface ([`default_registry`]), the six-tool build menu it is
+//! trimmed to ([`six_tool_registry`]), the read-only investigate menu
+//! ([`read_only_registry`]) and the worker surface ([`minimal_worker_registry`]).
+//!
+//! Every description is ONE neutral sentence saying what the tool does. Which tool
+//! to prefer for which shape of change is policy, and policy lives in the task
+//! prefix the agent loop writes (sc-core's config), where it can be tuned per run;
+//! a schema that says "PREFER this" argues with that prefix and, on a trimmed
+//! registry, argues for a tool the model may not even have.
 
 use crate::spec::{ParamSpec, ParamType, Permission, SideEffect, ToolRegistry, ToolSpec};
 
@@ -16,9 +21,8 @@ pub fn default_registry() -> ToolRegistry {
             // of these, not all sixteen), and steering toward a tool the model does not
             // have wastes the turn and teaches it to distrust the harness. This used to
             // point at `search_code`, which a trimmed run has no way to call.
-            description: "Read a UTF-8 text file. Optionally pass `start` (1-based line) and \
-                          `limit` (line count) to read just a window of it rather than the \
-                          whole file.",
+            description: "Read a UTF-8 text file with every line numbered, or just a window of \
+                          it given `start` (1-based line) and `limit` (line count).",
             params: vec![
                 ParamSpec::new(
                     "path",
@@ -52,14 +56,18 @@ pub fn default_registry() -> ToolRegistry {
         },
         ToolSpec {
             name: "search_code",
-            description: "Search files with a REGEX (e.g. `match .*ShipRole`, `fn \\w+`, \
-                          `enum \\w+`); returns file:line hits. A plain string with no regex \
-                          metacharacters works as a literal substring. Use `.*` to match across a \
-                          line and `\\.` for a literal dot.",
+            // The description and the parameter say the SAME thing: a pattern gets a regex
+            // grep (plain text with no metacharacters matches literally), a question gets
+            // the ranked index. They used to disagree -- "REGEX" above, "the literal text"
+            // below -- and a model reads both.
+            description: "Search the project: a regex or code pattern (e.g. `fn \\w+`, \
+                          `ShipRole::`) returns file:line hits, and a plain-English question \
+                          returns the functions most relevant to it.",
             params: vec![ParamSpec::new(
                 "query",
                 ParamType::String,
-                "the literal text to search for",
+                "a regex or code pattern (plain text with no metacharacters matches \
+                 literally), or a plain-English question",
             )],
             side_effect: SideEffect::ReadOnly,
             permission: Permission::Auto,
@@ -79,11 +87,10 @@ pub fn default_registry() -> ToolRegistry {
             name: "cargo_info",
             // Names no other tool, per the rule below. "crate" rather than "package"
             // because that is the word the manifests and the directory names use.
-            description: "Facts about this Rust workspace's crates, read from the \
-                          Cargo.toml manifests: what a crate is for, which crates it \
-                          depends on, and which crates depend on IT. Pass a crate name \
-                          for one crate, or omit it to list them all. Answers \
-                          architecture questions without opening manifests one at a time.",
+            description: "Describe this Rust workspace's crates from their Cargo.toml \
+                          manifests (what a crate is for, what it depends on, and what \
+                          depends on it), for the named `crate` or for every crate when it \
+                          is omitted.",
             params: vec![ParamSpec::new(
                 "crate",
                 ParamType::OptionalString,
@@ -97,12 +104,15 @@ pub fn default_registry() -> ToolRegistry {
             // Names no other tool, per the rule above. Says READ, not "profile", because the
             // tool cannot record one -- a model that thinks it can will ask for something the
             // harness has no way to deliver.
-            description: "Read a recorded CPU profile (a folded-stack file) and list the                           functions that cost the most time, hottest first. Use this to answer                           WHY code is slow instead of guessing from the source. The file must                           already exist -- this does not run a profiler.",
+            description: "Read an existing recorded CPU profile (a folded-stack file) and list \
+                          the functions that cost the most time, hottest first; it does not \
+                          run a profiler.",
             params: vec![
                 ParamSpec::new(
                     "path",
                     ParamType::String,
-                    "path to the folded-stack file, relative to the project root                      (e.g. 'target/sc-profile.folded')",
+                    "path to the folded-stack file, relative to the project root (e.g. \
+                     'target/sc-profile.folded')",
                 ),
                 ParamSpec::new(
                     "limit",
@@ -143,23 +153,25 @@ pub fn default_registry() -> ToolRegistry {
         },
         ToolSpec {
             name: "append_file",
-            description: "Append content to the END of a file (creating it if absent). Use this \
-                          to build a large file in several turns: write the first part with \
-                          write_file, then append the rest in chunks so no single reply is too long.",
+            description: "Append content to the end of a file, creating it if absent.",
             params: vec![
                 ParamSpec::new(
                     "path",
                     ParamType::String,
                     "file path relative to the project root",
                 ),
-                ParamSpec::new("content", ParamType::String, "text to append at the end of the file"),
+                ParamSpec::new(
+                    "content",
+                    ParamType::String,
+                    "text to append at the end of the file",
+                ),
             ],
             side_effect: SideEffect::Mutating,
             permission: Permission::Auto,
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace an EXACT snippet in a file: old_str must occur exactly once.",
+            description: "Replace an exact snippet in a file: old_str must occur exactly once.",
             params: vec![
                 ParamSpec::new(
                     "path",
@@ -178,22 +190,24 @@ pub fn default_registry() -> ToolRegistry {
         },
         ToolSpec {
             name: "edit_lines",
-            description: "Replace lines start..=end (1-based, inclusive) of a file with new_text. \
-                          BEST for a large file: no snippet to copy exactly — just give the line \
-                          numbers shown in the file view. Use start==end+1 form? No: to INSERT \
-                          without deleting, set start = the line to insert BEFORE and end = \
-                          start-1 (an empty range inserts).",
+            description: "Replace lines start..=end (1-based, inclusive) of a file with \
+                          new_text; to insert before line N without deleting anything, pass \
+                          start=N and end=N-1.",
             params: vec![
                 ParamSpec::new(
                     "path",
                     ParamType::String,
                     "file path relative to the project root",
                 ),
-                ParamSpec::new("start", ParamType::Integer, "first line to replace (1-based)"),
+                ParamSpec::new(
+                    "start",
+                    ParamType::Integer,
+                    "first line to replace (1-based)",
+                ),
                 ParamSpec::new(
                     "end",
                     ParamType::Integer,
-                    "last line to replace (1-based, inclusive); use start-1 to INSERT before start",
+                    "last line to replace (1-based, inclusive); start-1 inserts before start",
                 ),
                 ParamSpec::new(
                     "new_text",
@@ -206,35 +220,38 @@ pub fn default_registry() -> ToolRegistry {
         },
         ToolSpec {
             name: "read_function",
-            description: "Read a SINGLE function/method by NAME (Rust/Python/C#) — its whole \
-                          body, line-numbered. PREFER this over read_file for a big file: you get \
-                          just the function you care about, not hundreds of unrelated lines.",
+            description: "Read one function or method by name (Rust/Python/C#), its whole body \
+                          with every line numbered.",
             params: vec![
                 ParamSpec::new(
                     "path",
                     ParamType::String,
                     "file path relative to the project root",
                 ),
-                ParamSpec::new("name", ParamType::String, "the function/method name to read"),
+                ParamSpec::new(
+                    "name",
+                    ParamType::String,
+                    "the function/method name to read",
+                ),
             ],
             side_effect: SideEffect::ReadOnly,
             permission: Permission::Auto,
         },
         ToolSpec {
             name: "edit_function",
-            description: "Replace a whole function/method by NAME (Rust/Python/C#) with new_body. \
-                          BEST for changing a function: no snippet to copy exactly and no line \
-                          numbers to get right — name the function, give its full new text. Use \
-                          this to add a match arm, change a signature, or rewrite a body. (If the \
-                          function is very large, it suggests using edit_lines for a targeted \
-                          change instead.)",
+            description: "Replace a whole function or method by name (Rust/Python/C#) with \
+                          new_body, the full new text of the function.",
             params: vec![
                 ParamSpec::new(
                     "path",
                     ParamType::String,
                     "file path relative to the project root",
                 ),
-                ParamSpec::new("name", ParamType::String, "the function/method name to replace"),
+                ParamSpec::new(
+                    "name",
+                    ParamType::String,
+                    "the function/method name to replace",
+                ),
                 ParamSpec::new(
                     "new_body",
                     ParamType::String,
@@ -292,6 +309,36 @@ pub fn default_registry() -> ToolRegistry {
             permission: Permission::Auto,
         },
     ])
+}
+
+/// The six-tool build menu: `read_file`, `edit_file`, `write_file`, `run_command`,
+/// `run_verification`, `finish`.
+///
+/// Measured on the SWE-bench path: six tools got `run_command` 12/12; the full
+/// sixteen got 3/12. A big menu makes a small model deliberate instead of act --
+/// it reads and re-reads instead of editing. This is the menu a scored task run
+/// and the desktop iterate run offer; [`default_registry`] keeps every tool for
+/// the flows that want them.
+///
+/// Filtered from [`default_registry`] by name so each spec has exactly one
+/// definition; the order is the default registry's.
+pub fn six_tool_registry() -> ToolRegistry {
+    const KEEP: [&str; 6] = [
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_command",
+        "run_verification",
+        "finish",
+    ];
+    let specs: Vec<ToolSpec> = default_registry()
+        .specs()
+        .iter()
+        .filter(|s| KEEP.contains(&s.name))
+        .cloned()
+        .collect();
+    debug_assert_eq!(specs.len(), KEEP.len(), "a kept tool is missing by name");
+    ToolRegistry::new(specs)
 }
 
 /// A READ-ONLY registry: every built-in tool that cannot change the workspace, plus

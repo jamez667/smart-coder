@@ -138,11 +138,226 @@ fn edit_file_rejects_missing_anchor() {
         "tool":"edit_file","path":"a.rs","old_str":"nope","new_str":"x"
     }));
     let o = obs(execute(&e, &ws));
-    assert!(o.contains("0 matches"), "got: {o}");
+    assert!(o.contains("anchor not found"), "got: {o}");
     // File untouched.
     assert_eq!(
         std::fs::read_to_string(ws.join("a.rs")).unwrap(),
         "fn f() {}\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **A missed anchor shows the closest block, never the whole file.**
+///
+/// The old miss message dumped the entire numbered file: on a 900-line file that cost
+/// the model its window and said nothing about WHERE it had been looking. Now it gets
+/// the few lines around the line that most resembles its anchor, with line numbers.
+#[test]
+fn edit_file_miss_shows_the_closest_block_not_the_whole_file() {
+    let ws = temp_dir("edit-miss-closest");
+    let body: String = (1..=100).map(|n| format!("let v{n} = {n};\n")).collect();
+    std::fs::write(ws.join("big.rs"), &body).unwrap();
+    // Wrong on the value, right on the shape: nearest to line 50.
+    let e = call(json!({
+        "tool":"edit_file","path":"big.rs",
+        "old_str":"let v50 = 999;","new_str":"let v50 = 0;"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(
+        o.starts_with("edit_file big.rs: anchor not found; closest match:\n"),
+        "got: {o}"
+    );
+    // ±3 lines around the closest line, each numbered `N: `.
+    for n in 47..=53 {
+        assert!(
+            o.contains(&format!("\n{n}: let v{n} = {n};")),
+            "line {n}: {o}"
+        );
+    }
+    assert!(!o.contains("\n1: let v1 "), "never the whole file: {o}");
+    assert!(!o.contains("\n100: "), "never the whole file: {o}");
+    assert!(o.lines().count() <= 31, "header + at most 30 lines: {o}");
+    // Untouched.
+    assert_eq!(std::fs::read_to_string(ws.join("big.rs")).unwrap(), body);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A long anchor that misses still yields a bounded message.
+#[test]
+fn edit_file_miss_output_is_capped_at_thirty_lines() {
+    let ws = temp_dir("edit-miss-cap");
+    let body: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(ws.join("big.txt"), &body).unwrap();
+    // A 60-line anchor whose first line resembles line 100 but whose body is wrong.
+    let anchor: String = (0..60).map(|i| format!("line {} x\n", 100 + i)).collect();
+    let e = call(json!({"tool":"edit_file","path":"big.txt","old_str":anchor,"new_str":"y"}));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("anchor not found; closest match:"), "got: {o}");
+    assert!(
+        o.lines().count() <= 31,
+        "header + at most 30 lines, got {}: {o}",
+        o.lines().count()
+    );
+    assert!(
+        o.contains("\n97: line 97"),
+        "starts 3 before the match: {o}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **A single-line anchor lands despite indentation drift.**
+///
+/// The whitespace-tolerant match used to need two lines; a one-line anchor with the
+/// wrong indent simply missed, and the model re-read the file to try again.
+#[test]
+fn edit_file_single_line_anchor_tolerates_indent_drift() {
+    let ws = temp_dir("edit-1line-indent");
+    std::fs::write(ws.join("a.rs"), "fn f() {\n        let x = 1;\n}\n").unwrap();
+    let e = call(json!({
+        "tool":"edit_file","path":"a.rs","old_str":"let x = 1;","new_str":"let x = 2;"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("ok"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        "fn f() {\n        let x = 2;\n}\n",
+        "replaced at the file's own indentation"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn edit_file_single_line_anchor_tolerates_tabs_vs_spaces() {
+    let ws = temp_dir("edit-1line-tabs");
+    std::fs::write(ws.join("a.rs"), "fn f() {\n\tlet x = 1;\n}\n").unwrap();
+    // The model writes four spaces where the file has a tab.
+    let e = call(json!({
+        "tool":"edit_file","path":"a.rs","old_str":"    let x = 1;","new_str":"    let x = 2;"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("ok"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        "fn f() {\n\tlet x = 2;\n}\n",
+        "the file keeps its tab"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn edit_file_single_line_anchor_tolerates_trailing_whitespace() {
+    let ws = temp_dir("edit-1line-trail");
+    std::fs::write(ws.join("a.rs"), "fn f() {\n    let x = 1;\n}\n").unwrap();
+    let e = call(json!({
+        "tool":"edit_file","path":"a.rs","old_str":"    let x = 1;   ","new_str":"    let x = 2;"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("ok"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        "fn f() {\n    let x = 2;\n}\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A single-line fuzzy match must still be UNIQUE; two candidates mean no edit.
+#[test]
+fn edit_file_single_line_fuzzy_match_must_be_unique() {
+    let ws = temp_dir("edit-1line-amb");
+    std::fs::write(ws.join("a.rs"), "  x = 1;\n    x = 1;\n").unwrap();
+    let e = call(json!({"tool":"edit_file","path":"a.rs","old_str":"x = 1;  ","new_str":"x = 2;"}));
+    let o = obs(execute(&e, &ws));
+    assert!(
+        o.contains("not found") || o.contains("ambiguous"),
+        "got: {o}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        "  x = 1;\n    x = 1;\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// True when every line ending in `s` is CRLF (and there is at least one).
+fn all_crlf(s: &str) -> bool {
+    s.contains("\r\n") && !s.replace("\r\n", "").contains('\n')
+}
+
+/// **An edit never flips a CRLF file to LF.**
+///
+/// Every editor used to write LF regardless of what it read, so one small edit on a
+/// Windows checkout became a whole-file diff and the next `git diff` was unreadable.
+#[test]
+fn edit_file_preserves_crlf_line_endings() {
+    let ws = temp_dir("crlf-edit-file");
+    std::fs::write(ws.join("a.rs"), "fn f() {\r\n    let x = 1;\r\n}\r\n").unwrap();
+    // Exact, fuzzy and whole-line paths all write back CRLF.
+    for (old, new) in [
+        ("let x = 1;", "let x = 2;"),         // exact substring
+        ("        let x = 2;", "let x = 3;"), // fuzzy (indent drift)
+    ] {
+        let e = call(json!({"tool":"edit_file","path":"a.rs","old_str":old,"new_str":new}));
+        let o = obs(execute(&e, &ws));
+        assert!(o.contains("ok"), "got: {o}");
+        let got = std::fs::read_to_string(ws.join("a.rs")).unwrap();
+        assert!(all_crlf(&got), "CRLF kept after {old:?}: {got:?}");
+        assert!(got.contains(new), "edit landed: {got:?}");
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn edit_lines_preserves_crlf_and_leaves_lf_alone() {
+    let ws = temp_dir("crlf-edit-lines");
+    std::fs::write(ws.join("c.rs"), "one\r\ntwo\r\nthree\r\n").unwrap();
+    let e =
+        call(json!({"tool":"edit_lines","path":"c.rs","start":2,"end":2,"new_text":"TWO\nTWO-B"}));
+    assert!(obs(execute(&e, &ws)).contains("ok"));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("c.rs")).unwrap(),
+        "one\r\nTWO\r\nTWO-B\r\nthree\r\n"
+    );
+    // An LF file stays LF.
+    std::fs::write(ws.join("l.rs"), "one\ntwo\n").unwrap();
+    let e = call(json!({"tool":"edit_lines","path":"l.rs","start":2,"end":2,"new_text":"TWO"}));
+    assert!(obs(execute(&e, &ws)).contains("ok"));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("l.rs")).unwrap(),
+        "one\nTWO\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn edit_function_preserves_crlf_line_endings() {
+    let ws = temp_dir("crlf-edit-fn");
+    std::fs::write(
+        ws.join("m.rs"),
+        "fn a() {}\r\nfn pick() -> u32 {\r\n    1\r\n}\r\nfn b() {}\r\n",
+    )
+    .unwrap();
+    let e = call(json!({
+        "tool":"edit_function","path":"m.rs","name":"pick",
+        "new_body":"fn pick() -> u32 {\n    2\n}"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("ok"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("m.rs")).unwrap(),
+        "fn a() {}\r\nfn pick() -> u32 {\r\n    2\r\n}\r\nfn b() {}\r\n"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn append_file_preserves_crlf_line_endings() {
+    let ws = temp_dir("crlf-append");
+    std::fs::write(ws.join("a.css"), "a {}\r\n").unwrap();
+    let e = call(json!({"tool":"append_file","path":"a.css","content":"b {}\nc {}\n"}));
+    assert!(obs(execute(&e, &ws)).contains("ok"));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.css")).unwrap(),
+        "a {}\r\nb {}\r\nc {}\r\n"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

@@ -41,6 +41,15 @@ pub struct ToolSpec {
 
 Kept deliberately small. Each does one thing.
 
+Two registries are built from this set. `default_registry()` carries every
+tool; `six_tool_registry()` — `read_file`, `edit_file`, `write_file`,
+`run_command`, `run_verification`, `finish` — is what a scored eval task run and
+the desktop iterate run offer ([23](23-repo-intelligence.md): six tools got
+`run_command` 12/12, sixteen got 3/12). Harness directives name a tool only
+through `mention(registry, ..)`, so a trimmed run is never steered toward a tool
+it cannot call; a directive that would be is a `ToolNotOffered` harness fault at
+injection time.
+
 ### Read / navigate (ReadOnly)
 - `read_file` — read a file (or a line range). Returns bytes + line numbers.
 - `list_dir` — list a directory (non-recursive by default).
@@ -57,9 +66,12 @@ Kept deliberately small. Each does one thing.
   read-only investigate menu** — see 23 for why that menu did not grow.
 
 ### Edit (Mutating)
-- `edit_file` — apply a **precise, anchored edit** (exact old → new string, or a
-  unified-diff hunk). No "rewrite the whole file" mode by default — anchored
-  edits are easier for a small model to get right and easier to verify/revert.
+- `edit_file` — apply a **precise, anchored edit** (old → new string; the anchor
+  must occur exactly once, and is matched tolerant of indentation and internal
+  whitespace). A missed anchor returns the closest-matching block (at most 30
+  numbered lines), never the whole file. Every editor preserves the file's
+  CRLF/LF endings. No "rewrite the whole file" mode by default — anchored edits
+  are easier for a small model to get right and easier to verify/revert.
 - `create_file` — write a new file (fails if it exists).
 
 > All edits go through a single apply-and-record path so every change can be
@@ -72,7 +84,13 @@ Kept deliberately small. Each does one thing.
   This is the verify gate from [03](03-agent-loop.md); separated from
   `run_command` so the harness can call it on its own and parse results
   predictably. Returns **structured per-test pass/fail + failure messages**, not
-  a raw log — the spine of the TDD loop ([11](11-testing-and-tdd.md)).
+  a raw log — the spine of the TDD loop ([11](11-testing-and-tdd.md)). Each
+  result also states what changed since the previous run of the same command —
+  `same N failures as last run`, `newly failing: a; now passing: b` — so a
+  red-after-red run reads as news, not repetition. The suite's output is parsed
+  uncapped; only `run_command` output is byte-capped (16 KB, head and tail kept,
+  one marker line), with stdout and stderr merged in write order through a
+  single pipe.
 
 Both execute through a POSIX `sh -c` on **every** platform, falling back to
 `cmd /C` only when no `sh` is on PATH. Models write POSIX: measured on the
@@ -91,7 +109,10 @@ is what let this regress twice.
 ### Meta (ReadOnly, harness-facing)
 - `update_plan` — let the model revise the step list (the harness validates and
   owns the result; see [03](03-agent-loop.md)).
-- `ask_user` — escalate a genuine ambiguity to the human instead of guessing.
+- `ask_user` — escalate a genuine ambiguity to the advisor ([02](02-model-backends.md)),
+  on the same per-run advisor budget the stall ladder spends. With no advisor,
+  or the budget spent, the model is told no one is available and to decide for
+  itself and continue; the run does not stop.
 - `finish` — declare the task complete (triggers final verification + summary).
 
 ## Permission layer

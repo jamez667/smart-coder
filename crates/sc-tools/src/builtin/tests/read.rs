@@ -18,6 +18,11 @@ fn read_function_returns_just_that_function() {
     assert!(out.contains("fn target"), "got: {out}");
     assert!(out.contains("x + 1"), "body present: {out}");
     assert!(!out.contains("fn a("), "only the target function: {out}");
+    // The same `N: text` numbering as read_file, at the function's real file lines.
+    assert!(
+        out.contains("\n3: fn target(x: u32) -> u32 {\n4:     x + 1\n5: }"),
+        "numbered from its position in the file: {out}"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -30,16 +35,31 @@ fn read_file_windows_to_a_line_range() {
     let r = call(json!({"tool":"read_file","path":"big.txt","start":10,"limit":3}));
     let o = obs(execute(&r, &ws));
     assert!(o.contains("lines 10-12 of 50"), "labels the window: {o}");
-    assert!(
-        o.contains("line 10") && o.contains("line 12"),
-        "window content: {o}"
+    // Every shown line carries its own file line number, `N: text`.
+    assert_eq!(
+        o,
+        "read_file big.txt (lines 10-12 of 50):\n10: line 10\n11: line 11\n12: line 12\n\
+         (lines 10-12 of 50; pass start=13 for more)",
+        "numbered window with a plain-words continuation hint"
     );
-    assert!(
-        !o.contains("line 9\n") && !o.contains("line 13"),
-        "outside window excluded: {o}"
+    // The hint is prose, never a tool-call object: on native tool calling a literal
+    // `{"tool":"read_file",...}` is the wrong dialect and gets copied into reply text.
+    assert!(!o.contains("{\"tool\""), "no JSON in the hint: {o}");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn read_file_numbers_every_line_of_a_whole_file() {
+    let ws = temp_dir("rnum");
+    std::fs::write(ws.join("s.rs"), "fn a() {}\n\nfn b() {}\n").unwrap();
+    let o = obs(execute(
+        &call(json!({"tool":"read_file","path":"s.rs"})),
+        &ws,
+    ));
+    assert_eq!(
+        o,
+        "read_file s.rs (3 lines):\n1: fn a() {}\n2: \n3: fn b() {}"
     );
-    // The continuation hint tells the model how to read the next chunk.
-    assert!(o.contains("\"start\":13"), "next-chunk hint: {o}");
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -55,7 +75,13 @@ fn read_file_caps_a_large_file_by_default() {
         o.contains(&format!("lines 1-{READ_FILE_DEFAULT_LINES} of 1000")),
         "capped: {o}"
     );
-    assert!(o.contains("more line(s)"), "truncation noted: {o}");
+    assert!(
+        o.ends_with(&format!(
+            "\n(lines 1-{READ_FILE_DEFAULT_LINES} of 1000; pass start={} for more)",
+            READ_FILE_DEFAULT_LINES + 1
+        )),
+        "truncation noted in plain words: {o}"
+    );
     assert!(!o.contains("L1000"), "tail not included: {o}");
     let _ = std::fs::remove_dir_all(&ws);
 }

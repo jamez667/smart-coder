@@ -30,6 +30,10 @@ pub struct TestReport {
     /// actual errors instead of a bare "exited non-zero". `None` for parsed
     /// per-test reports (their detail lives on the cases).
     pub raw: Option<String>,
+    /// What changed since the previous run of the same command, when the runner could
+    /// tell: `same 2 failures as last run`, `newly failing: a; now passing: b`. Set by
+    /// [`run_verification_in`](crate::run_verification_in); `None` from a bare parse.
+    pub delta: Option<String>,
 }
 
 /// Max chars of raw generic output to surface in an observation — enough for a
@@ -46,6 +50,7 @@ impl TestReport {
             command_ok,
             generic: true,
             raw: None,
+            delta: None,
         }
     }
 
@@ -56,6 +61,7 @@ impl TestReport {
             command_ok,
             generic: true,
             raw: Some(output.to_string()),
+            delta: None,
         }
     }
 
@@ -76,7 +82,24 @@ impl TestReport {
     /// A compact, failure-first observation for the model. Leads with failing
     /// cases and their messages; summarizes the passing ones rather than listing
     /// them (spec 05 — spend the window on what's broken).
+    ///
+    /// When a [`delta`](Self::delta) is known it is part of the observation. On a red
+    /// run it PREFIXES the status line (`newly failing: a -- run_verification: 1
+    /// failed, 2 passed:`), which still carries the word the agent loop keys on to
+    /// tell failure from success. On a green run it follows the status line on its
+    /// own line: a test named `test_error_path` in a `now passing:` clause on the
+    /// first line would otherwise read as an error to that same heuristic.
     pub fn observation(&self) -> String {
+        let body = self.observation_body();
+        match &self.delta {
+            None => body,
+            Some(d) if self.all_green() => format!("{body}\n{d}"),
+            Some(d) => format!("{d} -- {body}"),
+        }
+    }
+
+    /// The observation without the delta: the status line and the failure detail.
+    fn observation_body(&self) -> String {
         if self.generic {
             if self.command_ok {
                 return "run_verification: command exited 0 (passed)".into();
@@ -360,6 +383,7 @@ error: aborting due to 2 previous errors
             command_ok: true,
             generic: false,
             raw: None,
+            delta: None,
         };
         assert!(green.all_green());
 
@@ -368,6 +392,7 @@ error: aborting due to 2 previous errors
             command_ok: false,
             generic: false,
             raw: None,
+            delta: None,
         };
         assert!(!red.all_green());
         assert_eq!(red.failed().len(), 1);
@@ -380,12 +405,49 @@ error: aborting due to 2 previous errors
             command_ok: false,
             generic: false,
             raw: None,
+            delta: None,
         };
         let o = red.observation();
         assert!(o.contains("✗ broken"), "{o}");
         assert!(o.contains("1 failed, 1 passed"), "{o}");
         // The passing test isn't individually listed.
         assert!(!o.contains("✗ keep"), "{o}");
+    }
+
+    /// The delta prefixes a red status line and follows a green one.
+    ///
+    /// The agent loop reads the FIRST line to tell failure from success, keying on
+    /// "failed"/"error" and short-circuiting on "passed". A red line keeps "failed"
+    /// under the prefix; a green line must not gain a test name like
+    /// `test_error_path` in front of it, so the delta goes below it.
+    #[test]
+    fn delta_prefixes_red_and_follows_green() {
+        let mut red = TestReport {
+            cases: vec![case("keep", true), case("broken", false)],
+            command_ok: false,
+            generic: false,
+            raw: None,
+            delta: Some("newly failing: broken".into()),
+        };
+        let o = red.observation();
+        assert_eq!(
+            o.lines().next().unwrap(),
+            "newly failing: broken -- run_verification: 1 failed, 1 passed:"
+        );
+        red.delta = None;
+        assert!(red.observation().starts_with("run_verification: 1 failed"));
+
+        let green = TestReport {
+            cases: vec![case("test_error_path", true)],
+            command_ok: true,
+            generic: false,
+            raw: None,
+            delta: Some("now passing: test_error_path".into()),
+        };
+        assert_eq!(
+            green.observation(),
+            "run_verification: all 1 test(s) passed ✓\nnow passing: test_error_path"
+        );
     }
 
     #[test]

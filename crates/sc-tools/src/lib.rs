@@ -20,7 +20,7 @@ mod spec;
 
 pub use builtin::{
     default_registry, execute, handled_here, minimal_worker_registry, read_only_registry,
-    safe_join, source_files, ToolOutcome, NOT_EXECUTED_HERE,
+    safe_join, six_tool_registry, source_files, ToolOutcome, NOT_EXECUTED_HERE,
 };
 pub use grammar::{params_json_schema, registry_gbnf};
 pub use journal::{EditRecord, Journal};

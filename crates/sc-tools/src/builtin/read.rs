@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::util::safe_join;
+use super::util::{number_lines, safe_join, to_lf, uses_crlf};
 
 /// Default line cap when no explicit `limit` is given, so reading a large file can't flood the
 /// context window (or the MCP status tail). A model that needs more asks for a specific window.
@@ -26,6 +26,9 @@ pub fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option
     };
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
+    if total == 0 {
+        return format!("read_file {path} (0 lines)");
+    }
     // 1-based start; clamp to the file. `start=0`/absent → 1.
     let start_1 = start.filter(|&s| s > 0).map(|s| s as usize).unwrap_or(1);
     if start_1 > total {
@@ -38,17 +41,20 @@ pub fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option
         .map(|l| l as usize)
         .unwrap_or(READ_FILE_DEFAULT_LINES);
     let end = (start_1 - 1 + count).min(total); // exclusive, 0-based
-    let body = lines[start_1 - 1..end].join("\n");
-    // Label the window and, when it doesn't reach the end, tell the model exactly how to continue.
+                                                // Every line carries its number: the number the model reads here is the one it
+                                                // hands to a line-addressed edit, and the one an edit error quotes back.
+    let body = number_lines(&lines[start_1 - 1..end], start_1);
+    // Label the window and, when it doesn't reach the end, say how to continue -- in
+    // plain words. This used to be a literal `{"tool":"read_file",...}` object, which
+    // is the wrong dialect for a backend doing native tool calling: the model copied
+    // the JSON into its reply text instead of making the call.
     if start_1 == 1 && end == total {
         format!("read_file {path} ({total} lines):\n{body}")
     } else {
         let more = if end < total {
             format!(
-                "\n… {} more line(s). Read the next chunk with \
-                 {{\"tool\":\"read_file\",\"path\":\"{path}\",\"start\":{},\"limit\":{count}}}.",
-                total - end,
-                end + 1,
+                "\n(lines {start_1}-{end} of {total}; pass start={} for more)",
+                end + 1
             )
         } else {
             String::new()
@@ -68,23 +74,35 @@ pub fn read_file(workspace: &Path, path: &str, start: Option<i64>, limit: Option
 /// [`edit_function`]: super::write::edit_function
 const GIANT_FN_LINES: usize = sc_index::GIANT_FN_LINES;
 
-/// Resolve `(language, source, (start,end))` for the function `name` in `path`, or an error
-/// string. Shared by [`read_function`] and [`edit_function`].
+/// A function found by name: the file's LF-normalised source, the function's 1-based
+/// line span, how many functions share the name, and whether the file on disk is CRLF
+/// (so an editor can write the endings it found back).
+pub(super) struct Located {
+    pub src: String,
+    pub start: usize,
+    pub end: usize,
+    pub count: usize,
+    pub crlf: bool,
+}
+
+/// Resolve the function `name` in `path`, or an error string. Shared by
+/// [`read_function`] and [`edit_function`].
 ///
 /// [`edit_function`]: super::write::edit_function
 pub(super) fn locate_function(
     workspace: &Path,
     path: &str,
     name: &str,
-) -> std::result::Result<(String, usize, usize, usize), String> {
+) -> std::result::Result<Located, String> {
     let p = safe_join(workspace, path).map_err(|e| format!("{path} rejected: {e}"))?;
     let Some(lang) = sc_index::Language::from_path(path) else {
         return Err(format!(
             "{path}: function tools support Rust/Python/C# only. Use read_file/edit_lines here."
         ));
     };
-    let src = std::fs::read_to_string(&p).map_err(|e| format!("{path} error: {e}"))?;
-    let src = src.replace("\r\n", "\n").replace('\r', "\n");
+    let raw = std::fs::read_to_string(&p).map_err(|e| format!("{path} error: {e}"))?;
+    let crlf = uses_crlf(&raw);
+    let src = to_lf(&raw);
     let Some((start, end)) = sc_index::function_span(lang, &src, name) else {
         return Err(format!(
             "{path}: no function named `{name}` found. Check the name (or use search_code / \
@@ -92,23 +110,30 @@ pub(super) fn locate_function(
         ));
     };
     let count = sc_index::count_functions_named(lang, &src, name);
-    Ok((src, start, end, count))
+    Ok(Located {
+        src,
+        start,
+        end,
+        count,
+        crlf,
+    })
 }
 
 /// Read one function/method by name — its whole body, line-numbered. The model gets exactly the
 /// function it asked for instead of paging through a large file.
 pub fn read_function(workspace: &Path, path: &str, name: &str) -> String {
-    let (src, start, end, count) = match locate_function(workspace, path, name) {
+    let Located {
+        src,
+        start,
+        end,
+        count,
+        ..
+    } = match locate_function(workspace, path, name) {
         Ok(v) => v,
         Err(e) => return format!("read_function {e}"),
     };
     let lines: Vec<&str> = src.lines().collect();
-    let body: String = lines[start - 1..end]
-        .iter()
-        .enumerate()
-        .map(|(i, l)| format!("{:>5}  {l}", start + i))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body = number_lines(&lines[start - 1..end], start);
     let span_len = end - start + 1;
     let mut note = String::new();
     if count > 1 {

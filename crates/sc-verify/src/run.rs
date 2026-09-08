@@ -333,7 +333,17 @@ pub fn run_command_in(sandbox: &Sandbox, workspace: &Path, command: &str) -> Com
 /// bound something that never finishes.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
 
-/// [`run_command_in`] with an explicit deadline.
+/// The most bytes of command output a [`CommandResult`] carries to the model.
+///
+/// The agent loop already caps LINES, but one line can be a megabyte -- a minified
+/// bundle, a JSON dump, a progress bar that never newlines -- and that walks straight
+/// past a line cap into the prompt. Bytes bound what lines cannot. The head and the
+/// tail are kept (a build's first error and its final summary), the middle is cut, and
+/// one marker line says so.
+pub const OUTPUT_BYTE_CAP: usize = 16 * 1024;
+
+/// [`run_command_in`] with an explicit deadline. Output is capped at
+/// [`OUTPUT_BYTE_CAP`].
 ///
 /// A timeout is a FAILED command, not a crash: the caller gets `ok: false` and an
 /// output that says what happened, so the model can read it and try something
@@ -344,37 +354,58 @@ pub fn run_command_bounded(
     command: &str,
     timeout: Duration,
 ) -> CommandResult {
+    let mut result = run_raw(sandbox, workspace, command, timeout);
+    result.output = cap_output(&result.output);
+    result
+}
+
+/// [`run_command_in`] WITHOUT the byte cap, for a caller that parses the output
+/// rather than showing it: a test parser handed the head and tail of a long suite
+/// would miss every failure in the middle and report the survivors as the whole
+/// story. Still bounded by [`COMMAND_TIMEOUT`].
+pub fn run_command_full(sandbox: &Sandbox, workspace: &Path, command: &str) -> CommandResult {
+    run_raw(sandbox, workspace, command, COMMAND_TIMEOUT)
+}
+
+/// Spawn, drain, and bound `command`; the uncapped output in write order.
+fn run_raw(sandbox: &Sandbox, workspace: &Path, command: &str, timeout: Duration) -> CommandResult {
     let mut cmd = build_command(sandbox, workspace, command);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    // ONE pipe for both streams, so the model reads the output in the order it was
+    // written. Two pipes gave stdout then stderr, and a compiler's diagnostics landed
+    // after the test lines they explained; the model then chased the last thing it
+    // saw. Redirecting inside the shell (`2>&1`) would work only on the shell path,
+    // and this must hold for Docker too.
+    let spawn_failure = |e: std::io::Error| CommandResult {
+        ok: false,
+        code: None,
+        output: format!("failed to spawn {command:?}: {e}"),
+    };
+    let (mut reader, writer) = match std::io::pipe() {
+        Ok(p) => p,
+        Err(e) => return spawn_failure(e),
+    };
+    let err_writer = match writer.try_clone() {
+        Ok(w) => w,
+        Err(e) => return spawn_failure(e),
+    };
+    cmd.stdout(Stdio::from(writer))
+        .stderr(Stdio::from(err_writer));
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            return CommandResult {
-                ok: false,
-                code: None,
-                output: format!("failed to spawn {command:?}: {e}"),
-            }
-        }
+        Err(e) => return spawn_failure(e),
     };
+    // The parent's ends of the write side live in `cmd`; the reader only sees EOF once
+    // every writer is gone, so drop them now that the child holds its own.
+    drop(cmd);
 
-    // Drain both pipes on their own threads. A child that fills a pipe buffer
-    // blocks on the write, so polling `try_wait` without reading would deadlock on
-    // exactly the chatty command most likely to be slow.
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_handle = std::thread::spawn(move || {
+    // Drain the pipe on its own thread. A child that fills the pipe buffer blocks on
+    // the write, so polling `try_wait` without reading would deadlock on exactly the
+    // chatty command most likely to be slow.
+    let drain = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
-        buf
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
+        let _ = std::io::Read::read_to_end(&mut reader, &mut buf);
         buf
     });
 
@@ -392,14 +423,7 @@ pub fn run_command_bounded(
         std::thread::sleep(Duration::from_millis(20));
     };
 
-    let mut output = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).into_owned();
-    let err = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).into_owned();
-    if !err.is_empty() {
-        if !output.is_empty() {
-            output.push('\n');
-        }
-        output.push_str(&err);
-    }
+    let mut output = String::from_utf8_lossy(&drain.join().unwrap_or_default()).into_owned();
 
     match status {
         Some(st) => CommandResult {
@@ -424,6 +448,41 @@ pub fn run_command_bounded(
             }
         }
     }
+}
+
+/// Bound `output` to [`OUTPUT_BYTE_CAP`]: the first half and the last half, on line
+/// boundaries where there are any, with one marker line between saying what was cut.
+fn cap_output(output: &str) -> String {
+    if output.len() <= OUTPUT_BYTE_CAP {
+        return output.to_string();
+    }
+    let half = OUTPUT_BYTE_CAP / 2;
+    // Head: up to the last newline inside the first half, else a char boundary.
+    let head_end = output[..half].rfind('\n').unwrap_or_else(|| {
+        (0..=half)
+            .rev()
+            .find(|&i| output.is_char_boundary(i))
+            .unwrap_or(0)
+    });
+    // Tail: from the first newline inside the last half, else a char boundary.
+    let tail_from = output.len() - half;
+    let tail_start = output[tail_from..]
+        .find('\n')
+        .map(|i| tail_from + i + 1)
+        .unwrap_or_else(|| {
+            (tail_from..=output.len())
+                .find(|&i| output.is_char_boundary(i))
+                .unwrap_or(output.len())
+        });
+    format!(
+        "{}\n[harness] output truncated: {} bytes total, {} cut from the middle; the first and \
+         last {} KB are shown\n{}",
+        &output[..head_end],
+        output.len(),
+        tail_start - head_end,
+        half / 1024,
+        &output[tail_start..]
+    )
 }
 
 /// Kill a timed-out command *and everything it spawned*.
@@ -471,9 +530,16 @@ pub fn run_verification(workspace: &Path, command: &str) -> TestReport {
 
 /// Run the verification `command` under `sandbox` and parse it into a [`TestReport`]
 /// — the TDD gate, runnable inside the Docker build sandbox.
+///
+/// Parses the FULL output (the byte cap is for what the model reads, and a parser
+/// handed only the head and tail of a long suite would miss the failures in the
+/// middle), and fills in [`TestReport::delta`] against the previous run of the same
+/// command on this thread.
 pub fn run_verification_in(sandbox: &Sandbox, workspace: &Path, command: &str) -> TestReport {
-    let result = run_command_in(sandbox, workspace, command);
-    parse(command, &result.output, result.ok)
+    let result = run_command_full(sandbox, workspace, command);
+    let mut report = parse(command, &result.output, result.ok);
+    report.delta = crate::delta::note_run(command, &report);
+    report
 }
 
 #[cfg(test)]
@@ -838,8 +904,99 @@ mod tests {
             start.elapsed() < Duration::from_secs(55),
             "should finish well inside the deadline, not be killed by it"
         );
-        assert!(r.output.len() > 64_000, "got {} bytes", r.output.len());
+        // Everything was drained (the marker reports the true total) and then capped
+        // for the model.
+        assert!(
+            r.output.contains("[harness] output truncated: 1"),
+            "the marker names the total, got: {}",
+            &r.output[r.output.len().saturating_sub(300)..]
+        );
+        assert!(
+            r.output.len() < OUTPUT_BYTE_CAP + 256,
+            "capped near {OUTPUT_BYTE_CAP}, got {} bytes",
+            r.output.len()
+        );
+        // The uncapped runner keeps it all, which is what a parser needs.
+        let full = run_command_full(&Sandbox::Host, &ws, cmd);
+        assert!(
+            full.output.len() > 64_000,
+            "got {} bytes",
+            full.output.len()
+        );
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// **stderr lands where it was written, not after everything else.**
+    ///
+    /// Two pipes gave stdout then stderr, so a compiler's diagnostics arrived after
+    /// the test lines they explained and the model chased the last thing it saw.
+    #[test]
+    fn stderr_is_interleaved_with_stdout_in_write_order() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-order-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let cmd = if host_shell().0 == "cmd" {
+            "echo one& echo two 1>&2& echo three"
+        } else {
+            "echo one; echo two 1>&2; echo three"
+        };
+        let r = run_command(&ws, cmd);
+        let one = r.output.find("one").expect("stdout line");
+        let two = r.output.find("two").expect("stderr line");
+        let three = r.output.find("three").expect("second stdout line");
+        assert!(one < two && two < three, "out of order: {:?}", r.output);
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The cap keeps the head and the tail, cuts on line boundaries, and says so once.
+    #[test]
+    fn cap_output_keeps_head_and_tail_with_one_marker() {
+        let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n"; // 64 B
+        let big: String = (0..1000).map(|i| format!("{i:04}{}", &line[4..])).collect(); // 64 KB
+        let capped = cap_output(&big);
+        assert!(
+            capped.len() <= OUTPUT_BYTE_CAP + 200,
+            "got {}",
+            capped.len()
+        );
+        assert!(capped.starts_with("0000"), "head kept: {}", &capped[..80]);
+        assert!(
+            capped.ends_with(&format!("0999{}", &line[4..])),
+            "tail kept"
+        );
+        assert_eq!(capped.matches("[harness] output truncated").count(), 1);
+        assert!(capped.contains("64000 bytes total"), "{capped}");
+        // Whole lines either side of the marker.
+        let marker_at = capped.find("[harness]").unwrap();
+        assert_eq!(&capped[marker_at - 1..marker_at], "\n");
+        // Small output is untouched.
+        assert_eq!(cap_output("hi\n"), "hi\n");
+    }
+
+    /// **A second run of the same command reports what changed.**
+    ///
+    /// A small model reads each verification on its own; "2 failed" after "2 failed"
+    /// looks like no news even when it fixed one and broke another. The delta names it.
+    #[test]
+    fn run_verification_reports_the_delta_against_the_previous_run() {
+        let ws = temp_dir("verify-delta");
+        // A generic failing command: the signature is the placeholder, so a repeat is
+        // "same".
+        let cmd = "echo boom 1>&2; exit 1";
+        let first = run_verification(&ws, cmd);
+        assert_eq!(first.delta, None, "nothing to compare on the first run");
+        let second = run_verification(&ws, cmd);
+        assert_eq!(second.delta.as_deref(), Some("same 1 failure as last run"));
+        // The delta prefixes the red status line, which still says "failed".
+        let obs = second.observation();
+        let first_line = obs.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("same 1 failure as last run -- run_verification:"),
+            "{obs}"
+        );
+        assert!(first_line.contains("failed"), "{obs}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

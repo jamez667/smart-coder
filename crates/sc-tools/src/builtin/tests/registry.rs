@@ -77,31 +77,90 @@ fn rejects_path_traversal() {
 /// `search_code`; the model then guessed at parameters and lost the turn
 /// ("tool read_file has no parameter end").
 ///
-/// A description may name its OWN parameters; those always exist.
+/// Bare names count too, not only backticked ones: `append_file` used to say "write
+/// the first part with write_file", and the model reads prose as well as it reads
+/// code. Parameter descriptions are checked with the same rule.
 #[test]
 fn no_tool_description_names_another_tool() {
     let reg = default_registry();
     let names: Vec<&str> = reg.specs().iter().map(|s| s.name).collect();
     for spec in reg.specs() {
-        let own: Vec<String> = spec
-            .params
-            .iter()
-            .map(|p| format!("`{}`", p.name))
-            .collect();
         for other in &names {
             if *other == spec.name {
                 continue;
             }
-            let token = format!("`{other}`");
-            if own.contains(&token) {
-                continue;
-            }
             assert!(
-                !spec.description.contains(&token),
-                "`{}`'s description names `{other}`, which a trimmed registry may not offer",
+                !mentions(spec.description, other),
+                "`{}`'s description names {other}, which a trimmed registry may not offer: {:?}",
+                spec.name,
+                spec.description
+            );
+            for p in &spec.params {
+                assert!(
+                    !mentions(p.description, other),
+                    "`{}`'s parameter `{}` names {other}, which a trimmed registry may not \
+                     offer: {:?}",
+                    spec.name,
+                    p.name,
+                    p.description
+                );
+            }
+        }
+    }
+}
+
+/// Whether `text` contains `name` as a whole word (not inside a longer identifier).
+fn mentions(text: &str, name: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(i) = text[from..].find(name) {
+        let at = from + i;
+        let end = at + name.len();
+        let before_ok = !text[..at].chars().next_back().is_some_and(is_word);
+        let after_ok = !text[end..].chars().next().is_some_and(is_word);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Every default description is one neutral sentence: what the tool does, with no
+/// routing ("PREFER", "BEST for", "Use this to"). Routing is the task prefix's job.
+#[test]
+fn tool_descriptions_are_one_neutral_sentence() {
+    for spec in default_registry().specs() {
+        let d = spec.description;
+        for word in ["PREFER", "BEST", "Use this"] {
+            assert!(
+                !d.contains(word),
+                "`{}` routes with {word:?}: {d:?}",
                 spec.name
             );
         }
+        // One sentence: ends once, and no sentence break inside. A `.` followed by a
+        // space and a capital is the sentence break that matters; dotted paths and
+        // `e.g.` are not.
+        assert!(
+            d.ends_with('.'),
+            "`{}` does not end a sentence: {d:?}",
+            spec.name
+        );
+        let breaks = d
+            .match_indices(". ")
+            .filter(|(i, _)| {
+                d[i + 2..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+            })
+            .count();
+        assert_eq!(
+            breaks, 0,
+            "`{}` is more than one sentence: {d:?}",
+            spec.name
+        );
     }
 }
 
@@ -173,6 +232,38 @@ fn process_tools_are_real_registry_tools() {
             "NOT_EXECUTED_HERE names {name}, which the registry does not declare"
         );
     }
+}
+
+/// The build menu is the measured six, in the default registry's order.
+///
+/// Six tools got `run_command` 12/12 on the SWE-bench path where sixteen got 3/12.
+/// The scored task run and the desktop iterate run both offer this; the default
+/// registry keeps every tool for the flows that want them.
+#[test]
+fn the_build_menu_is_the_measured_six() {
+    let names: Vec<_> = crate::six_tool_registry()
+        .specs()
+        .iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "read_file",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "run_verification",
+            "finish",
+        ],
+        "the six-tool menu changed; if that is deliberate, probe it and update this test"
+    );
+    // The build finish stays parameterless here too: the work is the edits on disk.
+    let finish = crate::six_tool_registry().get("finish").cloned().unwrap();
+    assert!(
+        finish.params.is_empty(),
+        "the build finish is a signal, not a report"
+    );
 }
 
 /// The investigation menu is SIX tools, and stays six.

@@ -71,6 +71,40 @@ fn is_test_file(rel: &str) -> bool {
         || lower.contains(".spec.")
 }
 
+/// Render `lines` with 1-based line numbers starting at `first`, one `N: text` per
+/// line. This is the ONE format every tool uses to show file content, so a number the
+/// model reads in a file view is the number it can hand to a line-addressed edit.
+pub(super) fn number_lines(lines: &[&str], first: usize) -> String {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{}: {l}", first + i))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether text uses Windows line endings. Checked on the RAW bytes of a file before
+/// any normalisation, so an editor can write back the endings it found.
+pub(super) fn uses_crlf(raw: &str) -> bool {
+    raw.contains("\r\n")
+}
+
+/// Normalise every line ending to LF, so matching and splicing work in one dialect.
+pub(super) fn to_lf(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Convert LF text back to the file's own endings: CRLF when `crlf`, else unchanged.
+/// Every editor that read a CRLF file writes CRLF back, so an edit never flips a
+/// file's endings and shows up as a whole-file diff.
+pub(super) fn from_lf(lf: &str, crlf: bool) -> String {
+    if crlf {
+        lf.replace('\n', "\r\n")
+    } else {
+        lf.to_string()
+    }
+}
+
 /// Join `rel` onto `workspace`, rejecting absolute paths and `..` traversal
 /// (spec 04 — sandboxed to the workspace root).
 pub fn safe_join(workspace: &Path, rel: &str) -> Result<PathBuf> {
