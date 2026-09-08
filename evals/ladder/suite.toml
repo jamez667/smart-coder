@@ -248,3 +248,114 @@ verify_cmd = "cargo test --offline -q"
 contract_tests = ["tests/contract.rs"]
 tags = ["rung:engine-novel-generic", "lang:rust", "source:void-claim"]
 timeout_secs = 300
+
+# --- Cross-file rungs -------------------------------------------------------
+#
+# WHY THESE EXIST -- do not delete them as redundant with the rungs above.
+#
+# Measured 2026-09-07/08 on tiel-coder-35b, three arms (our harness / a bare
+# model with native tool calling / the external pi agent) x 3 repeats: SIX of the
+# ten rungs scored 3/3 for EVERY arm in EVERY round. Only `engine-diagonal-wired`,
+# `engine-grid-scan`, `engine-ecs-query` and `engine-diagonal-path` moved at all.
+# A suite where most tasks are solved by everyone ranks nothing; those six measure
+# a floor that every arm already clears.
+#
+# What DID separate the arms was diagnostic distance plus CROSS-FILE work: a
+# change made in one place that must then be propagated to every site depending
+# on it. That is what a repo map and a stall detector buy you, and it is exactly
+# what a bare model without either has to rediscover by recompiling.
+#
+# So each of these four requires edits in three or four files that a single-file
+# reader cannot get right, and each carries a trap that a lazy propagation falls
+# into:
+#
+#   rust-multi-site        a catch-all `_ =>` arm compiles but gives the wrong
+#                          answer at all three match sites (verified).
+#   rust-signature-change  one hard-coded deadline satisfies at most one of the
+#                          four call sites; each needs a value only its own
+#                          module's local context names.
+#   rust-hidden-invariant  the loud failure is in wrap.rs; the cause is in
+#                          span.rs, and patching wrap.rs alone leaves
+#                          highlight::rendered_rows wrong (verified).
+#   rust-trait-impl        the three impls need genuinely different bodies;
+#                          delegating without namespacing the key compiles and
+#                          fails (verified).
+#
+# Same rules as the rungs above: Rust only, std only, single `rustc --test` over
+# a `#[path = "..."] mod` chain rooted at test.rs, and a unique exe name per task
+# so parallel and repeat runs cannot collide.
+
+[[tasks]]
+id = "rust-multi-site"
+description = """
+The daemon's `Event` enum needs a fourth kind: `Cancelled { id: u32, by: String }`, \
+emitted when a human stops a job before it finishes.
+
+Add the variant and handle it everywhere it is now matched. A cancelled job is \
+something an operator should see, but it must never be retried automatically — \
+retrying what somebody deliberately stopped is the wrong answer. Its status line \
+reads `#<id> cancelled by <who>`.
+
+Leave the existing three variants behaving exactly as they do now. The tests in \
+test.rs specify all of this; make them pass."""
+fixture = "tasks/rust-multi-site/fixture"
+solution = "tasks/rust-multi-site/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_multi_site.exe test.rs && ./t_multi_site.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:cross-file-variant", "lang:rust"]
+timeout_secs = 300
+
+[[tasks]]
+id = "rust-signature-change"
+description = """
+`budget::plan` sizes a job's retry schedule from its cost class alone, so a \
+schedule can outlast the window the caller actually has. Give it a second \
+parameter, `deadline_ms: u64` — the wall-clock window the whole schedule must fit \
+inside — and cut attempts until `attempts * backoff_ms <= deadline_ms`, never \
+below one attempt.
+
+Then update every caller to pass the deadline that is right for it. The right \
+value is different at each one, and each module already states its own: read the \
+code around the call rather than picking one number for all of them.
+
+The tests in test.rs specify the behaviour; make them pass."""
+fixture = "tasks/rust-signature-change/fixture"
+solution = "tasks/rust-signature-change/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_sig_change.exe test.rs && ./t_sig_change.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:cross-file-signature", "lang:rust"]
+timeout_secs = 300
+
+[[tasks]]
+id = "rust-hidden-invariant"
+description = """
+The narrow-terminal view draws a blank row under a wrapped source line. Wrapping \
+a 12-byte line at width 6 should give two chunks; the pane gets a third, empty \
+one. Find the cause and fix it so the tests pass."""
+fixture = "tasks/rust-hidden-invariant/fixture"
+solution = "tasks/rust-hidden-invariant/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_hidden_invariant.exe test.rs && ./t_hidden_invariant.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:cross-file-cause", "lang:rust"]
+timeout_secs = 300
+
+[[tasks]]
+id = "rust-trait-impl"
+description = """
+The `Store` trait can read, write and count, but nothing can drop a single key. \
+Add `evict(&mut self, key: &str) -> bool` to the trait — remove the key if this \
+layer holds it, returning whether anything was dropped — and implement it for all \
+three stores.
+
+They store their entries in three different ways, so the three bodies are three \
+different pieces of code. Every other key must survive an eviction, and `len` \
+must agree afterwards.
+
+Leave the existing methods behaving exactly as they do now. The tests in test.rs \
+specify the behaviour; make them pass."""
+fixture = "tasks/rust-trait-impl/fixture"
+solution = "tasks/rust-trait-impl/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_trait_impl.exe test.rs && ./t_trait_impl.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:cross-file-trait", "lang:rust"]
+timeout_secs = 300
