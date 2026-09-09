@@ -37,6 +37,74 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// The RESULT of a tool call, paired to the assistant turn that made it by
+    /// [`Message::tool_call_id`].
+    ///
+    /// Only produced when the assistant turn it answers carries a native
+    /// [`ToolCallRecord`]; a text-only turn keeps its observation as an ordinary
+    /// `User` message, exactly as before. See [`Message::tool`].
+    Tool,
+}
+
+/// One native tool call an assistant turn made, kept in the shape the backend
+/// handed it over so the NEXT request can replay it faithfully.
+///
+/// **This is the fix for a whole class of silent corruption.** A model whose chat
+/// template wraps calls in its own markup (`<tool_call>…</tool_call><|im_end|>` for
+/// the ChatML family, Mellum2 included) only ever sees that markup if the call goes
+/// back out as a structured `tool_calls` array — the template writes the wrapper.
+/// Flattening the call to a bare `{"tool":…}` string in `content` shows the model a
+/// dozen turns of history in a format its own template never emits; it imitates the
+/// history and never produces the stop token, because the token that ends its turn
+/// is part of the wrapper it was never shown. Measured on Mellum2-12B: 24 completion
+/// tokens and a clean stop with a faithful history, 3,072 (the cap) and
+/// `{"tool":"finish"}</tool_call>` repeated ~60 times with the flattened one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCallRecord {
+    /// The server's id for this call. Echoed back as the assistant message's
+    /// `tool_calls[].id` and as the matching result's `tool_call_id`. Empty when the
+    /// server did not supply one (llama.cpp often does not) — the wire builder then
+    /// synthesises a stable one so the pair still matches.
+    pub id: String,
+    /// The function name, verbatim.
+    pub name: String,
+    /// The JSON-encoded argument object, verbatim — a *string* per the OpenAI
+    /// schema, kept byte-for-byte rather than re-serialised so the replayed request
+    /// is the same bytes the server sent.
+    pub arguments: String,
+}
+
+impl ToolCallRecord {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+
+    /// The id this call is replayed under: the server's own when it gave one,
+    /// otherwise a deterministic stand-in derived from the call itself.
+    ///
+    /// **One implementation, because two halves have to agree.** The assistant
+    /// message's `tool_calls[].id` and its result's `tool_call_id` are what a chat
+    /// template matches a call to its answer by; if the harness and the wire builder
+    /// each invented their own id, the pair would silently come apart on every server
+    /// that does not supply ids (llama.cpp usually does not).
+    pub fn wire_id(&self) -> String {
+        if !self.id.is_empty() {
+            return self.id.clone();
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.name.hash(&mut h);
+        self.arguments.hash(&mut h);
+        format!("call_{:016x}", h.finish())
+    }
 }
 
 /// A single chat message.
@@ -44,25 +112,62 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// The native tool calls this ASSISTANT turn made, when the backend returned a
+    /// structured `tool_calls` array. Empty for every other message and for a turn
+    /// decoded by the `ParseRepair`/`Grammar` strategies, whose output is genuinely
+    /// text — those replay byte-identically to how they always have.
+    pub tool_calls: Vec<ToolCallRecord>,
+    /// For a [`Role::Tool`] message, the id of the call it answers. `None` elsewhere.
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
-            content: content.into(),
-        }
+        Self::plain(Role::System, content)
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: content.into(),
-        }
+        Self::plain(Role::User, content)
     }
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::plain(Role::Assistant, content)
+    }
+
+    /// A tool RESULT, paired to the call `id` it answers.
+    pub fn tool(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(id.into()),
+        }
+    }
+
+    /// An assistant turn that made native tool calls: the normalised text form the
+    /// harness's extractor reads, PLUS the structured calls the wire builder replays.
+    pub fn assistant_with_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCallRecord>,
+    ) -> Self {
         Self {
             role: Role::Assistant,
             content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// True when this turn carries a native call to replay (so its observation must
+    /// go back as a paired `tool` result rather than a plain user message).
+    pub fn has_tool_calls(&self) -> bool {
+        !self.tool_calls.is_empty()
+    }
+
+    fn plain(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 }
@@ -174,6 +279,17 @@ pub struct GenerateResponse {
     /// Milliseconds the server spent on the prefill (llama.cpp's
     /// `timings.prompt_ms`) -- the wall-clock consequence of the two counts above.
     pub prompt_ms: Option<f64>,
+    /// The NATIVE tool calls this reply carried, when the backend returned a
+    /// structured `tool_calls` array.
+    ///
+    /// [`Self::content`] still holds the harness's normalised `{"tool":…}` text form
+    /// (every extractor reads that, and nothing about it changes). This is the same
+    /// call kept in the shape the SERVER sent, so the loop can store it on the
+    /// assistant turn and replay it faithfully next turn instead of showing the model
+    /// a flattened string its own chat template never emits — see [`ToolCallRecord`].
+    ///
+    /// Empty for a plain-completion or grammar reply, whose output is genuinely text.
+    pub tool_calls: Vec<ToolCallRecord>,
 }
 
 impl GenerateResponse {
@@ -181,11 +297,7 @@ impl GenerateResponse {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            finish_reason: None,
-            prompt_tokens: None,
-            cached_prompt_tokens: None,
-            prefilled_prompt_tokens: None,
-            prompt_ms: None,
+            ..Default::default()
         }
     }
 
@@ -194,10 +306,7 @@ impl GenerateResponse {
         Self {
             content: content.into(),
             finish_reason: reason,
-            prompt_tokens: None,
-            cached_prompt_tokens: None,
-            prefilled_prompt_tokens: None,
-            prompt_ms: None,
+            ..Default::default()
         }
     }
 

@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::{
     BackendHealth, Capabilities, GenerateRequest, GenerateResponse, ModelBackend, OutputConstraint,
-    Role, ToolCalling,
+    Role, ToolCallRecord, ToolCalling,
 };
 
 /// A backend that talks to any OpenAI-compatible chat-completions endpoint.
@@ -327,11 +327,7 @@ impl OpenAiBackend {
     /// streamed run silently lost its `tools`/`grammar` while the transcript still
     /// recorded the constraint as sent. One builder means the two cannot drift again.
     fn build_body(&self, req: &GenerateRequest, stream: bool) -> serde_json::Value {
-        let messages: Vec<serde_json::Value> = req
-            .messages
-            .iter()
-            .map(|m| serde_json::json!({"role": role_str(m.role), "content": m.content}))
-            .collect();
+        let messages: Vec<serde_json::Value> = req.messages.iter().map(wire_message).collect();
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -442,6 +438,7 @@ impl OpenAiBackend {
         // ends it. We pull `choices[0].delta.content` from each chunk and stream it out.
         let reader = std::io::BufReader::new(resp.body_mut().as_reader());
         let mut full = String::new();
+        let mut calls = StreamingCalls::default();
         let mut finish_reason: Option<String> = None;
         let mut prompt_tokens: Option<usize> = None;
         // The prefix-cache split arrives on the same final chunk as `usage`.
@@ -486,6 +483,12 @@ impl OpenAiBackend {
             if chunk_split != CacheSplit::default() {
                 split = chunk_split;
             }
+            // A native call streams as `delta.tool_calls`, indexed, with the
+            // arguments arriving in fragments. Accumulate it here or the streaming
+            // path loses the call entirely — which it did, silently: `parse_stream_delta`
+            // only ever read `content`/`reasoning_content`, so a native-FC turn over
+            // SSE produced an empty reply.
+            calls.absorb(payload);
             if let Some(delta) = parse_stream_delta(payload) {
                 if !delta.is_empty() {
                     full.push_str(&delta);
@@ -504,12 +507,82 @@ impl OpenAiBackend {
         // A grammar-constrained reply arrives entirely inside `reasoning_content`; unwrap it
         // so the tool call survives instead of being stripped as thinking.
         let full = unwrap_reasoning_only(&full).unwrap_or(full);
-        let mut out = GenerateResponse::with_finish_reason(full, finish_reason);
+        // Same precedence as the non-streaming path: a native call, normalised to the
+        // uniform `{"tool":…}` text, wins over whatever text also arrived.
+        let records = calls.finish();
+        let content = match records.first() {
+            Some(tc) => record_to_text(tc),
+            None => full,
+        };
+        let mut out = GenerateResponse::with_finish_reason(content, finish_reason);
+        out.tool_calls = records;
         out.prompt_tokens = prompt_tokens;
         out.cached_prompt_tokens = split.cached;
         out.prefilled_prompt_tokens = split.prefilled;
         out.prompt_ms = split.prompt_ms;
         Ok(out)
+    }
+}
+
+/// Tool calls being assembled from an SSE stream.
+///
+/// OpenAI streams a call as a series of `delta.tool_calls` entries carrying an
+/// `index`: the first usually has the id and name, and the `arguments` string arrives
+/// in fragments across later chunks. Indexed rather than positional because a model
+/// may interleave two calls.
+#[derive(Debug, Default)]
+struct StreamingCalls {
+    /// `index -> (id, name, arguments-so-far)`, kept ordered by index at the end.
+    parts: std::collections::BTreeMap<u64, ToolCallRecord>,
+}
+
+impl StreamingCalls {
+    /// Fold one SSE chunk in. Unknown or call-free chunks are no-ops.
+    fn absorb(&mut self, payload: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        let Some(items) = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|t| t.as_array())
+        else {
+            return;
+        };
+        for (pos, item) in items.iter().enumerate() {
+            let idx = item
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(pos as u64);
+            let slot = self.parts.entry(idx).or_default();
+            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                if !id.is_empty() {
+                    slot.id = id.to_string();
+                }
+            }
+            let Some(f) = item.get("function") else {
+                continue;
+            };
+            if let Some(name) = f.get("name").and_then(|n| n.as_str()) {
+                if !name.is_empty() {
+                    slot.name = name.to_string();
+                }
+            }
+            if let Some(args) = f.get("arguments").and_then(|a| a.as_str()) {
+                slot.arguments.push_str(args);
+            }
+        }
+    }
+
+    /// The assembled calls, in index order. A slot that never got a name is dropped:
+    /// it is a fragment of a call the stream was cut off before naming, not a call.
+    fn finish(self) -> Vec<ToolCallRecord> {
+        self.parts
+            .into_values()
+            .filter(|c| !c.name.is_empty())
+            .collect()
     }
 }
 
@@ -723,7 +796,23 @@ struct WireResponseMessage {
 
 #[derive(Deserialize)]
 struct WireToolCall {
+    /// The server's id for this call, when it supplies one (llama.cpp often does
+    /// not). Kept so the result can be paired back to it verbatim.
+    #[serde(default)]
+    id: Option<String>,
     function: WireFunction,
+}
+
+impl WireToolCall {
+    /// The structured record kept on the assistant [`crate::Message`] so the next
+    /// request replays this call in the shape it arrived in.
+    fn to_record(&self) -> ToolCallRecord {
+        ToolCallRecord::new(
+            self.id.clone().unwrap_or_default(),
+            self.function.name.clone(),
+            self.function.arguments.clone(),
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -778,6 +867,50 @@ fn role_str(role: Role) -> &'static str {
         Role::System => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// Render ONE message in the OpenAI wire shape.
+///
+/// The whole point of this function is that an assistant turn which made a native
+/// tool call goes back out AS a native tool call. The server's chat template is what
+/// writes that turn's markup (`<tool_call>…</tool_call><|im_end|>` for the ChatML
+/// family), and it only does so for a structured `tool_calls` array — a flattened
+/// `{"tool":…}` string in `content` renders as ordinary assistant prose, teaching the
+/// model a house style its own template never emits and that has no stop token in it.
+///
+/// Everything without a native call renders exactly as it always did: a bare
+/// `{"role":…,"content":…}` pair, byte-identical, so the `ParseRepair`/`Grammar`
+/// paths and every existing recording are untouched.
+fn wire_message(m: &crate::Message) -> serde_json::Value {
+    if !m.tool_calls.is_empty() {
+        let calls: Vec<serde_json::Value> = m
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.wire_id(),
+                    "type": "function",
+                    "function": { "name": tc.name, "arguments": tc.arguments },
+                })
+            })
+            .collect();
+        // `content` stays alongside the calls. A template that renders both shows the
+        // model its own reasoning as well as the call; one that renders only the calls
+        // (the ChatML family) ignores it. Sending null instead would DISCARD a
+        // reasoning model's visible thinking from its own history.
+        return serde_json::json!({
+            "role": role_str(m.role),
+            "content": m.content,
+            "tool_calls": calls,
+        });
+    }
+    match &m.tool_call_id {
+        Some(id) => {
+            serde_json::json!({"role": role_str(m.role), "content": m.content, "tool_call_id": id})
+        }
+        None => serde_json::json!({"role": role_str(m.role), "content": m.content}),
     }
 }
 
@@ -785,12 +918,22 @@ fn role_str(role: Role) -> &'static str {
 /// string: `{"tool":"<name>", ...args}`. This lets the same `ParseRepair`
 /// extractor validate every strategy's output — native FC included.
 fn tool_call_to_text(tc: &WireToolCall) -> String {
+    normalized_call_text(&tc.function.name, &tc.function.arguments)
+}
+
+/// The same normalisation for a call assembled off the stream.
+fn record_to_text(tc: &ToolCallRecord) -> String {
+    normalized_call_text(&tc.name, &tc.arguments)
+}
+
+/// `name` + JSON-encoded `arguments` -> the harness's uniform `{"tool":…}` string.
+fn normalized_call_text(name: &str, arguments: &str) -> String {
     let args: serde_json::Value =
-        serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
+        serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
     let mut obj = serde_json::Map::new();
     obj.insert(
         "tool".to_string(),
-        serde_json::Value::String(tc.function.name.clone()),
+        serde_json::Value::String(name.to_string()),
     );
     if let Some(map) = args.as_object() {
         for (k, v) in map {
@@ -969,6 +1112,12 @@ impl OpenAiBackend {
         // Prefer a native tool call (normalized to the uniform string shape); else
         // plain text content; else the reasoning block (thinking models that ran
         // out of tokens mid-think leave content empty but reasoning populated).
+        // The normalised `{"tool":…}` text stays exactly as it was — the whole
+        // extraction/validation path reads it — but the STRUCTURED call is kept
+        // beside it so the loop can put the turn back on the wire in the shape the
+        // server handed it over. See `ToolCallRecord`.
+        let records: Vec<ToolCallRecord> =
+            message.tool_calls.iter().map(|t| t.to_record()).collect();
         let content = if let Some(tc) = message.tool_calls.first() {
             tool_call_to_text(tc)
         } else {
@@ -981,6 +1130,7 @@ impl OpenAiBackend {
         };
 
         let mut out = GenerateResponse::with_finish_reason(content, finish_reason);
+        out.tool_calls = records;
         out.prompt_tokens = prompt_tokens;
         out.cached_prompt_tokens = split.cached;
         out.prefilled_prompt_tokens = split.prefilled;
@@ -1853,6 +2003,220 @@ Connection: close
         );
         // Garbage doesn't panic.
         assert_eq!(parse_stream_delta("not json"), None);
+    }
+    // ---- the tool-call round trip (the Mellum2 corruption) -------------------
+    //
+    // Every test below exists because of one measured failure. Mellum2-12B's chat
+    // template wraps calls in `<tool_call>...</tool_call>` and ends the turn with
+    // `<|im_end|>`. The harness used to flatten each native call to a bare
+    // `{"tool":...}` string and replay it as plain assistant content, so from turn 2
+    // onward the model read its OWN history in a format its template never emits. It
+    // imitated the history and never reached its stop token. Isolated, same server,
+    // same six tools: 24 completion tokens and a clean stop on a faithful history,
+    // 3,072 (the cap) with `{"tool":"finish"}</tool_call>` repeated ~60 times on the
+    // flattened one. It cost 3 of the first 6 ladder rungs and 350-400k tokens.
+
+    /// Parse the JSON body out of a raw HTTP request the stub server captured.
+    fn body_of(raw: &str) -> serde_json::Value {
+        let idx = raw.find("\r\n\r\n").expect("headers end");
+        serde_json::from_str(&raw[idx + 4..]).expect("a JSON body")
+    }
+
+    /// **THE REGRESSION.** An assistant turn that made a native call goes out as a
+    /// structured `tool_calls` array -- not as bare JSON stuffed in `content`.
+    ///
+    /// The `tool_calls` array is what makes the server's chat template write the
+    /// model's own wrapper markup. Without it the template renders ordinary assistant
+    /// prose, and the token that ends the model's turn is never in the history at all.
+    #[test]
+    fn an_assistant_turn_with_a_native_call_goes_out_as_structured_tool_calls() {
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        let call = ToolCallRecord::new("call_7", "read_file", r#"{"path":"lib.rs"}"#);
+        let convo = vec![
+            Message::system("be terse"),
+            Message::user("fix the bug"),
+            Message::assistant_with_calls(r#"{"tool":"read_file","path":"lib.rs"}"#, vec![call]),
+            Message::tool("call_7", "read_file lib.rs:\nfn main() {}"),
+        ];
+        OpenAiBackend::new(base, "mellum")
+            .generate(&GenerateRequest::new(convo))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4);
+
+        let a = &msgs[2];
+        assert_eq!(a["role"], "assistant");
+        let calls = a["tool_calls"].as_array().expect("structured tool_calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_7");
+        assert_eq!(calls[0]["type"], "function");
+        assert_eq!(calls[0]["function"]["name"], "read_file");
+        assert_eq!(calls[0]["function"]["arguments"], r#"{"path":"lib.rs"}"#);
+
+        // And the result is paired to that call, as a `tool` message.
+        let t = &msgs[3];
+        assert_eq!(t["role"], "tool");
+        assert_eq!(t["tool_call_id"], "call_7");
+        assert!(t["content"].as_str().unwrap().contains("fn main"));
+
+        // The plain messages are untouched: no stray tool fields anywhere.
+        assert!(msgs[0].get("tool_calls").is_none());
+        assert!(msgs[1].get("tool_calls").is_none());
+        assert!(msgs[1].get("tool_call_id").is_none());
+    }
+
+    /// **The full round trip: parse a native reply, store it, send it back the same.**
+    ///
+    /// This is the property the fix is actually about -- what came off the wire on turn
+    /// N is what goes back onto it on turn N+1.
+    #[test]
+    fn a_native_call_round_trips_back_out_in_the_shape_it_arrived_in() {
+        // Turn 1: the server answers with a native tool call.
+        const REPLY: &str = r#"{"choices":[{"message":{"role":"assistant","content":null,
+            "tool_calls":[{"id":"call_abc","type":"function",
+              "function":{"name":"search_code","arguments":"{\"query\":\"draw_trails\"}"}}]},
+            "finish_reason":"tool_calls"}]}"#;
+        let (base, _rx) = stub_server(REPLY);
+        let resp = OpenAiBackend::new(base, "mellum")
+            .generate(&GenerateRequest::new(vec![Message::user("find it")]))
+            .unwrap();
+
+        // The normalised text the harness's extractor reads is UNCHANGED by this work.
+        assert_eq!(
+            resp.content,
+            r#"{"query":"draw_trails","tool":"search_code"}"#
+        );
+        // And the structured call rode along beside it.
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "call_abc");
+        assert_eq!(resp.tool_calls[0].name, "search_code");
+        assert_eq!(resp.tool_calls[0].arguments, r#"{"query":"draw_trails"}"#);
+
+        // Turn 2: store that turn and rebuild the request.
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        let convo = vec![
+            Message::user("find it"),
+            Message::assistant_with_calls(resp.content.clone(), resp.tool_calls.clone()),
+            Message::tool(resp.tool_calls[0].wire_id(), "3 matches"),
+        ];
+        OpenAiBackend::new(base, "mellum")
+            .generate(&GenerateRequest::new(convo))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let sent = &body["messages"][1]["tool_calls"][0];
+        assert_eq!(sent["id"], "call_abc", "the server's own id survives");
+        assert_eq!(sent["function"]["name"], "search_code");
+        // Byte-for-byte the arguments string the server sent, not a re-serialisation.
+        assert_eq!(sent["function"]["arguments"], r#"{"query":"draw_trails"}"#);
+        assert_eq!(body["messages"][2]["tool_call_id"], "call_abc");
+    }
+
+    /// **The parse-repair path is unchanged.** A text-only reply carries no calls, and
+    /// replaying it produces exactly the two-field `{"role","content"}` object it always
+    /// did -- nothing added, so Tiel and every recorded run behave identically.
+    #[test]
+    fn a_text_reply_stores_and_replays_as_plain_content() {
+        let (base, _rx) = stub_server(
+            r#"{"choices":[{"message":{"role":"assistant","content":"{\"tool\":\"finish\"}"}}]}"#,
+        );
+        let resp = OpenAiBackend::new(base, "tiel")
+            .generate(&GenerateRequest::new(vec![Message::user("go")]))
+            .unwrap();
+        assert_eq!(resp.content, r#"{"tool":"finish"}"#);
+        assert!(
+            resp.tool_calls.is_empty(),
+            "no native call, nothing to keep"
+        );
+
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        OpenAiBackend::new(base, "tiel")
+            .generate(&GenerateRequest::new(vec![
+                Message::user("go"),
+                Message::assistant(resp.content.clone()),
+                Message::user("observation"),
+            ]))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let a = &body["messages"][1];
+        assert_eq!(a["role"], "assistant");
+        assert_eq!(a["content"], r#"{"tool":"finish"}"#);
+        assert_eq!(
+            a.as_object().unwrap().len(),
+            2,
+            "exactly role+content, byte-identical to before this change: {a}"
+        );
+        assert_eq!(body["messages"][2]["role"], "user");
+    }
+
+    /// A server that supplies no call id still produces a MATCHING pair -- the harness
+    /// and the wire builder derive the same stand-in from the call itself. llama.cpp
+    /// usually omits the id, so this is the common case, not the corner.
+    #[test]
+    fn a_call_without_a_server_id_still_pairs_to_its_result() {
+        const REPLY: &str = r#"{"choices":[{"message":{"role":"assistant",
+            "tool_calls":[{"type":"function",
+              "function":{"name":"finish","arguments":"{\"summary\":\"done\"}"}}]}}]}"#;
+        let (base, _rx) = stub_server(REPLY);
+        let resp = OpenAiBackend::new(base, "mellum")
+            .generate(&GenerateRequest::new(vec![Message::user("go")]))
+            .unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert!(resp.tool_calls[0].id.is_empty(), "the server gave no id");
+
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        OpenAiBackend::new(base, "mellum")
+            .generate(&GenerateRequest::new(vec![
+                Message::assistant_with_calls(resp.content.clone(), resp.tool_calls.clone()),
+                Message::tool(resp.tool_calls[0].wire_id(), "result"),
+            ]))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let id = body["messages"][0]["tool_calls"][0]["id"].as_str().unwrap();
+        assert!(!id.is_empty(), "a stand-in id was synthesised");
+        assert_eq!(
+            body["messages"][1]["tool_call_id"], id,
+            "both halves derive the SAME id or the template cannot pair them"
+        );
+    }
+
+    /// A streamed native call is assembled from its fragments and kept.
+    ///
+    /// The streaming path used to read only `content`/`reasoning_content`, so a
+    /// native-FC turn over SSE returned an empty reply and no call at all.
+    #[test]
+    fn a_streamed_native_call_is_assembled_and_retained() {
+        const SSE: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\
+             \"tool_calls\":[{\"index\":0,\"id\":\"call_s\",\"type\":\"function\",\
+             \"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\
+             \"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\
+             \"function\":{\"arguments\":\"\\\"lib.rs\\\"}\"}}]}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+             data: [DONE]\n\n";
+        let (base, _rx) = stub_server_raw(SSE, "text/event-stream");
+        let resp = OpenAiBackend::new(base, "mellum")
+            .generate_streaming(
+                &GenerateRequest::new(vec![Message::user("read it")]),
+                &mut |_| {},
+            )
+            .unwrap();
+
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "call_s");
+        assert_eq!(resp.tool_calls[0].name, "read_file");
+        assert_eq!(resp.tool_calls[0].arguments, r#"{"path":"lib.rs"}"#);
+        // Normalised to the same uniform text the non-streaming path produces.
+        assert_eq!(resp.content, r#"{"path":"lib.rs","tool":"read_file"}"#);
     }
 }
 

@@ -73,6 +73,17 @@ pub struct Segment {
     pub zone: Zone,
     pub role: Role,
     pub text: String,
+    /// The NATIVE tool calls an assistant segment's turn made, carried through the
+    /// budgeter so the rebuilt [`Message`] can replay them in the shape the backend
+    /// sent (see [`sc_model::ToolCallRecord`]). Empty for every other segment, and
+    /// for an assistant turn the model produced as plain text — those rebuild
+    /// byte-identically to how they always have.
+    ///
+    /// Never truncated: it is a handful of bytes and it is the thing whose ABSENCE
+    /// corrupts the model's view of its own history. Only `text` is budgeted.
+    pub tool_calls: Vec<sc_model::ToolCallRecord>,
+    /// For a [`Role::Tool`] segment, the id of the call it answers.
+    pub tool_call_id: Option<String>,
 }
 
 /// Which chat role a segment is rendered as.
@@ -81,28 +92,57 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// A tool RESULT, paired to the assistant call it answers. Only used when that
+    /// call was a NATIVE one; an observation for a text-decoded turn stays
+    /// [`Role::User`], exactly as before.
+    Tool,
 }
 
 impl Segment {
     pub fn system(zone: Zone, text: impl Into<String>) -> Self {
-        Self {
-            zone,
-            role: Role::System,
-            text: text.into(),
-        }
+        Self::plain(zone, Role::System, text)
     }
     pub fn user(zone: Zone, text: impl Into<String>) -> Self {
-        Self {
-            zone,
-            role: Role::User,
-            text: text.into(),
-        }
+        Self::plain(zone, Role::User, text)
     }
     pub fn assistant(zone: Zone, text: impl Into<String>) -> Self {
+        Self::plain(zone, Role::Assistant, text)
+    }
+
+    /// An assistant segment whose turn made native tool calls: the normalised text
+    /// the harness reads, plus the structured calls that go back on the wire.
+    pub fn assistant_with_calls(
+        zone: Zone,
+        text: impl Into<String>,
+        tool_calls: Vec<sc_model::ToolCallRecord>,
+    ) -> Self {
         Self {
             zone,
             role: Role::Assistant,
             text: text.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// A tool RESULT segment, paired to the call `id` it answers.
+    pub fn tool(zone: Zone, id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            zone,
+            role: Role::Tool,
+            text: text.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(id.into()),
+        }
+    }
+
+    fn plain(zone: Zone, role: Role, text: impl Into<String>) -> Self {
+        Self {
+            zone,
+            role,
+            text: text.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 
@@ -110,7 +150,14 @@ impl Segment {
         match self.role {
             Role::System => Message::system(self.text.clone()),
             Role::User => Message::user(self.text.clone()),
-            Role::Assistant => Message::assistant(self.text.clone()),
+            Role::Assistant if self.tool_calls.is_empty() => Message::assistant(self.text.clone()),
+            Role::Assistant => {
+                Message::assistant_with_calls(self.text.clone(), self.tool_calls.clone())
+            }
+            Role::Tool => Message::tool(
+                self.tool_call_id.clone().unwrap_or_default(),
+                self.text.clone(),
+            ),
         }
     }
 }

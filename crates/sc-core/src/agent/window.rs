@@ -10,7 +10,7 @@
 //! ever rewrites a message already in it: an observation, once shown, stays as shown.
 
 use sc_context::{Segment, Zone};
-use sc_model::Message;
+use sc_model::{Message, ToolCallRecord};
 
 /// One model turn as the window holds it: the action and its attached user messages.
 #[derive(Debug, Clone)]
@@ -32,12 +32,53 @@ pub(super) struct RecentWindow {
 }
 
 impl RecentWindow {
-    /// Append the assistant action + its observation as a new turn. Nothing is trimmed here:
-    /// the loop evicts by budget, oldest turn first (see the eviction loop in `mod.rs`).
+    /// Append the assistant action + its observation as a new turn, with the action
+    /// stored as PLAIN TEXT. The `ParseRepair` / `Grammar` path: the model genuinely
+    /// produced text, so it replays as text, byte-identically to how it always has.
+    ///
+    /// The loop always calls [`Self::push_turn_with_calls`] (it has the reply's calls,
+    /// which are empty on those paths); this is the same thing spelled for tests.
+    #[cfg(test)]
     pub(super) fn push_turn(&mut self, action: &str, observation: &str) {
+        self.push_turn_with_calls(action, &[], observation);
+    }
+
+    /// The same, but carrying the NATIVE tool calls the backend returned for this turn.
+    ///
+    /// This is the round trip that keeps a tool-tagged chat template honest. With calls
+    /// present the turn is stored as an assistant message that still carries them, and
+    /// the observation is stored as a `tool` RESULT paired to the first call's id — the
+    /// shape the OpenAI wire format and every ChatML-family template expect. The server's
+    /// template then re-emits the model's own `<tool_call>…</tool_call><|im_end|>`
+    /// markup, so on turn N the model reads a history in the format it actually writes.
+    ///
+    /// With `calls` empty this is exactly [`Self::push_turn`]: nothing about the
+    /// text path changes.
+    pub(super) fn push_turn_with_calls(
+        &mut self,
+        action: &str,
+        calls: &[ToolCallRecord],
+        observation: &str,
+    ) {
+        let (action, observation) = if calls.is_empty() {
+            (
+                Message::assistant(action.to_string()),
+                Message::user(observation.to_string()),
+            )
+        } else {
+            // The result pairs to the FIRST call: the harness executes exactly one tool
+            // per turn, so a reply carrying several is the model over-answering and only
+            // the first is run. Pairing the observation to a call that never ran would
+            // be a worse lie than not pairing it at all.
+            let id = calls[0].wire_id();
+            (
+                Message::assistant_with_calls(action.to_string(), calls.to_vec()),
+                Message::tool(id, observation.to_string()),
+            )
+        };
         self.turns.push(Turn {
-            action: Message::assistant(action.to_string()),
-            notes: vec![Message::user(observation.to_string())],
+            action,
+            notes: vec![observation],
         });
     }
 
@@ -83,6 +124,7 @@ pub(super) fn role_word(role: sc_model::Role) -> &'static str {
         sc_model::Role::System => "system",
         sc_model::Role::User => "user",
         sc_model::Role::Assistant => "assistant",
+        sc_model::Role::Tool => "tool",
     }
 }
 
@@ -90,7 +132,17 @@ pub(super) fn seg_from_message(zone: Zone, m: &Message) -> Segment {
     match m.role {
         sc_model::Role::System => Segment::system(zone, m.content.clone()),
         sc_model::Role::User => Segment::user(zone, m.content.clone()),
-        sc_model::Role::Assistant => Segment::assistant(zone, m.content.clone()),
+        sc_model::Role::Assistant if m.tool_calls.is_empty() => {
+            Segment::assistant(zone, m.content.clone())
+        }
+        sc_model::Role::Assistant => {
+            Segment::assistant_with_calls(zone, m.content.clone(), m.tool_calls.clone())
+        }
+        sc_model::Role::Tool => Segment::tool(
+            zone,
+            m.tool_call_id.clone().unwrap_or_default(),
+            m.content.clone(),
+        ),
     }
 }
 
@@ -145,5 +197,89 @@ mod tests {
         let left: Vec<&str> = w.messages().map(|m| m.content.as_str()).collect();
         assert_eq!(left, vec!["a2", "obs2"]);
         assert_eq!(w.messages().next().unwrap().role, sc_model::Role::Assistant);
+    }
+
+    /// **A native call is stored as a call, and its observation as a paired result.**
+    ///
+    /// This is the harness half of the Mellum2 fix. The window used to store the
+    /// backend's flattened `{"tool":...}` string as plain assistant content, so the next
+    /// request replayed it as prose -- a format the model's own chat template never
+    /// emits, and one with no stop token in it. Stored as a call, the server's template
+    /// re-emits the model's own `<tool_call>...</tool_call><|im_end|>` markup instead.
+    #[test]
+    fn a_native_call_is_stored_as_a_call_with_its_result_paired_to_it() {
+        let mut w = RecentWindow::default();
+        let call = ToolCallRecord::new("call_1", "read_file", r#"{"path":"lib.rs"}"#);
+        w.push_turn_with_calls(
+            r#"{"tool":"read_file","path":"lib.rs"}"#,
+            std::slice::from_ref(&call),
+            "read_file lib.rs:\nfn main() {}",
+        );
+
+        let msgs: Vec<&Message> = w.messages().collect();
+        assert_eq!(msgs.len(), 2);
+
+        // The action still carries the normalised text every extractor reads...
+        assert_eq!(msgs[0].role, sc_model::Role::Assistant);
+        assert_eq!(msgs[0].content, r#"{"tool":"read_file","path":"lib.rs"}"#);
+        // ...AND the structured call the next request replays.
+        assert_eq!(msgs[0].tool_calls, vec![call.clone()]);
+
+        // The observation is a tool RESULT naming the call it answers.
+        assert_eq!(msgs[1].role, sc_model::Role::Tool);
+        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("call_1"));
+        assert!(msgs[1].content.contains("fn main"));
+
+        // And the segments the prompt builder gets carry both through.
+        let segs: Vec<sc_context::Segment> = w
+            .messages()
+            .map(|m| seg_from_message(Zone::RecentObservation, m))
+            .collect();
+        assert_eq!(segs[0].tool_calls, vec![call]);
+        assert_eq!(segs[1].role, sc_context::Role::Tool);
+        assert_eq!(segs[1].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    /// **The text path is byte-identical to before.** `ParseRepair` and `Grammar`
+    /// produce no native call, so their turns must store exactly as they always have --
+    /// a plain assistant message and a plain user observation. Anything else would
+    /// change Tiel's prompt and invalidate every recorded run.
+    #[test]
+    fn a_text_only_turn_stores_exactly_as_it_always_has() {
+        let mut w = RecentWindow::default();
+        w.push_turn_with_calls(r#"{"tool":"finish"}"#, &[], "done");
+
+        let msgs: Vec<&Message> = w.messages().collect();
+        assert_eq!(msgs[0].role, sc_model::Role::Assistant);
+        assert!(msgs[0].tool_calls.is_empty());
+        assert!(msgs[0].tool_call_id.is_none());
+        assert_eq!(msgs[1].role, sc_model::Role::User, "NOT a tool result");
+        assert!(msgs[1].tool_call_id.is_none());
+
+        // Identical to what the old two-argument form produced.
+        let mut old = RecentWindow::default();
+        old.push_turn(r#"{"tool":"finish"}"#, "done");
+        let a: Vec<(sc_model::Role, &str)> =
+            w.messages().map(|m| (m.role, m.content.as_str())).collect();
+        let b: Vec<(sc_model::Role, &str)> = old
+            .messages()
+            .map(|m| (m.role, m.content.as_str()))
+            .collect();
+        assert_eq!(a, b);
+    }
+
+    /// A call the server gave no id for still pairs: both halves derive the same
+    /// stand-in from the call itself, via the one `wire_id` in `sc_model`.
+    #[test]
+    fn a_call_with_no_server_id_still_pairs_to_its_result() {
+        let mut w = RecentWindow::default();
+        let call = ToolCallRecord::new("", "finish", r#"{"summary":"done"}"#);
+        w.push_turn_with_calls(r#"{"tool":"finish"}"#, std::slice::from_ref(&call), "ok");
+        let msgs: Vec<&Message> = w.messages().collect();
+        assert_eq!(
+            msgs[1].tool_call_id.as_deref(),
+            Some(call.wire_id().as_str())
+        );
+        assert!(!call.wire_id().is_empty());
     }
 }

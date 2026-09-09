@@ -76,6 +76,9 @@ pub fn flatten_messages(messages: &[Message]) -> String {
             Role::System => "System",
             Role::User => "User",
             Role::Assistant => "Assistant",
+            // A flattened single-prompt backend has no tool-call channel: the call and
+            // its result are just more transcript, labelled so the model can read them.
+            Role::Tool => "Tool result",
         };
         out.push_str(tag);
         out.push_str(": ");

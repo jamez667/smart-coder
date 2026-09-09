@@ -1671,7 +1671,20 @@ pub fn run_agent_observed(
                 step: step + 1,
             });
         }
-        recent.push_turn(&resp.content, &trimmed);
+        // Store the turn in the shape the backend gave it to us.
+        //
+        // `resp.content` is the harness's normalised `{"tool":…}` text and stays the
+        // thing every extractor above read; `resp.tool_calls` is the SAME call as the
+        // server sent it, and carrying it means next turn's request replays the turn
+        // as a native `tool_calls` array rather than as a bare string. That matters for
+        // any model whose chat template wraps calls in its own markup: replaying the
+        // flattened string shows it a history in a format its template never emits, it
+        // imitates the history, and it never reaches its own stop token. Measured on
+        // Mellum2-12B, that is a 24-token clean call becoming a 3,072-token runaway.
+        //
+        // Empty on the `ParseRepair`/`Grammar` paths, where the model's output really
+        // is text — those store and replay exactly as they always have.
+        recent.push_turn_with_calls(&resp.content, &resp.tool_calls, &trimmed);
         // Re-render the cached retrieval only if this turn changed the workspace, and then
         // only the parts whose bytes moved; an unchanged turn keeps the prompt prefix intact.
         // `changed` only tracks the path-carrying edit tools, but a shell command can edit
