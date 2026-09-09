@@ -411,6 +411,16 @@ pub fn run_agent_observed(
     // Largest reply seen, so the reply reserve can be checked against reality.
     let mut peak_reply_tokens = 0usize;
     let mut journal = Journal::new();
+    // Has THIS run actually changed the workspace? The `journal` answers that for edits made
+    // through a path-carrying tool, but a shell command (`sed -i`, a codegen step) edits
+    // without ever touching it -- so the loop's own per-turn `changed` flag is OR'd in too.
+    //
+    // This is the second half of the "you may stop" test. Green alone means nothing on a run
+    // that started green; green PLUS a change this run is the harness's evidence that the
+    // model did something and that the something still builds. Without it the steer would fire
+    // on the very first `run_verification` of a run where nothing has happened yet, and tell a
+    // model that has done no work at all to call `finish`.
+    let mut made_a_change = false;
     let mut stall_detector = StallDetector::default();
     // The harness's in-loop intervention bookkeeping: the running intervention count and the
     // bounded diagnosis/advisor/self-recovery counters the ladder spends (spec 02/03). See
@@ -974,6 +984,10 @@ pub fn run_agent_observed(
                             did_change
                         })
                         .unwrap_or(false);
+                    // Remember it for the whole run, not just this turn: the "you are done"
+                    // steer fires on a LATER turn (the verification after the edit), by which
+                    // point this turn's `changed` is long gone.
+                    made_a_change |= changed;
 
                     match outcome {
                         ToolOutcome::Finished => {
@@ -1106,21 +1120,42 @@ pub fn run_agent_observed(
                                     });
                                 }
                             }
-                            // A green verification the harness will NOT act on: say so, or
-                            // the model reads "all tests passed" as the run being over and
-                            // spends its remaining turns idling (or re-verifying) while the
-                            // harness waits for a `finish` it does not know to send.
+                            // A green verification the harness will NOT act on. Which of the
+                            // two things it means depends entirely on whether the run has
+                            // changed anything yet:
+                            //
+                            // - NOTHING changed: green is the state the workspace was handed
+                            //   over in and proves nothing. Say so, or the model reads "all
+                            //   tests passed" as the run being over and idles out its budget
+                            //   while the harness waits for a `finish` it does not know to send.
+                            //
+                            // - SOMETHING changed: the model did the work and the build still
+                            //   passes. That is the whole success condition for a refactor, and
+                            //   the harness has to SAY so. Left with only the "this does not
+                            //   mean you are done" half, a model that IS done re-runs the check
+                            //   forever -- measured at 246s of a 598s run: eight replies, six
+                            //   byte-identical commands, each appended to the prompt so the next
+                            //   one was slower than the last. Still NOT an auto-finish (that is
+                            //   what let an unreferenced orphan file count as success): `finish`
+                            //   stays the model's own deliberate act and `gate_finish` still
+                            //   runs the suite before honouring it. It is just no longer a guess.
                             let o = if tool == "run_verification"
                                 && green_at_start
                                 && !looks_like_failure(&o)
                             {
-                                format!(
-                                    "{o}\nNOTE: the build was ALREADY passing before you \
-                                     started, so this result does not mean the task is done — \
-                                     it only means you have not broken anything. Check that \
-                                     EVERY part of the task has actually been applied, then \
-                                     call `finish` yourself when it has."
-                                )
+                                if made_a_change || !journal.is_empty() {
+                                    let steer = escalation::done_steer(registry);
+                                    report_if_unoffered(&steer, registry, step, sink);
+                                    format!("{o}\n{steer}")
+                                } else {
+                                    format!(
+                                        "{o}\nNOTE: the build was ALREADY passing before you \
+                                         started and you have not changed anything yet, so this \
+                                         result does not mean the task is done — it only \
+                                         means you have not broken anything. Apply the task, then \
+                                         call `finish` yourself when it is done."
+                                    )
+                                }
                             } else {
                                 o
                             };
@@ -1155,6 +1190,7 @@ pub fn run_agent_observed(
                                 o
                             };
                             let changed = changed || !batch_note.is_empty();
+                            made_a_change |= changed;
                             (o, action, changed, tool, arg)
                         }
                     }
@@ -1564,17 +1600,21 @@ pub fn run_agent_observed(
                     // a healthy refactor as a stall.
                     //
                     // The model is told the build still passes -- useful, since a refactor
-                    // half-applied usually does NOT -- and reminded that the harness will
-                    // not end the run for it.
+                    // half-applied usually does NOT -- AND that this is the finish line.
+                    //
+                    // This branch only runs because an edit landed, so the two halves of the
+                    // "you may stop" test are both satisfied here by construction: the run
+                    // changed the workspace and the suite is green. The old wording said only
+                    // what green does not mean ("keep going until every part is applied"),
+                    // which a model that HAS applied every part reads as an instruction to
+                    // check again. See `done_steer`.
                     last_failure_sig = None;
                     failure_sig_streak = 0;
+                    let steer = escalation::done_steer(registry);
+                    report_if_unoffered(&steer, registry, step, sink);
                     recent.push_observation(&truncate_observation(
                         &format!(
-                            "(harness ran the verification after your edit)\n{}\nThe build was \
-                             ALREADY passing before you started, so this does not mean the task \
-                             is done — it only means you have not broken it. Keep going until \
-                             every part of the task is actually applied, then call `finish` \
-                             yourself.",
+                            "(harness ran the verification after your edit)\n{}\n{steer}",
                             report.observation()
                         ),
                         cfg.read_file_line_cap,
@@ -1609,6 +1649,16 @@ pub fn run_agent_observed(
             }
         }
 
+        // Is this the shape the 598s refactor was stuck in -- work done, build green, model
+        // asking again? Three facts, all already recorded: the suite was green before the run
+        // (so `finish` is the ONLY completion signal there is), the run has changed the
+        // workspace (so the model did something), and the last verification the run log saw
+        // was green (so what it did still builds). Read from the run log rather than tracked
+        // separately: that is the same answer every stop report is filled from.
+        let finished_shape = green_at_start
+            && (made_a_change || !journal.is_empty())
+            && runlog.lock().last_verification_green() == Some(true);
+
         match stall::handle_stall(
             step,
             action,
@@ -1624,6 +1674,7 @@ pub fn run_agent_observed(
             advisor,
             instruction,
             workspace,
+            finished_shape,
             &runlog,
             sink,
         ) {

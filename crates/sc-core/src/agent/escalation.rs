@@ -196,3 +196,47 @@ pub(super) fn stopped(
         interventions,
     }
 }
+
+/// The positive "you may stop now" signal, appended to a GREEN verification on a run that
+/// started green AND has actually changed the workspace.
+///
+/// Measured (evals/results/2026-09-08-refactor-anatomy): on a real refactor the work was
+/// complete at model call 35 and the run cost another 246s over calls 36-43 — eight replies
+/// that each opened "The build passes. The extraction is complete: …", buried the SAME
+/// `cargo check` mid-reply, and ran to the token cap. Six of the commands were byte-identical.
+/// Phase 4 removed auto-finish on a green-at-start run (correctly: an unreferenced orphan file
+/// was counting as success) but replaced it with a note that only ever says what green does
+/// NOT mean — "this does not mean the task is done". A model that has done the work reads that
+/// as "keep checking", and checking is free to attempt and expensive to run.
+///
+/// So this is the other half: green + the workspace demonstrably changed = the harness saying,
+/// in one unambiguous line, that re-running the check cannot tell it anything new and `finish`
+/// is the move. The harness still does NOT finish for it — the model's own `finish` remains
+/// the deliberate act, and `gate_finish` still runs the suite before honouring it.
+pub(super) fn done_steer(registry: &ToolRegistry) -> String {
+    let finish = mention(registry, &["finish"]).unwrap_or("finish");
+    format!(
+        "THE WORK IS VERIFIED AND YOU ARE DONE. You changed the workspace this run and the \
+         verification above is GREEN. Running the check again will return exactly this — it \
+         cannot tell you anything new. Call `{finish}` NOW with a one-line `summary` of what \
+         you changed. Do not re-verify, do not re-read, do not restate the work: `{finish}` \
+         is the only correct call this turn."
+    )
+}
+
+/// The same signal, delivered by the stall ladder instead of by an observation.
+///
+/// When the ladder fires on a run that started green, has changed the workspace, and whose
+/// last verification was green, the model is not lost — it is finished and waiting for
+/// permission it will never get. The generic [`self_recovery_directive`] tells it to "take a
+/// concrete next action", which on a completed refactor means another `cargo check`: the exact
+/// loop the ladder is supposed to break. Name the real situation instead.
+pub(super) fn finished_stall_directive(registry: &ToolRegistry) -> String {
+    let finish = mention(registry, &["finish"]).unwrap_or("finish");
+    format!(
+        "STOP — you are repeating yourself. The change is MADE and the verification is GREEN. \
+         There is nothing left to check: every re-run returns the same green result. Call \
+         `{finish}` this turn with a one-line `summary` of the change. Any other tool call is \
+         wasted."
+    )
+}

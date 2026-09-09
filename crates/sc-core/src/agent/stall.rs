@@ -21,8 +21,8 @@ use crate::recovery::{Progress, StallDetector};
 use crate::runlog::RunLogSink;
 
 use super::escalation::{
-    escalate, recent_tools, self_recovery_directive, ADVISOR_LIMIT, DIAGNOSIS_LIMIT,
-    SELF_RECOVERY_LIMIT,
+    escalate, finished_stall_directive, recent_tools, self_recovery_directive, ADVISOR_LIMIT,
+    DIAGNOSIS_LIMIT, SELF_RECOVERY_LIMIT,
 };
 use super::prompt::gather_sources;
 use super::window::RecentWindow;
@@ -47,7 +47,33 @@ pub(super) struct Interventions {
     /// spend on the expensive T1 model -- and `StopReason::Stalled` was unreachable
     /// for that configuration.
     pub(super) advisor_nudges: usize,
+    /// Consecutive ladder interventions that were followed by NO change to the workspace.
+    ///
+    /// Every rung below resets the stall detector so the model gets a clean turn, which is
+    /// right the first time: a firm directive often does land. It is wrong the third time.
+    /// Reset-then-repeat is a cycle -- repeat, advise, reset, repeat -- and the run only
+    /// escapes it when the bounded rungs run out, at a full prompt pass plus a
+    /// maximum-length generation per round. Measured: the 598s refactor spent 246s of it
+    /// here, and hit the step cap rather than the ladder's end.
+    ///
+    /// Counts intervention-to-intervention, not turn-to-turn: it is incremented when the
+    /// ladder fires again with `changed_since_intervention` still false, and cleared the
+    /// moment any turn changes the workspace. Advice that produces work is unbounded, as
+    /// before; only advice that produces nothing is capped.
+    pub(super) fruitless_stalls: usize,
+    /// Whether the workspace has changed since the last rung fired. Set false when a rung
+    /// injects a directive; set true by the loop on any turn that changes bytes.
+    pub(super) changed_since_intervention: bool,
 }
+
+/// How many times the ladder may fire WITHOUT the workspace changing in between before it
+/// stops resetting and gives up.
+///
+/// Two, because the first intervention is the harness's honest attempt and the second is its
+/// confirmation that the attempt did not land. A third round buys nothing a second did not,
+/// and each round costs a full prompt pass plus a maximum-length generation -- 30s+ on a 35B
+/// model, and rising, since every wasted reply is appended to the prompt.
+pub(super) const FRUITLESS_STALL_LIMIT: usize = 2;
 
 impl Interventions {
     /// Consult the advisor (junior asks senior, spec 02), spending one unit of the run's
@@ -102,9 +128,21 @@ pub(super) fn handle_stall(
     advisor: Option<&dyn ModelBackend>,
     instruction: &str,
     workspace: &std::path::Path,
+    // The run started green, has since changed the workspace, and the last verification came
+    // back green: the model is not lost, it is FINISHED and waiting for a permission it will
+    // never get. Changes what the ladder says (see `finished_stall_directive`) -- the generic
+    // directive's "take a concrete next action" is, on a completed refactor, another
+    // verification, which is the very loop the ladder was called to break.
+    finished_shape: bool,
     runlog: &RunLogSink,
     sink: &dyn EventSink,
 ) -> StallDecision {
+    // Any turn that touched bytes clears the fruitless streak, stalled or not: advice that
+    // produced work has landed, and the next stall deserves the full ladder again.
+    if changed {
+        interv.changed_since_intervention = true;
+        interv.fruitless_stalls = 0;
+    }
     let stuck = match stall.observe(action, changed, cfg.repeat_limit, cfg.no_progress_limit) {
         Progress::Ok => return StallDecision::Continue,
         Progress::Looping => "repeating the same action without progress",
@@ -113,6 +151,25 @@ pub(super) fn handle_stall(
     sink.record(&AgentEvent::Stalled {
         trigger: stuck.to_string(),
     });
+
+    // The ladder has already intervened and NOTHING moved since. Every rung below ends in
+    // `stall.reset()`, so without this the run cycles -- repeat, advise, reset, repeat --
+    // and escapes only when the bounded rungs are spent, one full prompt pass plus one
+    // maximum-length generation per round. Stop paying for advice that demonstrably is not
+    // landing (see `FRUITLESS_STALL_LIMIT`).
+    // `interv.count > 0` gates it on a rung having actually fired: before the first
+    // intervention there is nothing to judge as fruitless, and the flag's `false` default
+    // would otherwise credit the very first stall as a failed round.
+    if interv.count > 0 && !interv.changed_since_intervention {
+        interv.fruitless_stalls += 1;
+        if interv.fruitless_stalls >= FRUITLESS_STALL_LIMIT {
+            return StallDecision::GiveUp(crate::recovery::StopReason::Stalled(format!(
+                "{stuck}; the harness intervened {} times with no change to the workspace \
+                 between them",
+                interv.fruitless_stalls
+            )));
+        }
+    }
 
     // Root-cause diagnosis (spec 03 — recovery). Before the generic recovery ladder, on a
     // TEST-driven run, a focused debugger pass reads the FULL test output + every source file
@@ -134,6 +191,7 @@ pub(super) fn handle_stall(
         {
             interv.diagnoses += 1;
             interv.count += 1;
+            interv.changed_since_intervention = false;
             stall.reset();
             sink.record(&AgentEvent::Diagnosis {
                 trigger: stuck.to_string(),
@@ -147,8 +205,28 @@ pub(super) fn handle_stall(
     // Junior asks senior for a nudge (spec 02). With no advisor (the single-model setup) or
     // the advisor budget spent, the harness steers the model back in-band a bounded number
     // of times before giving up — a capable model just needs a firm directive, not a senior.
+    // A model that has done the work and verified it does not need a senior, and does not
+    // need to be told to "take a concrete next action" -- that is precisely what it thinks
+    // it is doing. It needs to be told it may stop. Take this rung ahead of both the advisor
+    // (an expensive T1 call that would arrive at the same answer) and the generic directive.
+    if finished_shape {
+        interv.self_recoveries += 1;
+        interv.count += 1;
+        interv.changed_since_intervention = false;
+        stall.reset();
+        let advice = finished_stall_directive(registry);
+        super::report_if_unoffered(&advice, registry, step, sink);
+        sink.record(&AgentEvent::Advice {
+            trigger: stuck.to_string(),
+            advice: advice.clone(),
+        });
+        recent.push_observation(&advice);
+        return StallDecision::Recovered;
+    }
+
     match interv.consult(advisor, instruction, plan, history, stuck) {
         Some(advice) => {
+            interv.changed_since_intervention = false;
             stall.reset();
             sink.record(&AgentEvent::Advice {
                 trigger: stuck.to_string(),
@@ -160,6 +238,7 @@ pub(super) fn handle_stall(
         None if interv.self_recoveries < SELF_RECOVERY_LIMIT => {
             interv.self_recoveries += 1;
             interv.count += 1;
+            interv.changed_since_intervention = false;
             stall.reset();
             let advice = self_recovery_directive(&recent_tools(history), registry);
             super::report_if_unoffered(&advice, registry, step, sink);
