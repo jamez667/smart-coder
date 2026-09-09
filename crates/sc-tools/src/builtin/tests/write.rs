@@ -896,3 +896,244 @@ fn a_real_write_still_reports_exactly_as_before() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+// ---------------------------------------------------------------------------
+// The indentation-tolerant SPAN rung: a single-line anchor naming a
+// sub-expression, whose only mismatch is leading whitespace.
+// ---------------------------------------------------------------------------
+
+/// The `Window::values` fixture from `evals/ladder/tasks/rust-symptomatic`, trimmed to
+/// the part the live failure was measured against.
+fn ring_buffer_fixture() -> &'static str {
+    "\
+//! A fixed-capacity ring buffer of readings, with a rolling mean.
+
+pub struct Window {
+    buf: Vec<i64>,
+    cap: usize,
+    head: usize,
+    len: usize,
+    sum: i64,
+}
+
+impl Window {
+    /// The readings, oldest first.
+    pub fn values(&self) -> Vec<i64> {
+        let mut out = Vec::with_capacity(self.len);
+        for i in 0..self.len {
+            out.push(self.buf[(self.head + i) % self.cap]);
+        }
+        out
+    }
+}
+"
+}
+
+/// **THE LIVE CASE.** The model anchors on the sub-expression with 8 spaces of
+/// indentation; the file line carries 12 and wraps it in `out.push(` … `);`.
+///
+/// Exact occurrences: 0. Trimmed occurrences: exactly 1. The anchor is unambiguous, so
+/// the edit must land — and it must replace only the expression, leaving `out.push(`
+/// and `);` intact. 24 of 43 anchor failures across the Mellum transcripts were this.
+#[test]
+fn edit_file_partial_line_anchor_with_wrong_indent_lands() {
+    let ws = temp_dir("edit-span-live");
+    std::fs::write(ws.join("lib.rs"), ring_buffer_fixture()).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "lib.rs",
+        // Eight spaces, and only the indexing expression — not the whole statement.
+        "old_str": "        self.buf[(self.head + i) % self.cap]",
+        "new_str": "        self.buf[(self.head + i) % self.len]",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(
+        o.contains("ok (1 replacement, matched ignoring indentation)"),
+        "got: {o}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("lib.rs")).unwrap(),
+        "\
+//! A fixed-capacity ring buffer of readings, with a rolling mean.
+
+pub struct Window {
+    buf: Vec<i64>,
+    cap: usize,
+    head: usize,
+    len: usize,
+    sum: i64,
+}
+
+impl Window {
+    /// The readings, oldest first.
+    pub fn values(&self) -> Vec<i64> {
+        let mut out = Vec::with_capacity(self.len);
+        for i in 0..self.len {
+            out.push(self.buf[(self.head + i) % self.len]);
+        }
+        out
+    }
+}
+",
+        "only the span moved: `out.push(` and `);` survive, and so does the 12-space indent"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **Ambiguity is rejected, never guessed.** The same trimmed anchor in two places
+/// means we cannot know which the model meant, so nothing is written.
+#[test]
+fn edit_file_partial_line_anchor_must_be_unique() {
+    let ws = temp_dir("edit-span-amb");
+    let src = "\
+fn f() {
+    let a = compute(self.buf[i]);
+        let b = compute(self.buf[i]);
+}
+";
+    std::fs::write(ws.join("a.rs"), src).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "a.rs",
+        "old_str": "  self.buf[i]",
+        "new_str": "  self.buf[j]",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(
+        o.contains("anchor not found") || o.contains("ambiguous"),
+        "got: {o}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        src,
+        "two candidates: the file is untouched"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A mid-line anchor replaces ONLY its span — not the line it sits in. This is what
+/// separates this rung from the whole-line disambiguation above it.
+#[test]
+fn edit_file_partial_line_anchor_replaces_only_the_span() {
+    let ws = temp_dir("edit-span-midline");
+    std::fs::write(
+        ws.join("a.rs"),
+        "fn f() {\n    let x = wrap(inner(1), tail);\n}\n",
+    )
+    .unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "a.rs",
+        // Indented anchor naming a sub-expression in the middle of the line.
+        "old_str": "        inner(1)",
+        "new_str": "        inner(2)",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("matched ignoring indentation"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        "fn f() {\n    let x = wrap(inner(2), tail);\n}\n",
+        "`let x = wrap(` and `, tail);` are untouched"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A MULTI-LINE anchor never reaches this rung, even when its trimmed form would occur
+/// once. Multi-line blocks are `fuzzy_line_block_replace`'s job, and it re-indents each
+/// line rather than splicing a raw span.
+#[test]
+fn edit_file_multi_line_anchor_still_takes_the_block_path() {
+    let ws = temp_dir("edit-span-multi");
+    std::fs::write(
+        ws.join("a.rs"),
+        "fn f() {\n    let a = 1;\n    let b = 2;\n}\n",
+    )
+    .unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "a.rs",
+        // Two lines, both under-indented: the block path matches on line signatures.
+        "old_str": "let a = 1;\nlet b = 2;",
+        "new_str": "let a = 10;\nlet b = 20;",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(
+        o.contains("whitespace-tolerant match"),
+        "the block rung must answer, not the span rung; got: {o}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        "fn f() {\n    let a = 10;\n    let b = 20;\n}\n",
+        "each line re-indented to the file's own indent"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **The guards still fire on this path.** A partial-line anchor is not a way around
+/// `destructive_replacement`: replacing real code with bare punctuation is rejected
+/// here exactly as it is on the exact-match path.
+#[test]
+fn edit_file_partial_line_anchor_still_hits_the_destructive_guard() {
+    let ws = temp_dir("edit-span-destructive");
+    let src = "fn f() {\n    let x = compute(alpha_beta_gamma);\n}\n";
+    std::fs::write(ws.join("a.rs"), src).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "a.rs",
+        "old_str": "        compute(alpha_beta_gamma)",
+        "new_str": "        :",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("rejected"), "got: {o}");
+    assert!(o.contains("DESTROY the line"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        src,
+        "nothing written"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// …and the brace-balance tripwire too: a span replacement that unbalances the file is
+/// rejected before it reaches disk. This guard is gated on `count == 1` further down, so
+/// the new rung has to run it itself.
+#[test]
+fn edit_file_partial_line_anchor_still_hits_the_delimiter_guard() {
+    let ws = temp_dir("edit-span-delims");
+    let src = "fn f() {\n    let x = wrap(inner(1), tail);\n}\n";
+    std::fs::write(ws.join("a.rs"), src).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "a.rs",
+        // Drops a closing paren: the file would no longer balance.
+        "old_str": "        inner(1)",
+        "new_str": "        inner(1",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("rejected"), "got: {o}");
+    assert!(o.contains("unbalanced the file's delimiters"), "got: {o}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        src,
+        "nothing written"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Zero occurrences of the trimmed anchor still reports the missed anchor, unchanged.
+#[test]
+fn edit_file_absent_anchor_still_reports_not_found() {
+    let ws = temp_dir("edit-span-absent");
+    let src = "fn f() {\n    let x = 1;\n}\n";
+    std::fs::write(ws.join("a.rs"), src).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "a.rs",
+        "old_str": "        nothing_like_this(9)",
+        "new_str": "        something(9)",
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(o.contains("anchor not found"), "got: {o}");
+    assert_eq!(std::fs::read_to_string(ws.join("a.rs")).unwrap(), src);
+    let _ = std::fs::remove_dir_all(&ws);
+}

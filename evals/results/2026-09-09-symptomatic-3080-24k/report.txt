@@ -10,16 +10,16 @@ symptomatic        0/3
 
 --- context cost (prompt tokens summed over every turn) ---
 arm               total     per task   vs first
-control(6)       488697       162899       100%
+control(6)       843615       281205       100%
 
 --- prefix cache (what the SERVER re-prefilled, vs what we sent) ---
 arm                sent    prefilled       cached  hit rate
-control(6)       488697        37183       548115       94%
+control(6)       843615       375273       522520       58%
   a HIGH hit rate is the append-only prompt working: only the newly appended tokens
   were prefilled. A rate near 0% on a multi-turn task means the prefix is NOT holding.
 
 --- process (per task, averaged) ---
 arm         steps  first edit  re-reads  wasted     secs
-control(6)   28.0         4.0       0.3     3.0       68
+control(6)   26.3         4.0       3.0     3.0      271
 
 --- reading this ---

@@ -509,6 +509,45 @@ fn edit_file_with(
                 Err(e) => format!("edit_file {path} error: {e}"),
             };
         }
+        // Still nothing. Last rung: an INDENTED SUB-EXPRESSION anchor. The model points at
+        // the expression it wants to change rather than the whole statement, and prefixes it
+        // with the indentation it believes the line carries — so `        self.buf[..]`
+        // (8 spaces) never matches `            out.push(self.buf[..]);` (12), even though
+        // the expression itself sits in exactly one place. Measured on the Mellum
+        // transcripts: 24 of 43 anchor failures are this one class.
+        //
+        // The anchor is not a whole line, so `line_sig` above can't match it; and the
+        // whole-line disambiguation further down is gated on `count > 1`, so it never runs
+        // here. Hence this rung.
+        //
+        // SINGLE-LINE ONLY, deliberately. A multi-line `old_str` whose trimmed form happens
+        // to occur once is a different and riskier proposition — the interior lines' own
+        // indentation would have to match byte-exactly anyway, and whole/multi-line blocks
+        // are already `fuzzy_line_block_replace`'s job. A newline in the anchor skips this.
+        if let Some(spliced) = indent_tolerant_span_replace(content, old_str, new_str) {
+            // The guards must still run on this path: a partial-line match is not a licence
+            // to skip them. (`destructive_replacement` judges the old/new PAIR and has
+            // already run in `edit_file`; `delimiter_regression` needs the resulting file,
+            // which only exists here.)
+            if is_code_path(path) {
+                if let Some(msg) = delimiter_regression(content, &spliced) {
+                    return format!(
+                        "edit_file {path} rejected: {msg} Your new_str isn't brace-balanced \
+                         against the anchor it replaces — recount the delimiters in old_str and \
+                         match them in new_str."
+                    );
+                }
+            }
+            if spliced == content {
+                return no_op(&format!("edit_file {path}"), NO_OP_EDIT_FILE);
+            }
+            return match std::fs::write(p, from_lf(&spliced, crlf)) {
+                Ok(()) => {
+                    format!("edit_file {path} ok (1 replacement, matched ignoring indentation)")
+                }
+                Err(e) => format!("edit_file {path} error: {e}"),
+            };
+        }
         // The anchor isn't in the file in any form. The usual cause for a small model is
         // that the edit already landed (or it's working from a stale view), so it keeps
         // re-proposing a change that's no longer applicable. Show it the place in the
@@ -756,4 +795,46 @@ fn fuzzy_line_block_replace(content: &str, old_str: &str, new_str: &str) -> Opti
         joined.push('\n');
     }
     Some(joined)
+}
+
+/// Indentation-tolerant SPAN replace, for a SINGLE-LINE anchor that names a
+/// sub-expression rather than a whole line.
+///
+/// The model writes `        self.buf[(self.head + i) % self.cap]` — the expression it
+/// means, carrying the indentation it *believes* the line has. The file line is
+/// `            out.push(self.buf[(self.head + i) % self.cap]);`. The exact anchor
+/// occurs zero times; the TRIMMED anchor occurs exactly once. That is unambiguous, so
+/// the edit should land.
+///
+/// The rule, and nothing looser than it:
+///
+/// * the anchor must be single-line — a `\n` in `old_str` returns `None` (multi-line
+///   blocks belong to [`fuzzy_line_block_replace`], which aligns whole-line signatures);
+/// * `old_str.trim()` must be non-empty;
+/// * it must occur EXACTLY once in the file as a plain substring. Zero or two-or-more
+///   and we return `None` — the caller falls through to today's behaviour. We never
+///   choose between candidates.
+///
+/// Only the matched SPAN is replaced, not the line: the anchor sits mid-line inside
+/// `out.push(` … `);`, and that surrounding text must survive untouched. The replacement
+/// is `new_str.trim()` for the same reason the match needed trimming — the model's
+/// `new_str` carries the same phantom indentation as its `old_str`, and the line's real
+/// indentation is already in the file, outside the span. A `new_str` that trims to
+/// nothing deletes the span, which is a legitimate operation.
+///
+/// Returns the whole new file content, or `None` when the rule isn't met.
+fn indent_tolerant_span_replace(content: &str, old_str: &str, new_str: &str) -> Option<String> {
+    // Single-line anchors only. Said in the doc comment above, enforced here.
+    if old_str.contains('\n') {
+        return None;
+    }
+    let needle = old_str.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    // Uniqueness is mandatory — 0 or 2+ and we decline rather than guess.
+    if content.matches(needle).count() != 1 {
+        return None;
+    }
+    Some(content.replacen(needle, new_str.trim(), 1))
 }
