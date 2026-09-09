@@ -1,0 +1,5 @@
+model mellum2-12b at http://localhost:11440/v1, commit d788d02 (17 tasks x 1 run(s) x 1 arm(s): control(6))
+
+  [1/1] control(6)   rust-stated                PASS                              4s
+  [1/1] control(6)   rust-located               PASS                             12s
+  [1/1] control(6)   rust-symptomatic           still red                       313s
