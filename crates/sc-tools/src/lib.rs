@@ -21,6 +21,7 @@ mod spec;
 pub use builtin::{
     default_registry, execute, handled_here, minimal_worker_registry, read_only_registry,
     safe_join, six_tool_registry, source_files, ToolOutcome, NOT_EXECUTED_HERE,
+    WRITE_FILE_OVERWRITE_MAX_LINES,
 };
 pub use grammar::{params_json_schema, registry_gbnf, registry_gbnf_with_scratchpad};
 pub use journal::{EditRecord, Journal};

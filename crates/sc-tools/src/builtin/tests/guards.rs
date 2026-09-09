@@ -379,3 +379,111 @@ fn destructive_replacement_predicate_boundaries() {
         );
     }
 }
+
+/// **A one-character punctuation anchor is rejected on its own terms, not on the file's.**
+///
+/// Forensics on `engine-grid-scan`: the model sent `old_str: "!"` against a `floor.rs` whose
+/// header is `//!`. It was rejected only as AMBIGUOUS ("3 matches"), which reads as "nearly
+/// right, add a neighbouring line" — and sent the model back to guessing at a file it had
+/// never been shown in full.
+///
+/// The ambiguity path is also only accidental protection: the same `"!"` against a file with
+/// exactly ONE `!` matched once and WROTE, silently, answering "ok (1 replacement)". That is
+/// the case with no guard at all, and it is the one this pins.
+#[test]
+fn a_single_punctuation_anchor_is_rejected_however_many_times_it_occurs() {
+    use crate::builtin::guards::indistinct_anchor;
+
+    // The real one from the forensics, plus its family.
+    for bad in ["!", "(", ")", ";", ":", "|", "&", ".", "#", "*", " ! "] {
+        let msg = indistinct_anchor(bad)
+            .unwrap_or_else(|| panic!("{bad:?} is not an address; it must be rejected"));
+        assert!(
+            msg.contains("DISTINCTIVE"),
+            "the rejection must say what an anchor has to BE: {msg}"
+        );
+    }
+
+    // And the file cannot rescue it. UNIQUE `!` -- the case the ambiguity check never sees.
+    let ws = temp_dir("bang-unique");
+    let src = "def f():\n    return not x\n# no bangs here except one!\n";
+    std::fs::write(ws.join("a.py"), src).unwrap();
+    let o = obs(execute(
+        &call(json!({"tool":"edit_file","path":"a.py","old_str":"!","new_str":"?"})),
+        &ws,
+    ));
+    assert!(
+        o.contains("rejected"),
+        "a unique `!` must not be written: {o}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.py")).unwrap(),
+        src,
+        "nothing was written"
+    );
+
+    // The `//!` case from the rung: rejected as indistinct, NOT as ambiguous.
+    let ws2 = temp_dir("bang-many");
+    let src2 = "//! The floor.\n//! more.\nfn f() { assert!(x); }\n";
+    std::fs::write(ws2.join("floor.rs"), src2).unwrap();
+    let o2 = obs(execute(
+        &call(json!({"tool":"edit_file","path":"floor.rs","old_str":"!","new_str":"//!"})),
+        &ws2,
+    ));
+    assert!(
+        o2.contains("single punctuation character") && !o2.contains("ambiguous"),
+        "the reason must be the anchor, not the match count: {o2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+    let _ = std::fs::remove_dir_all(&ws2);
+}
+
+/// The guard's other half: it must not fire on anything a model legitimately edits.
+///
+/// One character is the whole surface. Two is already the operator band
+/// (`>=` -> `>`), which `destructive_replacement` owns; a one-character IDENTIFIER is real
+/// code; and `_` is a real Rust token.
+#[test]
+fn the_indistinct_anchor_guard_does_not_fire_on_a_legitimate_edit() {
+    use crate::builtin::guards::indistinct_anchor;
+
+    for ok in [
+        ">=",
+        "&&",
+        "==",
+        "!=",
+        "()",
+        "{}", // two-character operators and delimiters
+        "i",
+        "n",
+        "x",
+        "0",
+        "9", // one-character identifiers and literals
+        "_", // the Rust wildcard
+        "!x",
+        "x!", // one punctuation plus context is already an address
+        "    return n",
+        "fn f() {",
+        "//! The floor.", // real anchors
+        "",
+        "  ", // empty: `edit_file` has its own error for that, ahead of this guard
+    ] {
+        assert!(
+            indistinct_anchor(ok).is_none(),
+            "{ok:?} is a legitimate anchor and must pass through"
+        );
+    }
+
+    // End to end: a real one-line anchor still edits.
+    let ws = temp_dir("anchor-ok");
+    std::fs::write(ws.join("a.rs"), "fn f() {\n    let n = 1;\n}\n").unwrap();
+    let o = obs(execute(
+        &call(
+            json!({"tool":"edit_file","path":"a.rs","old_str":"    let n = 1;","new_str":"    let n = 2;"}),
+        ),
+        &ws,
+    ));
+    assert!(o.contains("ok"), "a distinctive anchor still edits: {o}");
+    let _ = std::fs::remove_dir_all(&ws);
+}

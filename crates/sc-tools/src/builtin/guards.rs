@@ -240,3 +240,50 @@ pub fn destructive_replacement(old_str: &str, new_str: &str) -> Option<String> {
          the line instead, send an empty new_str (\"\")."
     ))
 }
+
+/// If `old_str` is too weak to ADDRESS a location at all, say so. `None` for every anchor
+/// that could plausibly identify one.
+///
+/// THE BUG THIS EXISTS FOR. Forensics on the `engine-grid-scan` rung: the model sent
+/// `old_str: "!"` against a `floor.rs` whose header is `//!`. It was rejected — but only as
+/// *ambiguous* ("3 matches"), which tells the model its anchor was nearly right and it should
+/// add a neighbouring line. It was not nearly right. A bare `!` does not address anything, and
+/// the "pick a longer anchor" advice sent the model back to guessing at file contents it had
+/// never been shown in full.
+///
+/// The ambiguity path is also only accidental protection. Ambiguity depends on the FILE: run
+/// the same `"!"` against a file holding exactly one `!` and `edit_file` matches once and
+/// WRITES — replacing a character the model almost certainly did not mean, silently, with an
+/// "ok (1 replacement)". The anchor is wrong on its own terms, so it is rejected on its own
+/// terms, at every match count.
+///
+/// Deliberately as narrow as a guard can be — ALL of these must hold:
+/// 1. The anchor is exactly ONE character after trimming. Two characters is already an
+///    operator a model legitimately tweaks (`>=` -> `>`, `&&` -> `||`), and
+///    [`destructive_replacement`] is the guard for that band.
+/// 2. That character is not alphanumeric. A one-letter identifier (`i`, `n`, `x`) is real
+///    code; it will be caught by the ambiguity check when it is ambiguous, and when it is
+///    unique it is a legitimate (if unusual) edit.
+/// 3. It is not an underscore — `_` is a real Rust token (a wildcard pattern, a placeholder)
+///    and is listed among the structural scraps a model legitimately edits.
+///
+/// So the whole surface is: one bare punctuation or symbol character. `"!"`, `"("`, `";"`,
+/// `":"`, `"|"`. None of them can identify a place in a file. Every multi-character anchor,
+/// every identifier, and every deliberate `_` passes straight through.
+pub fn indistinct_anchor(old_str: &str) -> Option<String> {
+    let t = old_str.trim();
+    let mut chars = t.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        return None; // not exactly one character
+    };
+    if c.is_alphanumeric() || c == '_' {
+        return None;
+    }
+    Some(format!(
+        "old_str {t:?} is a single punctuation character — it cannot identify a place in the \
+         file, however many times it occurs. Nothing was written. An anchor must be \
+         DISTINCTIVE: copy a whole line (or two consecutive lines) verbatim from the file as it \
+         was shown to you, including its indentation, and put the change in new_str. If you \
+         want to change one character, anchor on the whole line that holds it."
+    ))
+}

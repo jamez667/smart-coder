@@ -44,9 +44,17 @@ pub fn parse(command: &str, output: &str, command_ok: bool) -> TestReport {
     }
 }
 
-/// Parse `cargo test` libtest output, e.g.:
-/// `test mod::it_works ... ok` / `test mod::it_breaks ... FAILED`, plus the
-/// `---- mod::it_breaks stdout ----` failure detail blocks.
+/// Parse `cargo test` libtest output. Two shapes, detected PER LINE so a single
+/// pass handles either (and a mixed log, e.g. one crate's tests run each way):
+///
+/// * **verbose** (the default): `test mod::it_works ... ok` /
+///   `test mod::it_breaks ... FAILED` -- every test named, pass and fail alike.
+/// * **quiet** (`-q`): progress dots and `N/M` instead of per-test `ok` lines, and
+///   failures printed as `mod::it_breaks --- FAILED` with NO `test ` prefix. Passing
+///   tests are never named, so their COUNT comes from the `test result:` summary.
+///
+/// The `---- <name> stdout ----` detail blocks are identical in both modes, so the
+/// left/right assertion values are attached the same way either way.
 fn parse_cargo(output: &str, command_ok: bool) -> TestReport {
     let mut cases = Vec::new();
     for line in output.lines() {
@@ -66,15 +74,40 @@ fn parse_cargo(output: &str, command_ok: bool) -> TestReport {
                         passed: false,
                         message: None,
                     }),
-                    _ => {} // ignored / measured — not a pass/fail signal
+                    _ => {} // ignored / measured -- not a pass/fail signal
                 }
             }
+            continue;
+        }
+        if let Some(name) = quiet_failure_name(line) {
+            cases.push(TestCase {
+                name: name.to_string(),
+                passed: false,
+                message: None,
+            });
         }
     }
     attach_cargo_failure_messages(output, &mut cases);
+
+    // Quiet mode never prints a per-test `ok` line, so the passes have to come from
+    // the `test result:` summary -- as anonymous placeholders, since libtest does not
+    // name them. Only when nothing named a pass, so verbose runs keep their real names.
+    let named_passes = cases.iter().any(|c| c.passed);
+    if !named_passes {
+        if let Some(passed) = cargo_summary_passed(output) {
+            for i in 0..passed {
+                cases.push(TestCase {
+                    name: format!("(passed #{})", i + 1),
+                    passed: true,
+                    message: None,
+                });
+            }
+        }
+    }
+
     if cases.is_empty() {
-        // No `test ...` lines — e.g. `cargo check`/`cargo build`. Keep the raw output so a
-        // failing compile surfaces its errors to the model (was dropped → it edited blind).
+        // No test lines at all -- e.g. `cargo check`/`cargo build`. Keep the raw output so a
+        // failing compile surfaces its errors to the model (was dropped -> it edited blind).
         return TestReport::generic_with_output(command_ok, output);
     }
     TestReport {
@@ -86,8 +119,56 @@ fn parse_cargo(output: &str, command_ok: bool) -> TestReport {
     }
 }
 
+/// The test name on a QUIET-mode failure line, `<name> --- FAILED`.
+///
+/// Anchored tightly, because `----` is everywhere in libtest output: the line must end
+/// in exactly ` --- FAILED`, and what precedes it must look like a test path -- non-empty,
+/// no whitespace, and not itself starting with a dash. That last rule is what keeps
+/// `---- t::fails stdout ----` out (it does not end in ` --- FAILED` anyway, but a
+/// hypothetical `---- x --- FAILED` would otherwise slip through).
+fn quiet_failure_name(line: &str) -> Option<&str> {
+    let name = line.strip_suffix(" --- FAILED")?.trim_end();
+    if name.is_empty() || name.starts_with('-') || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Total passing tests across every libtest `test result:` summary line, e.g.
+/// `test result: FAILED. 1 passed; 1 failed; ...` -> 1. Summed, because one cargo
+/// invocation prints one summary per target (lib, each integration test, doctests).
+/// Present in BOTH modes, and the only source of a pass count under `-q`.
+fn cargo_summary_passed(output: &str) -> Option<usize> {
+    let mut total = 0usize;
+    let mut seen = false;
+    for line in output.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("test result:") else {
+            continue;
+        };
+        let toks: Vec<&str> = rest.split_whitespace().collect();
+        for (i, t) in toks.iter().enumerate() {
+            if t.trim_end_matches(';') == "passed" && i > 0 {
+                if let Ok(n) = toks[i - 1].parse::<usize>() {
+                    total += n;
+                    seen = true;
+                }
+            }
+        }
+    }
+    seen.then_some(total)
+}
+
 /// Pull the `---- <name> stdout ----` panic/assertion blocks and attach them to
-/// the matching failed case.
+/// the matching failed case. Identical in verbose and quiet mode, so one reader
+/// serves both.
+///
+/// Real libtest output puts a BLANK LINE between the header and the panic, and
+/// another between the panic and the `note: run with RUST_BACKTRACE=1` trailer, so
+/// stopping at the first blank line (as this once did) threw the whole message away
+/// -- left/right values included. Instead: read to the end of the block (the next
+/// `---- ` header, the `failures:` list, or the `test result:` summary), then trim
+/// the leading/trailing blank lines and drop libtest's backtrace boilerplate.
 fn attach_cargo_failure_messages(output: &str, cases: &mut [TestCase]) {
     let lines: Vec<&str> = output.lines().collect();
     for (i, line) in lines.iter().enumerate() {
@@ -96,18 +177,35 @@ fn attach_cargo_failure_messages(output: &str, cases: &mut [TestCase]) {
             .strip_prefix("---- ")
             .and_then(|s| s.strip_suffix(" stdout ----"))
         {
-            // Gather until a blank line or the next block.
-            let mut msg = Vec::new();
+            let mut msg: Vec<&str> = Vec::new();
             for next in &lines[i + 1..] {
                 let t = next.trim();
-                if t.is_empty() || t.starts_with("---- ") {
+                if t.starts_with("---- ")
+                    || t == "failures:"
+                    || t.starts_with("test result:")
+                    || t.starts_with("error: test failed")
+                {
                     break;
+                }
+                // libtest's backtrace hint is noise in every single failure.
+                if t.starts_with("note: run with `RUST_BACKTRACE") {
+                    continue;
                 }
                 msg.push(t);
             }
+            // Trim the blank lines that bracket the panic.
+            while msg.first().is_some_and(|t| t.is_empty()) {
+                msg.remove(0);
+            }
+            while msg.last().is_some_and(|t| t.is_empty()) {
+                msg.pop();
+            }
             if let Some(c) = cases.iter_mut().find(|c| c.name == name && !c.passed) {
                 if !msg.is_empty() {
-                    c.message = Some(msg.join("\n"));
+                    c.message = Some(msg.join(
+                        "
+",
+                    ));
                 }
             }
         }
@@ -516,6 +614,213 @@ test result: ok. 1 passed; 0 failed;
         let report = parse("cargo test", out, true);
         assert!(report.all_green());
         assert_eq!(report.passed_count(), 1);
+    }
+
+    /// REAL verbose output, captured live -- not the idealised fixture above. libtest
+    /// puts a BLANK LINE between the `---- name stdout ----` header and the panic, and
+    /// the extractor used to stop at the first blank line, so on genuine cargo output
+    /// it attached NOTHING and the left/right values were lost in verbose mode too.
+    /// The `note: run with RUST_BACKTRACE` trailer is dropped as per-failure noise.
+    #[test]
+    fn parses_real_cargo_verbose_with_blank_line_before_the_panic() {
+        let out = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src\\lib.rs (target\\debug\\deps\\qt-a49e4d17cfc9a51a.exe)
+
+running 2 tests
+test t::passes ... ok
+test t::fails ... FAILED
+
+failures:
+
+---- t::fails stdout ----
+
+thread 't::fails' (64264) panicked at src\\lib.rs:6:18:
+assertion `left == right` failed: the real assertion detail
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    t::fails
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+";
+        let report = parse("cargo test --offline", out, false);
+        assert!(!report.generic);
+        assert_eq!(report.passed_count(), 1);
+
+        // Verbose NAMES its passes -- placeholders must never dilute them.
+        let passed: Vec<&str> = report
+            .cases
+            .iter()
+            .filter(|c| c.passed)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(passed, ["t::passes"]);
+
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1);
+        let msg = failed[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("left: 1") && msg.contains("right: 2"),
+            "got: {msg:?}"
+        );
+        assert!(
+            !msg.contains("RUST_BACKTRACE"),
+            "the backtrace hint is noise: {msg:?}"
+        );
+    }
+
+    /// `cargo test -q` prints a DIFFERENT failure shape to the verbose default:
+    /// `t::fails --- FAILED`, with no `test ` prefix and no per-test `ok` lines at
+    /// all. Before this was handled, `strip_prefix("test ")` matched nothing, the
+    /// parser collected ZERO cases and the report fell through to the generic path --
+    /// so the model was shown cargo's epilogue (`error: test failed, to rerun pass
+    /// --test contract`) instead of the named assertion with its left/right values.
+    ///
+    /// Measured live on the `engine-ecs-query` ladder rung: every `run_verification`
+    /// read `same 1 failure as last run -- ... error: test failed`, and all seven
+    /// named assertions were discarded. Two ladder rungs use `-q`.
+    ///
+    /// The fixture below is REAL captured output (cargo 1.9x, Windows).
+    #[test]
+    fn parses_cargo_quiet_mode_failure() {
+        let out = "
+running 2 tests
+. 1/2
+t::fails --- FAILED
+
+failures:
+
+---- t::fails stdout ----
+
+thread 't::fails' (64480) panicked at src\\lib.rs:5:26:
+assertion `left == right` failed: the real assertion detail
+  left: 1
+ right: 2
+
+failures:
+    t::fails
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        let report = parse("cargo test --offline -q", out, false);
+        assert!(
+            !report.generic,
+            "quiet mode must parse, not fall to the generic epilogue: {:?}",
+            report
+        );
+
+        let failed = report.failed();
+        assert_eq!(failed.len(), 1, "cases: {:?}", report.cases);
+        assert_eq!(failed[0].name, "t::fails");
+
+        // The pass is COUNTED (from the summary) even though libtest never names it.
+        assert_eq!(report.passed_count(), 1);
+        assert!(!report.all_green());
+
+        // The assertion detail -- the whole point -- survives.
+        let msg = failed[0].message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("left: 1") && msg.contains("right: 2"),
+            "left/right must be retained, got: {msg:?}"
+        );
+        assert!(
+            msg.contains("the real assertion detail"),
+            "the assertion message must be retained, got: {msg:?}"
+        );
+
+        // And it reaches the model.
+        let obs = report.observation();
+        assert!(obs.contains("t::fails") && obs.contains("left: 1"), "{obs}");
+    }
+
+    /// An all-green `-q` run names NOTHING: dots, then `test result: ok`. The pass
+    /// count still has to come out right, and the gate has to read green.
+    #[test]
+    fn parses_cargo_quiet_mode_all_green() {
+        let out = "
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        let report = parse("cargo test --offline -q", out, true);
+        assert!(!report.generic, "{report:?}");
+        assert!(report.all_green());
+        assert_eq!(report.passed_count(), 2);
+        assert!(report.failed().is_empty());
+    }
+
+    /// One cargo invocation prints one `test result:` per target (lib, each
+    /// integration test, doctests). Under `-q` those summaries are the only pass
+    /// signal, so they must SUM, not overwrite.
+    #[test]
+    fn cargo_quiet_sums_pass_counts_across_targets() {
+        let out = "
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 3 tests
+..F
+contract::t3 --- FAILED
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        let report = parse("cargo test -q", out, false);
+        assert_eq!(report.passed_count(), 4, "cases: {:?}", report.cases);
+        assert_eq!(report.failed().len(), 1);
+        assert_eq!(report.failed()[0].name, "contract::t3");
+    }
+
+    /// `----` is all over libtest output. The quiet matcher must not mistake a
+    /// failure-detail HEADER for a case -- that would invent a phantom test named
+    /// after a block delimiter and (worse) double-count the real failure.
+    #[test]
+    fn cargo_detail_block_header_is_not_a_case() {
+        assert_eq!(quiet_failure_name("---- x stdout ----"), None);
+        assert_eq!(quiet_failure_name("---- t::fails stdout ----"), None);
+        // A dash-led line that happens to end the right way is still not a test path.
+        assert_eq!(quiet_failure_name("---- x --- FAILED"), None);
+        // Nor is a prose line with spaces in the "name".
+        assert_eq!(quiet_failure_name("some prose --- FAILED"), None);
+        assert_eq!(quiet_failure_name("--- FAILED"), None);
+        // The real thing does match.
+        assert_eq!(quiet_failure_name("t::fails --- FAILED"), Some("t::fails"));
+
+        // End to end: the header alone must not produce a case.
+        let out = "
+running 1 test
+---- x stdout ----
+some panic text
+test result: FAILED. 0 passed; 1 failed;
+";
+        let report = parse("cargo test -q", out, false);
+        assert!(
+            report
+                .cases
+                .iter()
+                .all(|c| c.name != "---- x stdout ----" && c.name != "x"),
+            "a detail header became a case: {:?}",
+            report.cases
+        );
+    }
+
+    /// Garbage that merely looks cargo-ish must fall back to the generic path with
+    /// its raw output intact, not panic and not invent cases.
+    #[test]
+    fn cargo_garbage_output_falls_back_to_generic() {
+        let out = "running amok
+--- FAILED ---
+-- FAILED
+   --- FAILED
+error: something else entirely
+";
+        let report = parse("cargo test -q", out, false);
+        assert!(report.generic, "cases: {:?}", report.cases);
+        assert!(report.observation().contains("something else entirely"));
     }
 
     #[test]

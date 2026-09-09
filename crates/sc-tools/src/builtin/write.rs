@@ -10,7 +10,8 @@
 use std::path::Path;
 
 use super::guards::{
-    delimiter_regression, destructive_replacement, duplicate_definition, is_code_path,
+    delimiter_regression, destructive_replacement, duplicate_definition, indistinct_anchor,
+    is_code_path,
 };
 use super::read::{locate_function, Located};
 use super::util::{from_lf, number_lines, safe_join, to_lf, uses_crlf};
@@ -20,7 +21,12 @@ use super::util::{from_lf, number_lines, safe_join, to_lf, uses_crlf};
 /// unterminated string, breaking the build (observed live: the 30B looping write_file on a
 /// 790-line terrain.rs, each rewrite introducing a fresh syntax error). Such a file must be
 /// changed with surgical `edit_file` / `append_file` instead.
-const WRITE_FILE_OVERWRITE_MAX_LINES: usize = 150;
+///
+/// Public because the agent loop's failed-edit escalation has to answer the SAME question
+/// before it steers a stuck model at `write_file`: telling it to rewrite a file this guard
+/// will then refuse is a deadlock. It was a duplicated literal `150` in
+/// `sc_core::agent`; one constant, one answer.
+pub const WRITE_FILE_OVERWRITE_MAX_LINES: usize = 150;
 
 /// The word every no-op observation carries, so the loop (and a human reading the log)
 /// can tell "the tool worked and changed nothing" from "the tool worked and edited the
@@ -377,6 +383,12 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
     };
     if old_str.is_empty() {
         return format!("edit_file {path} error: old_str must not be empty");
+    }
+    // An anchor that cannot address anything is wrong before we look at the file at all --
+    // so this runs ahead of the match, and for EVERY path, not just `is_code_path` ones (a
+    // bare `!` is no more of an address in Python or Markdown than it is in Rust).
+    if let Some(msg) = indistinct_anchor(old_str) {
+        return format!("edit_file {path} rejected: {msg}");
     }
     // Normalize line endings to LF for matching/editing, on BOTH sides. A file checked out on
     // Windows is CRLF; the model, shown that file verbatim, faithfully copies CRLF into old_str

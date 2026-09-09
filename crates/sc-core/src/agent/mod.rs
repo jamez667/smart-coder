@@ -125,6 +125,110 @@ pub(super) fn report_if_unoffered(
     }
 }
 
+/// What the failed-edit escalation is allowed to steer a stuck model toward for one path.
+///
+/// Three outcomes, decided by the file itself rather than by wording:
+///
+/// * [`RewriteTarget::Rewrite`] — the file exists and is small enough that `write_file`
+///   will accept an overwrite, so a wholesale rewrite is a real way out. Carries the file's
+///   FULL current contents.
+/// * [`RewriteTarget::TooLarge`] — the file exists but exceeds
+///   [`sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES`], so `write_file` would REJECT the rewrite.
+///   Steering there is a deadlock; the escalation must name a surgical tool instead.
+/// * [`RewriteTarget::Unreadable`] — the path can't be read (gone, a directory, not
+///   permitted). The harness has no contents to offer, so it must not claim it showed any.
+enum RewriteTarget {
+    Rewrite { contents: String },
+    TooLarge { lines: usize },
+    Unreadable,
+}
+
+/// Classify the escalation's target path.
+///
+/// THE BUG THIS EXISTS FOR. On the `engine-grid-scan` rung the escalation told the model to
+/// call `write_file` and "base it on the file shown in the error above". The only thing shown
+/// above was `anchor_not_found`'s BOUNDED WINDOW — 30 lines of a 94-line `floor.rs`, cut
+/// mid-line. The model did exactly as told: it reconstructed the whole file from that window,
+/// collapsed `//!` to `!` on line 2 and truncated the rest. The resulting
+/// `src/floor.rs:2 expected item, found '!'` ate 26 of the run's 40 turns.
+///
+/// The window is the right answer to "where did your anchor nearly match". It is the wrong
+/// basis for a whole-file rewrite. The two have to agree: if the harness asks for a rewrite it
+/// supplies the whole file, and if it cannot supply the whole file it does not ask for one.
+fn rewrite_target(workspace: &Path, path: &str) -> RewriteTarget {
+    let Ok(contents) = std::fs::read_to_string(workspace.join(path)) else {
+        return RewriteTarget::Unreadable;
+    };
+    let lines = contents.lines().count();
+    // The SAME threshold `write_file` enforces, imported rather than repeated: a directive
+    // that steers at a rewrite the guard then refuses is worse than no directive at all.
+    if lines > sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES {
+        return RewriteTarget::TooLarge { lines };
+    }
+    RewriteTarget::Rewrite { contents }
+}
+
+/// The file's full current contents, numbered like the focus-file view (`N: text`), under a
+/// header naming the line count. This is what "base it on the file shown above" must actually
+/// refer to.
+///
+/// Numbered on purpose, and matching the read view the model already knows: the numbers make a
+/// truncated reconstruction visible (the model can see it stopped at 30 of 94) and they are the
+/// same addresses `edit_lines` takes if it changes its mind.
+fn numbered_file(path: &str, contents: &str) -> String {
+    let lines: Vec<&str> = contents.lines().collect();
+    let n = lines.len();
+    let body = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{}: {l}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "--- {path} ({n} lines), in full, as it is on disk right now ---\n{body}\n\
+         --- end of {path} ---"
+    )
+}
+
+/// The tail of a rewrite directive: WHAT the model should base the rewrite on.
+///
+/// The old wording was `Base it on the file shown in the error above` — and for an anchor miss
+/// the only thing shown above is [a 30-line window][window], not the file. So the harness now
+/// supplies the source itself:
+///
+/// * [`RewriteTarget::Rewrite`] — the whole file, numbered, inline. There is nothing left to
+///   remember or reconstruct, and the numbers make a short reconstruction self-evident.
+/// * anything else — no claim that a file was shown; tell it to read the file first.
+///   ([`RewriteTarget::TooLarge`] never reaches a rewrite directive, but a caller that adds
+///   one later must not silently inherit the old lie.)
+///
+/// [window]: sc_tools
+fn rewrite_source(path: &str, target: &RewriteTarget, reread: Option<&'static str>) -> String {
+    match target {
+        RewriteTarget::Rewrite { contents } => format!(
+            " Do NOT reconstruct it from the snippet in the error above — that is only the few \
+             lines around your missed anchor, not the file. Here is the WHOLE file; your \
+             `content` must be every one of these lines, with the fix applied and the `N: ` \
+             prefixes stripped. Apply the fix the failing test needs and send the result.\n\n{}",
+            numbered_file(path, contents)
+        ),
+        // No contents to offer. Say so, and name the way to get them, rather than pointing at
+        // a "file above" that was never shown.
+        _ => match reread {
+            Some(r) => format!(
+                " The full text of `{path}` has NOT been shown to you — the snippet in the \
+                 error above is only the lines around your missed anchor. Call `{r}` on \
+                 `{path}` FIRST and write the rewrite from what it returns."
+            ),
+            None => format!(
+                " The full text of `{path}` has NOT been shown to you — the snippet in the \
+                 error above is only the lines around your missed anchor. Do not guess the \
+                 rest of the file."
+            ),
+        },
+    }
+}
+
 pub fn run_agent(
     backend: &dyn ModelBackend,
     instruction: &str,
@@ -1566,22 +1670,37 @@ pub fn run_agent_observed(
             failed_edit_path = None;
             failed_edit_streak = 0;
         }
+        // Set when the escalation below inlines a whole file into the observation. That
+        // observation is then SOURCE, not a status line, and must take the generous file cap:
+        // cutting it to `observation_line_cap` would hand the model a truncated file and ask
+        // it to rewrite from that -- the exact corruption the inlining exists to prevent.
+        let mut obs_carries_full_file = false;
         let obs = if failed_edit_streak >= 2 {
             failed_edit_path = None;
             failed_edit_streak = 0;
             interv.count += 1;
-            // Is the target a LARGE existing file? A wholesale `write_file` of such a file
-            // corrupts it (the model can't reproduce hundreds of lines faithfully — unterminated
-            // strings, dropped fns) AND is refused by the write_file guard, so steering to it
-            // would deadlock. For a big file, steer to SURGICAL edits instead.
-            let big_existing = std::fs::read_to_string(workspace.join(&arg))
-                .map(|s| s.lines().count() > 150)
-                .unwrap_or(false);
+            // Can this file be rewritten wholesale at all? `write_file` refuses to overwrite
+            // anything above `WRITE_FILE_OVERWRITE_MAX_LINES`, so steering a big file at it is
+            // a deadlock; and a rewrite the harness cannot supply the source for is the
+            // corruption this whole branch exists to stop.
+            let target = rewrite_target(workspace, &arg);
+            let big_existing = matches!(target, RewriteTarget::TooLarge { .. });
+            // Name the size in the surgical steer. "too large" without a number reads as an
+            // opinion the model can argue with; "412 lines" is a fact, and it is the same number
+            // `write_file`'s own rejection would quote if it tried the rewrite anyway.
+            let size = match &target {
+                RewriteTarget::TooLarge { lines } => format!(" ({lines} lines)"),
+                _ => String::new(),
+            };
             // Every tool named below comes from `mention`: whichever way the model was
             // failing, the way out has to be a tool it can actually call.
             let whole = mention(registry, &["write_file"]);
             let surgical = mention(registry, &["edit_function", "edit_lines"]);
+            let reread = mention(registry, &["read_file"]);
             let directive = match (create_clash && !big_existing, big_existing, whole, surgical) {
+                // A create_file clash is NOT the reconstruct-from-a-window trap: the model
+                // already holds the full content it tried to create, it just reached for the
+                // tool that refuses to overwrite. It needs the right tool name, not the file.
                 (true, _, Some(w), _) => format!(
                     "`{arg}` already exists — `create_file` will NOT overwrite it, so \
                      repeating it does nothing. To change it, call `{w}` with `path` \
@@ -1590,7 +1709,9 @@ pub fn run_agent_observed(
                 ),
                 (_, true, _, Some("edit_function")) => format!(
                     "Editing `{arg}` by exact snippet is failing — you keep matching code that \
-                     isn't in the file. STOP editing this large file by snippet. If the code you \
+                     isn't in the file. STOP editing this large file{size} by snippet. It is too \
+                     large to rewrite in one shot — `write_file` would refuse it — so do NOT \
+                     try. If the code you \
                      want to change is inside a function/method, use `edit_function`: pass its \
                      `name` and the FULL new function text as `new_body` — no snippet to copy and \
                      no line numbers to get right (the tool finds the function for you). This is \
@@ -1605,7 +1726,9 @@ pub fn run_agent_observed(
                 ),
                 (_, true, _, Some(_)) => format!(
                     "Editing `{arg}` by exact snippet is failing — you keep matching code that \
-                     isn't in the file. STOP editing this large file by snippet. Use `edit_lines` \
+                     isn't in the file. STOP editing this large file{size} by snippet. It is too \
+                     large to rewrite in one shot — `write_file` would refuse it — so do NOT \
+                     try. Use `edit_lines` \
                      (address lines by NUMBER from the `N: ` view; do NOT include the `N: ` \
                      prefix; to INSERT before line N pass start=N, end=N-1). Make the change now."
                 ),
@@ -1613,8 +1736,11 @@ pub fn run_agent_observed(
                     "Your edit anchor does not exist in `{arg}` — you are matching against \
                      code that isn't in the file. STOP editing by anchor. Instead call `{w}` \
                      with `path` `{arg}` and the ENTIRE corrected file contents in one shot \
-                     ({w} overwrites the existing file). Base it on the file shown in the error \
-                     above plus the fix the failing test needs."
+                     ({w} overwrites the existing file).{}",
+                    {
+                        obs_carries_full_file = matches!(target, RewriteTarget::Rewrite { .. });
+                        rewrite_source(&arg, &target, reread)
+                    }
                 ),
                 (_, _, None, Some(s)) => format!(
                     "Repeating that call on `{arg}` does nothing — you are working from code \
@@ -1678,7 +1804,12 @@ pub fn run_agent_observed(
         // Everything else — a verification report, a shell log, an `ask` answer — keeps
         // the error-first path: those genuinely want the failing lines over the leading
         // ones, and their lines are not a range the model can re-request.
-        let cap = observation_cap_for(&tool, cfg);
+        let cap = if obs_carries_full_file {
+            // The harness put a whole file in here on purpose; cap it like a read.
+            cfg.read_file_line_cap.max(observation_cap_for(&tool, cfg))
+        } else {
+            observation_cap_for(&tool, cfg)
+        };
         let trimmed = if matches!(tool.as_str(), "read_file" | "read_function") {
             truncate_paged_read(&obs, cap)
         } else {
