@@ -33,9 +33,19 @@ pub struct ResultRow {
     pub task: String,
     pub arm: String,
     pub model: String,
-    /// `git rev-parse --short HEAD` at the time of the run, `"unknown"` outside a
-    /// checkout. Two rows with different commits are not the same experiment.
+    /// The commit the BINARY WAS BUILT FROM ([`current_commit`]) -- `"unknown"`
+    /// outside a checkout, with a `-dirty` suffix when it was built from a tree
+    /// with uncommitted changes. Two rows with different commits are not the same
+    /// experiment.
+    ///
+    /// Deliberately not the runtime HEAD: HEAD says what the tree was when the
+    /// binary RAN, which for a stale binary names code the row does not contain.
     pub commit: String,
+    /// The runtime HEAD, when it differed from `commit` -- i.e. the binary was
+    /// stale relative to the working tree. `None` when they agreed, which is the
+    /// normal case, so a healthy row does not carry a redundant column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_commit: Option<String>,
     /// 1-based round within the run.
     pub repeat: usize,
     /// [`crate::runner::Outcome::symbol`] -- `"PASS"`, `"STILL-RED"`, ...
@@ -83,6 +93,10 @@ impl ResultRow {
     ///
     /// `arm` is the arm's label, `commit` comes from [`current_commit`] once per
     /// run, and `metrics` is the [`MetricsSink`] snapshot for this one solve.
+    ///
+    /// `tree_commit` is filled in only when the runtime HEAD disagrees with
+    /// `commit`, so a stale-binary run is legible in the rows and not only in the
+    /// scrollback that carried the warning.
     #[allow(clippy::too_many_arguments)] // a record constructor; every input is a column
     pub fn new(
         task: &EvalTask,
@@ -109,6 +123,7 @@ impl ResultRow {
             arm: arm.to_string(),
             model: model.to_string(),
             commit: commit.to_string(),
+            tree_commit: runtime_head().filter(|head| head != commit),
             repeat,
             outcome: result.outcome.symbol().to_string(),
             steps: run.map(|r| r.steps).unwrap_or(0),
@@ -145,11 +160,26 @@ pub fn rung_of(task: &EvalTask) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The short hash of the checked-out commit, or `"unknown"`.
+/// The short hash of the commit this binary was **built** from, `-dirty` when it
+/// was built from a tree with uncommitted changes, or `"unknown"` when it was
+/// built outside a checkout.
 ///
-/// Called once per run and copied into every row: a row without a commit cannot
-/// be compared with anything.
+/// Stamped by `build.rs` at compile time, not read from git at run time. The
+/// runtime answer is a different question -- what the tree is NOW -- and using it
+/// makes a stale binary claim code it does not contain. Copied into every row: a
+/// row without a commit cannot be compared with anything.
 pub fn current_commit() -> String {
+    option_env!("SC_EVAL_BUILD_COMMIT")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// `git rev-parse --short HEAD` right now, or `None` outside a checkout.
+///
+/// Used ONLY to detect that the binary is stale relative to the tree; it never
+/// becomes a row's `commit`.
+pub fn runtime_head() -> Option<String> {
     std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -158,7 +188,37 @@ pub fn current_commit() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The warning to print when a binary is stale relative to the working tree, or
+/// `None` when there is nothing to say.
+///
+/// Pure, so the interesting case is testable without a git checkout in a
+/// particular state. Says nothing when the two agree, when there is no runtime
+/// HEAD to compare against (not a checkout), or when the build stamp is
+/// `"unknown"` -- an unstamped build is already its own kind of loud, and pairing
+/// it with a HEAD would suggest a mismatch that was never measured.
+///
+/// A `-dirty` build stamp never matches a bare HEAD, and that is correct: a binary
+/// built from uncommitted work is exactly as unreproducible as a stale one.
+pub fn stale_binary_warning(build: &str, head: Option<&str>) -> Option<String> {
+    let head = head?;
+    if build == "unknown" || build == head {
+        return None;
+    }
+    Some(format!(
+        "WARNING: this binary was built from {build} but the working tree is at {head}; \
+         rows will be stamped {build}. Rebuild before trusting these numbers as \
+         current, or ignore this if the older binary is the point (an A/B against it)."
+    ))
+}
+
+/// Print [`stale_binary_warning`] to stderr, if there is one. Call once at run
+/// start, before anything that produces rows.
+pub fn warn_if_stale(build: &str) {
+    if let Some(msg) = stale_binary_warning(build, runtime_head().as_deref()) {
+        eprintln!("{msg}");
+    }
 }
 
 /// Append `rows` to `<dir>/rows.jsonl`, one JSON object per line, creating the
@@ -463,6 +523,86 @@ mod tests {
         }
     }
 
+    /// **The stamp is the BUILD commit, not the runtime HEAD.**
+    ///
+    /// The bug this replaces: a binary built at 08:26 stamped a commit that landed
+    /// at 08:56, so rows claimed a fix they did not contain. Testing a build
+    /// script's output from inside the crate is necessarily indirect -- the
+    /// strongest available assertion is that the function returns exactly what the
+    /// build script put in the environment, and that in a checkout it is a real
+    /// hash rather than the `"unknown"` fallback.
+    #[test]
+    fn current_commit_is_the_build_time_stamp() {
+        let stamp = current_commit();
+        assert!(
+            !stamp.is_empty(),
+            "a row without a commit compares to nothing"
+        );
+        assert_eq!(
+            stamp,
+            env!("SC_EVAL_BUILD_COMMIT"),
+            "the stamp must be exactly what build.rs emitted"
+        );
+        // This crate is built inside a checkout, so the fallback means the build
+        // script failed to find git -- which would silently un-pin every row.
+        if runtime_head().is_some() {
+            assert_ne!(
+                stamp, "unknown",
+                "built in a checkout: expected a real hash"
+            );
+            let hash = stamp.strip_suffix("-dirty").unwrap_or(&stamp);
+            assert!(
+                hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "expected a short hash, optionally `-dirty`: {stamp:?}"
+            );
+        }
+    }
+
+    /// The dirty marker: a build from an uncommitted tree is as unreproducible as
+    /// a stale binary, so it must not look like a clean build of that commit.
+    /// Which case this run is depends on the tree, so assert the property that
+    /// holds either way, and the marker's consequence where it applies.
+    #[test]
+    fn a_dirty_build_is_marked_and_never_matches_a_bare_head() {
+        let stamp = current_commit();
+        if let Some(dirty_of) = stamp.strip_suffix("-dirty") {
+            assert!(!dirty_of.is_empty(), "`-dirty` must qualify a hash");
+            // The point of the marker: it can never be mistaken for the commit.
+            assert!(
+                stale_binary_warning(&stamp, Some(dirty_of)).is_some(),
+                "a dirty build against its own HEAD must still warn"
+            );
+        }
+        // Whatever the tree, the marker is the only suffix the stamp may carry.
+        let bare = stamp.strip_suffix("-dirty").unwrap_or(&stamp);
+        assert!(!bare.contains('-'), "unexpected suffix on {stamp:?}");
+    }
+
+    /// **The mismatch is loud.** Pure comparison, so the stale case is testable
+    /// without contriving a git checkout.
+    #[test]
+    fn a_stale_binary_warns_and_a_current_one_does_not() {
+        // Built from one commit, run against a tree at another: the whole bug.
+        let msg = stale_binary_warning("aaa1111", Some("c421932"))
+            .expect("a mismatch must produce a warning");
+        assert!(msg.starts_with("WARNING:"), "must be unmissable: {msg:?}");
+        assert!(msg.contains("aaa1111") && msg.contains("c421932"));
+        assert!(
+            msg.contains("stamped aaa1111"),
+            "must say which commit the rows get: {msg:?}"
+        );
+
+        // Agreement is the normal case and says nothing.
+        assert_eq!(stale_binary_warning("aaa1111", Some("aaa1111")), None);
+        // Not a checkout: nothing to compare against, so no claim either way.
+        assert_eq!(stale_binary_warning("aaa1111", None), None);
+        // An unstamped build is its own problem; pairing it with a HEAD would
+        // report a mismatch nobody measured.
+        assert_eq!(stale_binary_warning("unknown", Some("c421932")), None);
+        // A dirty build is never "current", even at the same commit.
+        assert!(stale_binary_warning("aaa1111-dirty", Some("aaa1111")).is_some());
+    }
+
     #[test]
     fn the_rung_comes_from_the_tag() {
         assert_eq!(
@@ -528,6 +668,93 @@ mod tests {
         assert_eq!(v["repeat"], 2);
         assert_eq!(v["wall_ms"], 1500);
         assert_eq!(v["outcome"], "PASS");
+    }
+
+    /// **A row records the BUILD stamp**, and carries the runtime HEAD beside it
+    /// only when they disagree -- so a stale-binary run stays legible in the data
+    /// after the scrollback carrying the warning is gone.
+    #[test]
+    fn a_row_records_the_build_stamp_and_flags_a_stale_tree() {
+        let t = task(&[]);
+        let result = TaskResult {
+            id: "t".into(),
+            solver: "raw".into(),
+            outcome: Outcome::StillRed,
+            metrics: None,
+            run: None,
+        };
+        let stamp = current_commit();
+        let row = ResultRow::new(
+            &t,
+            "raw",
+            "m",
+            &stamp,
+            1,
+            &result,
+            &RunMetrics::default(),
+            0,
+        );
+        assert_eq!(
+            row.commit, stamp,
+            "the row carries the build stamp verbatim"
+        );
+        // Whether THIS binary is stale depends on the tree it was built in, so the
+        // invariant to assert is the equivalence, not either branch: the column is
+        // present exactly when the stamp and the tree disagree.
+        assert_eq!(
+            row.tree_commit.is_some(),
+            runtime_head().is_some_and(|head| head != stamp),
+            "tree_commit appears exactly when the binary is stale (or built dirty)"
+        );
+
+        // A row whose stamp agrees with the tree omits the column rather than
+        // writing a null -- the healthy case stays as narrow as it was before.
+        let agreeing = runtime_head().unwrap_or_else(|| stamp.clone());
+        let clean = ResultRow::new(
+            &t,
+            "raw",
+            "m",
+            &agreeing,
+            1,
+            &result,
+            &RunMetrics::default(),
+            0,
+        );
+        assert_eq!(clean.tree_commit, None);
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&clean).unwrap()).unwrap();
+        assert_eq!(v["commit"], agreeing.as_str());
+        assert!(v.get("tree_commit").is_none());
+
+        // A row stamped with some OTHER build carries the tree it actually ran on.
+        let stale = ResultRow::new(
+            &t,
+            "raw",
+            "m",
+            "0000000",
+            1,
+            &result,
+            &RunMetrics::default(),
+            0,
+        );
+        assert_eq!(
+            stale.commit, "0000000",
+            "the stamp wins; HEAD never overwrites it"
+        );
+        assert_eq!(
+            stale.tree_commit,
+            runtime_head(),
+            "a disagreement is recorded, not silently dropped"
+        );
+        if let Some(head) = runtime_head() {
+            let v: serde_json::Value =
+                serde_json::from_str(&serde_json::to_string(&stale).unwrap()).unwrap();
+            assert_eq!(v["commit"], "0000000");
+            assert_eq!(
+                v["tree_commit"], head,
+                "the stale run stays legible in the data, not only in the scrollback"
+            );
+        }
     }
 
     #[test]

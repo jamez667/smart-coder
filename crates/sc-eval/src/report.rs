@@ -453,6 +453,7 @@ mod ab_tests {
             arm: arm.into(),
             model: "m".into(),
             commit: "c".into(),
+            tree_commit: None,
             repeat: 1,
             outcome: if pass { "PASS" } else { "STILL-RED" }.into(),
             steps: 5,

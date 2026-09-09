@@ -24,7 +24,10 @@ pub mod task;
 
 pub use gateway_arm::{build_arm, Arm, ArmRun, ArmSolver, AskStats, GatewayTool};
 pub use report::{ab_report, Report};
-pub use results::{current_commit, rung_of, write_rows, MetricsSink, ResultRow, RunMetrics};
+pub use results::{
+    current_commit, rung_of, runtime_head, stale_binary_warning, warn_if_stale, write_rows,
+    MetricsSink, ResultRow, RunMetrics,
+};
 pub use retrieval::{QueryResult, RetrievalQuery, RetrievalSuite};
 pub use runner::{run_suite, run_task, Outcome, TaskResult};
 pub use solver::{AgentSolver, FileSolver, FnSolver, NoopSolver, Solver};

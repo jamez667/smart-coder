@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use sc_eval::gateway_arm::{build_arm, Arm, AskStats};
-use sc_eval::results::{current_commit, write_rows, MetricsSink, ResultRow};
+use sc_eval::results::{current_commit, warn_if_stale, write_rows, MetricsSink, ResultRow};
 use sc_eval::runner::{run_task, Outcome};
 use sc_eval::task::TaskSuite;
 use sc_model::OpenAiBackend;
@@ -61,6 +61,14 @@ fn main() {
         );
         return;
     }
+
+    // The commit the binary was BUILT from, not whatever HEAD is now: a stale
+    // binary that stamped the runtime HEAD once made a run look like it contained
+    // a fix that had landed after the build. First thing out, before any argument
+    // or suite error can pre-empt it -- a warning you have to scroll past a failure
+    // to see is one nobody sees.
+    let commit = current_commit();
+    warn_if_stale(&commit);
 
     let url = flag(&args, "--url").unwrap_or_else(|| "http://localhost:11436/v1".to_string());
     let model = flag(&args, "--model").unwrap_or_else(|| "tiel-coder-35b".to_string());
@@ -98,7 +106,6 @@ fn main() {
     let backend = OpenAiBackend::new(&url, &model)
         .with_detected_context()
         .with_native_tools();
-    let commit = current_commit();
     // The ladder's verify commands are POSIX (`... && ./t_stated.exe`). Without an
     // `sh` on PATH, sc-verify falls back to `cmd /C`, every verification fails,
     // and the run scores a model that was never allowed to pass -- measured: a
@@ -112,7 +119,7 @@ fn main() {
     }
     let labels: Vec<&str> = arms.iter().map(|a| a.label()).collect();
     eprintln!(
-        "model {model} at {url}, commit {commit} ({} tasks x {repeat} run(s) x {} arm(s): {})\n",
+        "model {model} at {url}, built from {commit} ({} tasks x {repeat} run(s) x {} arm(s): {})\n",
         suite.tasks.len(),
         arms.len(),
         labels.join(" ")
