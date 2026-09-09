@@ -268,6 +268,38 @@ pub fn run_agent_observed(
         prompt_budget: budget,
     });
 
+    // BASELINE: what was the suite doing BEFORE the agent touched anything?
+    //
+    // Everything downstream of a green verification -- both auto-finish sites -- assumes
+    // the TDD premise from spec 11: the suite starts RED, so going green is proof of
+    // progress. On a REFACTOR the suite is green before the first turn, and green then
+    // proves nothing whatsoever.
+    //
+    // Measured on mini-miner-2, a real 8,190-line file, task "extract five multiplayer
+    // methods from app.rs into app/net.rs": the model created `app/net.rs` with mangled
+    // empty bodies, never added `mod net;`, never deleted the originals, and called
+    // `run_verification`. `cargo check` passed -- an UNREFERENCED new file changes
+    // nothing -- and the loop auto-finished `finished: true, verified: Some(true)` after
+    // 8 steps, with a third of the job done and a generated file that would not compile
+    // if wired in. The loop recorded no pre-run state anywhere, so it could not tell.
+    //
+    // COST: exactly one extra verification per run, and only when a verify command is
+    // configured. On the capability ladder that is one more `cargo test`/`rustc`
+    // invocation per task. Taken here, once, before the loop -- never inside it.
+    let started_green: Option<bool> = cfg.verify_command.as_ref().map(|cmd| {
+        let report = sc_verify::run_verification_in(&cfg.sandbox, workspace, cmd);
+        let green = report.all_green();
+        sink.record(&AgentEvent::BaselineVerification {
+            green,
+            summary: first_line(&report.observation()),
+        });
+        green
+    });
+    // Read once into a plain bool for the two auto-finish guards below: an unconfigured
+    // verification (None) can never report green in the first place, so it falls in with
+    // the red-at-start TDD path and keeps today's behavior exactly.
+    let green_at_start = started_green.unwrap_or(false);
+
     // A zero or nonsensical budget means the run is doomed before the first turn.
     //
     // `prompt_budget` is `max_context * fraction - response_reserve`, saturating. If
@@ -447,6 +479,7 @@ pub fn run_agent_observed(
                 verified: None,
                 change_summary: journal.change_summary(),
                 stop_reason: StopReason::Cancelled,
+                started_green,
                 interventions: interv.count,
             });
         }
@@ -765,6 +798,7 @@ pub fn run_agent_observed(
                 reason,
                 step + 1,
                 verified,
+                started_green,
                 &journal,
                 metrics,
                 peak_prompt_tokens,
@@ -969,6 +1003,7 @@ pub fn run_agent_observed(
                                         verified,
                                         change_summary: journal.change_summary(),
                                         stop_reason: StopReason::Finished,
+                                        started_green,
                                         interventions: interv.count,
                                     });
                                 }
@@ -1039,7 +1074,16 @@ pub fn run_agent_observed(
                                 // Auto-finish: if the suite is green, the task is
                                 // done — a small model that forgets to call `finish`
                                 // shouldn't lose a win it already earned (spec 11).
-                                if green {
+                                //
+                                // ONLY when the suite started RED. That is the entire
+                                // premise: red→green is the agent's doing. On a run that
+                                // was green before the first turn (a refactor), green is
+                                // the state the workspace was handed over in, and a model
+                                // that has changed nothing load-bearing reproduces it for
+                                // free. There the model must call `finish` itself — its
+                                // own assertion that the work is done is the only signal
+                                // left, and `gate_finish` still honors it.
+                                if green && !green_at_start {
                                     sink.record(&AgentEvent::Stopped {
                                         reason: StopReason::Finished,
                                     });
@@ -1057,10 +1101,29 @@ pub fn run_agent_observed(
                                         verified: Some(true),
                                         change_summary: journal.change_summary(),
                                         stop_reason: StopReason::Finished,
+                                        started_green,
                                         interventions: interv.count,
                                     });
                                 }
                             }
+                            // A green verification the harness will NOT act on: say so, or
+                            // the model reads "all tests passed" as the run being over and
+                            // spends its remaining turns idling (or re-verifying) while the
+                            // harness waits for a `finish` it does not know to send.
+                            let o = if tool == "run_verification"
+                                && green_at_start
+                                && !looks_like_failure(&o)
+                            {
+                                format!(
+                                    "{o}\nNOTE: the build was ALREADY passing before you \
+                                     started, so this result does not mean the task is done — \
+                                     it only means you have not broken anything. Check that \
+                                     EVERY part of the task has actually been applied, then \
+                                     call `finish` yourself when it has."
+                                )
+                            } else {
+                                o
+                            };
                             // Prepend the note about any extra files the batch pre-applied,
                             // so the model's next observation reflects ALL the writes (not just
                             // the first), and a change anywhere in the batch counts as progress.
@@ -1240,6 +1303,7 @@ pub fn run_agent_observed(
                         reason,
                         step + 1,
                         verified,
+                        started_green,
                         &journal,
                         metrics,
                         peak_prompt_tokens,
@@ -1465,7 +1529,12 @@ pub fn run_agent_observed(
                     summary: first_line(&report.observation()),
                     full: cmd_result.output.clone(),
                 });
-                if report.all_green() {
+                // Same rule as the model-invoked `run_verification` above: green only
+                // ends the run when the suite STARTED red. On a green-at-start refactor
+                // this branch fires after the very first edit -- any edit, including one
+                // that creates an unreferenced file -- and it is the branch that actually
+                // shipped the mini-miner-2 false success.
+                if report.all_green() && !green_at_start {
                     sink.record(&AgentEvent::Stopped {
                         reason: StopReason::Finished,
                     });
@@ -1483,8 +1552,34 @@ pub fn run_agent_observed(
                         verified: Some(true),
                         change_summary: journal.change_summary(),
                         stop_reason: StopReason::Finished,
+                        started_green,
                         interventions: interv.count,
                     });
+                } else if report.all_green() {
+                    // Green, but the suite was green before the run started, so this is
+                    // not a win and not a failure -- it is the workspace still building.
+                    // It must NOT go through the failure path below: that path treats a
+                    // repeated signature as an edit that did nothing, and three identical
+                    // GREEN reports in a row would trip `note_unchanged_failure` and kill
+                    // a healthy refactor as a stall.
+                    //
+                    // The model is told the build still passes -- useful, since a refactor
+                    // half-applied usually does NOT -- and reminded that the harness will
+                    // not end the run for it.
+                    last_failure_sig = None;
+                    failure_sig_streak = 0;
+                    recent.push_observation(&truncate_observation(
+                        &format!(
+                            "(harness ran the verification after your edit)\n{}\nThe build was \
+                             ALREADY passing before you started, so this does not mean the task \
+                             is done — it only means you have not broken it. Keep going until \
+                             every part of the task is actually applied, then call `finish` \
+                             yourself.",
+                            report.observation()
+                        ),
+                        cfg.read_file_line_cap,
+                        true,
+                    ));
                 } else {
                     let observation = report.observation();
                     let sig = failure_signature(&observation);
@@ -1545,6 +1640,7 @@ pub fn run_agent_observed(
                     reason,
                     step + 1,
                     verified,
+                    started_green,
                     &journal,
                     metrics,
                     peak_prompt_tokens,
@@ -1573,6 +1669,7 @@ pub fn run_agent_observed(
         StopReason::BudgetExhausted,
         cfg.max_steps,
         verified,
+        started_green,
         &journal,
         metrics,
         peak_prompt_tokens,

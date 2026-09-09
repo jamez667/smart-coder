@@ -114,6 +114,12 @@ fn fmt_event(e: &AgentEvent) -> String {
                 if *green { "GREEN" } else { "RED" }
             )
         }
+        AgentEvent::BaselineVerification { green, summary } => {
+            format!(
+                "  ⊨ baseline [{}]: {summary}",
+                if *green { "GREEN" } else { "RED" }
+            )
+        }
         AgentEvent::HarnessFault { kind, detail, .. } => {
             format!("  🔧 harness fault ({}): {detail}", kind.label())
         }

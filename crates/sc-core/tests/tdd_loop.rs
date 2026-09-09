@@ -44,6 +44,42 @@ impl ModelBackend for Scripted {
     }
 }
 
+/// Like [`Scripted`], but when the script runs out it REPEATS the last turn instead of
+/// falling back to `finish`.
+///
+/// The fallback is fine for a TDD test -- the run ends on the green anyway -- but it makes
+/// the baseline tests below unfalsifiable: they need to prove the loop does NOT end itself
+/// on a green suite, and a backend that volunteers `finish` the moment the script is
+/// exhausted ends the run for a completely different reason. This one keeps calling a
+/// harmless read until the step budget runs out, which is what "the run kept going" means.
+struct Looping(RefCell<Vec<String>>);
+impl Looping {
+    fn new(turns: Vec<&str>) -> Self {
+        Looping(RefCell::new(turns.into_iter().map(String::from).collect()))
+    }
+}
+impl ModelBackend for Looping {
+    fn name(&self) -> &str {
+        "looping"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::None,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        let mut s = self.0.borrow_mut();
+        let content = if s.len() > 1 {
+            s.remove(0)
+        } else {
+            s.first().cloned().unwrap_or_default()
+        };
+        Ok(GenerateResponse::new(content))
+    }
+}
+
 fn temp_repo(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!(
         "sc-core-tdd-{tag}-{}-{}",
@@ -186,5 +222,255 @@ fn cheating_by_editing_the_frozen_test_is_denied() {
         test_after.contains("is_even 4 || exit 1"),
         "frozen test was edited!"
     );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+// ---------------------------------------------------------------------------
+// The BASELINE: what the suite was doing before the agent touched anything.
+//
+// Every auto-finish in the loop assumed the TDD premise above -- the suite starts
+// RED, so going green is proof of progress. On a REFACTOR the suite is green before
+// the first turn, and green then proves nothing.
+//
+// Found on mini-miner-2, a real 8,190-line file. Task: extract five multiplayer
+// methods from app.rs into a new app/net.rs, add `mod net;`, delete the moved
+// bodies, `cargo check -p miner` must pass. The model created app/net.rs with
+// mangled empty bodies, never added the module declaration, never deleted the
+// originals, and called run_verification. cargo check passed -- an UNREFERENCED new
+// file changes nothing -- and the loop auto-finished `finished: true, verified:
+// Some(true)` after 8 steps, with a third of the job done and a generated file that
+// would not have compiled if it had been wired in.
+// ---------------------------------------------------------------------------
+
+/// A GREEN sample repo: the "suite" already passes, exactly as it does at the start of
+/// any refactor. Nothing here is red for the agent to fix.
+fn green_repo() -> std::path::PathBuf {
+    let ws = temp_repo("green");
+    std::fs::write(
+        ws.join("impl.sh"),
+        "is_even() { [ $(( $1 % 2 )) -eq 0 ]; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("test.sh"),
+        ". ./impl.sh\nis_even 4 || exit 1\nif is_even 3; then exit 1; fi\nexit 0\n",
+    )
+    .unwrap();
+    ws
+}
+
+#[test]
+fn a_green_verification_on_a_green_at_start_run_is_not_a_finish() {
+    // THE REGRESSION. The verify command already passes. The model writes ONE
+    // unrelated new file -- the harmless, unreferenced kind that cannot change the
+    // build's result either way -- and then asks for the tests. Green comes back,
+    // because green is what the workspace was handed over as.
+    //
+    // That must not be reported as a verified success: nothing was proven.
+    let ws = green_repo();
+    let backend = Looping::new(vec![
+        r#"{"tool":"create_file","path":"net.sh","content":"echo nothing references this\n"}"#,
+        r#"{"tool":"run_verification"}"#,
+        // If the loop were still auto-finishing, it would never reach these turns.
+        r#"{"tool":"read_file","path":"impl.sh"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 6,
+        ..config_with_verify()
+    };
+
+    let report = run(&backend, &ws, &cfg);
+
+    assert_eq!(
+        report.started_green,
+        Some(true),
+        "the baseline must be recorded, and this suite starts green"
+    );
+    assert!(
+        !report.finished,
+        "a green verification on a green-at-start run is not proof the task is done; \
+         stop_reason was {:?}",
+        report.stop_reason
+    );
+    assert_ne!(
+        report.stop_reason,
+        sc_core::StopReason::Finished,
+        "the run must not report Finished off a baseline-green verification"
+    );
+    // The unreferenced file really was written -- the point is that writing it, and
+    // the build still passing, is not a completed task.
+    assert!(ws.join("net.sh").exists(), "the scripted write should land");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn an_edit_on_a_green_at_start_run_does_not_auto_finish_either() {
+    // The other auto-finish site: the harness runs the suite itself the moment an
+    // edit lands. On a refactor that fires on the FIRST edit, with the whole job
+    // still ahead of it -- this is the branch that actually shipped the mini-miner-2
+    // false success, since the model never had to call run_verification at all.
+    let ws = green_repo();
+    let backend = Looping::new(vec![
+        r#"{"tool":"create_file","path":"net.sh","content":"echo unreferenced\n"}"#,
+        r#"{"tool":"read_file","path":"impl.sh"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 4,
+        ..config_with_verify()
+    };
+
+    let report = run(&backend, &ws, &cfg);
+
+    assert_eq!(report.started_green, Some(true));
+    assert!(
+        !report.finished,
+        "the post-edit auto-verify must not finish a run that started green"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn finish_is_still_honoured_when_the_run_started_green() {
+    // Nothing else is left to gate on, so the model's own `finish` IS the signal:
+    // `gate_finish` runs the suite, it is green, and the run ends as Finished. Take
+    // this away and a refactor could never complete at all.
+    let ws = green_repo();
+    let backend = Scripted::new(vec![
+        r#"{"tool":"create_file","path":"net.sh","content":"echo unreferenced\n"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 5,
+        ..config_with_verify()
+    };
+
+    let report = run(&backend, &ws, &cfg);
+
+    assert!(
+        report.finished,
+        "an explicit finish must still be honoured; stopped {:?}",
+        report.stop_reason
+    );
+    assert_eq!(report.verified, Some(true));
+    assert_eq!(report.started_green, Some(true));
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn the_tdd_path_is_unchanged_and_records_a_red_baseline() {
+    // The premise the auto-finish was built on is still intact: a suite that starts
+    // RED and goes green is the agent's doing, so the win is still honoured without
+    // an explicit `finish`.
+    let ws = red_repo();
+    let backend = Scripted::new(vec![
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 1;","new_str":"[ $(( $1 % 2 )) -eq 0 ];"}"#,
+        r#"{"tool":"run_verification"}"#,
+        r#"{"tool":"read_file","path":"impl.sh"}"#,
+    ]);
+
+    let report = run(&backend, &ws, &config_with_verify());
+
+    assert_eq!(
+        report.started_green,
+        Some(false),
+        "a red-at-start run must record a red baseline"
+    );
+    assert!(
+        report.finished,
+        "green verification should still auto-finish"
+    );
+    assert_eq!(report.verified, Some(true));
+    assert!(
+        report.steps <= 2,
+        "should still finish promptly, took {}",
+        report.steps
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn no_verify_command_means_no_baseline_was_measured() {
+    // The guard: with nothing configured there is nothing to run, and the extra
+    // verification the baseline costs must not be spent. `None` says "not measured",
+    // which is not the same as "started red".
+    let ws = green_repo();
+    let backend = Scripted::new(vec![r#"{"tool":"finish"}"#]);
+    let cfg = AgentConfig {
+        max_steps: 3,
+        ..Default::default()
+    };
+    assert!(cfg.verify_command.is_none());
+
+    let report = run(&backend, &ws, &cfg);
+
+    assert_eq!(report.started_green, None);
+    assert_eq!(report.verified, None);
+    assert!(report.finished);
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn the_baseline_is_emitted_once_on_the_event_stream() {
+    // A transcript that cannot see the baseline cannot tell a refactor-shaped run
+    // from a TDD-shaped one -- and the cost guard is only real if it is one run, so
+    // assert the count, not just the presence.
+    use std::sync::Mutex;
+    let ws = green_repo();
+    let backend = Scripted::new(vec![
+        r#"{"tool":"create_file","path":"net.sh","content":"echo unreferenced\n"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 5,
+        ..config_with_verify()
+    };
+
+    let seen: Mutex<Vec<sc_core::AgentEvent>> = Mutex::new(Vec::new());
+    let sink = sc_core::FnSink(|e: &sc_core::AgentEvent| seen.lock().unwrap().push(e.clone()));
+    let registry = default_registry();
+    sc_core::run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        &ParseRepair,
+        "Extract the net helpers into their own file.",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let events = seen.lock().unwrap();
+    let baselines: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match e {
+            sc_core::AgentEvent::BaselineVerification { green, .. } => Some(*green),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        baselines,
+        vec![true],
+        "exactly one baseline, and it says the suite started green"
+    );
+    // It is taken BEFORE the first turn, so nothing the model did can have caused it.
+    let baseline_at = events
+        .iter()
+        .position(|e| matches!(e, sc_core::AgentEvent::BaselineVerification { .. }))
+        .unwrap();
+    let first_turn_at = events
+        .iter()
+        .position(|e| matches!(e, sc_core::AgentEvent::ModelTurn { .. }))
+        .unwrap();
+    assert!(
+        baseline_at < first_turn_at,
+        "the baseline must be measured before the first model turn"
+    );
+
     let _ = std::fs::remove_dir_all(&ws);
 }

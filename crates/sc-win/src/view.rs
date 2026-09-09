@@ -88,6 +88,16 @@ pub fn agent_rows(ev: &AgentEvent) -> Vec<Row> {
                 vec![Row::err(icon, text)]
             }
         }
+        // Always an "ok" row whichever way it went: a red baseline is the normal TDD
+        // start, not a failure, and a green one is not a win. It states the ground the
+        // run began on -- which is what decides whether a later green means anything.
+        BaselineVerification { green, summary } => vec![Row::ok(
+            "○",
+            format!(
+                "baseline  suite starts {}  {summary}",
+                if *green { "GREEN" } else { "RED" }
+            ),
+        )],
         // Flagged as an error row because it is one -- ours. The wrench distinguishes
         // it at a glance from the model's own failures above.
         HarnessFault { kind, detail, .. } => vec![Row::err(

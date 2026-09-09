@@ -118,6 +118,15 @@ prevented. The harness defends the integrity of the signal:
   escalate.
 - **Whole-suite gate** — making one test green while breaking another is a
   failure, not a pass.
+- **Green must be EARNED** — the harness records a **baseline** verification once,
+  before the first turn, and reports it as `started_green`. Auto-finish on green
+  exists because red→green is the agent's doing; on a task whose suite is *already
+  green* (a refactor, an extraction, a rename) green proves nothing, so the harness
+  will not end the run on it — the model must call `finish` itself, and `finish` is
+  still honoured. Measured: on a real extraction task the model created one
+  unreferenced new file, `cargo check` passed (an unreferenced file changes
+  nothing), and the loop reported `finished: true, verified: true` with a third of
+  the job done.
 - **Coverage as a guard, not a goal** — a configurable coverage floor for changed
   code catches "implemented but untested" paths; it is a backstop, not the
   target (coverage is gamed easily; behavior tests are the point).

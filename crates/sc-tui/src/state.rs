@@ -154,6 +154,18 @@ impl TuiState {
                 };
                 self.push(kind, format!("⊨ verify: {summary}"));
             }
+            // Shown plainly, and NOT as an Ok/Error line: the baseline is neither the
+            // agent's win nor its failure, it is the ground it started on — and on a
+            // green-at-start run it is the reason a later green will not end the run.
+            AgentEvent::BaselineVerification { green, summary } => {
+                self.push(
+                    LineKind::Info,
+                    format!(
+                        "⊨ baseline: suite starts {} — {summary}",
+                        if *green { "GREEN" } else { "RED" }
+                    ),
+                );
+            }
             AgentEvent::HarnessFault { kind, detail, .. } => {
                 self.harness_faults += 1;
                 self.push(

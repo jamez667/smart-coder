@@ -291,6 +291,15 @@ pub struct AgentReport {
     /// Whether the configured verification command was green at `finish` (spec 11
     /// — the whole-suite gate). `None` if no `verify_command` was configured.
     pub verified: Option<bool>,
+    /// Whether the verification command was ALREADY green before the agent's first
+    /// turn. `None` if no `verify_command` was configured (nothing was measured).
+    ///
+    /// This is what tells a refactor-shaped run from a TDD-shaped one, and without it
+    /// `verified: Some(true)` is ambiguous: on a red-at-start run it means the agent
+    /// turned the suite green, on a green-at-start run it means nothing happened that
+    /// broke the build — which an unreferenced new file also achieves. An eval row that
+    /// carries both can score the two differently instead of counting them the same.
+    pub started_green: Option<bool>,
     /// A compact summary of files changed over the run (spec 04/06 — the journal's
     /// diff overview).
     pub change_summary: String,

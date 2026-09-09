@@ -164,6 +164,9 @@ pub(super) fn stopped(
     reason: StopReason,
     steps: usize,
     verified: Option<bool>,
+    // The pre-run baseline (see `AgentReport::started_green`), measured once before the
+    // first turn and carried through unchanged.
+    started_green: Option<bool>,
     journal: &Journal,
     metrics: ToolCallMetrics,
     peak_prompt_tokens: usize,
@@ -187,6 +190,7 @@ pub(super) fn stopped(
         harness_faults,
         prompt_budget,
         verified,
+        started_green,
         change_summary: journal.change_summary(),
         stop_reason: reason,
         interventions,

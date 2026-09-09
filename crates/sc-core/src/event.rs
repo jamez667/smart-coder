@@ -96,6 +96,21 @@ pub enum AgentEvent {
         summary: String,
         full: String,
     },
+    /// **The state of the suite BEFORE the agent touched anything** — run once, at
+    /// run start, when a `verify_command` is configured (spec 11).
+    ///
+    /// The whole TDD premise is that the suite starts RED, so going green is proof
+    /// the agent did the work. On a REFACTOR the suite is green before the first
+    /// turn, and then "green" proves exactly nothing: measured on a real 8,190-line
+    /// file, a model created one unreferenced new file, called `run_verification`,
+    /// `cargo check` passed (an unreferenced file changes nothing), and the loop
+    /// auto-finished `verified: Some(true)` with a third of the job done.
+    ///
+    /// Deliberately NOT a [`Verification`](AgentEvent::Verification): that variant
+    /// means "the agent ran the suite", and the run log reads the last one of those
+    /// as the run's verified state. A baseline is the harness measuring the ground
+    /// it is standing on, before any turn exists to attribute it to.
+    BaselineVerification { green: bool, summary: String },
     /// The harness detected a loop/stall.
     Stalled { trigger: String },
     /// The advisor (senior) was consulted. `trigger` is why it was asked; `advice`
@@ -394,6 +409,13 @@ impl<W: Write> TranscriptSink<W> {
             AgentEvent::Verification { green, full, .. } => {
                 format!("<<< VERIFICATION (green={green}):\n{full}\n")
             }
+            // Rendered: whether the suite started green is the single fact that decides
+            // whether a later green means anything at all. A transcript without it cannot
+            // tell a refactor-shaped run from a TDD-shaped one.
+            AgentEvent::BaselineVerification { green, summary } => format!(
+                "== BASELINE (before any turn): suite is {} — {summary}\n",
+                if *green { "GREEN" } else { "RED" }
+            ),
             AgentEvent::RepairTriggered { detail } => format!("!! REPAIR: {detail}\n"),
             AgentEvent::Stalled { trigger } => format!("** STALLED: {trigger}\n"),
             AgentEvent::Advice { trigger, advice } => {
