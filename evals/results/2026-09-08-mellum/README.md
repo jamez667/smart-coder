@@ -16,6 +16,35 @@ was not close.
 It solves the two easiest rungs (the fix is named in the task text) and fails
 everything requiring diagnosis. Tiel scores 51/51 on this suite.
 
+## ROOT CAUSE FOUND (2026-09-09): a harness bug, not a weak model
+
+Mellum's chat template wraps calls in `<tool_call>...</tool_call>` and ends the
+turn with `<|im_end|>`. The harness stores each assistant turn in the recent
+window as **bare JSON** — `{"path":"lib.rs","tool":"read_file"}` — with no
+wrapper (`agent/window.rs`, `Message::assistant(action)`, fed from the
+normalised text form in `sc-model`).
+
+So the model reads a dozen turns of history in a format its template never
+produces, concludes that is the house style, imitates it — and never emits the
+stop token, because the thing that ends its turn is the tag it was never shown.
+
+Isolated and reproduced:
+
+| prompt | completion tokens | result |
+| --- | --- | --- |
+| one tool, clean history | **24** | perfect call, clean stop |
+| six tools, clean history | **24** | perfect call, clean stop |
+| six tools, **harness's bare-JSON history** | 164 | stray `</tool_call>`, drifting |
+| the same at real run length | 3,072 (cap) | runaway: `{"tool":"finish"}</tool_call>` × 60 |
+
+The model is fine. Native tool calling is fine. The registry is fine. The
+*history format we replay back to it* is what breaks it, and it breaks worse
+the longer the run goes — which is exactly the observed shape (easy rungs pass
+in 2-3 turns, anything needing 20+ turns collapses).
+
+**This affects any model whose template uses tool-call tags**, not just Mellum.
+Tiel tolerates it, which is why the bug stayed hidden.
+
 ## The tell: 15 truncated replies per failed run
 
 Each failure burned ~350-400k prompt tokens with 14-15 `ReplyTruncated` faults —
