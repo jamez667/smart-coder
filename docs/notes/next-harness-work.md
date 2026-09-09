@@ -114,6 +114,24 @@ Speculative until 1 and 2 land; listed so it is not lost.
 
 ---
 
+## Ruled out: a second model for cheap turns
+
+Tiering (a small fast model for mechanical turns, the 35B for edits and
+reasoning) is the classic move and the backend plumbing already exists. **It
+does not fit on this hardware.** Measured 2026-09-08: the 17.7 GB coder is
+already split across both cards, leaving 836 MiB free on the 3080 Ti and 1.9
+GiB on the 3080 — fragmented, so a second model would have to fit entirely in
+the smaller gap, and would then compete for the same memory bandwidth the 35B
+is using.
+
+It is also aimed at the wrong cost. Generation is not the bottleneck: the
+measured turns run at 92-110 tok/s when generating, and the ~5s a trivial turn
+costs is prefill and round-trip, not decode. A second model would still pay
+those. Revisit only if the hardware changes, and even then measure prefill
+first.
+
+---
+
 ## Method note
 
 Two bugs today (paged reads losing their middle; green-at-start counting as
