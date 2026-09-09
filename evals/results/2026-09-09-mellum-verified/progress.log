@@ -1,0 +1,4 @@
+model mellum2-12b at http://localhost:11440/v1, built from 1b83e7f (17 tasks x 1 run(s) x 1 arm(s): control(6))
+
+  [1/1] control(6)   rust-stated                PASS                              6s
+  [1/1] control(6)   rust-located               still red                       565s

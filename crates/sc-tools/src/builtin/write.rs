@@ -9,7 +9,9 @@
 
 use std::path::Path;
 
-use super::guards::{delimiter_regression, duplicate_definition, is_code_path};
+use super::guards::{
+    delimiter_regression, destructive_replacement, duplicate_definition, is_code_path,
+};
 use super::read::{locate_function, Located};
 use super::util::{from_lf, number_lines, safe_join, to_lf, uses_crlf};
 
@@ -405,10 +407,30 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
     // directly and reject a replacement that would define an existing top-level item a second time
     // (the coder pasting a duplicate helper). Only when the anchor matches exactly once — the fuzzy
     // / whole-line fallbacks in `edit_file_with` are already the "couldn't match" recovery path.
-    if is_code_path(path) && content.matches(&old_owned).count() == 1 {
-        let after = content.replacen(&old_owned, &new_owned, 1);
-        if let Some(msg) = duplicate_definition(&content, &after) {
+    if is_code_path(path) {
+        // Destructive-replacement guard: this one judges the old_str/new_str PAIR, not the
+        // resulting file, so it runs whether or not the anchor resolves — an edit that would
+        // destroy the line is wrong at every match count, and rejecting it here keeps the model
+        // from re-sending it down the fuzzy path.
+        if let Some(msg) = destructive_replacement(&old_owned, &new_owned) {
             return format!("edit_file {path} rejected: {msg}");
+        }
+        if content.matches(&old_owned).count() == 1 {
+            let after = content.replacen(&old_owned, &new_owned, 1);
+            if let Some(msg) = duplicate_definition(&content, &after) {
+                return format!("edit_file {path} rejected: {msg}");
+            }
+            // Brace-balance tripwire, for parity with edit_lines/edit_function: the anchored
+            // editor was the ONLY writer with no delimiter check, and it is the one a small model
+            // reaches for most. Same regression semantics — a pre-existing imbalance is never
+            // blamed on this edit.
+            if let Some(msg) = delimiter_regression(&content, &after) {
+                return format!(
+                    "edit_file {path} rejected: {msg} Your new_str isn't brace-balanced against \
+                     the anchor it replaces — recount the delimiters in old_str and match them in \
+                     new_str."
+                );
+            }
         }
     }
     edit_file_with(&p, path, &content, &old_owned, &new_owned, crlf)

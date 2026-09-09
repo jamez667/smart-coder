@@ -165,3 +165,78 @@ pub fn duplicate_definition(before: &str, after: &str) -> Option<String> {
             )
         })
 }
+
+/// The most alphanumeric characters an `old_str` may hold and still be treated as a punctuation
+/// tweak rather than a statement. `>=` -> `>` has zero; `a >= b` has two; a real statement like
+/// `here = here.max(v);` has eleven. Set above the small-operator band and below any statement.
+const PUNCT_TWEAK_ALNUM_MAX: usize = 4;
+
+/// `new_str` values that carry no letters or digits yet are perfectly ordinary code: the structural
+/// scraps a model legitimately collapses a block down to. Compared after trimming whitespace.
+const STRUCTURAL_FRAGMENTS: &[&str] = &[
+    "}", "};", "},", "}),", "});", "};\n}", ")", ");", "),", "]", "];", "],", ",", "{", "{}", "()",
+    "[]", "..", "...", "_", "_,", "_ => {}", "|", "&",
+];
+
+/// Is `s` made only of delimiters, operators and whitespace that plausibly close or restructure a
+/// block — i.e. every non-whitespace char is one of the bracket/terminator family? `: ` and `?` and
+/// friends are deliberately NOT in this set: they never stand alone as a statement.
+fn is_structural_scrap(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return false;
+    }
+    STRUCTURAL_FRAGMENTS.contains(&t)
+        || t.chars()
+            .all(|c| matches!(c, '}' | ')' | ']' | ';' | ',' | ' ' | '\t' | '\n' | '\r'))
+}
+
+/// Count of letters/digits in `s` — the crude "how much actual code is here" measure.
+fn alnum_count(s: &str) -> usize {
+    s.chars().filter(|c| c.is_alphanumeric()).count()
+}
+
+/// If replacing `old_str` with `new_str` looks like it would DESTROY the line rather than change
+/// it, return a message saying so. `None` for every edit that is plausibly a real change.
+///
+/// THE BUG THIS EXISTS FOR. A live rung failure: the model sent
+/// `{"old_str": "        here = here.max(v);", "new_str": ":"}` — a whole statement replaced by a
+/// bare colon. `edit_file` wrote it, answered "ok (1 replacement)", and the file stopped compiling.
+/// The next turn made the genuinely correct fix, but the build was already broken by turn 2, so the
+/// harness reported a fresh failure and the model thrashed for 20 more turns (565s on a rung that
+/// passes in 5s). `delimiter_regression` cannot see this: `:` leaves every bracket balanced.
+///
+/// The predicate, deliberately narrow — ALL of these must hold:
+/// 1. `new_str` is non-empty after trimming. An EMPTY `new_str` is a deletion, a real operation.
+/// 2. `new_str` contains no letters and no digits — it is bare punctuation.
+/// 3. `new_str` is not a [structural scrap](is_structural_scrap) (`}`, `);`, `},`, …) — collapsing
+///    a block down to a closing brace is legitimate.
+/// 4. `old_str` DID carry real code: more than [`PUNCT_TWEAK_ALNUM_MAX`] alphanumerics. This is
+///    what lets a genuine operator tweak (`>=` -> `>`, `&&` -> `||`) straight through.
+///
+/// Everything else — a shorter statement, a comment, a rename, a deletion — has letters or digits
+/// in `new_str` and never reaches condition 2.
+pub fn destructive_replacement(old_str: &str, new_str: &str) -> Option<String> {
+    let new_t = new_str.trim();
+    if new_t.is_empty() {
+        return None; // a deletion is a real operation
+    }
+    if alnum_count(new_t) > 0 {
+        return None; // it has actual content — a statement, a comment, a name
+    }
+    if is_structural_scrap(new_t) {
+        return None; // `}` / `);` / `},` — collapsing a block is legitimate
+    }
+    let old_alnum = alnum_count(old_str);
+    if old_alnum <= PUNCT_TWEAK_ALNUM_MAX {
+        return None; // an operator/punctuation tweak, not a statement being destroyed
+    }
+    let anchor = old_str.trim();
+    Some(format!(
+        "the replacement {new_t:?} would DESTROY the line, not change it. The anchor `{anchor}` is \
+         real code ({old_alnum} letters/digits) and you are replacing it with bare punctuation, \
+         which cannot compile. Nothing was written. Send the FULL replacement statement as \
+         new_str — the whole line you want `{anchor}` to become, terminator included. To DELETE \
+         the line instead, send an empty new_str (\"\")."
+    ))
+}
