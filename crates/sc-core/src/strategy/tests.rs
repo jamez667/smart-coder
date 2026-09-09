@@ -771,3 +771,196 @@ fn a_cut_inside_an_argument_degrades_or_yields_nothing_but_never_corrupts() {
         "a cut anchor must not be applied to a file"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The mislabelled tool call: right arguments, wrong name.
+// ---------------------------------------------------------------------------
+
+/// THE LIVE CASE. The harness told the model *"STOP editing by anchor. Instead call
+/// `write_file` with `path` `pathfind.rs` and the ENTIRE corrected file contents in one shot."*
+/// The model obeyed the NAME and kept its own intent — an anchored edit under a `write_file`
+/// label. The turn was thrown away with `tool "write_file" has no parameter "new_str"`, which
+/// teaches it nothing: it did what the harness asked. Believe the arguments.
+#[test]
+fn an_edit_labelled_write_file_runs_as_the_edit_it_is() {
+    let reg = default_registry();
+    let raw = r#"{"new_str":"/// 8-connected","old_str":"/// 4-connected","path":"pathfind.rs","tool":"write_file"}"#;
+    let call = ParseRepair
+        .extract(raw, &reg)
+        .expect("an unambiguous edit_file key set must be recovered");
+    assert_eq!(
+        call.name, "edit_file",
+        "the RECOVERED name must ride on the call — the journal snapshot, key_arg and the \
+         stall-detector action hash all key off it"
+    );
+    assert_eq!(call.str("path"), Some("pathfind.rs"));
+    assert_eq!(call.str("old_str"), Some("/// 4-connected"));
+    assert_eq!(call.str("new_str"), Some("/// 8-connected"));
+    assert!(
+        !call.args.contains_key("tool"),
+        "validation strips the envelope field"
+    );
+}
+
+/// The note the loop appends, so the model learns the NAME rather than having its mistake
+/// silently papered over.
+#[test]
+fn a_recovery_reports_both_the_named_and_the_recovered_tool() {
+    let reg = default_registry();
+    let raw = r#"{"tool":"write_file","path":"p.rs","old_str":"a","new_str":"b"}"#;
+    let (named, recovered) =
+        mislabelled_tool_recovery(raw, &reg).expect("the rung fired, so the loop must see it");
+    assert_eq!(named, "write_file");
+    assert_eq!(recovered, "edit_file");
+    let note = mislabelled_tool_note(&named, &recovered);
+    assert_eq!(
+        note,
+        "[you named write_file; your arguments were an edit_file call, so it ran as one]"
+    );
+}
+
+/// AMBIGUITY IS REFUSED. `{path, content}` fits `write_file`, `create_file` AND `append_file`.
+/// "The model obviously meant a write" is not good enough: appending when it meant to
+/// overwrite silently corrupts the file. Today's error stands instead.
+#[test]
+fn an_ambiguous_key_set_is_never_recovered() {
+    let reg = default_registry();
+    let raw = r#"{"tool":"edit_file","path":"p.rs","content":"x"}"#;
+    let err = ParseRepair
+        .extract(raw, &reg)
+        .expect_err("path+content matches three tools — it must not be guessed");
+    assert!(
+        matches!(err, RepairError::Invalid(_)),
+        "falls through to the normal validation error, got {err:?}"
+    );
+    assert!(
+        mislabelled_tool_recovery(raw, &reg).is_none(),
+        "and the loop must not be told a recovery happened"
+    );
+    // The existing edit_file+content hint is what the model sees — unchanged.
+    assert!(err.to_string().contains("write_file"));
+}
+
+/// A genuinely malformed call still produces today's error, word for word. This is the
+/// fall-through the whole rung is gated behind.
+#[test]
+fn a_genuinely_malformed_call_keeps_todays_error() {
+    let reg = default_registry();
+    // `bogus` is declared by NO tool, so no key set can identify one.
+    let raw = r#"{"tool":"read_file","path":"a.txt","bogus":1}"#;
+    let err = ParseRepair.extract(raw, &reg).unwrap_err();
+    assert_eq!(
+        err,
+        RepairError::Invalid(sc_tools::ValidationError::UnknownParam {
+            tool: "read_file".into(),
+            param: "bogus".into(),
+        })
+    );
+    assert!(err.to_string().contains("has no parameter \"bogus\""));
+
+    // A MISSING required param is not this rung's business either: nothing about it says
+    // "wrong name", and an empty key set fits both run_verification and finish.
+    let missing = ParseRepair
+        .extract(r#"{"tool":"read_file"}"#, &reg)
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        RepairError::Invalid(sc_tools::ValidationError::MissingParam {
+            tool: "read_file".into(),
+            param: "path",
+        })
+    );
+    assert!(mislabelled_tool_recovery(r#"{"tool":"read_file"}"#, &reg).is_none());
+}
+
+/// A CORRECT call never goes near the new rung. Pinned because the recovery must be
+/// unreachable from the happy path — the strict parse returns first.
+#[test]
+fn a_correct_call_is_untouched_by_the_rename_rung() {
+    let reg = default_registry();
+    for raw in [
+        r#"{"tool":"edit_file","path":"p.rs","old_str":"a","new_str":"b"}"#,
+        r#"{"tool":"write_file","path":"p.rs","content":"x"}"#,
+        r#"{"tool":"read_file","path":"p.rs"}"#,
+        r#"{"tool":"finish"}"#,
+    ] {
+        let call = ParseRepair.extract(raw, &reg).unwrap();
+        let named = serde_json::from_str::<serde_json::Value>(raw).unwrap()["tool"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(call.name, named, "a valid call keeps its own name: {raw}");
+        assert!(
+            mislabelled_tool_recovery(raw, &reg).is_none(),
+            "the rung must not even report on a valid call: {raw}"
+        );
+    }
+}
+
+/// The other shapes that ARE unique, so the rule is a rule and not one hard-coded pair —
+/// and the ones that stay refused because they are not.
+#[test]
+fn uniqueness_is_the_rule_not_a_hard_coded_pair() {
+    let reg = default_registry();
+
+    // path+start+end+new_text is edit_lines and nothing else.
+    let lines = ParseRepair
+        .extract(
+            r#"{"tool":"edit_file","path":"p.rs","start":3,"end":5,"new_text":"z"}"#,
+            &reg,
+        )
+        .unwrap();
+    assert_eq!(lines.name, "edit_lines");
+
+    // path+name+new_body is edit_function and nothing else.
+    let func = ParseRepair
+        .extract(
+            r#"{"tool":"write_file","path":"p.rs","name":"go","new_body":"fn go() {}"}"#,
+            &reg,
+        )
+        .unwrap();
+    assert_eq!(func.name, "edit_function");
+
+    // A bare `path` fits read_file, list_dir AND profile_hotspots — never recovered. (Here
+    // gate 1 already declines: edit_file fails on a MISSING param, not an unexpected one.)
+    assert!(mislabelled_tool_recovery(r#"{"tool":"edit_file","path":"p.rs"}"#, &reg).is_none());
+
+    // A key set that is unique but whose VALUES are wrong still fails: gate 3 re-validates.
+    assert!(ParseRepair
+        .extract(
+            r#"{"tool":"write_file","path":"p.rs","old_str":"","new_str":"b"}"#,
+            &reg
+        )
+        .is_err());
+    assert!(ParseRepair
+        .extract(
+            r#"{"tool":"write_file","path":"p.rs","old_str":7,"new_str":"b"}"#,
+            &reg
+        )
+        .is_err());
+}
+
+/// The rung reads the REGISTRY IT WAS GIVEN, never a hard-coded table — a trimmed menu has
+/// different tools and therefore different unique key sets.
+#[test]
+fn the_rung_reads_the_registry_it_was_given() {
+    let worker = sc_tools::minimal_worker_registry();
+    // The worker menu is edit_file + edit_lines + run_verification + finish, no write_file.
+    // path+old_str+new_str is still uniquely edit_file there.
+    let call = ParseRepair
+        .extract(
+            r#"{"tool":"edit_lines","path":"p.rs","old_str":"a","new_str":"b"}"#,
+            &worker,
+        )
+        .unwrap();
+    assert_eq!(call.name, "edit_file");
+
+    // On a registry with no edit_file at all, the same payload has nothing to recover to.
+    let no_edit = worker.only(&["run_verification", "finish"]).unwrap();
+    assert!(ParseRepair
+        .extract(
+            r#"{"tool":"finish","path":"p.rs","old_str":"a","new_str":"b"}"#,
+            &no_edit
+        )
+        .is_err());
+}

@@ -1074,6 +1074,12 @@ pub fn run_agent_observed(
             matches!(c.name.as_str(), "write_file" | "append_file")
                 && crate::strategy::is_truncated_write_salvage(&resp.content, registry)
         });
+        // Did the model name one tool and hand us another tool's arguments? The repair
+        // rung ran it as what the arguments say it is, which is right -- but the model
+        // must be TOLD, or it keeps using the wrong name. The harness caused this one:
+        // the rewrite escalation orders `write_file`, and a model that wants an anchored
+        // edit obeys the name while sending old_str/new_str.
+        let mislabelled = crate::strategy::mislabelled_tool_recovery(&resp.content, registry);
         let (obs, action, changed, tool, arg) = match extracted {
             Ok(call) => {
                 metrics.record_valid();
@@ -1442,6 +1448,14 @@ pub fn run_agent_observed(
                             // If this write was salvaged from a truncated reply, only the partial
                             // head landed. Tell the model to CONTINUE with append_file rather than
                             // re-writing the whole file (which would truncate at the same place).
+                            // Say so when the call ran under a different name than it was given.
+                            let o = match &mislabelled {
+                                Some((named, recovered)) => format!(
+                                    "{o} {}",
+                                    crate::strategy::mislabelled_tool_note(named, recovered)
+                                ),
+                                None => o,
+                            };
                             let o = if salvaged_truncated_write {
                                 let note = match mention(registry, &["append_file"]) {
                                     Some(append) => format!(

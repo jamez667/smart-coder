@@ -957,12 +957,12 @@ fn self_recovery_directive_never_names_a_tool_the_run_cannot_call() {
     use super::escalation::self_recovery_directive;
     let recent = vec!["read_file".to_string()];
 
-    let full = self_recovery_directive(&recent, &sc_tools::default_registry());
+    let full = self_recovery_directive(&recent, &sc_tools::default_registry(), 0);
     assert!(full.contains("`write_file`") && full.contains("`edit_file`"));
     assert!(full.contains("`run_verification`"));
 
     let six = registry_of(&["read_file", "write_file", "edit_lines", "finish"]);
-    let d = self_recovery_directive(&recent, &six);
+    let d = self_recovery_directive(&recent, &six, 0);
     assert!(
         d.contains("`write_file`") && d.contains("`edit_lines`"),
         "{d}"
@@ -974,9 +974,152 @@ fn self_recovery_directive_never_names_a_tool_the_run_cannot_call() {
     assert_eq!(unoffered_tool_in(&d, &six), None);
 
     let read_only = registry_of(&["read_file", "finish"]);
-    let d = self_recovery_directive(&recent, &read_only);
+    let d = self_recovery_directive(&recent, &read_only, 0);
     assert!(d.contains("`finish`"), "{d}");
     assert_eq!(unoffered_tool_in(&d, &read_only), None, "{d}");
+}
+
+/// THE defect: the directive recommended and forbade the SAME tool in one sentence.
+///
+/// A model looping on `edit_file` against the full registry was handed "Emit `write_file`
+/// or `edit_file` (an action that changes the workspace) this turn. Do NOT emit `edit_file`
+/// again." Measured over one Mellum run this fired 8 times, and the model obeyed the
+/// prohibition and dropped the recommendation more often than the reverse -- 3 of the 8
+/// next turns were the do-nothing calls the nudge exists to prevent.
+///
+/// The rule is absolute, and asserted on the exact strings the model reads: whatever tool
+/// the directive recommends, it must not go on to forbid.
+#[test]
+fn self_recovery_directive_never_recommends_and_forbids_the_same_tool() {
+    use super::escalation::self_recovery_directive;
+
+    let full = sc_tools::default_registry();
+    let d = self_recovery_directive(&["edit_file".to_string()], &full, 0);
+    assert!(
+        !d.contains("Emit `write_file` or `edit_file`"),
+        "recommends the looped tool it then forbids: {d}"
+    );
+    assert!(
+        !d.contains("use `edit_file` for a small"),
+        "the body bullet still recommends the looped tool: {d}"
+    );
+    // The prohibition survives, and there is still a legal concrete move.
+    assert!(d.contains("Do NOT emit `edit_file` again."), "{d}");
+    assert!(
+        d.contains("Emit `write_file`"),
+        "no concrete move left: {d}"
+    );
+
+    // The same must hold for every edit tool in the registry, in both directions.
+    for looped in ["write_file", "edit_file"] {
+        let d = self_recovery_directive(&[looped.to_string()], &full, 0);
+        let forbids = d.contains(&format!("Do NOT emit `{looped}` again"));
+        let recommends = d.contains(&format!("Emit `{looped}`"))
+            || d.contains(&format!("or `{looped}`"))
+            || d.contains(&format!("with `{looped}`"))
+            || d.contains(&format!("use `{looped}`"));
+        assert!(
+            !(forbids && recommends),
+            "`{looped}` is both recommended and forbidden: {d}"
+        );
+    }
+}
+
+/// Excluding the looped tool can empty the recommendation list: a registry with exactly one
+/// edit tool, and the model looping on it. "Do not use it again" is then wrong advice --
+/// nothing else here can change the workspace -- so the directive must say how to use that
+/// tool DIFFERENTLY, and must never forbid it.
+#[test]
+fn self_recovery_directive_on_the_only_edit_tool_says_how_to_use_it_differently() {
+    use super::escalation::self_recovery_directive;
+
+    for (tools, looped) in [
+        (&["read_file", "edit_file", "finish"][..], "edit_file"),
+        (&["read_file", "write_file", "finish"][..], "write_file"),
+    ] {
+        let reg = registry_of(tools);
+        let d = self_recovery_directive(&[looped.to_string()], &reg, 0);
+        assert!(
+            !d.contains(&format!("Do NOT emit `{looped}`")),
+            "forbids the only edit tool: {d}"
+        );
+        assert!(
+            d.contains(&format!(
+                "Emit `{looped}` this turn with DIFFERENT arguments."
+            )),
+            "no concrete move named: {d}"
+        );
+        assert_eq!(unoffered_tool_in(&d, &reg), None, "{d}");
+    }
+}
+
+/// The read-only arm carried the same contradiction latently: it tells the model to call
+/// `finish`, then appends "Do NOT emit {looped} again" -- which reads as "call `finish` NOW
+/// ... do NOT emit `finish` again" when `finish` is the tool being looped on.
+#[test]
+fn self_recovery_directive_looping_on_finish_does_not_forbid_finish() {
+    use super::escalation::self_recovery_directive;
+
+    let read_only = registry_of(&["read_file", "finish"]);
+    let d = self_recovery_directive(&["finish".to_string()], &read_only, 0);
+    assert!(d.contains("call `finish` NOW"), "{d}");
+    assert!(
+        !d.contains("Do NOT emit `finish`"),
+        "recommends and forbids `finish`: {d}"
+    );
+    // Still a concrete move: what to do differently with the tool it must keep using.
+    assert!(d.contains("`summary`"), "{d}");
+
+    // The normal read-only case is untouched: looping on `read_file` still forbids it.
+    let d = self_recovery_directive(&["read_file".to_string()], &read_only, 0);
+    assert!(d.contains("Do NOT emit `read_file` again."), "{d}");
+}
+
+/// The correct behaviour must survive the fix: a model looping on a READ tool against a full
+/// registry still gets both edit tools recommended and the read tool forbidden.
+#[test]
+fn self_recovery_directive_keeps_the_normal_case_intact() {
+    use super::escalation::self_recovery_directive;
+
+    let d = self_recovery_directive(&["read_file".to_string()], &sc_tools::default_registry(), 0);
+    assert!(
+        d.contains(
+            "Emit `write_file` or `edit_file` (an action that changes the workspace) \
+             this turn. Do NOT emit `read_file` again."
+        ),
+        "{d}"
+    );
+    assert!(d.contains("use `edit_file` for a small"), "{d}");
+    assert!(d.contains("then `run_verification`"), "{d}");
+}
+
+/// "You already have everything you read in the context above" is only true while nothing
+/// has been evicted. Once older turns are compacted into the summary the model may genuinely
+/// NOT have what it read, and a harness that asserts something the model can see is false
+/// teaches it to distrust the rest of the directive.
+#[test]
+fn self_recovery_directive_softens_the_you_have_everything_claim_after_eviction() {
+    use super::escalation::self_recovery_directive;
+    let recent = vec!["read_file".to_string()];
+    let reg = sc_tools::default_registry();
+
+    let fresh = self_recovery_directive(&recent, &reg, 0);
+    assert!(
+        fresh.contains("You already have everything you read"),
+        "{fresh}"
+    );
+
+    let evicted = self_recovery_directive(&recent, &reg, 3);
+    assert!(
+        !evicted.contains("You already have everything you read"),
+        "claims something false after eviction: {evicted}"
+    );
+    assert!(evicted.contains("compacted into the summary"), "{evicted}");
+    // The actionable half is unchanged either way.
+    assert!(
+        evicted.contains("Do NOT emit `read_file` again."),
+        "{evicted}"
+    );
 }
 
 /// `ask_user` and the stall ladder spend ONE advisor budget between them. Before, only

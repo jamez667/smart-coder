@@ -240,7 +240,10 @@ pub(super) fn handle_stall(
             interv.count += 1;
             interv.changed_since_intervention = false;
             stall.reset();
-            let advice = self_recovery_directive(&recent_tools(history), registry);
+            // `recent.evicted()` decides whether the directive may claim the model still
+            // has everything it read: once turns have been compacted away, it does not.
+            let advice =
+                self_recovery_directive(&recent_tools(history), registry, recent.evicted());
             super::report_if_unoffered(&advice, registry, step, sink);
             sink.record(&AgentEvent::Advice {
                 trigger: stuck.to_string(),

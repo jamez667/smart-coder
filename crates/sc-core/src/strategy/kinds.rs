@@ -12,7 +12,8 @@ use sc_tools::{
 use super::error::{RepairError, ToolCallStrategy};
 use super::repair::{
     is_progress_tool, looks_swallowed, recover_swallowed_call, repair_edit_file_call,
-    repair_file_content_call, repair_truncated_file_write, validated_calls,
+    repair_file_content_call, repair_mislabelled_tool_call, repair_truncated_file_write,
+    validated_calls,
 };
 
 /// The universal fallback: prompt for a JSON object, parse it tolerantly, and
@@ -91,6 +92,27 @@ impl ToolCallStrategy for ParseRepair {
             if let Some(value) = repair_edit_file_call(raw) {
                 if let Ok(call) = registry.validate(&value) {
                     return Ok(call);
+                }
+            }
+            // The model used the WRONG TOOL NAME for an otherwise perfect call — it was
+            // ORDERED to call `write_file` and complied with the name while sending an
+            // `edit_file`'s `old_str`/`new_str`. The JSON parses fine, so none of the
+            // body-repair rungs above are even relevant; what failed is the name against the
+            // schema. Believe the arguments when they name exactly one tool (see
+            // `repair_mislabelled_tool_call` for how strict that is).
+            for json in crate::text::extract_all_json_objects(raw) {
+                if !json.contains("\"tool\"") {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(json).or_else(|_| {
+                    serde_json::from_str(&crate::text::escape_raw_control_chars_in_strings(json))
+                }) else {
+                    continue;
+                };
+                if let Some(fixed) = repair_mislabelled_tool_call(&value, registry) {
+                    if let Ok(call) = registry.validate(&fixed) {
+                        return Ok(call);
+                    }
                 }
             }
             // A stray quote closing a NUMERIC argument (`"limit":60"`). Every repair above

@@ -44,7 +44,8 @@ pub use recovery::{action_hash, Progress, StallDetector, StopReason};
 pub use runlog::{RunLog, RunLogSink};
 pub use sc_context::{estimate_tokens, TokenCounter};
 pub use strategy::{
-    select_strategy, Grammar, NativeTools, ParseRepair, RepairError, ToolCallStrategy,
+    mislabelled_tool_note, mislabelled_tool_recovery, select_strategy, Grammar, NativeTools,
+    ParseRepair, RepairError, ToolCallStrategy,
 };
 pub use text::{extract_json_array, extract_json_object, first_line, mentioned_identifiers};
 

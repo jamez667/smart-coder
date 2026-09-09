@@ -65,29 +65,120 @@ pub(super) fn mention(registry: &ToolRegistry, preferred: &[&'static str]) -> Op
 ///
 /// Every tool it names comes from [`mention`], so a trimmed registry gets a directive
 /// built from the tools it has -- and a read-only one is told to answer, not to edit.
-pub(super) fn self_recovery_directive(recent: &[String], registry: &ToolRegistry) -> String {
+///
+/// THE ONE INVARIANT: the directive never recommends and forbids the same tool.
+///
+/// It used to. The recommended actions were built from `[whole, anchored]` unfiltered, so a
+/// model looping on `edit_file` -- the common case, because the edit tools are the ones a
+/// model gets stuck on -- was handed "Emit `write_file` or `edit_file` … Do NOT emit
+/// `edit_file` again" in a single sentence. Measured over one Mellum run across four rungs,
+/// this fired 8 times: 3 of the next turns were `run_verification`/`run_command`/`read_file`
+/// (the do-nothing turns the nudge exists to prevent), 2 were `write_file` (the intent) and
+/// 3 were `edit_file` (the prohibition ignored). The prohibition is the clearer half of a
+/// contradiction, so the model obeyed it and dropped the recommendation more often than not.
+///
+/// So `looped` is excluded from everything the directive recommends, and the prohibition is
+/// only appended when the directive did not just recommend that tool. When excluding it
+/// leaves nothing -- the model is looping on the only edit tool the registry offers --
+/// "do not use it again" is simply wrong advice, and the directive says how to use that tool
+/// DIFFERENTLY instead. Either way the model is always left at least one legal concrete move.
+///
+/// `evicted` is how many whole turns have left the recent window into the compacted summary.
+/// While it is zero the model really does still have everything it read, and the directive
+/// says so; once turns have been evicted that claim is false, and a harness that asserts
+/// something the model can see is false teaches it to distrust the rest of the directive.
+pub(super) fn self_recovery_directive(
+    recent: &[String],
+    registry: &ToolRegistry,
+    evicted: usize,
+) -> String {
     let looped = recent
         .first()
         .map(String::as_str)
         .unwrap_or("the same tool");
-    let whole = mention(registry, &["write_file", "create_file"]);
-    let anchored = mention(registry, &["edit_file", "edit_lines", "edit_function"]);
-    let verify = mention(registry, &["run_verification"]);
+    // The recommendable edit tools, with the looped one removed: it must never appear as a
+    // recommendation next to its own prohibition.
+    let keep = |t: Option<&'static str>| t.filter(|n| *n != looped);
+    let whole = keep(mention(registry, &["write_file", "create_file"]));
+    let anchored = keep(mention(
+        registry,
+        &["edit_file", "edit_lines", "edit_function"],
+    ));
+    let verify = keep(mention(registry, &["run_verification"]));
+    // Does the registry offer an edit tool at all? Distinct from `whole`/`anchored` being
+    // Some: a single-edit-tool registry the model is looping on leaves both None here.
+    let only_edit_tool = whole.is_none()
+        && anchored.is_none()
+        && mention(
+            registry,
+            &[
+                "write_file",
+                "create_file",
+                "edit_file",
+                "edit_lines",
+                "edit_function",
+            ],
+        )
+        .is_some();
 
+    let have = if evicted == 0 {
+        "You already have everything you read in the context above; re-reading or \
+         re-running changes nothing."
+    } else {
+        // Older turns are gone into the summary, so "you have everything" would be a lie.
+        // What is still true is the part that matters: repeating the call will not help.
+        "Older turns have been compacted into the summary above, but repeating `{looped}` \
+         will not bring them back -- it returns what it returned before."
+    };
+    let have = have.replace("{looped}", looped);
     let mut out = format!(
         "STOP — you are stuck in a loop calling `{looped}` and making no progress. \
-         You already have everything you read in the context above; re-reading or \
-         re-running changes nothing. Decide the next CONCRETE move right now:\n"
+         {have} Decide the next CONCRETE move right now:\n"
     );
+
+    if only_edit_tool {
+        // The model is looping on the ONLY tool that can change the workspace. Telling it
+        // to stop using that tool would leave it no legal move at all, so tell it how to
+        // use the tool differently instead -- the loop is nearly always the same call with
+        // the same arguments failing the same way.
+        out.push_str(&format!(
+            "`{looped}` is the only tool here that can change the workspace, so keep using \
+             it -- but NOT with the same arguments, which is what has failed every turn so \
+             far. Change ONE of these and send it again:\n\
+             - If the anchor/old text did not match, widen or re-copy it EXACTLY from the \
+             file as it reads now, whitespace included.\n\
+             - If you cannot find an anchor you trust, send the ENTIRE corrected file \
+             contents in one shot instead of a fragment.\n\
+             - If you are editing blind, open the file first and copy the target lines out \
+             of what you get back.\n"
+        ));
+        out.push_str(&format!(
+            "Emit `{looped}` this turn with DIFFERENT arguments."
+        ));
+        return out;
+    }
+
     match (whole, anchored) {
         (None, None) => {
             // Nothing here can change the workspace: this is a question, and the only
             // move left is to answer it.
-            out.push_str(
-                "- If you have the answer, call `finish` NOW with it in `summary`.\n\
-                 - If you are reading the wrong file, say so in `finish` rather than reading on.\n",
-            );
-            out.push_str(&format!("Do NOT emit `{looped}` again."));
+            let finish = mention(registry, &["finish"]).unwrap_or("finish");
+            out.push_str(&format!(
+                "- If you have the answer, call `{finish}` NOW with it in `summary`.\n\
+                 - If you are reading the wrong file, say so in `{finish}` rather than \
+                 reading on.\n"
+            ));
+            // Only forbid the looped tool if we did not just recommend it. A model looping
+            // on `finish` is being told to call `finish` -- "do NOT emit `finish` again"
+            // in the same breath is the same contradiction this function exists to avoid.
+            if looped != finish {
+                out.push_str(&format!("Do NOT emit `{looped}` again."));
+            } else {
+                out.push_str(
+                    "Your last `finish` was rejected or empty: put the actual answer in \
+                     `summary` this time.",
+                );
+            }
             return out;
         }
         (Some(w), anchored) => {
@@ -117,6 +208,8 @@ pub(super) fn self_recovery_directive(recent: &[String], registry: &ToolRegistry
         Some(v) => out.push_str(&format!(", then `{v}`.\n")),
         None => out.push_str(".\n"),
     }
+    // `whole`/`anchored` already have `looped` filtered out, so this list can never name
+    // the tool the next line forbids.
     let acts: Vec<String> = [whole, anchored]
         .into_iter()
         .flatten()

@@ -464,3 +464,143 @@ fn a_repeated_no_op_edit_is_reported_as_one_and_stalls() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **A mislabelled tool call runs as the tool its ARGUMENTS name, all the way through the loop.**
+///
+/// THE HARNESS CAUSED THIS ONE. Observed live: the loop told the model *"STOP editing by anchor.
+/// Instead call `write_file` with `path` `pathfind.rs` and the ENTIRE corrected file contents in
+/// one shot."* The model obeyed the NAME and kept its own intent, sending
+/// `{"tool":"write_file","path":…,"old_str":…,"new_str":…}` — a complete, unambiguous
+/// `edit_file` wearing the wrong label. Validation answered `tool "write_file" has no parameter
+/// "new_str"` and the whole turn was discarded. Rejecting it teaches the model nothing: it did
+/// exactly what it was told.
+///
+/// The strategy-level recovery is pinned in `strategy::tests`. What this pins is the part that
+/// only the loop can prove: the recovered call carries the RECOVERED name, so everything keyed
+/// off `call.name` stays right —
+///
+/// 1. the `ToolCall` event (and therefore the run log / activity feed) says `edit_file`;
+/// 2. `mutating_path` finds `edit_file`'s Mutating side effect, so the journal snapshots the
+///    path and the edit is recorded as a real workspace change; and
+/// 3. the edit actually lands in the file, which is what the model asked for.
+///
+/// Without the rung the turn is thrown away and the file is untouched.
+#[test]
+fn an_edit_labelled_write_file_runs_as_an_edit_through_the_whole_loop() {
+    let ws = temp("mislabelled");
+    let f = ws.join("pathfind.rs");
+    std::fs::write(&f, "/// 4-connected neighbours.\nfn go() {}\n").unwrap();
+
+    let backend = Scripted::new(vec![
+        // The live payload: named write_file, shaped exactly like an edit_file.
+        r#"{"new_str":"/// 8-connected neighbours.","old_str":"/// 4-connected neighbours.","path":"pathfind.rs","tool":"write_file"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let sink = Collect::default();
+    let report = sc_core::run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "fix it",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    // 3. The edit landed.
+    let after = std::fs::read_to_string(&f).unwrap();
+    assert!(
+        after.starts_with("/// 8-connected neighbours."),
+        "the anchored edit must actually be applied, got: {after:?}"
+    );
+
+    // 1. The loop saw an `edit_file`, not the `write_file` the model named — the ToolCall
+    //    event, the action hash and `key_arg` all read from the same `call.name`.
+    let edits = sink.tool_results("edit_file");
+    assert_eq!(
+        edits.len(),
+        1,
+        "the turn must be attributed to edit_file, got results: {:?}",
+        sink.results.lock().unwrap()
+    );
+    assert!(
+        edits[0].contains("1 replacement"),
+        "and it must be the real anchored edit: {}",
+        edits[0]
+    );
+    assert!(
+        sink.tool_results("write_file").is_empty(),
+        "nothing may be attributed to the name the model wrote"
+    );
+
+    // 2. `mutating_path` resolved through the RECOVERED name, so the journal recorded it.
+    assert!(
+        report.change_summary.contains("pathfind.rs"),
+        "the journal must record the change: {}",
+        report.change_summary
+    );
+
+    // The note the loop appends so the model learns the right name.
+    assert_eq!(
+        sc_core::mislabelled_tool_recovery(
+            r#"{"new_str":"b","old_str":"a","path":"pathfind.rs","tool":"write_file"}"#,
+            &default_registry(),
+        ),
+        Some(("write_file".to_string(), "edit_file".to_string())),
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The model is TOLD when its call ran under a different name than it gave.
+///
+/// The harness causes this one: the rewrite escalation orders `write_file`, and a
+/// model that wants an anchored edit obeys the name while sending old_str/new_str.
+/// Running it as the edit it is fixes the turn; without the note the model never
+/// learns the right name and does it again.
+#[test]
+fn a_mislabelled_call_tells_the_model_what_it_actually_ran() {
+    let ws = temp("mislabelled-note");
+    std::fs::write(
+        ws.join("a.rs"),
+        "fn go() { let x = 1; }
+",
+    )
+    .unwrap();
+
+    let sink = Collect::default();
+    // Names write_file, hands over edit_file's arguments.
+    let backend = Scripted::new(vec![
+        r#"{"tool":"write_file","path":"a.rs","old_str":"let x = 1;","new_str":"let x = 2;"}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    sc_core::run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "change x to 2",
+        &ws,
+        &AgentConfig {
+            max_steps: 2,
+            ..AgentConfig::default()
+        },
+        &sink,
+    )
+    .unwrap();
+
+    let seen = sink.tool_results("edit_file").join(
+        "
+",
+    );
+    assert!(
+        seen.contains("you named write_file") && seen.contains("edit_file"),
+        "the model must be told which tool actually ran, got: {seen}"
+    );
+    let after = std::fs::read_to_string(ws.join("a.rs")).unwrap();
+    assert!(after.contains("let x = 2;"), "the edit must apply: {after}");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

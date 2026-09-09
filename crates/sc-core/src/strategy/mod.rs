@@ -32,4 +32,7 @@ mod tests;
 
 pub use error::{RepairError, ToolCallStrategy};
 pub use kinds::{select_strategy, Grammar, NativeTools, ParseRepair};
-pub use repair::{extract_markdown_write, extract_write_batch, is_truncated_write_salvage};
+pub use repair::{
+    extract_markdown_write, extract_write_batch, is_truncated_write_salvage, mislabelled_tool_note,
+    mislabelled_tool_recovery,
+};

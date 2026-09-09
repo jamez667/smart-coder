@@ -29,6 +29,11 @@ pub(super) struct RecentWindow {
     /// is never silently dropped if that changes.
     head: Vec<Message>,
     turns: Vec<Turn>,
+    /// How many whole turns have left this window into the compacted summary.
+    ///
+    /// Read by the stall ladder: the self-recovery directive claims "you already have
+    /// everything you read in the context above", which is only true while this is zero.
+    evicted: usize,
 }
 
 impl RecentWindow {
@@ -109,8 +114,14 @@ impl RecentWindow {
         if self.turns.is_empty() {
             None
         } else {
+            self.evicted += 1;
             Some(self.turns.remove(0))
         }
+    }
+
+    /// How many whole turns have been evicted from this window over the run's lifetime.
+    pub(super) fn evicted(&self) -> usize {
+        self.evicted
     }
 
     /// Every message in prompt order: orphan notes, then each turn's action followed by

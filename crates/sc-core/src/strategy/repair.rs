@@ -412,3 +412,154 @@ pub fn repair_stray_quote_after_number(raw: &str) -> Option<serde_json::Value> {
     }
     serde_json::from_str(&out).ok()
 }
+
+/// Recover a call whose TOOL NAME contradicts its ARGUMENTS: the model sent a complete,
+/// unambiguous call for one tool while labelling it as another.
+///
+/// **The harness caused this one.** Observed live: the loop told the model
+/// *"STOP editing by anchor. Instead call `write_file` with `path` `pathfind.rs` and the ENTIRE
+/// corrected file contents in one shot."* The model obeyed the NAME and kept its own intent,
+/// emitting `{"tool":"write_file","path":"pathfind.rs","old_str":"…","new_str":"…"}` — a
+/// flawless `edit_file` wearing the wrong label. Validation answered
+/// `tool "write_file" has no parameter "new_str"` and the whole turn was thrown away. Rejecting
+/// it teaches the model nothing: it did what it was told.
+///
+/// So when the arguments name a tool more precisely than the `"tool"` field does, believe the
+/// arguments. Strictly:
+///
+/// 1. the named tool failed validation **specifically** with [`ValidationError::UnknownParam`]
+///    (an argument it does not declare) — every other failure is the model getting the call
+///    itself wrong, and none of them mean "you picked the wrong name";
+/// 2. the argument key set (minus `tool`) identifies **exactly one** tool in the registry — it
+///    supplies every required parameter of that tool and no key the tool does not declare —
+///    and no OTHER registry tool also accepts it; and
+/// 3. the rebuilt call validates cleanly under that tool's spec.
+///
+/// Any doubt and it falls through to today's error. A wrong recovery silently runs an operation
+/// the model never asked for, which is far worse than losing a turn: `{path, content}` fits
+/// `write_file`, `create_file` AND `append_file`, so it is refused even though "the model
+/// obviously meant a write" — appending when it meant to overwrite corrupts the file.
+///
+/// Returns the rebuilt JSON object (carrying the RECOVERED name, so everything the loop keys off
+/// `call.name` — the journal snapshot, `key_arg`, the stall-detector action hash — stays right),
+/// or `None`.
+///
+/// [`ValidationError::UnknownParam`]: sc_tools::ValidationError::UnknownParam
+pub(super) fn repair_mislabelled_tool_call(
+    value: &serde_json::Value,
+    registry: &ToolRegistry,
+) -> Option<serde_json::Value> {
+    let obj = value.as_object()?;
+
+    // Gate 1: the ONLY failure this rung answers is "you sent an argument this tool has no
+    // parameter for". A missing param, a wrong type, an empty string, an unknown tool — all of
+    // those are the model getting its own chosen call wrong, and renaming the tool under it
+    // would be inventing an intent the arguments do not carry.
+    match registry.validate(value) {
+        Err(sc_tools::ValidationError::UnknownParam { .. }) => {}
+        _ => return None,
+    }
+
+    // Gate 2: the key set must identify exactly one tool. `uniquely_identified_tool` is where
+    // the conservatism lives.
+    let keys: Vec<&str> = obj
+        .keys()
+        .filter(|k| k.as_str() != "tool")
+        .map(String::as_str)
+        .collect();
+    let recovered = uniquely_identified_tool(&keys, registry)?;
+
+    // Gate 3: the rebuilt call must validate cleanly. The key set only proves the SHAPE fits;
+    // the values still have to be the right types and non-empty.
+    let mut rebuilt = obj.clone();
+    rebuilt.insert(
+        "tool".to_string(),
+        serde_json::Value::String(recovered.to_string()),
+    );
+    let rebuilt = serde_json::Value::Object(rebuilt);
+    registry.validate(&rebuilt).ok()?;
+    Some(rebuilt)
+}
+
+/// The single registry tool whose schema `keys` fits, or `None` if none or more than one does.
+///
+/// "Fits" is exact in both directions: every REQUIRED parameter of the tool is present in
+/// `keys`, and every key is a parameter the tool declares. That two-sided test is what makes
+/// `{path, old_str, new_str}` mean `edit_file` and nothing else, while `{path}` (`read_file`,
+/// `list_dir`, `profile_hotspots`) and `{path, content}` (`write_file`, `create_file`,
+/// `append_file`) match several and are therefore refused.
+///
+/// A tool the CALL ALREADY NAMED cannot be its own recovery, and the empty key set is never a
+/// recovery either — `{}` fits `run_verification` and `finish`, and even on a registry offering
+/// only one of them, promoting a nameless call to `finish` would end a run on a typo.
+fn uniquely_identified_tool<'a>(keys: &[&str], registry: &'a ToolRegistry) -> Option<&'a str> {
+    if keys.is_empty() {
+        return None;
+    }
+    let mut hit: Option<&str> = None;
+    for spec in registry.specs() {
+        let declares_every_key = keys.iter().all(|k| spec.param(k).is_some());
+        let has_every_required = spec
+            .params
+            .iter()
+            .filter(|p| p.ty.required())
+            .all(|p| keys.contains(&p.name));
+        if declares_every_key && has_every_required {
+            if hit.is_some() {
+                return None; // ambiguous — two tools accept this exact key set
+            }
+            hit = Some(spec.name);
+        }
+    }
+    hit
+}
+
+/// The note appended to a recovered call's observation, so the model learns the right NAME
+/// rather than silently having its mistake papered over. `named` is what it wrote, `recovered`
+/// is what actually ran.
+pub fn mislabelled_tool_note(named: &str, recovered: &str) -> String {
+    let article = if recovered.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("[you named {named}; your arguments were {article} {recovered} call, so it ran as one]")
+}
+
+/// The `(named, recovered)` pair when `raw`'s single call was recovered by
+/// [`repair_mislabelled_tool_call`], for the loop to render
+/// [`mislabelled_tool_note`] onto the turn's observation. `None` when no rung fired.
+///
+/// Mirrors [`is_truncated_write_salvage`]: the salvage runs inside `extract`, and the loop asks
+/// this afterwards to find out whether it did, because a [`ValidatedCall`] carries no room for a
+/// harness note.
+pub fn mislabelled_tool_recovery(raw: &str, registry: &ToolRegistry) -> Option<(String, String)> {
+    let (valid, _) = validated_calls(raw, registry);
+    if !valid.is_empty() {
+        return None; // the strict path succeeded — this rung never ran
+    }
+    for json in extract_all_json_objects(raw) {
+        if !json.contains("\"tool\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json)
+            .or_else(|_| serde_json::from_str(&escape_raw_control_chars_in_strings(json)))
+        else {
+            continue;
+        };
+        // `continue`, not `?`: a later object in the reply may still be the recovered call.
+        let Some(named) = value
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if let Some(fixed) = repair_mislabelled_tool_call(&value, registry) {
+            if let Ok(call) = registry.validate(&fixed) {
+                return Some((named, call.name));
+            }
+        }
+    }
+    None
+}
