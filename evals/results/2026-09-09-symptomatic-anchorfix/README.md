@@ -1,7 +1,15 @@
 # The partial-line anchor fix, measured on the rung it was found in
 
-`rust-symptomatic`, Mellum2-12B on the 3080, three repeats each. Still red every
-time — the fix was never going to solve the bug — but the cost of failing:
+`rust-symptomatic`, Mellum2-12B on the 3080, three repeats each.
+
+**CORRECTION (later the same day): this rung now PASSES.** On the full 17-rung
+run it went green in 32 steps / 189s. I called it a capability wall three times
+on the strength of four failures and said no harness change would reach it.
+That was wrong — the anchor fix got it over the line, it just needed more steps
+than the three-repeat runs below were giving it. The model could find the bug
+all along; it could not land the edit.
+
+The cost figures below still stand as a measure of what the fix changed:
 
 | | median secs | steps | median tokens |
 | --- | --- | --- | --- |

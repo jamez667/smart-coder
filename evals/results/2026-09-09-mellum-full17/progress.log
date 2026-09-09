@@ -1,0 +1,7 @@
+WARNING: this binary was built from adea9d5 but the working tree is at e7041d6; rows will be stamped adea9d5. Rebuild before trusting these numbers as current, or ignore this if the older binary is the point (an A/B against it).
+model mellum2-12b at http://localhost:11441/v1, built from adea9d5 (17 tasks x 1 run(s) x 1 arm(s): control(6))
+
+  [1/1] control(6)   rust-stated                PASS                              3s
+  [1/1] control(6)   rust-located               PASS                              4s
+  [1/1] control(6)   rust-symptomatic           PASS                            189s
+  [1/1] control(6)   rust-misdirected           still red                       316s
