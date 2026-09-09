@@ -1036,3 +1036,294 @@ fn ask_user_shares_the_advisor_budget_with_the_stall_ladder() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// A sink that captures every `Advice` directive the loop injects.
+#[derive(Default)]
+struct AdviceSink(std::sync::Mutex<Vec<String>>);
+
+impl crate::event::EventSink for AdviceSink {
+    fn record(&self, e: &crate::event::AgentEvent) {
+        if let crate::event::AgentEvent::Advice { advice, .. } = e {
+            self.0.lock().unwrap().push(advice.clone());
+        }
+    }
+}
+
+/// Drive `n` identical anchor misses on `path` and return the directives the loop injected.
+fn miss_directives(ws: &Path, path: &str, n: usize) -> Vec<String> {
+    let miss = json!({"tool":"edit_file","path":path,
+        "old_str":"fn nothing_like_this_is_in_the_file()","new_str":"fn other()"})
+    .to_string();
+    let mut script: Vec<String> = vec![miss; n];
+    script.push(json!({"tool":"finish"}).to_string());
+    let backend = MockBackend::new(script);
+    let registry = sc_tools::default_registry();
+    let strategy = crate::strategy::select_strategy(&backend.capabilities());
+    let sink = AdviceSink::default();
+    let _ = run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        "fix it",
+        ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+    let out = sink.0.lock().unwrap().clone();
+    out
+}
+
+/// **The rewrite escalation carries the WHOLE file, byte for byte.**
+///
+/// THE BUG. On the `engine-grid-scan` rung the escalation said "call `write_file` ... Base it
+/// on the file shown in the error above". The only thing shown above was `anchor_not_found`'s
+/// bounded 30-line window -- of a 94-line `floor.rs`, cut mid-line 41. The model obeyed
+/// literally: it reconstructed 94 lines from 30, collapsed `//!` to `!` on line 2 and
+/// truncated the rest. The resulting `expected item, found bang` ate 26 of the 40 turns.
+///
+/// The window is right for "here is where your anchor nearly matched" and wrong as the basis
+/// for a whole-file rewrite. If the harness asks for a rewrite, the harness supplies the file.
+#[test]
+fn the_rewrite_escalation_carries_the_whole_file_not_a_window() {
+    let ws = temp_dir("rewrite-full-file");
+    // The rung's file in miniature: longer than MISS_MAX_LINES (30) so a window could never
+    // carry it, and under the write_file overwrite cap so a rewrite is genuinely the steer.
+    let mut src = String::from("//! The floor.\n//! Second doc line - the one that got mangled.\n");
+    for n in 1..=92 {
+        src.push_str(&format!("pub const V{n}: u32 = {n};\n"));
+    }
+    assert_eq!(src.lines().count(), 94);
+    std::fs::write(ws.join("floor.rs"), &src).unwrap();
+
+    let advice = miss_directives(&ws, "floor.rs", 3);
+    let d = advice
+        .iter()
+        .find(|a| a.contains("write_file"))
+        .unwrap_or_else(|| panic!("a repeated miss must steer to write_file: {advice:?}"));
+
+    // It no longer points at something it did not show.
+    assert!(
+        !d.contains("shown in the error above"),
+        "the harness must not call the window the file: {d}"
+    );
+    // Every line of the file is present, numbered, in order -- including line 2, the one the
+    // model mangled, and line 94, well past where the window stopped.
+    for (i, line) in src.lines().enumerate() {
+        assert!(
+            d.contains(&format!("\n{}: {line}", i + 1)),
+            "line {} of the file is missing from the directive",
+            i + 1
+        );
+    }
+    assert!(
+        d.contains("2: //! Second doc line"),
+        "the doc-comment line that got mangled must be there verbatim: {d}"
+    );
+    assert!(
+        d.contains("(94 lines)"),
+        "the directive names the size: {d}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **Too large to rewrite: the escalation steers surgical and never asks for a rewrite.**
+///
+/// `write_file` REFUSES to overwrite a file above `WRITE_FILE_OVERWRITE_MAX_LINES`, so a
+/// directive steering there is a deadlock -- the model is told to do the one thing the next
+/// guard rejects. The escalation asks the SAME constant, so the two cannot disagree.
+#[test]
+fn a_file_too_large_to_rewrite_is_steered_to_a_surgical_tool() {
+    let ws = temp_dir("rewrite-too-large");
+    let n = sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES + 1;
+    let src: String = (1..=n)
+        .map(|i| format!("pub const V{i}: u32 = {i};\n"))
+        .collect();
+    std::fs::write(ws.join("big.rs"), &src).unwrap();
+
+    let advice = miss_directives(&ws, "big.rs", 3);
+    let d = advice
+        .iter()
+        .find(|a| a.contains("big.rs"))
+        .unwrap_or_else(|| panic!("a repeated miss must be escalated: {advice:?}"));
+
+    assert!(
+        d.contains("edit_function") || d.contains("edit_lines"),
+        "a big file must be steered at a surgical tool: {d}"
+    );
+    assert!(
+        !d.contains("ENTIRE corrected file contents") && !d.contains("ENTIRE new file contents"),
+        "it must NOT ask for a rewrite write_file would refuse: {d}"
+    );
+    assert!(
+        d.contains(&format!("({n} lines)")),
+        "the directive names the size that rules a rewrite out: {d}"
+    );
+    // And it must not inline the file it just called too big to reproduce.
+    assert!(
+        !d.contains("in full, as it is on disk right now"),
+        "no whole-file dump for a file that cannot be rewritten: {d}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **One miss is still just the bounded window.** The escalation fires on a STREAK; a single
+/// anchor miss must cost exactly what it always cost -- the lines around the closest match, no
+/// directive and no file. Bloating every miss with a whole file is the other way to lose the
+/// model's window.
+#[test]
+fn a_single_anchor_miss_still_shows_only_the_bounded_window() {
+    let ws = temp_dir("single-miss-window");
+    let src: String = (1..=94)
+        .map(|i| format!("pub const V{i}: u32 = {i};\n"))
+        .collect();
+    std::fs::write(ws.join("floor.rs"), &src).unwrap();
+
+    #[derive(Default)]
+    struct Cap {
+        advice: std::sync::Mutex<Vec<String>>,
+        results: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::event::EventSink for Cap {
+        fn record(&self, e: &crate::event::AgentEvent) {
+            match e {
+                crate::event::AgentEvent::Advice { advice, .. } => {
+                    self.advice.lock().unwrap().push(advice.clone())
+                }
+                crate::event::AgentEvent::ToolResult { full, .. } => {
+                    self.results.lock().unwrap().push(full.clone())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // One miss, then finish: the streak never reaches 2.
+    let backend = MockBackend::new([
+        json!({"tool":"edit_file","path":"floor.rs",
+               "old_str":"fn nothing_like_this_is_in_the_file()","new_str":"fn other()"})
+        .to_string(),
+        json!({"tool":"finish"}).to_string(),
+    ]);
+    let registry = sc_tools::default_registry();
+    let strategy = crate::strategy::select_strategy(&backend.capabilities());
+    let sink = Cap::default();
+    let _ = run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        "fix it",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        sink.advice.lock().unwrap().is_empty(),
+        "one miss is not a streak: {:?}",
+        sink.advice.lock().unwrap()
+    );
+    let results = sink.results.lock().unwrap();
+    let miss = results
+        .iter()
+        .find(|r| r.contains("anchor not found"))
+        .unwrap_or_else(|| panic!("expected an anchor miss: {results:?}"));
+    assert!(
+        !miss.contains("in full, as it is on disk right now"),
+        "an ordinary miss must not carry the file: {miss}"
+    );
+    assert!(
+        miss.lines().count() <= 31,
+        "header plus at most MISS_MAX_LINES, got {}: {miss}",
+        miss.lines().count()
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **The inlined file must SURVIVE the observation cap.**
+///
+/// `edit_file` normally takes the tight `observation_line_cap` -- right for a status line,
+/// fatal for one that now holds a whole file. The DEFAULT cap (200) happens to clear the
+/// largest inlinable file (150) plus its miss window today, but `observation_line_cap` is
+/// configurable: lower it and `truncate_observation` slices the very file the directive just
+/// told the model to reproduce -- the original bug wearing a new hat. So an observation that
+/// carries a file is capped like a read, and this pins that with a cap that would cut it.
+#[test]
+fn the_inlined_file_survives_the_observation_cap() {
+    let ws = temp_dir("rewrite-cap");
+    // The largest file the rewrite steer will ever inline.
+    let n = sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES;
+    let src: String = (1..=n)
+        .map(|i| format!("pub const V{i}: u32 = {i};\n"))
+        .collect();
+    std::fs::write(ws.join("max.rs"), &src).unwrap();
+
+    let cfg = AgentConfig {
+        // Well under the file: without the read cap this observation would be sliced.
+        observation_line_cap: 40,
+        ..AgentConfig::default()
+    };
+    assert!(
+        n > cfg.observation_line_cap,
+        "the file must outgrow the tight cap for this to test anything"
+    );
+
+    // Record what the model is actually SENT, which is the only thing that matters here.
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let calls = std::sync::Mutex::new(0usize);
+    let recorder = seen.clone();
+    let miss = json!({"tool":"edit_file","path":"max.rs",
+        "old_str":"fn nothing_like_this_is_in_the_file()","new_str":"fn other()"})
+    .to_string();
+    let backend = scripted_backend("cap", move |req: &sc_model::GenerateRequest| {
+        recorder
+            .lock()
+            .unwrap()
+            .extend(req.messages.iter().map(|m| m.content.clone()));
+        let mut c = calls.lock().unwrap();
+        *c += 1;
+        let content = if *c <= 2 {
+            miss.clone()
+        } else {
+            json!({"tool":"finish"}).to_string()
+        };
+        Ok(GenerateResponse {
+            content,
+            ..Default::default()
+        })
+    });
+
+    let registry = sc_tools::default_registry();
+    let strategy = crate::strategy::select_strategy(&backend.capabilities());
+    let sink = NullSink;
+    let _ = run_agent_observed(
+        &backend,
+        None,
+        &registry,
+        strategy.as_ref(),
+        "fix it",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let msgs = seen.lock().unwrap();
+    let with_file = msgs
+        .iter()
+        .find(|m| m.contains("in full, as it is on disk right now"))
+        .unwrap_or_else(|| panic!("the rewrite steer never reached the model"));
+    // Both ends of the file survived the cap.
+    assert!(
+        with_file.contains("1: pub const V1: u32 = 1;"),
+        "head kept: {with_file}"
+    );
+    assert!(
+        with_file.contains(&format!("{n}: pub const V{n}: u32 = {n};")),
+        "tail kept -- a cut file is exactly the bug this fix exists for"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
