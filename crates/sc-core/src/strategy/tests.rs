@@ -622,3 +622,152 @@ fn a_quote_ending_a_real_string_is_left_alone() {
         "a digit before the closing quote of a real string is not a stray quote"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stop sequences — the run-on second call (spec 02).
+//
+// Measured over a 12-rung Mellum2-12B run: 91 replies emitted one complete valid
+// call, closed it with `</tool_call>`, then started a SECOND call in a different
+// format and ran to the 3,072-token cap. ~1,729 of 2,606 seconds — 66% of the wall
+// clock — generating text the extractor discarded. The parse never lost a turn; the
+// run lost the time.
+// ---------------------------------------------------------------------------
+
+/// **The fix.** `NativeTools` declares the terminator AND puts it on the request,
+/// alongside (not instead of) the tools constraint.
+#[test]
+fn native_strategy_sets_the_tool_call_stop_sequence() {
+    let reg = default_registry();
+    let mut req = sc_model::GenerateRequest::new(vec![]);
+    NativeTools.prepare_request(&mut req, &reg);
+
+    assert_eq!(
+        req.stop,
+        vec!["</tool_call>".to_string()],
+        "the one measured terminator, and only that one"
+    );
+    assert_eq!(
+        NativeTools.stop_sequences(),
+        req.stop,
+        "what the strategy declares is what lands on the request"
+    );
+    // The constraint is still there: the stop list is additive, not a replacement.
+    assert!(
+        matches!(req.constraint, Some(OutputConstraint::Tools(_))),
+        "native tools must survive the stop wiring: {:?}",
+        req.constraint
+    );
+}
+
+/// **The blast radius stays at zero for the other two strategies.**
+///
+/// A stop sequence that fires inside a legitimate payload truncates real output,
+/// which is strictly worse than the waste it saves. Only the arm with a measurement
+/// behind it gets one; `ParseRepair` and `Grammar` are byte-for-byte unchanged.
+#[test]
+fn parse_repair_and_grammar_set_no_stop_sequences() {
+    let reg = default_registry();
+
+    let mut plain = sc_model::GenerateRequest::new(vec![]);
+    ParseRepair.prepare_request(&mut plain, &reg);
+    assert!(plain.stop.is_empty(), "parse-repair: {:?}", plain.stop);
+    assert!(
+        plain.constraint.is_none(),
+        "and still no constraint: {:?}",
+        plain.constraint
+    );
+
+    let mut gbnf = sc_model::GenerateRequest::new(vec![]);
+    Grammar.prepare_request(&mut gbnf, &reg);
+    assert!(gbnf.stop.is_empty(), "grammar: {:?}", gbnf.stop);
+    assert!(
+        matches!(gbnf.constraint, Some(OutputConstraint::Grammar(_))),
+        "the grammar still rides: {:?}",
+        gbnf.constraint
+    );
+
+    let mut scratch_req = sc_model::GenerateRequest::new(vec![]);
+    Grammar::with_scratchpad(400).prepare_request(&mut scratch_req, &reg);
+    assert!(
+        scratch_req.stop.is_empty(),
+        "scratchpad grammar: {:?}",
+        scratch_req.stop
+    );
+
+    assert!(ParseRepair.stop_sequences().is_empty());
+    assert!(Grammar.stop_sequences().is_empty());
+}
+
+/// **A reply cut at the stop sequence still parses.**
+///
+/// The server strips the matched stop text, so what comes back is exactly the
+/// complete leading call — the ~19 seconds of run-on second call that followed it in
+/// the real transcript never gets generated. Feeding the reply that ends right where
+/// the cut lands must yield the same call as the full rambling reply did.
+#[test]
+fn a_reply_cut_at_the_stop_sequence_still_yields_the_call() {
+    let reg = default_registry();
+
+    // The real shape, from the transcript: one valid call, `</tool_call>`, then a
+    // second call in a different format running to the cap.
+    let rambling = concat!(
+        r#"{"new_str":"let x = 1;","old_str":"let x = 0;","path":"tokenizer.rs","tool":"edit_file"}"#,
+        "</tool_call>\n\n",
+        r#"{"name": "edit_file", "arguments": {"new_str": "let y ="#,
+    );
+    // What the server returns once `stop` is set: everything before the marker.
+    let cut = rambling.split("</tool_call>").next().unwrap();
+
+    let from_cut = NativeTools
+        .extract(cut, &reg)
+        .expect("the cut reply parses");
+    assert_eq!(from_cut.name, "edit_file");
+    assert_eq!(from_cut.str("path"), Some("tokenizer.rs"));
+    assert_eq!(from_cut.str("new_str"), Some("let x = 1;"));
+
+    // And it is the SAME call the full reply produced — the stop changes cost, not
+    // outcome.
+    let from_full = NativeTools
+        .extract(rambling, &reg)
+        .expect("the full reply parsed too; that was never the problem");
+    assert_eq!(from_full.name, from_cut.name);
+    assert_eq!(from_full.str("path"), from_cut.str("path"));
+    assert_eq!(from_full.str("new_str"), from_cut.str("new_str"));
+}
+
+/// **What a misfire actually looks like, and what already survives one.**
+///
+/// A payload legitimately containing `</tool_call>` is the residual risk of the stop
+/// list. Two outcomes, and the difference is worth pinning because it decides whether
+/// the `StopSequenceMisfire` fault is the only safety net:
+///
+/// * A `write_file` cut mid-`content` is SALVAGED by the existing truncation repair --
+///   it lands the partial content, and the model appends the rest. Degraded, not lost.
+/// * An `edit_file` cut mid-`old_str` has no such recovery: an anchor that never closed
+///   cannot be matched, so the turn yields nothing and looks exactly like a model that
+///   declined to act. That is the case the fault exists to name.
+#[test]
+fn a_cut_inside_an_argument_degrades_or_yields_nothing_but_never_corrupts() {
+    let reg = default_registry();
+
+    // A write_file whose content is itself a chat template: cut mid-string, the JSON
+    // never closes -- and the truncation salvage lands what did arrive.
+    let write_cut = r#"{"tool":"write_file","path":"fixture.txt","content":"<tool_call>{}"#;
+    let salvaged = NativeTools
+        .extract(write_cut, &reg)
+        .expect("the existing truncation salvage covers this shape");
+    assert_eq!(salvaged.name, "write_file");
+    assert_eq!(
+        salvaged.str("content"),
+        Some("<tool_call>{}"),
+        "the partial content lands verbatim -- never spliced with the raw JSON tail"
+    );
+
+    // An edit_file cut mid-anchor has nothing to salvage: no closing quote, no
+    // new_str, nothing to match against the file.
+    let edit_cut = r#"{"tool":"edit_file","path":"chat.rs","old_str":"let t = "#;
+    assert!(
+        NativeTools.extract(edit_cut, &reg).is_err(),
+        "a cut anchor must not be applied to a file"
+    );
+}

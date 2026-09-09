@@ -877,6 +877,40 @@ pub fn run_agent_observed(
         // produced a valid call is not a model failing to converge, it is a model that
         // converged and then kept talking. Ask first, kill second.
         let this_reply_has_a_call = strategy.extract(&resp.content, registry).is_ok();
+
+        // DID OUR OWN STOP SEQUENCE CUT THE REPLY IN THE WRONG PLACE?
+        //
+        // The strategy sends `stop: ["</tool_call>"]` so the model cannot emit a
+        // complete call and then keep generating a second one to the cap -- the waste
+        // that took 66% of a 12-rung run's wall clock. The marker is chat-template
+        // markup, so it should never appear inside a tool argument; but a `write_file`
+        // whose content is a chat template, or a fixture carrying the literal, would
+        // contain it, and the server would then cut mid-JSON.
+        //
+        // The signature is exact and cheap: we asked for stop sequences, the server
+        // says it stopped on one (`finish_reason: "stop"`, NOT "length" -- that is
+        // `ReplyTruncated` above), and the reply yields no parseable call. A healthy
+        // stop-sequence hit leaves the complete call in front of the marker, so it has
+        // a call and never reaches here.
+        //
+        // Reported, not repaired: the loop's existing repair prompt already re-asks,
+        // and silently widening the payload is how a harness bug gets blamed on the
+        // model. This makes the cut visible on the turn it happens.
+        if !req.stop.is_empty()
+            && resp.finish_reason.as_deref() == Some("stop")
+            && !this_reply_has_a_call
+        {
+            sink.record(&AgentEvent::HarnessFault {
+                kind: FaultKind::StopSequenceMisfire,
+                detail: format!(
+                    "the server stopped on a stop sequence we set ({}) and the {} chars it returned carry no parseable tool call -- the marker probably occurred INSIDE an argument, so the call was cut mid-JSON",
+                    req.stop.join(", "),
+                    resp.content.len()
+                ),
+                step: step + 1,
+            });
+        }
+
         if read_only_run && capped_replies >= 3 && !this_reply_has_a_call {
             sink.record(&AgentEvent::Stalled {
                 trigger: "the model kept generating to the token cap instead of calling a tool"

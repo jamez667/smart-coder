@@ -263,6 +263,21 @@ pub enum FaultKind {
     /// A missing `pytest` scores as the model failing to make tests pass, which is
     /// indistinguishable from a wrong patch if you only read the score.
     VerifyUnavailable,
+    /// A stop sequence WE set cut the reply somewhere it should not have, so a turn
+    /// that was producing a call produced nothing.
+    ///
+    /// The strategy sends `stop: ["</tool_call>"]` to end the run-on second call that
+    /// burned 66% of a 12-rung run's wall clock. The marker is chat-template markup and
+    /// so should never occur inside a payload -- but a `write_file` whose content is
+    /// itself a chat template, or a fixture carrying the literal, would contain it, and
+    /// the server would then cut mid-JSON.
+    ///
+    /// The signature is exact: the server says it stopped on a stop sequence
+    /// (`finish_reason: "stop"`), the request HAD stop sequences, and the reply yields
+    /// no parseable call. Without this the turn is indistinguishable from a model that
+    /// declined to act -- the same misattribution `ReplyTruncated` exists to prevent,
+    /// with the harness rather than the cap doing the cutting.
+    StopSequenceMisfire,
 }
 
 impl FaultKind {
@@ -278,6 +293,7 @@ impl FaultKind {
             Self::CommandTimedOut => "command timed out",
             Self::PromptOverBudget => "prompt over budget",
             Self::VerifyUnavailable => "verify unavailable",
+            Self::StopSequenceMisfire => "stop sequence misfire",
         }
     }
 }

@@ -169,8 +169,42 @@ impl ToolCallStrategy for NativeTools {
             .to_string()
     }
 
+    /// **The one measured terminator: `</tool_call>`.**
+    ///
+    /// The failure this ends (see [`ToolCallStrategy::stop_sequences`]): the model emits
+    /// one complete valid call, closes it with `</tool_call>`, and then keeps going --
+    /// starting a SECOND call in a different format and running to the token cap. Every
+    /// wasted token in that reply comes AFTER this marker, so cutting there costs nothing
+    /// and saves the rest of the generation.
+    ///
+    /// Why only this one, and why it is safe:
+    ///
+    /// * It is MARKUP, not code. The ChatML/Qwen family (Mellum2, Qwen2.5-Coder, Tiel)
+    ///   writes it as the closing half of its own `<tool_call>…</tool_call>` wrapper --
+    ///   it is a chat-template artifact leaking into the content, which is precisely why
+    ///   it never belongs in a payload. Contrast a SYNTACTIC stop, tested earlier: a
+    ///   closing brace followed by a newline occurs inside a `write_file` content body,
+    ///   and one run in five then produced NO tool call at all.
+    /// * It is checked at `openai.rs:2051`, where the same marker is documented from a
+    ///   live capture -- `{"tool":"finish"}</tool_call>` repeated ~60 times to the cap.
+    ///
+    /// Deliberately EXCLUDED: `<|im_end|>` (a special token the server already treats as
+    /// end-of-generation; sending it as a text stop is redundant), and the terminators of
+    /// families not in use here -- `</function>`, `<|tool▁call▁end|>`. An unobserved stop
+    /// string is pure downside: it can only cut output we did want.
+    ///
+    /// The residual risk is a payload that legitimately CONTAINS `</tool_call>` -- a
+    /// `write_file` whose content is itself a chat template, or a test fixture carrying
+    /// the literal. That reply is cut mid-JSON and yields no parseable call, so
+    /// [`crate::FaultKind::StopSequenceMisfire`] reports it rather than letting it read
+    /// as the model declining to act.
+    fn stop_sequences(&self) -> Vec<String> {
+        vec!["</tool_call>".to_string()]
+    }
+
     fn prepare_request(&self, req: &mut GenerateRequest, registry: &ToolRegistry) {
         req.constraint = Some(OutputConstraint::Tools(tool_schemas(registry)));
+        req.stop = self.stop_sequences();
     }
 
     fn request_overhead_text(&self, registry: &ToolRegistry) -> String {
@@ -264,6 +298,9 @@ impl ToolCallStrategy for Grammar {
             Some(n) => registry_gbnf_with_scratchpad(registry, n),
         };
         req.constraint = Some(OutputConstraint::Grammar(grammar));
+        // No stop sequences: the grammar already halts decoding at the end of a
+        // well-formed object, and a text stop could only cut a payload short.
+        req.stop = self.stop_sequences();
     }
 
     fn extract(&self, raw: &str, registry: &ToolRegistry) -> Result<ValidatedCall, RepairError> {

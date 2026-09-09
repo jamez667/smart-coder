@@ -1324,3 +1324,155 @@ fn a_capped_reply_that_still_carries_a_call_is_not_a_stall() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// **The stop-sequence misfire detector must be seen to fire.**
+///
+/// A kind with no observed firing is not a detector. The strategy sets
+/// `stop: ["</tool_call>"]` to end the run-on second call that took 66% of a 12-rung
+/// Mellum2-12B run's wall clock. The marker is chat-template markup, so it should never
+/// occur inside a payload -- but a `write_file` whose content IS a chat template, or a
+/// fixture carrying the literal, would contain it, and the server would cut mid-JSON.
+///
+/// The signature is exact: we asked for stop sequences, the server says it stopped on
+/// one (`finish_reason: "stop"`, not `"length"` -- that is `ReplyTruncated`), and the
+/// reply yields no parseable call. Without this the turn is indistinguishable from a
+/// model that declined to act, which is the misattribution the fault vocabulary exists
+/// to prevent -- with the harness, not the cap, doing the cutting.
+struct CutMidCall(std::cell::Cell<usize>);
+impl ModelBackend for CutMidCall {
+    fn name(&self) -> &str {
+        "cut-mid-call"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::OpenAiStyle,
+            on_device: false,
+        }
+    }
+    fn generate(&self, r: &GenerateRequest) -> Result<GenerateResponse> {
+        // The strategy must actually have asked for a stop sequence, or the fault is
+        // testing nothing.
+        assert_eq!(
+            r.stop,
+            vec!["</tool_call>".to_string()],
+            "NativeTools must put its terminator on every request"
+        );
+        let n = self.0.get();
+        self.0.set(n + 1);
+        if n == 0 {
+            // The misfire: an edit_file whose old_str contained the marker, so the
+            // server cut mid-anchor. Short, so `ReplyTruncated`'s `ran_long` guard
+            // cannot fire and steal the attribution.
+            GenerateResponse::with_finish_reason(
+                r#"{"tool":"edit_file","path":"a.txt","old_str":"<tool_call"#,
+                Some("stop".into()),
+            )
+        } else {
+            GenerateResponse::with_finish_reason(r#"{"tool":"finish"}"#, Some("stop".into()))
+        }
+        .pipe_ok()
+    }
+}
+
+/// Tiny helper so the mock reads as one expression.
+trait PipeOk: Sized {
+    fn pipe_ok(self) -> Result<Self> {
+        Ok(self)
+    }
+}
+impl PipeOk for GenerateResponse {}
+
+#[test]
+fn a_stop_that_cut_mid_call_raises_a_misfire_fault() {
+    let ws = temp("stop-misfire");
+    std::fs::write(ws.join("a.txt"), "let t = 1;\n").unwrap();
+
+    let backend = CutMidCall(std::cell::Cell::new(0));
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &sc_core::NativeTools,
+        "edit a.txt",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let misfires = faults_of(&events, FaultKind::StopSequenceMisfire);
+    assert_eq!(
+        misfires.len(),
+        1,
+        "exactly the cut turn, not the healthy one that followed: {misfires:?}"
+    );
+    let (detail, step) = &misfires[0];
+    assert_eq!(*step, 1, "on the turn it happened");
+    assert!(
+        detail.contains("</tool_call>"),
+        "the detail names the sequence that fired: {detail}"
+    );
+
+    // And it is NOT reported as a token-cap truncation -- different cause, different fix.
+    assert!(
+        faults_of(&events, FaultKind::ReplyTruncated).is_empty(),
+        "a stop-sequence cut is not a cap truncation"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **The detector must stay silent on a HEALTHY stop-sequence hit.**
+///
+/// That is the whole point of the stop list: the server stops at the marker with the
+/// complete call in front of it. `finish_reason: "stop"` plus a parseable call is the
+/// success case, and a fault there would make the count noise.
+struct CleanStop;
+impl ModelBackend for CleanStop {
+    fn name(&self) -> &str {
+        "clean-stop"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_context_tokens: 8_192,
+            tool_calling: ToolCalling::OpenAiStyle,
+            on_device: false,
+        }
+    }
+    fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+        Ok(GenerateResponse::with_finish_reason(
+            r#"{"tool":"finish"}"#,
+            Some("stop".into()),
+        ))
+    }
+}
+
+#[test]
+fn a_clean_stop_with_a_parseable_call_raises_nothing() {
+    let ws = temp("stop-clean");
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    run_agent_observed(
+        &CleanStop,
+        None,
+        &default_registry(),
+        &sc_core::NativeTools,
+        "finish",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    assert!(
+        faults_of(&events, FaultKind::StopSequenceMisfire).is_empty(),
+        "the success case must be silent"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

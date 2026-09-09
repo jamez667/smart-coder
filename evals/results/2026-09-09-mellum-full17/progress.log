@@ -5,3 +5,11 @@ model mellum2-12b at http://localhost:11441/v1, built from adea9d5 (17 tasks x 1
   [1/1] control(6)   rust-located               PASS                              4s
   [1/1] control(6)   rust-symptomatic           PASS                            189s
   [1/1] control(6)   rust-misdirected           still red                       316s
+  [1/1] control(6)   rust-two-stage             still red                       546s
+  [1/1] control(6)   rust-invariant             PASS                              5s
+  [1/1] control(6)   engine-diagonal-path       PASS                             17s
+  [1/1] control(6)   engine-diagonal-wired      still red                       140s
+  [1/1] control(6)   engine-grid-scan           still red                       352s
+  [1/1] control(6)   engine-ecs-query           still red                       168s
+  [1/1] control(6)   rust-multi-site            still red                       661s
+  [1/1] control(6)   rust-signature-change      PASS                            205s

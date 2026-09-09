@@ -1805,6 +1805,78 @@ Connection: close
         );
     }
 
+    /// **`stop` and `tools` must coexist on the wire.**
+    ///
+    /// The strategy sets both on the same request: the tool schemas so the model can
+    /// call, and `stop: ["</tool_call>"]` so it cannot emit a second run-on call after
+    /// the first. They are composed independently in `build_body`, and this pins that --
+    /// a `stop` list that silently dropped when `tools` was attached would leave the 66%
+    /// wall-clock waste in place with nothing saying so.
+    #[test]
+    fn a_stop_list_rides_alongside_native_tools() {
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        let req = GenerateRequest::new(vec![Message::user("edit tokenizer.rs")])
+            .with_constraint(OutputConstraint::Tools(vec![crate::ToolSchema {
+                name: "edit_file".into(),
+                description: "Edit a file.".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]))
+            .with_stop(["</tool_call>"]);
+        OpenAiBackend::new(base, "mellum")
+            .with_native_tools()
+            .generate(&req)
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        assert_eq!(
+            body["stop"],
+            serde_json::json!(["</tool_call>"]),
+            "the stop list reaches the wire: {body}"
+        );
+        // And neither half displaced the other.
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(body["tools"][0]["function"]["name"], "edit_file");
+        assert_eq!(body["tool_choice"], "required");
+    }
+
+    /// The same on the STREAMING path, which builds its body through the same
+    /// `build_body` -- the drift that once lost `tools` there would lose `stop` too.
+    #[test]
+    fn a_streamed_request_carries_the_stop_list_with_its_tools() {
+        let (base, rx) = stub_server_raw(DONE_SSE, "text/event-stream");
+        let req = GenerateRequest::new(vec![Message::user("go")])
+            .with_constraint(OutputConstraint::Tools(vec![crate::ToolSchema {
+                name: "read_file".into(),
+                description: "Read a file.".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]))
+            .with_stop(["</tool_call>"]);
+        OpenAiBackend::new(base, "mellum")
+            .with_native_tools()
+            .generate_streaming(&req, &mut |_: &str| {})
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stop"], serde_json::json!(["</tool_call>"]), "{body}");
+        assert_eq!(body["tool_choice"], "required", "{body}");
+    }
+
+    /// An EMPTY stop list sends no `stop` field at all -- `ParseRepair` and `Grammar`
+    /// must produce a byte-for-byte unchanged request.
+    #[test]
+    fn an_empty_stop_list_puts_no_stop_field_on_the_wire() {
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        OpenAiBackend::new(base, "m")
+            .generate(&GenerateRequest::new(vec![Message::user("hi")]))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        assert!(body.get("stop").is_none(), "no empty stop field: {body}");
+    }
+
     #[test]
     fn llama_cpp_forwards_a_gbnf_grammar() {
         let (base, rx) = stub_server(

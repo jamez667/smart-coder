@@ -96,10 +96,32 @@ pub trait ToolCallStrategy {
     /// since validity is enforced downstream.
     fn system_preamble(&self, registry: &ToolRegistry) -> String;
 
+    /// The strings that END a tool call for this strategy's model, sent to the
+    /// server as `stop` so decoding halts the instant a call is complete.
+    ///
+    /// **This is a wall-clock fix, not a correctness one.** Measured over a 12-rung
+    /// Mellum2-12B run: 91 replies emitted ONE complete valid call, closed it, then
+    /// started a SECOND call in a different format and ran to the 3,072-token cap --
+    /// ~1,729 of 2,606 seconds, 66% of the wall clock, generating text the extractor
+    /// then discarded. Failing rungs averaged 12.7 such replies, passing rungs 2.5.
+    /// The parse never lost a turn; the run lost the time, and the junk poisoned the
+    /// server's prefix cache.
+    ///
+    /// Empty by default, so a strategy that has not measured a terminator adds no
+    /// risk: a stop sequence that fires inside a legitimate payload truncates real
+    /// output, which is strictly worse than the waste it saves.
+    fn stop_sequences(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Mutate the outgoing request to apply any backend-side constraint (native
-    /// tools, JSON-schema mode, GBNF grammar). The default does nothing — correct
-    /// for the plain-completion parse+repair path.
-    fn prepare_request(&self, _req: &mut GenerateRequest, _registry: &ToolRegistry) {}
+    /// tools, JSON-schema mode, GBNF grammar) and the strategy's stop sequences.
+    /// The default applies only the stop sequences (none, unless the strategy
+    /// overrides [`Self::stop_sequences`]) — correct for the plain-completion
+    /// parse+repair path.
+    fn prepare_request(&self, req: &mut GenerateRequest, _registry: &ToolRegistry) {
+        req.stop = self.stop_sequences();
+    }
 
     /// The text this strategy adds to the REQUEST outside the messages -- the native
     /// `tools` JSON, for a strategy that sends schemas structurally -- so the prompt
