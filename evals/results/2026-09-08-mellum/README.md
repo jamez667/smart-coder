@@ -1,0 +1,47 @@
+# Mellum2-12B-A2.5B on the 17-rung ladder — ABANDONED after 6 runs
+
+Faster at generating, far worse at the work. Stopped early because the result
+was not close.
+
+| task | Mellum | | | Tiel (same rungs) |
+| --- | --- | --- | --- | --- |
+| | outcome | steps | secs | |
+| rust-stated | PASS | 2 | 4 | PASS, 2 steps |
+| rust-located | PASS | 3 | 5 | PASS, 4 steps |
+| rust-symptomatic | **STILL-RED** | 23 | 368 | PASS, 3 steps, 8s |
+| rust-misdirected | **STILL-RED** | 28 | 337 | PASS, 4 steps, 18s |
+| rust-two-stage | **STILL-RED** | 29 | **2847** | PASS, 4 steps, 9s |
+| rust-invariant | PASS | 7 | 6 | PASS, 3 steps, 8s |
+
+It solves the two easiest rungs (the fix is named in the task text) and fails
+everything requiring diagnosis. Tiel scores 51/51 on this suite.
+
+## The tell: 15 truncated replies per failed run
+
+Each failure burned ~350-400k prompt tokens with 14-15 `ReplyTruncated` faults —
+the model rambling past the 3,072-token cap on every hard turn, never
+converging on a call. That is the failure mode that wastes the most wall-clock,
+and it is why `rust-two-stage` took 47 minutes before giving up.
+
+## Throughput was never the problem
+
+Measured before this run: Mellum generates at 151 tok/s (3080 Ti) and 216 tok/s
+(3080), against Tiel's 92-110. Two instances run concurrently at ~222 tok/s
+combined. All true, and all irrelevant — a model that cannot finish the task
+does not benefit from finishing tokens faster.
+
+This is the clearest evidence yet for the day's recurring lesson: **turn count
+and task completion dominate, not token rate.** A model 2x faster per token
+that needs 10x the turns is 5x slower in practice.
+
+## Hardware note worth keeping
+
+The 3080 sits on an **x4 Gen1** link and was still the faster card for
+inference. PCIe carries weights at load time and traffic between cards for a
+*split* model; once weights are resident on one card, generation never crosses
+the bus. Part of why Tiel is slower is that `--tensor-split 11,9` pays
+inter-GPU traffic per token — a single-card model that is good enough would win
+on that alone. Mellum is not good enough.
+
+Both Mellum profiles remain in the ops compose (`--profile mellum`) with these
+numbers recorded, so nobody re-runs this experiment blind.
