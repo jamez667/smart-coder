@@ -32,6 +32,32 @@ use crate::recovery::{action_hash, failure_signature, StallDetector, StopReason}
 use crate::strategy::ToolCallStrategy;
 use crate::text::{first_line, mentioned_identifiers};
 
+/// The fraction of the prompt budget the recent window is evicted down to ONCE eviction
+/// has been triggered (see the assembly loop below).
+///
+/// A CONSTANT, not an `AgentConfig` field, deliberately. This number is a property of how
+/// a prefix KV cache works -- llama.cpp reuses the longest byte-identical prefix, so any
+/// shrink forces a full re-prefill of what remains -- and not a preference about the run.
+/// A user who turns it down gets a silently slower agent with no error and no way to tell;
+/// a user who turns it up gets thrashing back. `keep_recent_turns` is the knob that belongs
+/// to the user (how much verbatim history they want), and it stays the absolute floor.
+///
+/// 0.8 is the starting point the measured trace argues for: on the 15-turn refactor the
+/// prompt sat at ~48k against a ~50k budget and each of the last three turns evicted again.
+/// A 20% gap at that size is ~10k tokens of headroom, which on that trace's per-turn growth
+/// (+584 on the largest clean append, and single-turn reads of a few thousand) is several
+/// turns of appending before the next eviction -- against one turn today.
+const WINDOW_EVICT_TARGET: f64 = 0.8;
+
+/// The token count the window is evicted down to for a given prompt budget.
+///
+/// Saturates at `budget` so a pathological fraction can never ASK for more room than the
+/// budget itself, which would make an already-fitting prompt look over target.
+fn window_evict_target(budget: usize) -> usize {
+    let target = (budget as f64 * WINDOW_EVICT_TARGET) as usize;
+    target.min(budget)
+}
+
 /// Run the agent against `instruction` in `workspace` with the default registry,
 /// choosing the strongest tool-call strategy the backend can enforce (spec 02).
 /// The name of a tool the prompt steers toward but the registry does not offer.
@@ -459,6 +485,12 @@ pub fn run_agent_observed(
     const UNCHANGED_FAILURE_LIMIT: usize = 3;
     let mut last_failure_sig: Option<u64> = None;
     let mut failure_sig_streak = 0usize;
+    // Is the eviction loop currently in its "evict deeper" pass? Set the moment the
+    // builder reports it had to drop or clip, cleared when the loop settles on a prompt.
+    // It exists so the deeper WINDOW_EVICT_TARGET is applied ONLY on a turn where eviction
+    // was actually triggered: a prompt that already fits never sets it, so it is never
+    // shrunk on account of the target.
+    let mut evicting = false;
     // Shell-command approvals accumulated this run via `Confirmation::AllowRemember`
     // (spec 06). Owned by the loop and mutated in place, so `cfg` stays shared and
     // `PermissionPolicy` is never mutated. Checked in addition to the static policy.
@@ -503,6 +535,24 @@ pub fn run_agent_observed(
         // is down to `keep_recent_turns` (the verbatim minimum). Evicting from the FRONT is
         // what keeps the prompt append-only between turns: nothing after the summary moves
         // unless a turn actually leaves.
+        //
+        // EVICTION HAS HYSTERESIS. Once it fires it does not stop at "just fits": it keeps
+        // going until the prompt is under WINDOW_EVICT_TARGET of the budget, so the next
+        // several turns have room to APPEND without breaking the prefix again.
+        //
+        // Evicting the bare minimum leaves the prompt sitting on the budget ceiling, so the
+        // very next turn overflows and evicts again -- and llama.cpp reuses only the longest
+        // byte-identical PREFIX, so every shrink re-prefills everything that remains.
+        // Measured on a real 15-turn refactor (evals/results/2026-09-08-refactor-fixed):
+        // the prompt grew monotonically to call 12 (48,307 tokens) and then shrank on each
+        // of the last three turns (-10,872, -1,094, -8,768). Cache hit was 58% (85k reused /
+        // 61k re-prefilled) against 81% on the eval ladder.
+        //
+        // THE TRADE, stated plainly: evicting deeper means the model loses older turns
+        // SOONER than it strictly had to -- they survive only as the compacted summary. We
+        // pay that to buy a stable prefix over the turns that follow, because on this
+        // workload a re-prefill costs whole seconds and a slightly shorter verbatim window
+        // costs a summary line. `keep_recent_turns` remains the absolute floor either way.
         let (built, pinned_full_files) = loop {
             let (segments, pinned) = assemble::assemble_segments(
                 cfg,
@@ -518,12 +568,22 @@ pub fn run_agent_observed(
             let raw_chars: usize = segments.iter().map(|s| s.text.len()).sum();
             let built = builder.build(segments);
             let built_chars: usize = built.messages.iter().map(|m| m.content.len()).sum();
+            // The TRIGGER is unchanged: did the builder have to drop or clip anything?
             let over = built.tokens_used > built.budget || built_chars < raw_chars;
-            if over && recent.len() > cfg.keep_recent_turns.max(1) {
+            // The TARGET only governs how far to go ONCE TRIGGERED. A prompt that fit on
+            // arrival is left completely alone -- that is the common case and it must stay
+            // byte-identical, so `evicting` is never set by a turn that simply fits.
+            if over {
+                evicting = true;
+            }
+            let target = window_evict_target(built.budget);
+            let want_more = over || (evicting && built.tokens_used > target);
+            if want_more && recent.len() > cfg.keep_recent_turns.max(1) {
                 recent.evict_oldest();
                 evicted_turns += 1;
                 continue;
             }
+            evicting = false;
             break (built, pinned);
         };
         peak_prompt_tokens = peak_prompt_tokens.max(built.tokens_used);

@@ -14,13 +14,21 @@ thinking. **Optimise turns and prefill, not sampling.**
 
 ---
 
-## 1. Batch window eviction — IN PROGRESS
+## 1. Batch window eviction — DONE (2026-09-08)
 
-The prompt grows monotonically and then shrinks once per turn as eviction drops
+The prompt grew monotonically and then shrank once per turn as eviction dropped
 the minimum needed to fit, breaking the KV prefix every turn near the end of a
-run. Cache hit 58% here vs 81% on the ladder. Fix is hysteresis: once eviction
-triggers, evict down to ~80% of budget so the next several turns append
-cleanly.
+run. Cache hit 58% here vs 81% on the ladder. Fixed with hysteresis
+(`WINDOW_EVICT_TARGET = 0.8`): once eviction triggers, evict down to ~80% of
+budget so the next several turns append cleanly — roughly 3-6 turns of headroom
+per eviction instead of one. Regression test `evict_hysteresis.rs`; shrink
+turns went from `[10, 11, 14, 19]` (10 and 11 adjacent) to `[8, 10, 12, 14, 16,
+18, 23]`.
+
+**Trap worth remembering:** uniform observation sizes do NOT reproduce this —
+evict-one/append-one nets out. The bug only bites when observations grow over
+the run, which is what the real trace does. A test built on uniform reads
+passes against the unfixed code and proves nothing.
 
 ---
 
@@ -66,7 +74,38 @@ multi-step task. A status file nobody reads is a cost, not a feature.
 
 ---
 
-## 3. Let the model act on what it just read
+## 3. Wire `sc-review` into the single-agent loop
+
+`sc-review` already exists — four lenses (Duplication, ErrorHandling,
+AbstractionFit, UnrelatedChanges), grounding against the repo map,
+corroboration between reviewers, ranking — and it is **only wired into the
+swarm**. The single-agent loop that sc-win, the eval and the probes all use
+never calls it.
+
+**It would have caught today's worst failure.** The orphan-file run created
+`app/net.rs`, wired nothing, deleted nothing, and was reported as a verified
+success. That diff is exactly the `UnrelatedChanges`/`AbstractionFit` shape, and
+`sc-review`'s own doc comment names the class: things invisible to a test suite.
+It would NOT have caught the 246s "I am done" loop — that was a correct diff
+with wasted turns, and review runs after the work.
+
+**Where it belongs: a separate step at `finish`, not in the advisor.** They are
+different jobs with different inputs — the advisor is a one-sentence nudge from
+a summary while the model is stuck; review is a structured pass over a diff.
+Merging them makes the advisor's blindness worse, and it is already inert. A
+corroborated finding at `finish` should become an observation the model must
+answer, mirroring the existing test gate. This fits the green-at-start fix,
+where `finish` is now a deliberate act on refactor-shaped work.
+
+**Cost to weigh:** a model pass per finish attempt, on the path that is already
+our bottleneck against pi, and findings are judgement rather than fact (which
+is why the crate requires corroboration before anything may block). Measure
+whether it catches an incomplete refactor WITHOUT adding turns to runs that
+were already correct.
+
+---
+
+## 4. Let the model act on what it just read
 
 The trace shows a read-then-act pattern costing two turns where one would do.
 Returning a numbered view of the changed region after an edit — so the model
