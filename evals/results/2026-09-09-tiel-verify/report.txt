@@ -1,0 +1,60 @@
+
+=== ladder A/B ===
+
+arm         solved      of   rate
+control(6)      17      17   100%
+
+--- per rung (solved/total across 1 round(s)) ---
+rung                       control(6)
+stated                            1/1
+located                           1/1
+symptomatic                       1/1
+misdirected                       1/1
+two-stage                         1/1
+invariant                         1/1
+engine-additive                   1/1
+engine-two-layer                  1/1
+engine-multi-site                 1/1
+engine-novel-generic              1/1
+cross-file-variant                1/1
+cross-file-signature              1/1
+cross-file-cause                  1/1
+cross-file-trait                  1/1
+recovery-replan                   1/1
+recovery-unchanged-failure        1/1
+recovery-anchor-miss              1/1
+
+--- context cost (prompt tokens summed over every turn) ---
+arm               total     per task   vs first
+control(6)       304120        17889       100%
+
+  task                     control(6)
+  rust-stated                    2086
+  rust-located                   2184
+  rust-symptomatic               2446
+  rust-misdirected               6203
+  rust-two-stage                 5723
+  rust-invariant                 2447
+  engine-diagonal-path          15198
+  engine-diagonal-wired         62733
+  engine-grid-scan              40460
+  engine-ecs-query              23299
+  rust-multi-site               33288
+  rust-signature-change         37874
+  rust-hidden-invariant          2802
+  rust-trait-impl               43406
+  rust-plausible-wrong-fix       4009
+  rust-ineffective-edit          9639
+  rust-shifting-anchor          10323
+
+--- prefix cache (what the SERVER re-prefilled, vs what we sent) ---
+arm                sent    prefilled       cached  hit rate
+control(6)       304120        72702       301479       81%
+  a HIGH hit rate is the append-only prompt working: only the newly appended tokens
+  were prefilled. A rate near 0% on a multi-turn task means the prefix is NOT holding.
+
+--- process (per task, averaged) ---
+arm         steps  first edit  re-reads  wasted     secs
+control(6)    4.7         3.3       0.0     0.2       18
+
+--- reading this ---
