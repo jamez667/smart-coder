@@ -60,22 +60,28 @@ impl RecentWindow {
         calls: &[ToolCallRecord],
         observation: &str,
     ) {
-        let (action, observation) = if calls.is_empty() {
-            (
-                Message::assistant(action.to_string()),
-                Message::user(observation.to_string()),
-            )
+        // Build the action FIRST and pair the observation to what it actually kept.
+        // `assistant_with_calls` drops the whole turn's calls when any one of them has
+        // arguments that are not valid JSON (a reply truncated at the token cap, which the
+        // harness still salvages usable work from). When that happens the turn must revert
+        // ENTIRELY to the pre-fix shape: a `tool` result whose `tool_call_id` names a call
+        // no longer in the history is malformed in its own right, and servers reject it.
+        // So the pairing reads `has_tool_calls()`, never the `calls` argument.
+        let action_msg = if calls.is_empty() {
+            Message::assistant(action.to_string())
         } else {
+            Message::assistant_with_calls(action.to_string(), calls.to_vec())
+        };
+        let observation = if action_msg.has_tool_calls() {
             // The result pairs to the FIRST call: the harness executes exactly one tool
             // per turn, so a reply carrying several is the model over-answering and only
             // the first is run. Pairing the observation to a call that never ran would
             // be a worse lie than not pairing it at all.
-            let id = calls[0].wire_id();
-            (
-                Message::assistant_with_calls(action.to_string(), calls.to_vec()),
-                Message::tool(id, observation.to_string()),
-            )
+            Message::tool(action_msg.tool_calls[0].wire_id(), observation.to_string())
+        } else {
+            Message::user(observation.to_string())
         };
+        let action = action_msg;
         self.turns.push(Turn {
             action,
             notes: vec![observation],

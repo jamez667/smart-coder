@@ -94,8 +94,8 @@ impl ToolCallRecord {
     /// time.** When the model's output is cut off at the token cap mid-`write_file`, the
     /// harness's truncation salvage (`repair_truncated_file_write`) still recovers usable
     /// work from the partial body — but the `arguments` the server handed over are
-    /// literally unterminated (`"content":"fn main() {
-  ...` with no closing quote).
+    /// literally unterminated: a `"content"` string opened and never closed, because the
+    /// bytes that would have closed it never arrived.
     /// Replaying those bytes verbatim inside a `tool_calls` array makes the NEXT request
     /// unparseable, and llama.cpp answers the whole thing with an HTTP 500 — which kills
     /// the task outright, salvaged work and all. Observed on `engine-diagonal-path`:

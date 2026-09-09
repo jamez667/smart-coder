@@ -237,3 +237,78 @@ fn native_calls_keep_the_prompt_prefix_stable() {
         }
     }
 }
+
+/// A truncated `write_file` reply as the token cap actually produces it: the harness's
+/// normalised text AND the server's `tool_calls`, both carrying arguments that were cut
+/// off mid-`content` and are therefore not valid JSON.
+fn truncated_write() -> GenerateResponse {
+    const ARGS: &str =
+        "{\"path\":\"astar.rs\",\"content\":\"    None\n}\n\n/// A* over a caller-supplied bool grid";
+    // The extractor sees the same truncated text the backend normalised from the call.
+    let mut r = GenerateResponse::new(format!("{{\"tool\":\"write_file\",{}", &ARGS[1..]));
+    r.tool_calls = vec![ToolCallRecord::new("call_cut", "write_file", ARGS)];
+    r
+}
+
+/// **THE REGRESSION, through the loop.** A turn whose native `arguments` were truncated
+/// at the token cap must not put those bytes back on the wire.
+///
+/// The harness salvages real work out of such a reply (`repair_truncated_file_write`), so
+/// the run should continue — but replaying the malformed `arguments` inside a `tool_calls`
+/// array made llama.cpp fail to parse its OWN request and answer HTTP 500, aborting the
+/// task at 0 steps. Observed on `engine-diagonal-path`. The turn must degrade to the
+/// pre-native shape instead: plain assistant content, plain user observation.
+#[test]
+fn a_truncated_native_call_is_not_replayed_as_a_native_call() {
+    let reqs = requests_for(
+        vec![
+            truncated_write(),
+            native("finish", r#"{"summary":"done"}"#, "call_2"),
+        ],
+        native_caps(),
+        &NativeTools,
+    );
+    assert!(
+        reqs.len() >= 2,
+        "the loop survived the truncation and went on"
+    );
+
+    let second = &reqs[1];
+    // Nothing on this request carries unparseable arguments...
+    for m in second {
+        for tc in &m.tool_calls {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&tc.arguments).is_ok(),
+                "a call with invalid JSON arguments reached the request: {:?}",
+                tc.arguments
+            );
+        }
+    }
+    // ...and specifically, the truncated turn kept none.
+    let action = second
+        .iter()
+        .find(|m| m.role == Role::Assistant && m.content.contains("write_file"))
+        .expect("turn 1's action is replayed");
+    assert!(
+        action.tool_calls.is_empty(),
+        "the truncated call must be dropped, not replayed: {:?}",
+        action.tool_calls
+    );
+
+    // The observation stays consistent with it: a plain user message, no dangling id.
+    assert!(
+        second
+            .iter()
+            .all(|m| m.tool_call_id.as_deref() != Some("call_cut")),
+        "no result may name a call that is no longer in the history"
+    );
+    let shipped: std::collections::HashSet<String> = second
+        .iter()
+        .flat_map(|m| m.tool_calls.iter().map(|tc| tc.wire_id()))
+        .collect();
+    for m in second {
+        if let Some(id) = &m.tool_call_id {
+            assert!(shipped.contains(id), "dangling tool_call_id {id}");
+        }
+    }
+}

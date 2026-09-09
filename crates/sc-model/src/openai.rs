@@ -327,7 +327,7 @@ impl OpenAiBackend {
     /// streamed run silently lost its `tools`/`grammar` while the transcript still
     /// recorded the constraint as sent. One builder means the two cannot drift again.
     fn build_body(&self, req: &GenerateRequest, stream: bool) -> serde_json::Value {
-        let messages: Vec<serde_json::Value> = req.messages.iter().map(wire_message).collect();
+        let messages = wire_messages(&req.messages);
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -871,6 +871,47 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
+/// Render the whole conversation, keeping call/result pairing intact.
+///
+/// [`wire_message`] renders one message and cannot see the sequence, but the two halves
+/// of a native call are two messages: the assistant turn carrying `tool_calls`, and the
+/// `role:"tool"` result naming one of those ids. When the validity guard drops an
+/// assistant turn's calls (its `arguments` were truncated mid-string and are not JSON),
+/// the result that followed it is left naming an id no longer in the request — dangling,
+/// malformed, and rejected by strict servers. So a `tool` message whose id no assistant
+/// turn actually shipped is demoted to a plain user message, which is precisely the
+/// pre-native shape and what the harness sent for its entire life before that round trip.
+fn wire_messages(msgs: &[crate::Message]) -> Vec<serde_json::Value> {
+    let shipped: std::collections::HashSet<String> = msgs
+        .iter()
+        .filter(|m| replays_calls(m))
+        .flat_map(|m| m.tool_calls.iter().map(|tc| tc.wire_id()))
+        .collect();
+    msgs.iter()
+        .map(|m| match (&m.role, &m.tool_call_id) {
+            (Role::Tool, Some(id)) if !shipped.contains(id) => {
+                serde_json::json!({"role": role_str(Role::User), "content": m.content})
+            }
+            _ => wire_message(m),
+        })
+        .collect()
+}
+
+/// Whether this message's native calls go out as a structured `tool_calls` array.
+///
+/// **The validity guard.** A call whose `arguments` is not parseable JSON must never
+/// reach the wire: the server parses that string to render its chat template, and
+/// llama.cpp answers a malformed one with HTTP 500 — killing the whole task. The
+/// truncation salvage (`repair_truncated_file_write`) recovers usable work from exactly
+/// such a reply, so the harness legitimately holds calls it must not replay natively.
+/// [`crate::Message::assistant_with_calls`] already drops them at construction; this
+/// re-checks because `Message`'s fields are public and other crates populate them
+/// directly. It is all-or-nothing per turn, matching the constructor, so the observation
+/// pairing above stays decidable.
+fn replays_calls(m: &crate::Message) -> bool {
+    !m.tool_calls.is_empty() && m.tool_calls.iter().all(ToolCallRecord::is_replayable)
+}
+
 /// Render ONE message in the OpenAI wire shape.
 ///
 /// The whole point of this function is that an assistant turn which made a native
@@ -884,7 +925,7 @@ fn role_str(role: Role) -> &'static str {
 /// `{"role":…,"content":…}` pair, byte-identical, so the `ParseRepair`/`Grammar`
 /// paths and every existing recording are untouched.
 fn wire_message(m: &crate::Message) -> serde_json::Value {
-    if !m.tool_calls.is_empty() {
+    if replays_calls(m) {
         let calls: Vec<serde_json::Value> = m
             .tool_calls
             .iter()
@@ -2066,6 +2107,173 @@ Connection: close
         assert!(msgs[0].get("tool_calls").is_none());
         assert!(msgs[1].get("tool_calls").is_none());
         assert!(msgs[1].get("tool_call_id").is_none());
+    }
+
+    /// A `write_file` whose arguments were CUT OFF at the token cap: exactly the bytes
+    /// llama.cpp choked on. Valid enough for the harness's truncation salvage to recover
+    /// work from, not valid JSON.
+    fn truncated_args() -> String {
+        // An opened `content` string that never closes — the reply ended mid-body.
+        r#"{"path":"src/astar.rs","content":"    None
+}
+
+/// A* over a caller-supplied bool grid"#
+            .to_string()
+    }
+
+    /// **THE REGRESSION (guard).** A tool call whose `arguments` is not valid JSON must
+    /// NOT go on the wire as a structured call.
+    ///
+    /// The model's reply was truncated at the token cap mid-`write_file`. The harness's
+    /// salvage still recovers usable work from it, but replaying those exact bytes inside
+    /// a `tool_calls` array makes the server fail to parse its own request: llama.cpp
+    /// answers `HTTP 500: Failed to parse tool call arguments as JSON ... missing closing
+    /// quote` and the whole task dies at 0 steps (`SOLVER-ERR`). Seen on
+    /// `engine-diagonal-path`. The fallback is the pre-native shape, which survived this
+    /// for the harness's entire life: plain content, no `tool_calls`, and a plain USER
+    /// observation with no dangling `tool_call_id`.
+    #[test]
+    fn a_truncated_tool_call_falls_back_to_plain_content_instead_of_a_500() {
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        let bad = ToolCallRecord::new("call_9", "write_file", truncated_args());
+        assert!(!bad.is_replayable(), "these arguments really are malformed");
+
+        let convo = vec![
+            Message::user("write the pathfinder"),
+            Message::assistant_with_calls(
+                r#"{"tool":"write_file","path":"src/astar.rs"}"#,
+                vec![bad],
+            ),
+            Message::tool(
+                "call_9",
+                "write_file src/astar.rs: wrote 812 bytes (truncated)",
+            ),
+        ];
+        OpenAiBackend::new(base, "tiel")
+            .generate(&GenerateRequest::new(convo))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+
+        // The assistant turn went out as PLAIN CONTENT: no `tool_calls` field at all.
+        let a = &msgs[1];
+        assert_eq!(a["role"], "assistant");
+        assert!(
+            a.get("tool_calls").is_none(),
+            "malformed arguments must never reach the wire: {a}"
+        );
+        assert_eq!(
+            a["content"],
+            r#"{"tool":"write_file","path":"src/astar.rs"}"#
+        );
+
+        // And its observation went out as a PLAIN USER message — pairing it to a call
+        // that is no longer in the request would be malformed in its own right.
+        let t = &msgs[2];
+        assert_eq!(t["role"], "user", "no dangling tool result");
+        assert!(t.get("tool_call_id").is_none(), "no dangling id: {t}");
+        assert!(t["content"].as_str().unwrap().contains("812 bytes"));
+
+        // Nothing anywhere in the body carries the unparseable bytes as an `arguments`.
+        assert!(
+            !body.to_string().contains("\\\"arguments\\\""),
+            "no arguments field survives on this request"
+        );
+    }
+
+    /// **Size is not the trigger — validity is.** A very large but WELL-FORMED argument
+    /// object still round-trips natively. The 500 was about parseability; inventing a
+    /// size cap would silently drop legitimate big writes.
+    #[test]
+    fn a_huge_but_valid_argument_object_still_goes_out_natively() {
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        let big =
+            serde_json::json!({"path": "src/big.rs", "content": "x".repeat(200_000)}).to_string();
+        let call = ToolCallRecord::new("call_big", "write_file", big.clone());
+        assert!(call.is_replayable());
+
+        OpenAiBackend::new(base, "tiel")
+            .generate(&GenerateRequest::new(vec![
+                Message::assistant_with_calls("{}", vec![call]),
+                Message::tool("call_big", "wrote"),
+            ]))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let msgs = body["messages"].as_array().unwrap();
+        let calls = msgs[0]["tool_calls"].as_array().expect("still native");
+        assert_eq!(calls[0]["function"]["arguments"], big);
+        assert_eq!(msgs[1]["role"], "tool");
+    }
+
+    /// **A mixed conversation stays well-formed.** One good call, one truncated call,
+    /// then an ordinary text turn: the good one goes out natively with its paired result,
+    /// the bad one as plain content with a plain user observation, and every `tool`
+    /// message left in the body names a call that is actually present.
+    #[test]
+    fn a_mixed_conversation_keeps_the_good_call_and_degrades_only_the_bad_one() {
+        let (base, rx) =
+            stub_server(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+        let good = ToolCallRecord::new("call_a", "read_file", r#"{"path":"lib.rs"}"#);
+        let bad = ToolCallRecord::new("call_b", "write_file", truncated_args());
+
+        let convo = vec![
+            Message::system("be terse"),
+            Message::user("build it"),
+            Message::assistant_with_calls(r#"{"tool":"read_file","path":"lib.rs"}"#, vec![good]),
+            Message::tool(
+                "call_a",
+                "read_file lib.rs:
+fn main() {}",
+            ),
+            Message::assistant_with_calls(
+                r#"{"tool":"write_file","path":"src/astar.rs"}"#,
+                vec![bad],
+            ),
+            Message::tool("call_b", "write_file: wrote 812 bytes (truncated)"),
+            Message::assistant("I will append the rest."),
+            Message::user("go on"),
+        ];
+        OpenAiBackend::new(base, "tiel")
+            .generate(&GenerateRequest::new(convo))
+            .unwrap();
+
+        let body = body_of(&rx.recv().unwrap());
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 8);
+
+        // The GOOD call is untouched: native, paired.
+        assert_eq!(msgs[2]["tool_calls"].as_array().unwrap()[0]["id"], "call_a");
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "call_a");
+
+        // The BAD one degraded, both halves together.
+        assert!(msgs[4].get("tool_calls").is_none());
+        assert_eq!(msgs[5]["role"], "user");
+        assert!(msgs[5].get("tool_call_id").is_none());
+
+        // The ordinary turns are ordinary.
+        assert_eq!(msgs[6]["role"], "assistant");
+        assert!(msgs[6].get("tool_calls").is_none());
+        assert_eq!(msgs[7]["role"], "user");
+
+        // WELL-FORMEDNESS: every `tool_call_id` in the body names an id that some
+        // assistant turn actually shipped. No dangling references anywhere.
+        let shipped: std::collections::HashSet<String> = msgs
+            .iter()
+            .filter_map(|m| m.get("tool_calls").and_then(|c| c.as_array()))
+            .flatten()
+            .map(|c| c["id"].as_str().unwrap().to_string())
+            .collect();
+        for m in msgs {
+            if let Some(id) = m.get("tool_call_id").and_then(|v| v.as_str()) {
+                assert!(shipped.contains(id), "dangling tool_call_id {id}");
+            }
+        }
     }
 
     /// **The full round trip: parse a native reply, store it, send it back the same.**
