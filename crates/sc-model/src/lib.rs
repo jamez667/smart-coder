@@ -87,6 +87,26 @@ impl ToolCallRecord {
         }
     }
 
+    /// Whether this call is safe to put on the wire: its `arguments` must parse as
+    /// JSON.
+    ///
+    /// **A truncated reply is a valid tool call and an invalid JSON string at the same
+    /// time.** When the model's output is cut off at the token cap mid-`write_file`, the
+    /// harness's truncation salvage (`repair_truncated_file_write`) still recovers usable
+    /// work from the partial body — but the `arguments` the server handed over are
+    /// literally unterminated (`"content":"fn main() {
+  ...` with no closing quote).
+    /// Replaying those bytes verbatim inside a `tool_calls` array makes the NEXT request
+    /// unparseable, and llama.cpp answers the whole thing with an HTTP 500 — which kills
+    /// the task outright, salvaged work and all. Observed on `engine-diagonal-path`:
+    /// `Failed to parse tool call arguments as JSON ... missing closing quote`, 0 steps.
+    ///
+    /// This is about VALIDITY, not size. A huge but well-formed argument object is fine
+    /// and goes out natively; a short malformed one does not.
+    pub fn is_replayable(&self) -> bool {
+        serde_json::from_str::<serde_json::Value>(&self.arguments).is_ok()
+    }
+
     /// The id this call is replayed under: the server's own when it gave one,
     /// otherwise a deterministic stand-in derived from the call itself.
     ///
@@ -148,10 +168,22 @@ impl Message {
         content: impl Into<String>,
         tool_calls: Vec<ToolCallRecord>,
     ) -> Self {
+        // THE GUARD. A call whose `arguments` is not valid JSON never reaches the wire.
+        // If ANY call on this turn is malformed the whole turn falls back to the pre-fix
+        // shape — plain assistant content, no `tool_calls` field — which is what the
+        // harness did for its entire life before the native round trip and which
+        // demonstrably survives. All-or-nothing rather than per-call, because the
+        // observation pairs to `tool_calls[0]`: dropping just the bad one would silently
+        // re-point the result at a call that never ran.
+        //
+        // The content is unaffected either way: it is the harness's normalised
+        // `{"tool":…}` text, which every extractor above already reads, so the model
+        // still sees what it did — just as prose rather than as a structured call.
+        let replayable = tool_calls.iter().all(ToolCallRecord::is_replayable);
         Self {
             role: Role::Assistant,
             content: content.into(),
-            tool_calls,
+            tool_calls: if replayable { tool_calls } else { Vec::new() },
             tool_call_id: None,
         }
     }

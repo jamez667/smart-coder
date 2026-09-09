@@ -8,14 +8,26 @@ Killed after 3 of 17 rungs (the watchdog stops on the first failure).
 | rust-located | PASS 3 steps 5s | PASS 8 steps 12s |
 | rust-symptomatic | **STILL-RED** 23 steps 368s | **STILL-RED** 32 steps 313s |
 
-## What the fix DID do
+## CORRECTION: the runaway is NOT gone
 
-**The runaway is gone.** Near-cap replies went from **14 of 114 calls to 0 of
-56**. The pathology I diagnosed — the model imitating a bare-JSON history its
-template never emits, and never reaching its stop token — was real and is
-fixed. Verified end to end against the live server: the reply now carries both
-the normalised `{"tool":…}` text and the structured call, and the assistant
-turn goes back out with `tool_calls` plus a paired `role:"tool"` result.
+An earlier version of this file claimed "near-cap replies went from 14 of 114
+to 0 of 56". **That was a measurement error and it was wrong.** I compared reply
+lengths in CHARACTERS against a cap measured in TOKENS: 9,023 chars of dense
+JSON is ~3,072 tokens, i.e. exactly the cap. `rows.jsonl` had the truth the
+whole time — `peak_reply_tokens: 3072` and `faults: [["reply truncated", 16]]`,
+one MORE than the 15 before the fix.
+
+Reading the actual replies confirms it. The longest is 9,513 chars repeating
+one identical `edit_file` (`new_str` and `old_str` both `let mut out =
+Vec::with_capacity(self.len);`) until it is cut off. Another degenerates into
+unrelated prose about string-edit distance. 15 of the 32 replies repeat a
+single call 30-98 times; those turns cost ~230s of the 313s run.
+
+What the fix DID achieve is unmeasured here: it is a genuine wire-format
+correctness fix (verified end to end against the live server — the reply
+carries the structured call and the assistant turn goes back out with
+`tool_calls` plus a paired `role:"tool"` result), but it did not stop this
+model looping.
 
 ## What it did NOT do
 
