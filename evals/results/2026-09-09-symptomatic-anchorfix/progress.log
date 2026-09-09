@@ -1,0 +1,7 @@
+model mellum2-12b at http://localhost:11441/v1, built from adea9d5 (1 tasks x 3 run(s) x 1 arm(s): control(6))
+
+  [1/3] control(6)   rust-symptomatic           still red                       218s
+  [2/3] control(6)   rust-symptomatic           still red                       172s
+  [3/3] control(6)   rust-symptomatic           still red                       100s
+
+rows appended to evals/results/2026-09-09-symptomatic-anchorfix\rows.jsonl
