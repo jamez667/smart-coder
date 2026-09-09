@@ -1,0 +1,7 @@
+model mellum2-12b at http://localhost:11440/v1, built from 65813a3 (1 tasks x 3 run(s) x 1 arm(s): control(6))
+
+  [1/3] control(6)   rust-located               PASS                              6s
+  [2/3] control(6)   rust-located               PASS                             12s
+  [3/3] control(6)   rust-located               PASS                              5s
+
+rows appended to evals/results/2026-09-09-located-guarded\rows.jsonl

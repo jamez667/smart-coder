@@ -1,0 +1,16 @@
+# One-task suite: the rung a destructive edit_file wrecked. Paths resolve
+# relative to this file, so it must live beside suite.toml.
+
+[[tasks]]
+id = "rust-located"
+description = """
+In lib.rs, `insert` merges overlapping intervals into a sorted, non-overlapping \
+set. Intervals are half-open — `[1,3)` and `[3,6)` share no point and must NOT \
+merge — but `insert` merges them anyway. The bug is in the disjointness test \
+inside the loop. Fix it so the tests pass."""
+fixture = "tasks/rust-located/fixture"
+solution = "tasks/rust-located/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_located.exe test.rs && ./t_located.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:located", "lang:rust"]
+timeout_secs = 120
