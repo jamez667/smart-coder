@@ -447,6 +447,34 @@ pub fn run_agent_observed(
     // on the very first `run_verification` of a run where nothing has happened yet, and tell a
     // model that has done no work at all to call `finish`.
     let mut made_a_change = false;
+    // Is the last recorded verification still a valid answer? See [`VerifyFreshness`] for the
+    // measurement that motivated it (five ~6s verifications in a 117s run, several redundant).
+    // Constructed dirty; the run-start baseline above is the first thing to clean it, and it
+    // is dirtied again by every turn that could have written to the workspace.
+    let mut verify_fresh = VerifyFreshness::default();
+    // The last verification result AS THE MODEL WAS SHOWN IT -- the parsed, failure-first
+    // observation, not the raw command output. Replayed verbatim when the model re-asks for a
+    // verification nothing has invalidated.
+    //
+    // Kept here rather than read back from the run log because the two verification sites
+    // record different `full` payloads (the model-invoked one records the parsed observation,
+    // the auto-verify records the raw output for the diagnostic to reason over). Replaying the
+    // run log's `full` would hand the model a different text than it got the first time -- and
+    // for the auto-verify, a raw dump whose first line the greenness check would then have to
+    // re-interpret. This is the exact string, so a replay is indistinguishable from a re-run.
+    let mut last_verify_observation: Option<String> = None;
+    if started_green.is_some() {
+        // The baseline just ran against an untouched workspace, so the workspace is factually
+        // clean until something writes to it. The baseline itself is NEVER skipped -- there is
+        // nothing to reuse before it.
+        //
+        // This does not on its own let anything be skipped: the baseline records a
+        // `BaselineVerification`, which `last_verification_green()` deliberately does not see,
+        // so `reusable_green` still says no until a real `Verification` lands. That is the
+        // conservative side of the trade and it stays that way -- the baseline exists precisely
+        // because a green-at-start workspace proves nothing about the task.
+        verify_fresh.verified();
+    }
     let mut stall_detector = StallDetector::default();
     // The harness's in-loop intervention bookkeeping: the running intervention count and the
     // bounded diagnosis/advisor/self-recovery counters the ladder spends (spec 02/03). See
@@ -1024,18 +1052,39 @@ pub fn run_agent_observed(
                     // A normal tool call. Snapshot for the journal, then dispatch.
                     let pre = mutating_path(&call, registry)
                         .map(|p| (p.clone(), Journal::snapshot(workspace, &p)));
-                    let outcome = dispatch(
-                        &call,
-                        registry,
-                        &cfg.permission,
-                        cfg.confirmer.as_deref(),
-                        &mut session_allow,
-                        &cfg.sandbox,
-                        &cfg.verify_command,
-                        cfg.dry_run,
-                        workspace,
-                        cfg.external_tool.as_deref(),
-                    );
+                    // The model asking for a verification whose answer it has already been
+                    // given. This is a measured habit, not a hypothetical: on the 117s refactor
+                    // one of the five runs was the model re-checking a suite nothing had
+                    // touched since. Hand back what the run log recorded, with a line saying
+                    // why, instead of spending another ~6s producing the identical bytes.
+                    //
+                    // Same shape as the existing "same N failures as last run" delta: the
+                    // observation the model reacts to is honest about the harness's reasoning.
+                    // Only a GREEN result is replayed -- see `VerifyFreshness::reusable_green`.
+                    let cached_verification = (call.name == "run_verification"
+                        && cfg.verify_command.is_some()
+                        && verify_fresh.reusable_green(runlog.lock().last_verification_green()))
+                    .then(|| last_verify_observation.clone())
+                    .flatten();
+                    let outcome = match cached_verification {
+                        Some(previous) => ToolOutcome::Observation(format!(
+                            "{previous}\nNOTE: nothing has changed in the workspace since this \
+                             ran, so the harness did not run it again — this is the previous \
+                             result, unchanged."
+                        )),
+                        None => dispatch(
+                            &call,
+                            registry,
+                            &cfg.permission,
+                            cfg.confirmer.as_deref(),
+                            &mut session_allow,
+                            &cfg.sandbox,
+                            &cfg.verify_command,
+                            cfg.dry_run,
+                            workspace,
+                            cfg.external_tool.as_deref(),
+                        ),
+                    };
                     let changed = pre
                         .map(|(path, before)| {
                             let after = Journal::snapshot(workspace, &path);
@@ -1048,10 +1097,28 @@ pub fn run_agent_observed(
                     // steer fires on a LATER turn (the verification after the edit), by which
                     // point this turn's `changed` is long gone.
                     made_a_change |= changed;
+                    // ...and invalidate the recorded verification. A path-carrying tool whose
+                    // bytes actually moved is the obvious case; `run_command` is included
+                    // unconditionally because a shell command can write anything (`sed -i`, a
+                    // codegen or build step) without ever touching a journalled path. Same
+                    // conservative treatment `stable.refresh_if_changed` already gives it.
+                    verify_fresh.touched(changed || call.name == "run_command");
 
                     match outcome {
                         ToolOutcome::Finished => {
-                            match gate_finish(&cfg.sandbox, &cfg.verify_command, workspace) {
+                            // Skip the gate's re-run when the recorded verification is
+                            // both still valid and green -- see `gate_finish` and
+                            // `VerifyFreshness`. This is the fifth verification of the
+                            // measured 117s run, and on that run nothing had changed since
+                            // the fourth.
+                            let fresh_green = verify_fresh
+                                .reusable_green(runlog.lock().last_verification_green());
+                            match gate_finish(
+                                &cfg.sandbox,
+                                &cfg.verify_command,
+                                workspace,
+                                fresh_green,
+                            ) {
                                 FinishGate::Allow(verified) => {
                                     if let Some(v) = verified {
                                         sink.record(&AgentEvent::Verification {
@@ -1145,6 +1212,13 @@ pub fn run_agent_observed(
                                     summary: first_line(&o),
                                     full: o.clone(),
                                 });
+                                // A verification just answered for the workspace as it stands
+                                // (whether it ran the command or replayed the cached answer --
+                                // either way the recorded result is current).
+                                verify_fresh.verified();
+                                if green {
+                                    last_verify_observation = Some(o.clone());
+                                }
                                 // Auto-finish: if the suite is green, the task is
                                 // done — a small model that forgets to call `finish`
                                 // shouldn't lose a win it already earned (spec 11).
@@ -1251,6 +1325,10 @@ pub fn run_agent_observed(
                             };
                             let changed = changed || !batch_note.is_empty();
                             made_a_change |= changed;
+                            // The batched-write pre-apply writes files 2..N of the turn
+                            // directly, bypassing the journal snapshot the `changed` above was
+                            // computed from -- so a non-empty note IS a write.
+                            verify_fresh.touched(changed);
                             (o, action, changed, tool, arg)
                         }
                     }
@@ -1625,6 +1703,13 @@ pub fn run_agent_observed(
                     summary: first_line(&report.observation()),
                     full: cmd_result.output.clone(),
                 });
+                // The suite just ran against the post-edit workspace: the recorded answer is
+                // current again. This is what lets an edit -> auto-verify -> `finish` sequence
+                // cost ONE verification instead of two.
+                verify_fresh.verified();
+                if report.all_green() {
+                    last_verify_observation = Some(report.observation());
+                }
                 // Same rule as the model-invoked `run_verification` above: green only
                 // ends the run when the suite STARTED red. On a green-at-start refactor
                 // this branch fires after the very first edit -- any edit, including one
@@ -1810,7 +1895,7 @@ mod tests;
 
 use dispatch::{
     blind_cut, dispatch, gate_finish, key_arg, looks_like_failure, mutating_path,
-    observation_cap_for, pre_apply_batched_writes, FinishGate,
+    observation_cap_for, pre_apply_batched_writes, FinishGate, VerifyFreshness,
 };
 use escalation::{mention, stopped};
 use stable::StableContext;

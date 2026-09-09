@@ -34,6 +34,66 @@ pub trait ExternalTool: Send + Sync {
     fn execute(&self, call: &sc_tools::ValidatedCall, workspace: &Path) -> Option<ToolOutcome>;
 }
 
+/// Is the last recorded verification still a valid answer for the workspace as it stands?
+///
+/// MEASURED WASTE. On a real 15-turn refactor (117s end to end) the verify command ran FIVE
+/// times at ~6s each -- the run-start baseline, two auto-verifies after edits, one the model
+/// asked for itself, and the finish gate. Several were redundant: nothing had written to the
+/// workspace between them. `cargo check` on this workspace is 6s; a project with a real test
+/// suite pays minutes for the same nothing.
+///
+/// The rule is simply: **never run the verify command when the answer cannot have changed.**
+/// The workspace only changes when something writes to it, and the loop already tracks that.
+/// So this is a one-bit cache invalidation flag, not a cache: the ANSWER lives in the run log
+/// ([`crate::runlog::RunLog::last_verification_green`] and `last_verification`), which is the
+/// same place every stop report reads it from. This only says whether that answer is stale.
+///
+/// LIFECYCLE:
+/// - starts dirty (nothing has been verified yet, so there is no answer to reuse);
+/// - [`Self::verified`] marks it clean, immediately after any verification runs;
+/// - [`Self::touched`] marks it dirty again, from every turn that could have written to the
+///   workspace.
+///
+/// WHEN IN DOUBT, DIRTY. A redundant verification costs seconds; a skipped necessary one
+/// reports a wrong answer as verified.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct VerifyFreshness {
+    dirty: bool,
+}
+
+impl Default for VerifyFreshness {
+    fn default() -> Self {
+        // Dirty at construction: nothing has been verified this run, so there is nothing to
+        // reuse and the first verification must actually run. (The run-start baseline is NOT
+        // skippable for the same reason -- it establishes the shape of the run.)
+        Self { dirty: true }
+    }
+}
+
+impl VerifyFreshness {
+    /// A verification just ran, so the recorded answer describes the workspace as it is now.
+    pub(super) fn verified(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Something may have written to the workspace. Called with the loop's own `changed`
+    /// signal OR'd with every other way a turn can write: the batched-write pre-apply, and
+    /// any `run_command` (a shell command can `sed -i` anything, so it counts as a write
+    /// whether or not it was one -- the same conservative treatment
+    /// `stable.refresh_if_changed` already gives it).
+    pub(super) fn touched(&mut self, changed: bool) {
+        self.dirty |= changed;
+    }
+
+    /// May a caller reuse `last_green` -- the run log's last recorded verification outcome --
+    /// instead of running the command? Only when nothing has changed since it was recorded
+    /// AND it was green. A red result is never reused: the model is expected to act on it,
+    /// and re-running is how it learns whether its fix landed.
+    pub(super) fn reusable_green(&self, last_green: Option<bool>) -> bool {
+        !self.dirty && last_green == Some(true)
+    }
+}
+
 /// Outcome of the whole-suite gate at `finish`.
 pub(super) enum FinishGate {
     /// Finish is honored; the bool is the verified state (None → no verify cmd).
@@ -44,13 +104,33 @@ pub(super) enum FinishGate {
 
 /// Run the configured verification before honoring `finish` (spec 11). With no
 /// command configured, finish is always allowed (verified = None).
+///
+/// `fresh_green` is the loop's [`super::VerifyFreshness`] answer to "is the last recorded
+/// verification still valid, and was it green?". When it is `true` the suite is re-run for
+/// NOTHING: nothing has touched the workspace since, so the answer cannot have moved. On a
+/// measured 15-turn refactor this gate was the fifth ~6s verification of a 117s run.
+///
+/// A STALE green must never be trusted -- that is the whole point of the flag. Every turn
+/// that could have touched the workspace dirties it (see [`super::VerifyFreshness`]), and
+/// only an undirtied green is honored here. A red result never short-circuits, so a skip
+/// can never turn a red suite into a reported green.
+///
+/// ASSUMPTION: the harness is the only writer to the workspace during a run. A human
+/// editing files by hand, or a background build, is not observed. The loop already assumes
+/// this elsewhere (the retrieval cache's `refresh_if_changed`, the journal's snapshots).
+/// Because being wrong here means reporting an unverified workspace as verified, the flag
+/// is dirtied generously: a redundant verification costs seconds, a wrongly skipped one
+/// ships a false green.
 pub(super) fn gate_finish(
     sandbox: &sc_verify::Sandbox,
     verify_command: &Option<String>,
     workspace: &Path,
+    fresh_green: bool,
 ) -> FinishGate {
     match verify_command {
         None => FinishGate::Allow(None),
+        // Fresh green: the recorded answer still stands, so honour it without a re-run.
+        Some(_) if fresh_green => FinishGate::Allow(Some(true)),
         Some(cmd) => {
             let report = sc_verify::run_verification_in(sandbox, workspace, cmd);
             if report.all_green() {
