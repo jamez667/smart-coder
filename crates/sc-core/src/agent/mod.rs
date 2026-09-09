@@ -733,7 +733,20 @@ pub fn run_agent_observed(
         // Only on a READ-ONLY run: a build run's equivalent (a long `edit_file` old_str that
         // will not encode) has a recovery that works -- the `edit_lines` steer -- and killing
         // it would throw away a run that was about to succeed.
-        if read_only_run && capped_replies >= 3 {
+        //
+        // AND ONLY IF THIS REPLY HAS NO USABLE CALL IN IT. Measured on mini-miner-2, a real
+        // 8,190-line file: the model emitted a complete, correct `finish` carrying the whole
+        // answer -- the function, the line numbers, the floor-selection order -- and then
+        // kept typing "Wait, let me double check..." until it hit the cap. That tripped the
+        // third strike and the run was killed WITH THE ANSWER IN HAND, reported to the user
+        // as "did not reach a conclusion" after two minutes of work.
+        //
+        // The kill sits before `strategy.extract`, so it never asked whether the reply was
+        // usable; it only counted how long the reply was. A rambling turn that still
+        // produced a valid call is not a model failing to converge, it is a model that
+        // converged and then kept talking. Ask first, kill second.
+        let this_reply_has_a_call = strategy.extract(&resp.content, registry).is_ok();
+        if read_only_run && capped_replies >= 3 && !this_reply_has_a_call {
             sink.record(&AgentEvent::Stalled {
                 trigger: "the model kept generating to the token cap instead of calling a tool"
                     .to_string(),

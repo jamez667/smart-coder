@@ -1247,3 +1247,80 @@ fn a_capped_build_reply_is_told_to_act_not_to_fix_its_json() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// A rambling reply that STILL emitted a valid call must not be killed.
+///
+/// Measured on a real 8,190-line file: the model produced a complete `finish`
+/// carrying the whole answer, then kept typing "Wait, let me double check" until
+/// it hit the token cap. That was the third capped reply, so the run was killed
+/// and reported as "did not reach a conclusion" — with the answer in hand. The
+/// kill sat before extraction, so it counted the reply's LENGTH and never asked
+/// whether it was usable.
+#[test]
+fn a_capped_reply_that_still_carries_a_call_is_not_a_stall() {
+    struct RamblesButAnswers(std::cell::RefCell<usize>);
+    impl ModelBackend for RamblesButAnswers {
+        fn name(&self) -> &str {
+            "rambles-but-answers"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                max_context_tokens: 32_768,
+                tool_calling: ToolCalling::None,
+                on_device: false,
+            }
+        }
+        fn generate(&self, _r: &GenerateRequest) -> Result<GenerateResponse> {
+            let mut n = self.0.borrow_mut();
+            *n += 1;
+            // Every turn: run long enough to count as capped. The first two carry no
+            // call at all; the third carries a COMPLETE finish and then rambles on.
+            let filler = "Let me reconsider this from the beginning. ".repeat(400);
+            Ok(if *n < 3 {
+                GenerateResponse::with_finish_reason(filler, Some("length".into()))
+            } else {
+                GenerateResponse::with_finish_reason(
+                    format!(
+                        r#"{{"tool":"finish","summary":"the answer is in app.rs:2886"}}{filler}"#
+                    ),
+                    Some("length".into()),
+                )
+            })
+        }
+    }
+
+    let ws = temp("capped-but-answered");
+    std::fs::write(ws.join("a.txt"), "x").unwrap();
+
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    // A read-only registry is what makes this the read-only kill path.
+    let registry = sc_tools::read_only_registry();
+    let report = run_agent_observed(
+        &RamblesButAnswers(std::cell::RefCell::new(0)),
+        None,
+        &registry,
+        &ParseRepair,
+        "what is in a.txt?",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    assert!(
+        report.finished,
+        "the run carried a valid finish and must be allowed to use it, got {:?}",
+        report.stop_reason
+    );
+    let events = log.into_inner().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCall { tool, .. } if tool == "finish"
+        )),
+        "the finish call inside the rambling reply must be executed"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
