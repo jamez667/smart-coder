@@ -4,6 +4,7 @@ use serde_json::json;
 
 use super::{call, obs, temp_dir};
 use crate::builtin::dispatch::execute;
+use crate::builtin::registry::default_registry;
 
 #[test]
 fn edit_function_replaces_the_whole_function() {
@@ -623,5 +624,275 @@ fn edit_file_disambiguates_by_whole_line() {
         "def is_even(n):\n    return n % 2 == 0\n\n\ndef double(n):\n    return n * 2\n",
         "only the double body line changed, indentation preserved"
     );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+// --- No-op writes: a write that changes no bytes must SAY so --------------------
+//
+// THE BUG. `edit_file` computed `content.replacen(old, new, 1)` and answered
+// "ok (1 replacement)" without ever comparing the result to what it started with. A
+// model that submitted `old_str == new_str` was told its edit landed. Measured on one
+// Mellum run: four verbatim no-op turns, each answered "ok", and the model spent the
+// rest of the run reasoning from a false premise. Every writer is checked here.
+
+/// Read a file's bytes and mtime together — the pair a no-op must leave untouched.
+fn stamp(p: &std::path::Path) -> (String, std::time::SystemTime) {
+    (
+        std::fs::read_to_string(p).unwrap(),
+        std::fs::metadata(p).unwrap().modified().unwrap(),
+    )
+}
+
+/// A no-op observation says `no-op`, says nothing was written, and explains why.
+fn assert_no_op(o: &str, why_fragment: &str) {
+    assert!(o.contains("no-op"), "must name itself a no-op: {o}");
+    assert!(
+        o.contains("nothing written"),
+        "must say nothing landed: {o}"
+    );
+    assert!(o.contains(why_fragment), "must say why: {o}");
+    // It is NOT a hard error — the tool worked, the request was vacuous.
+    // `looks_like_failure` in sc-core keys on these words in the status line; see the
+    // sibling test there.
+    let status = o.lines().next().unwrap().to_ascii_lowercase();
+    for word in ["error", "rejected", "not found", "no match", "failed"] {
+        assert!(
+            !status.contains(word),
+            "a no-op must not read as a failure ({word:?}): {o}"
+        );
+    }
+}
+
+/// THE REGRESSION. `old_str == new_str` is a no-op, and the harness must say so
+/// instead of "ok (1 replacement)".
+#[test]
+fn edit_file_with_an_identical_old_and_new_is_a_no_op() {
+    let ws = temp_dir("noop-edit");
+    let f = ws.join("a.rs");
+    std::fs::write(&f, "fn f() { return 1; }\n").unwrap();
+    let before = stamp(&f);
+
+    let e = call(json!({
+        "tool":"edit_file","path":"a.rs",
+        "old_str":"return 1;","new_str":"return 1;"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert_no_op(&o, "identical");
+    assert!(
+        !o.contains("1 replacement"),
+        "must not claim a replacement landed: {o}"
+    );
+    assert_eq!(stamp(&f), before, "the file must not be rewritten at all");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The whole-line disambiguation path writes too, and it can also land on itself.
+#[test]
+fn edit_file_whole_line_match_that_changes_nothing_is_a_no_op() {
+    let ws = temp_dir("noop-wholeline");
+    let f = ws.join("m.py");
+    // "return n" substring-matches twice, so this takes the whole-line branch.
+    std::fs::write(
+        &f,
+        "def is_even(n):\n    return n % 2 == 0\n\n\ndef double(n):\n    return n\n",
+    )
+    .unwrap();
+    let before = stamp(&f);
+
+    let e = call(json!({
+        "tool":"edit_file","path":"m.py","old_str":"return n","new_str":"return n"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert_no_op(&o, "identical");
+    assert_eq!(stamp(&f), before, "the file must not be rewritten at all");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Rewriting a file with exactly what it already holds is a no-op.
+#[test]
+fn write_file_with_identical_bytes_is_a_no_op() {
+    let ws = temp_dir("noop-write");
+    let f = ws.join("a.txt");
+    std::fs::write(&f, "hello\n").unwrap();
+    let before = stamp(&f);
+
+    let w = call(json!({"tool":"write_file","path":"a.txt","content":"hello\n"}));
+    let o = obs(execute(&w, &ws));
+
+    assert_no_op(&o, "byte-for-byte");
+    assert!(!o.contains(" ok "), "must not claim success: {o}");
+    assert_eq!(stamp(&f), before, "the file must not be rewritten at all");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Appending an empty string appends nothing.
+///
+/// Two layers, and this pins both. A model cannot reach the writer with `content: ""` —
+/// `content` is a required non-empty `String`, so the VALIDATOR refuses the call before
+/// dispatch, which is the better answer (it names the parameter). Behind it, the writer
+/// itself refuses too, because `append_file` is public and a writer that answers
+/// "ok (+0 bytes)" for a write that moved nothing is exactly the `edit_file` bug.
+#[test]
+fn append_file_with_empty_content_is_a_no_op() {
+    // Layer 1: the tool surface never lets it through.
+    let rejected = default_registry()
+        .validate(&json!({"tool":"append_file","path":"big.css","content":""}))
+        .expect_err("an empty append must not validate");
+    assert!(
+        rejected.to_string().contains("must not be empty"),
+        "got: {rejected}"
+    );
+
+    // Layer 2: the writer itself, called directly.
+    let ws = temp_dir("noop-append");
+    let f = ws.join("big.css");
+    std::fs::write(&f, "a {}\n").unwrap();
+    let before = stamp(&f);
+
+    let o = crate::builtin::write::append_file(&ws, "big.css", "");
+    assert_no_op(&o, "empty");
+    assert!(
+        !o.contains("+0 bytes"),
+        "must not report a 0-byte success: {o}"
+    );
+    assert_eq!(stamp(&f), before, "the file must not be touched at all");
+
+    // ...and it must not conjure an empty file at a path that does not exist.
+    let o = crate::builtin::write::append_file(&ws, "new.css", "");
+    assert_no_op(&o, "empty");
+    assert!(
+        !ws.join("new.css").exists(),
+        "an empty append must not conjure a file"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Replacing a line range with exactly the text already there is a no-op.
+#[test]
+fn edit_lines_replacing_a_range_with_itself_is_a_no_op() {
+    let ws = temp_dir("noop-lines");
+    let f = ws.join("a.rs");
+    std::fs::write(&f, "fn f() {\n    let x = 1;\n}\n").unwrap();
+    let before = stamp(&f);
+
+    let e = call(json!({
+        "tool":"edit_lines","path":"a.rs","start":2,"end":2,"new_text":"    let x = 1;"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert_no_op(&o, "identical");
+    assert!(!o.contains("replaced lines"), "must not claim an edit: {o}");
+    assert_eq!(stamp(&f), before, "the file must not be rewritten at all");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Replacing a function with the body it already has is a no-op.
+#[test]
+fn edit_function_with_an_identical_body_is_a_no_op() {
+    let ws = temp_dir("noop-efn");
+    let f = ws.join("m.rs");
+    let body = "fn pick(r: u32) -> u32 {\n    r + 1\n}";
+    std::fs::write(&f, format!("{body}\n")).unwrap();
+    let before = stamp(&f);
+
+    let e = call(json!({
+        "tool":"edit_function","path":"m.rs","name":"pick","new_body":body
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert_no_op(&o, "identical");
+    assert!(!o.contains("replaced lines"), "must not claim an edit: {o}");
+    assert_eq!(stamp(&f), before, "the file must not be rewritten at all");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// `create_file` has no no-op case: it refuses an existing path, so the only write it
+/// performs creates a file that was not there — always a change, empty content included.
+#[test]
+fn create_file_has_no_no_op_case() {
+    let ws = temp_dir("noop-create");
+    // Creating a file that was not there is always a workspace change...
+    let c = call(json!({"tool":"create_file","path":"e.txt","content":"x"}));
+    let o = obs(execute(&c, &ws));
+    assert!(o.contains("ok (1 bytes)"), "got: {o}");
+    assert!(ws.join("e.txt").exists());
+    // ...and a second create with the SAME content is refused, not silently "ok".
+    // That refusal, not a no-op observation, is the answer for the identical-bytes case.
+    let again = obs(execute(&c, &ws));
+    assert!(again.contains("already exists"), "got: {again}");
+    // Empty content can't even be asked for: the validator rejects it.
+    assert!(default_registry()
+        .validate(&json!({"tool":"create_file","path":"z.txt","content":""}))
+        .is_err());
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **THE HAPPY PATH IS PINNED.** The no-op guard must not touch the wording of a real
+/// edit — the messages below are the exact bytes each writer produced before the fix,
+/// and several places (the UI, `looks_like_failure`, the batched-write note) key on them.
+#[test]
+fn a_real_write_still_reports_exactly_as_before() {
+    let ws = temp_dir("noop-happy");
+
+    std::fs::write(ws.join("a.rs"), "fn f() { return 1; }\n").unwrap();
+    assert_eq!(
+        obs(execute(
+            &call(json!({
+                "tool":"edit_file","path":"a.rs","old_str":"return 1;","new_str":"return 2;"
+            })),
+            &ws
+        )),
+        "edit_file a.rs ok (1 replacement)"
+    );
+
+    assert_eq!(
+        obs(execute(
+            &call(json!({"tool":"write_file","path":"w.txt","content":"hello\n"})),
+            &ws
+        )),
+        "write_file w.txt ok (6 bytes)"
+    );
+
+    assert_eq!(
+        obs(execute(
+            &call(json!({"tool":"create_file","path":"c.txt","content":"hi"})),
+            &ws
+        )),
+        "create_file c.txt ok (2 bytes)"
+    );
+
+    assert_eq!(
+        obs(execute(
+            &call(json!({"tool":"append_file","path":"w.txt","content":"more\n"})),
+            &ws
+        )),
+        "append_file w.txt ok (+5 bytes, 11 total)"
+    );
+
+    std::fs::write(ws.join("l.rs"), "fn f() {\n    let x = 1;\n}\n").unwrap();
+    assert_eq!(
+        obs(execute(
+            &call(json!({
+                "tool":"edit_lines","path":"l.rs","start":2,"end":2,"new_text":"    let x = 2;"
+            })),
+            &ws
+        )),
+        "edit_lines l.rs ok (replaced lines 2..=2; file now 3 lines)"
+    );
+
+    std::fs::write(ws.join("m.rs"), "fn pick(r: u32) -> u32 {\n    r + 1\n}\n").unwrap();
+    assert_eq!(
+        obs(execute(
+            &call(json!({
+                "tool":"edit_function","path":"m.rs","name":"pick",
+                "new_body":"fn pick(r: u32) -> u32 {\n    r + 2\n}"
+            })),
+            &ws
+        )),
+        "edit_function m.rs:pick ok (replaced lines 1..=3; file now 3 lines)"
+    );
+
     let _ = std::fs::remove_dir_all(&ws);
 }

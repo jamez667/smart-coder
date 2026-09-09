@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use sc_core::{run_agent_recovering, AgentConfig, ParseRepair, StopReason};
+use sc_core::{run_agent_recovering, AgentConfig, AgentEvent, EventSink, ParseRepair, StopReason};
 use sc_model::{Capabilities, GenerateRequest, GenerateResponse, ModelBackend, ToolCalling};
 use sc_proto::Result;
 use sc_tools::default_registry;
@@ -333,4 +333,134 @@ fn reading_several_different_files_is_not_a_repeat() {
         report.interventions, 0,
         "distinct reads are a search, not a loop: {report:?}"
     );
+}
+
+/// An [`EventSink`] that keeps every `ToolResult`, paired with the `ToolCall` it answered
+/// — so a test can assert what the harness actually TOLD the model, not just how the run
+/// ended.
+#[derive(Default)]
+struct Collect {
+    // (tool, observation), in order.
+    results: std::sync::Mutex<Vec<(String, String)>>,
+    pending: std::sync::Mutex<Option<String>>,
+}
+impl Collect {
+    /// Every observation the named tool produced this run.
+    fn tool_results(&self, tool: &str) -> Vec<String> {
+        self.results
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == tool)
+            .map(|(_, o)| o.clone())
+            .collect()
+    }
+}
+impl EventSink for Collect {
+    fn record(&self, event: &AgentEvent) {
+        match event {
+            AgentEvent::ToolCall { tool, .. } => {
+                *self.pending.lock().unwrap() = Some(tool.clone());
+            }
+            AgentEvent::ToolResult { full, .. } => {
+                if let Some(tool) = self.pending.lock().unwrap().take() {
+                    self.results.lock().unwrap().push((tool, full.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// **A model repeating a no-op edit must be TOLD it is a no-op, and must stall.**
+///
+/// THE MEASURED COST. `edit_file` answered "ok (1 replacement)" for an edit whose
+/// `old_str` equalled its `new_str` — it never compared the result to what it started
+/// with. On one Mellum run four turns were verbatim no-ops, each answered "ok", and the
+/// model spent the rest of a 313-second run reasoning from a false premise.
+///
+/// Three things have to hold, and this pins all three:
+///
+/// 1. **The observation is honest.** Every one of those turns must say "no-op", not "ok".
+///    This is the half the fix changes; without the guard the assertions below on the
+///    ToolResult text fail with the exact live lie, `edit_file impl.sh ok (1 replacement)`.
+/// 2. **The write does not count as a workspace change.** `changed` is
+///    `Journal::snapshot` before vs. after — file CONTENT — so a no-op was ALREADY
+///    `changed == false` before the fix, and skipping the write keeps it that way. Pinned
+///    because several things key off `changed` (the auto-verify, the stall detector's
+///    no-progress count, `verify_fresh.touched`, `made_a_change`); if a no-op ever marked
+///    the workspace dirty it would reset the stall detector every turn and re-verify for
+///    nothing, which is how a model loops on no-ops forever.
+/// 3. **The loop ends.** Identical calls hash identically (`action_hash` over tool + key
+///    arg), so the repeat detector sees it and the recovery ladder stops the run — here in
+///    9 steps against a 30-step budget.
+#[test]
+fn a_repeated_no_op_edit_is_reported_as_one_and_stalls() {
+    let ws = temp("noop-loop");
+    let f = ws.join("impl.sh");
+    let original = "is_even() { return 1; }\n";
+    std::fs::write(&f, original).unwrap();
+
+    // The exact shape of the live failure: old_str == new_str, submitted over and over.
+    let no_op =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 1;","new_str":"return 1;"}"#;
+    let backend = Scripted::new(vec![no_op]);
+    let cfg = AgentConfig {
+        max_steps: 30,
+        repeat_limit: 3,
+        ..Default::default()
+    };
+    let sink = Collect::default();
+    let report = sc_core::run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "fix it",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    // 1. Every edit_file turn told the model the truth.
+    let edits = sink.tool_results("edit_file");
+    assert!(!edits.is_empty(), "the model did attempt edits");
+    for o in &edits {
+        assert!(
+            o.contains("no-op") && o.contains("nothing written"),
+            "every no-op turn must say so, got: {o}"
+        );
+        assert!(
+            !o.contains("1 replacement"),
+            "the harness must never claim a replacement landed: {o}"
+        );
+    }
+
+    // 2. Nothing was written, and the run registers no workspace change.
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        original,
+        "a no-op edit must leave the file exactly as it was"
+    );
+    assert!(
+        report.change_summary.contains("no files changed"),
+        "a no-op must not register as a workspace change: {}",
+        report.change_summary
+    );
+
+    // 3. The loop ended on the stall ladder, well inside the budget.
+    assert!(!report.finished);
+    assert!(
+        matches!(report.stop_reason, StopReason::Stalled(_)),
+        "a loop of no-ops must end stalled, got {:?} after {} steps",
+        report.stop_reason,
+        report.steps
+    );
+    assert!(
+        report.steps < 30,
+        "must stop well under the budget, took {}",
+        report.steps
+    );
+    let _ = std::fs::remove_dir_all(&ws);
 }

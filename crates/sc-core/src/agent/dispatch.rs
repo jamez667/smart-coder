@@ -590,6 +590,35 @@ mod tests {
         assert!(looks_like_failure("edit_file x.py rejected: frozen path"));
     }
 
+    /// **A no-op write is not a failure.**
+    ///
+    /// A writer that changed no bytes now says so (`sc_tools::builtin::write`'s `no_op`)
+    /// instead of the old lie, "ok (1 replacement)". That observation must reach the model
+    /// as an ordinary result: the tool worked, the request was vacuous. Wording it as an
+    /// error would push the loop's error-reaction machinery at a harmless turn — and the
+    /// error path is not what makes a model stop repeating a no-op; the stall detector is,
+    /// and it counts the repeat either way.
+    #[test]
+    fn a_no_op_write_is_not_a_failure() {
+        for obs in [
+            "edit_file a.rs no-op (nothing written): old_str and new_str are identical, so \
+             the replacement changed nothing.",
+            "write_file a.txt no-op (nothing written): the content is byte-for-byte what \
+             the file already holds.",
+            "append_file a.css no-op (nothing written): content is empty, so nothing was \
+             appended.",
+            "edit_lines a.rs no-op (nothing written): new_text is identical to the lines it \
+             would replace.",
+            "edit_function m.rs:pick no-op (nothing written): new_body is identical to the \
+             function already in the file.",
+        ] {
+            assert!(
+                !looks_like_failure(obs),
+                "a vacuous edit is not a hard error: {obs}"
+            );
+        }
+    }
+
     /// A green verification carries "passed" and no failure marker.
     #[test]
     fn a_green_verification_is_not_a_failure() {

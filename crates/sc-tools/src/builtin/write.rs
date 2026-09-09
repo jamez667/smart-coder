@@ -20,6 +20,48 @@ use super::util::{from_lf, number_lines, safe_join, to_lf, uses_crlf};
 /// changed with surgical `edit_file` / `append_file` instead.
 const WRITE_FILE_OVERWRITE_MAX_LINES: usize = 150;
 
+/// The word every no-op observation carries, so the loop (and a human reading the log)
+/// can tell "the tool worked and changed nothing" from "the tool worked and edited the
+/// file". It must NOT read as a hard error to
+/// [`looks_like_failure`](../../../sc_core/agent/dispatch/fn.looks_like_failure.html):
+/// the tool did its job, the request was vacuous. So: no "error", no "rejected", no
+/// "not found", no "failed" in the status line.
+const NO_OP: &str = "no-op";
+
+/// Why an `edit_file` changed nothing.
+const NO_OP_EDIT_FILE: &str = "old_str and new_str are identical, so the replacement \
+    changed nothing. If the change is already in the file, move on; if it is not, the \
+    anchor or the replacement is wrong.";
+/// Why a `write_file`/`create_file` changed nothing.
+const NO_OP_SAME_BYTES: &str = "the content is byte-for-byte what the file already \
+    holds. If the change is already in the file, move on; if it is not, the content you \
+    sent is wrong.";
+/// Why an `append_file` changed nothing.
+const NO_OP_EMPTY_APPEND: &str = "content is empty, so nothing was appended. Send the \
+    text you meant to add.";
+/// Why an `edit_lines` changed nothing.
+const NO_OP_EDIT_LINES: &str = "new_text is identical to the lines it would replace, so \
+    the edit changed nothing. If the change is already in the file, move on; if it is \
+    not, the line range or the replacement is wrong.";
+/// Why an `edit_function` changed nothing.
+const NO_OP_EDIT_FUNCTION: &str = "new_body is identical to the function already in the \
+    file, so the edit changed nothing. If the change is already in the file, move on; if \
+    it is not, the body you sent is wrong.";
+
+/// The observation for a write that changed no bytes: `<tool> <path> no-op (nothing
+/// written): <why>`.
+///
+/// THE BUG THIS EXISTS FOR. `edit_file` answered "ok (1 replacement)" for an edit that
+/// replaced a string with itself. Measured on one Mellum run: four verbatim no-op turns,
+/// each answered "ok", and the model reasoned from a false premise for the rest of the
+/// run. A write that changes nothing must say so — every writer, every time.
+///
+/// Deliberately not an error. The tool worked; the edit was vacuous. Wording it as an
+/// error would make `looks_like_failure` treat a harmless turn as a failure to react to.
+fn no_op(prefix: &str, why: &str) -> String {
+    format!("{prefix} {NO_OP} (nothing written): {why}")
+}
+
 pub fn write_file(workspace: &Path, path: &str, content: &str) -> String {
     match safe_join(workspace, path) {
         Ok(p) => {
@@ -27,6 +69,10 @@ pub fn write_file(workspace: &Path, path: &str, content: &str) -> String {
             // files and small files are fine; this only blocks the destructive rewrite of a big
             // one, which is where the model corrupts the codebase.
             if let Ok(existing) = std::fs::read_to_string(&p) {
+                // Rewriting a file with exactly what it already holds changes nothing.
+                if existing == content {
+                    return no_op(&format!("write_file {path}"), NO_OP_SAME_BYTES);
+                }
                 let existing_lines = existing.lines().count();
                 if existing_lines > WRITE_FILE_OVERWRITE_MAX_LINES {
                     return format!(
@@ -56,6 +102,10 @@ pub fn write_file(workspace: &Path, path: &str, content: &str) -> String {
     }
 }
 
+/// `create_file` cannot be a no-op the way the other writers can: it refuses outright
+/// when the path already exists (below), so the only write it ever performs creates a
+/// file that was not there — which always changes the workspace, empty content included.
+/// The identical-bytes case reaches `write_file`, which guards it.
 pub fn create_file(workspace: &Path, path: &str, content: &str) -> String {
     match safe_join(workspace, path) {
         Ok(p) => {
@@ -100,6 +150,15 @@ pub fn append_file(workspace: &Path, path: &str, content: &str) -> String {
             } else {
                 content.to_string()
             };
+            // Appending nothing changes nothing. Defence in depth: a model can't reach
+            // this through the tool surface, because `content` is a required non-empty
+            // `String` and the validator (`spec::validate_value`) rejects `""` before
+            // dispatch. But this is a public fn, and a writer that can answer "ok (+0
+            // bytes)" for a write that moved nothing is the exact bug `edit_file` had.
+            // Placed BEFORE the open, so an empty append never conjures an empty file.
+            if content.is_empty() {
+                return no_op(&format!("append_file {path}"), NO_OP_EMPTY_APPEND);
+            }
             if is_code_path(path) && !existing.is_empty() {
                 let after = format!("{existing}{content}");
                 if let Some(msg) = duplicate_definition(&existing, &after) {
@@ -170,6 +229,11 @@ pub fn edit_function(workspace: &Path, path: &str, name: &str, new_body: &str) -
         }
     }
 
+    // The new body is what the function already says — splicing it in changes nothing.
+    // (`src` and `joined` are both LF, so this is a like-for-like comparison.)
+    if joined == src {
+        return no_op(&format!("edit_function {path}:{name}"), NO_OP_EDIT_FUNCTION);
+    }
     match std::fs::write(&p, from_lf(&joined, crlf)) {
         Ok(()) => {
             let dup = if count > 1 {
@@ -277,6 +341,11 @@ pub fn edit_lines(
                 insert_line - 1
             );
         }
+    }
+    // The addressed lines already read exactly like new_text — splicing them in changes
+    // nothing. (Also catches the degenerate insert of empty text.)
+    if joined == content {
+        return no_op(&format!("edit_lines {path}"), NO_OP_EDIT_LINES);
     }
     match std::fs::write(&p, from_lf(&joined, crlf)) {
         Ok(()) => {
@@ -410,6 +479,9 @@ fn edit_file_with(
         // line's whitespace-collapsed text), replace that real run — the edit lands despite the
         // spacing drift.
         if let Some(fuzzed) = fuzzy_line_block_replace(content, old_str, new_str) {
+            if fuzzed == content {
+                return no_op(&format!("edit_file {path}"), NO_OP_EDIT_FILE);
+            }
             return match std::fs::write(p, from_lf(&fuzzed, crlf)) {
                 Ok(()) => format!("edit_file {path} ok (1 replacement, whitespace-tolerant match)"),
                 Err(e) => format!("edit_file {path} error: {e}"),
@@ -445,6 +517,9 @@ fn edit_file_with(
             let mut joined = out.join("\n");
             if trailing_newline {
                 joined.push('\n');
+            }
+            if joined == content {
+                return no_op(&format!("edit_file {path}"), NO_OP_EDIT_FILE);
             }
             return match std::fs::write(p, from_lf(&joined, crlf)) {
                 Ok(()) => format!(
@@ -499,6 +574,9 @@ fn edit_file_with(
         );
     }
     let updated = content.replacen(old_str, new_str, 1);
+    if updated == content {
+        return no_op(&format!("edit_file {path}"), NO_OP_EDIT_FILE);
+    }
     match std::fs::write(p, from_lf(&updated, crlf)) {
         Ok(()) => format!("edit_file {path} ok (1 replacement)"),
         Err(e) => format!("edit_file {path} error: {e}"),
