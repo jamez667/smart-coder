@@ -34,14 +34,30 @@ This is the clearest evidence yet for the day's recurring lesson: **turn count
 and task completion dominate, not token rate.** A model 2x faster per token
 that needs 10x the turns is 5x slower in practice.
 
-## Hardware note worth keeping
+## Hardware note (CORRECTED 2026-09-09)
 
-The 3080 sits on an **x4 Gen1** link and was still the faster card for
-inference. PCIe carries weights at load time and traffic between cards for a
-*split* model; once weights are resident on one card, generation never crosses
-the bus. Part of why Tiel is slower is that `--tensor-split 11,9` pays
-inter-GPU traffic per token — a single-card model that is good enough would win
-on that alone. Mellum is not good enough.
+Re-measured with each card alone and properly pinned:
+
+| card | tok/s |
+| --- | --- |
+| 3080 Ti, x16 Gen2 | **253** |
+| 3080, x4 Gen1 | 215 |
+
+The Ti is 1.18x faster, which is what its memory bandwidth predicts (912 vs
+760 GB/s) — decode is memory-bound, so the ratio tracks bandwidth and the x4
+Gen1 link is irrelevant once weights are resident.
+
+**The first version of this file claimed the x4 card was faster.** That was two
+errors pointing the same way: Compose's `device_ids` does not hide the other GPU
+from the process, so llama.cpp split each instance 6.3/4.1 GB across both cards
+and neither was ever on one card; and Tiel was still partly resident on the Ti,
+so it contended while the 3080 ran clean. `CUDA_VISIBLE_DEVICES` is what
+actually pins an instance to a card.
+
+What survives: PCIe carries weights at load time and per-token traffic for a
+*split* model, so part of why Tiel is slower is that `--tensor-split 11,9` pays
+exactly that. A single-card model good enough for the work would win on that
+alone. Mellum is not that model.
 
 Both Mellum profiles remain in the ops compose (`--profile mellum`) with these
 numbers recorded, so nobody re-runs this experiment blind.
