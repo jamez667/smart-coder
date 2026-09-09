@@ -1,0 +1,24 @@
+# One-task suite: the rung Mellum has failed three times. Paths resolve relative
+# to this file, so it must live beside suite.toml.
+
+[[tasks]]
+id = "rust-symptomatic"
+description = """
+The rolling-window type in lib.rs returns its readings in the wrong order. Pushing \
+1 then 2 into a window of capacity 3 should give [1, 2], but it does not. A full \
+window reports its readings correctly, so this only shows up before the window \
+fills. Find the cause and fix it so the tests pass."""
+fixture = "tasks/rust-symptomatic/fixture"
+solution = "tasks/rust-symptomatic/solution"
+verify_cmd = "rustc --test --edition 2021 -o t_symptomatic.exe test.rs && ./t_symptomatic.exe"
+contract_tests = ["test.rs"]
+tags = ["rung:symptomatic", "lang:rust"]
+timeout_secs = 120
+
+# --- The harder rungs -------------------------------------------------------
+#
+# The three above all share a weakness: the failing test points straight at the
+# buggy file, so "read the test, read the file it names, fix it" is enough. Both
+# models cleared them 3/3, which means they measure a floor, not a ceiling.
+#
+# These three break that assumption in the three ways real debugging does.

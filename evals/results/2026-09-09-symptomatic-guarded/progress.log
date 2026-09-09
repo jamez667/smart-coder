@@ -1,0 +1,4 @@
+WARNING: this binary was built from 65813a3 but the working tree is at 6ba74e8; rows will be stamped 65813a3. Rebuild before trusting these numbers as current, or ignore this if the older binary is the point (an A/B against it).
+model mellum2-12b at http://localhost:11440/v1, built from 65813a3 (1 tasks x 3 run(s) x 1 arm(s): control(6))
+
+  [1/3] control(6)   rust-symptomatic           still red                        31s
