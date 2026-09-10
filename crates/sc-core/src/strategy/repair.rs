@@ -10,7 +10,8 @@ use sc_tools::{ToolRegistry, ValidatedCall};
 
 use crate::text::{
     escape_raw_control_chars_in_strings, extract_all_json_objects, fenced_code_block,
-    quoted_value_after, split_on_new_str, unescape_json_string_lenient,
+    quoted_value_after, split_on_new_str, structural_closing_quote, unescape_json_string_lenient,
+    value_start_after,
 };
 
 use super::error::RepairError;
@@ -196,12 +197,16 @@ pub fn extract_markdown_write(
 
 /// Key-aware recovery for a `write_file`/`create_file` call whose `content` body broke
 /// strict JSON parsing (an unescaped inner `"` from a Python `"""docstring"""`, an inner `}`
-/// from code, etc.). Rather than parse the malformed JSON, pull the fields out by position:
-/// the `tool` and `path` come before `content` and are well-formed; everything from after
-/// `"content":"` to the LAST `"` (the value's real closing quote, since content is the final
-/// field a model emits) is taken as the LITERAL file body. Returns a rebuilt JSON object
-/// (serde re-escapes the body correctly) for the normal validation path, or `None` if the
-/// shape doesn't match (so non-file calls fall through to the existing error).
+/// from code, etc.). Rather than parse the malformed JSON, pull the fields out by KEY: `path` is
+/// itself well-formed, and everything from after `"content":"` to the value's real closing quote
+/// — the last unescaped `"` at a structural boundary, see [`structural_closing_quote`] — is taken
+/// as the LITERAL file body. Returns a rebuilt JSON object (serde re-escapes the body correctly)
+/// for the normal validation path, or `None` if the shape doesn't match (so non-file calls fall
+/// through to the existing error).
+///
+/// Key order is not assumed. This used to bound the body with a blind `rfind('"')`, which is only
+/// correct when `content` is the LAST key; Mellum emits it FIRST and the rest of the envelope was
+/// being spliced into the file as source.
 pub(super) fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
     // Identify a file-content tool. Accept either order of quoting/spacing a model emits.
     let tool = ["write_file", "create_file"]
@@ -211,9 +216,10 @@ pub(super) fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
     // `path`: a well-formed `"path":"<...>"` — read the first quoted value after the key.
     let path = quoted_value_after(raw, "\"path\"")?;
 
-    // `content`: take everything after the opening quote of its value up to the final closing
-    // quote of the object. The model emits `content` last, so the body runs from there to the
-    // last `"` before the trailing `}` — rfind the closer so inner quotes don't truncate it.
+    // `content`: take everything after the opening quote of its value up to the value's real
+    // closing quote — the LAST unescaped `"` that sits at a structural boundary (followed only by
+    // whitespace and then `,` or `}`). Key order is NOT assumed: this is right whether the model
+    // put `content` last (the original case) or first, as Mellum does.
     let key_pos = raw.find("\"content\"")?;
     let after_key = &raw[key_pos + "\"content\"".len()..];
     // Skip `:` and whitespace, then the opening `"`.
@@ -221,9 +227,9 @@ pub(super) fn repair_file_content_call(raw: &str) -> Option<serde_json::Value> {
     let rest = &after_key[colon + 1..];
     let open_q = rest.find('"')?;
     let body_region = &rest[open_q + 1..];
-    // The value ends at the last `"` in the remaining text (before/at the closing brace). If
-    // there's a trailing `"}` / `" }`, the closer is that quote; else the last quote present.
-    let close_rel = body_region.rfind('"')?;
+    // No structurally-valid closer → give up rather than guess. This is a repair path for
+    // already-malformed JSON; a wrong bound writes the JSON envelope into a source file.
+    let close_rel = structural_closing_quote(body_region)?;
     let literal = &body_region[..close_rel];
 
     // Un-escape only the standard JSON escapes the model DID write correctly (so a properly
@@ -342,14 +348,27 @@ pub(super) fn repair_edit_file_call(raw: &str) -> Option<serde_json::Value> {
     }
     let path = quoted_value_after(raw, "\"path\"")?;
 
-    // The body region starts after `"old_str":"` and ends at the object's final `"`.
+    // The body region starts after `"old_str":"` and spans BOTH values, because the raw code
+    // inside them is what broke the JSON and only the `","new_str":"` separator can be trusted
+    // to cut them apart (see `split_on_new_str`). Its END is the structural closing quote of
+    // whichever of the two values comes LAST — an unescaped `"` followed only by whitespace and
+    // then `,` or `}`, with a well-formed object tail behind it.
+    //
+    // Same key-order defect as [`repair_file_content_call`] lived here: a blind `rfind('"')`
+    // assumed the edit's bodies were the object's FINAL keys, so
+    // `{"old_str":…,"new_str":…,"path":…,"tool":…}` swallowed the trailing `path`/`tool` members
+    // into `new_str` and wrote the harness's own envelope into the file.
     let old_key = raw.find("\"old_str\"")?;
     let after_old = &raw[old_key + "\"old_str\"".len()..];
     let colon = after_old.find(':')?;
     let rest = &after_old[colon + 1..];
     let open_q = rest.find('"')?;
     let body_region = &rest[open_q + 1..];
-    let last_q = body_region.rfind('"')?;
+    // Bound from the LAST value's own opening quote: if `new_str` follows `old_str`, the region
+    // ends where `new_str`'s value ends, not where `old_str`'s does. `value_start_after` gives the
+    // offset just past `"new_str":"`; anything before that is still `old_str`'s territory.
+    let scan_from = value_start_after(body_region, "\"new_str\"").unwrap_or(0);
+    let last_q = scan_from + structural_closing_quote(&body_region[scan_from..])?;
     let body = &body_region[..last_q];
 
     // Split the two values at the literal separator the model emits between them. Accept a little

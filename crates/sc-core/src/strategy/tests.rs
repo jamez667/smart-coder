@@ -964,3 +964,134 @@ fn the_rung_reads_the_registry_it_was_given() {
         )
         .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Bounding a recovered string body: the closer is a STRUCTURAL quote, not the
+// last quote anywhere. See `text::structural_closing_quote`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn content_first_key_order_does_not_splice_the_envelope_into_the_file() {
+    // THE LIVE BUG (rust-multi-site rung). Mellum emits `content` FIRST — its key order is
+    // ['content','path','tool'] in every repaired reply — and the old bound was "the last `\"`
+    // in the remaining text", which is only correct when `content` is LAST. So the harness
+    // walked past the body's real closer and wrote the rest of its own JSON envelope into
+    // render.rs as source, then reported compile errors the model had not caused. The model's
+    // fix was FULLY correct; the harness turned a solve into an 8-turn failure.
+    let raw = r#"{"content":"fn go() {}\n","path":"render.rs","tool":"write_file"}"#;
+    let value = repair_file_content_call(raw).expect("content-first must still be recovered");
+    assert_eq!(
+        value["content"].as_str(),
+        Some("fn go() {}\n"),
+        "the body must stop at its own closing quote, not swallow `\",\"path\":…`"
+    );
+    assert_eq!(value["path"].as_str(), Some("render.rs"));
+    assert_eq!(value["tool"].as_str(), Some("write_file"));
+}
+
+#[test]
+fn content_last_key_order_is_unchanged() {
+    // REGRESSION PIN. `content` last is the order the original code was written for and the
+    // order most models emit; the new bound must produce byte-identical results there.
+    let raw = "{\"tool\":\"write_file\",\"path\":\"app.py\",\"content\":\"def f():\n    \"\"\"doc\"\"\"\n    return 1\n\"}";
+    let value = repair_file_content_call(raw).expect("content-last must keep working");
+    assert_eq!(
+        value["content"].as_str(),
+        Some("def f():\n    \"\"\"doc\"\"\"\n    return 1\n")
+    );
+    assert_eq!(value["path"].as_str(), Some("app.py"));
+}
+
+#[test]
+fn an_escaped_quote_in_the_body_is_not_the_closer_in_either_key_order() {
+    // The body may legitimately contain `\"` (the downstream `unescape_json_string_lenient`
+    // exists for exactly that). An escaped quote must never be mistaken for the value's end —
+    // and, in the content-first order, must not stop the scan before the real closer either.
+    let last = r#"{"tool":"write_file","path":"a.rs","content":"let s = \"hi\";\n"}"#;
+    assert_eq!(
+        repair_file_content_call(last).unwrap()["content"].as_str(),
+        Some("let s = \"hi\";\n"),
+        "content last"
+    );
+    let first = r#"{"content":"let s = \"hi\";\n","path":"a.rs","tool":"write_file"}"#;
+    assert_eq!(
+        repair_file_content_call(first).unwrap()["content"].as_str(),
+        Some("let s = \"hi\";\n"),
+        "content first"
+    );
+}
+
+#[test]
+fn a_body_containing_the_envelope_text_verbatim_does_not_truncate_early() {
+    // The source code itself contains the literal `","path":"` — this harness's own repair
+    // code does. A quote followed by more content is not at a structural boundary, so the scan
+    // keeps going and the whole body survives.
+    let raw = r#"{"content":"const M: &str = \"\",\"path\":\"\";\nfn go() {}\n","path":"repair.rs","tool":"write_file"}"#;
+    let value = repair_file_content_call(raw).expect("recovered");
+    let content = value["content"].as_str().unwrap();
+    assert!(
+        content.contains("fn go() {}"),
+        "the body was cut at the embedded envelope text: {content:?}"
+    );
+    assert_eq!(value["path"].as_str(), Some("repair.rs"));
+}
+
+#[test]
+fn no_structural_closer_means_none_not_a_guess() {
+    // A repair path for already-malformed JSON must not guess: a wrong bound writes garbage
+    // into a source file, which is the very bug this fixes. With no quote at a structural
+    // boundary, return None and let the caller's existing error path run unchanged.
+    let raw = "{\"tool\":\"write_file\",\"path\":\"a.rs\",\"content\":\"fn go() {} still going";
+    assert!(
+        repair_file_content_call(raw).is_none(),
+        "no valid closer → no recovery"
+    );
+    // The caller's behaviour is unchanged: this shape is a TRUNCATION, and the truncation
+    // salvage below it in the ladder still owns it.
+    let reg = default_registry();
+    let call = ParseRepair.extract(raw, &reg).expect("truncation salvage");
+    assert_eq!(call.name, "write_file");
+    assert!(call.str("content").unwrap().contains("fn go() {}"));
+}
+
+#[test]
+fn edit_file_recovery_is_also_key_order_independent() {
+    // Sibling defect, same cause: `repair_edit_file_call` bounded `old_str`+`new_str` with the
+    // same blind `rfind('"')`, assuming `new_str` was the object's LAST key. With `path` after
+    // it, the trailing `","path":"x.rs","tool":"edit_file` was swallowed into `new_str` and
+    // would have been written into the file.
+    let reg = default_registry();
+    let raw = "{\"old_str\":\"let x = 1;\",\"new_str\":\"let x = 2;\",\"path\":\"m.rs\",\"tool\":\"edit_file\"}";
+    // Strict parsing handles this one, so drive the repair directly to prove the bound.
+    let value = repair_edit_file_call(raw).expect("recovered");
+    assert_eq!(value["new_str"].as_str(), Some("let x = 2;"));
+    assert_eq!(value["old_str"].as_str(), Some("let x = 1;"));
+    assert_eq!(value["path"].as_str(), Some("m.rs"));
+    // And the end-to-end path still agrees.
+    let call = ParseRepair.extract(raw, &reg).unwrap();
+    assert_eq!(call.str("new_str"), Some("let x = 2;"));
+}
+
+#[test]
+fn structural_closing_quote_picks_the_boundary_quote() {
+    use crate::text::structural_closing_quote;
+    // The quote at 1 is inside the body (followed by `b`); the one at 3 is followed by `,` AND
+    // by a well-formed tail, so it is the closer — even though a later quote also sits before
+    // a `}`. This is the content-first shape.
+    assert_eq!(structural_closing_quote("a\"b\",\"path\":\"x\"}"), Some(3));
+    // Trailing `"}` is structural: the tail is just the brace.
+    assert_eq!(structural_closing_quote("body\"}"), Some(4));
+    // Whitespace between the quote and the `}` is allowed.
+    assert_eq!(structural_closing_quote("body\"  }"), Some(4));
+    // An escaped quote is never the closer; `\\"` (an EVEN run of backslashes) is.
+    assert_eq!(structural_closing_quote("a\\\"b"), None);
+    assert_eq!(structural_closing_quote("a\\\\\"}"), Some(3));
+    // A `",` inside the body whose tail is NOT a valid object tail is skipped, and the real
+    // closer further right wins.
+    assert_eq!(
+        structural_closing_quote("let a = \", not a key;\"}"),
+        Some(21)
+    );
+    // Nothing structural at all.
+    assert_eq!(structural_closing_quote("no closer here"), None);
+}

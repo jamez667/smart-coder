@@ -174,6 +174,147 @@ pub(crate) fn quoted_value_after(raw: &str, key: &str) -> Option<String> {
     None
 }
 
+/// The byte offset in `raw` just past the OPENING quote of `key`'s string value — where that
+/// value's body begins. `None` if the key, its `:` or its opening `"` is absent.
+///
+/// Used by the edit repair to start its closing-quote scan at the LAST of the two bodies it
+/// spans, so a `"` inside the FIRST body can never be mistaken for the region's end.
+pub(crate) fn value_start_after(raw: &str, key: &str) -> Option<usize> {
+    let key_pos = raw.find(key)?;
+    let after = key_pos + key.len();
+    let colon = raw[after..].find(':')?;
+    let rest = after + colon + 1;
+    let open_q = raw[rest..].find('"')?;
+    Some(rest + open_q + 1)
+}
+
+/// The closing quote of a recovered string value — the `"` that really ends the body, whatever
+/// key order the model emitted.
+///
+/// The salvage paths cannot parse their input (that is why they exist), so they bound a string
+/// value by scanning rather than lexing. The old rule was "the last `\"` in the remaining text",
+/// which silently assumed the broken key was the LAST key in the object. Mellum emits
+/// `{"content":…,"path":…,"tool":…}` — content FIRST — so that rule walked straight past the
+/// body's closer and took the rest of the envelope as source, splicing
+/// `","path":"render.rs","tool":"write_file` into the file (observed live on the
+/// `rust-multi-site` rung: a fully correct model fix was turned into a build failure by the
+/// harness).
+///
+/// The rule here is two-sided, because neither "first quote" nor "last quote" is right on its
+/// own. A candidate closer must be
+///
+/// 1. **unescaped** — an odd run of `\` immediately before it means it is a `\"` inside the body
+///    (the downstream lenient unescaper exists precisely because bodies carry those); and
+/// 2. at a **structural boundary** — the next non-whitespace byte is `,` or `}`, or the text
+///    ends; and
+/// 3. followed by a **well-formed object tail** — everything after it is `,"key":<scalar>` pairs
+///    running out to the final `}`. That third test is what separates the real closer from a
+///    quote inside the body that merely happens to precede a `,` (source code containing the
+///    literal text `","path":"`, a `{"a": 1}` dict, a Python `"""docstring"""`).
+///
+/// Candidates are tested left to right and the FIRST that satisfies all three wins, so a
+/// content-first object stops at the body's own closer instead of eating the envelope. When the
+/// body is the object's last member, the only tail is `}` and the answer is the same quote the
+/// old `rfind` found — content-last behaviour is unchanged.
+///
+/// Returns the BYTE OFFSET of that quote within `body`, or `None` when no candidate qualifies —
+/// the callers then fall through to their existing error path rather than guessing, because a
+/// wrong bound writes garbage into a source file, which is the bug this fixes.
+pub(crate) fn structural_closing_quote(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut fallback: Option<usize> = None;
+    for (i, ch) in body.char_indices() {
+        if ch != '"' {
+            continue;
+        }
+        // (1) Escaped? Count the run of `\` immediately before this quote. Odd → it is a `\"`.
+        let mut backslashes = 0usize;
+        let mut j = i;
+        while j > 0 && bytes[j - 1] == b'\\' {
+            backslashes += 1;
+            j -= 1;
+        }
+        if backslashes % 2 == 1 {
+            continue;
+        }
+        // (2) Structural? The next non-whitespace byte must end the member or the object.
+        let rest = &body[i + 1..];
+        let next = rest.trim_start().as_bytes().first().copied();
+        if !matches!(next, None | Some(b',') | Some(b'}')) {
+            continue;
+        }
+        // (3) Is the remainder a well-formed object tail? If so this is the closer.
+        if is_object_tail(rest) {
+            return Some(i);
+        }
+        // A structural-looking quote whose tail does NOT check out is kept only as a last
+        // resort: it covers a trailing envelope the model mangled beyond recognition, and it
+        // reproduces the old `rfind` answer for a content-last body.
+        fallback = Some(i);
+    }
+    fallback
+}
+
+/// Whether `s` is the tail of a JSON object after one member's value: optional whitespace, then
+/// either the closing `}` or `,` followed by more `"key":<scalar>` members out to that `}`.
+/// Values are only scalars (string / number / bool / null) — every tool argument is one, and
+/// refusing nested structures keeps this from accepting arbitrary code that happens to balance.
+/// Trailing text after the `}` is allowed (models add prose).
+fn is_object_tail(s: &str) -> bool {
+    let mut rest = s.trim_start();
+    loop {
+        match rest.as_bytes().first() {
+            Some(b'}') | None => return true,
+            Some(b',') => rest = rest[1..].trim_start(),
+            _ => return false,
+        }
+        // A key: a well-formed quoted string with no inner escapes or quotes.
+        let Some(after_open) = rest.strip_prefix('"') else {
+            return false;
+        };
+        let Some(key_end) = after_open.find(['"', '\\']) else {
+            return false;
+        };
+        if after_open.as_bytes()[key_end] != b'"' {
+            return false; // an escape inside a key — not a plain envelope key
+        }
+        rest = after_open[key_end + 1..].trim_start();
+        let Some(after_colon) = rest.strip_prefix(':') else {
+            return false;
+        };
+        rest = after_colon.trim_start();
+        // A scalar value.
+        if let Some(after_q) = rest.strip_prefix('"') {
+            // A string: scan to its unescaped closing quote.
+            let mut escaped = false;
+            let mut end = None;
+            for (k, c) in after_q.char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    end = Some(k);
+                    break;
+                }
+            }
+            let Some(end) = end else { return false };
+            rest = after_q[end + 1..].trim_start();
+        } else {
+            let end = rest
+                .find([',', '}', ' ', '\t', '\n', '\r'])
+                .unwrap_or(rest.len());
+            let (lit, tail) = rest.split_at(end);
+            if lit.is_empty()
+                || !(lit == "true" || lit == "false" || lit == "null" || lit.parse::<f64>().is_ok())
+            {
+                return false;
+            }
+            rest = tail.trim_start();
+        }
+    }
+}
+
 /// Find the `"`,`"new_str"`:`"` boundary between the two edit_file values and return
 /// `(old_literal, new_literal)`. The separator is the model's own `","new_str":"` with possible
 /// whitespace; we match on `new_str"` and trim back over the quote/colon/comma. `None` if absent.

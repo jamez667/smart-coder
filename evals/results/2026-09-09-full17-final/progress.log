@@ -1,0 +1,21 @@
+model mellum2-12b at http://localhost:11441/v1, built from 95b429c (17 tasks x 1 run(s) x 1 arm(s): control(6))
+
+  [1/1] control(6)   rust-stated                PASS                              6s
+  [1/1] control(6)   rust-located               PASS                              7s
+  [1/1] control(6)   rust-symptomatic           still red                        19s
+  [1/1] control(6)   rust-misdirected           still red                        40s
+  [1/1] control(6)   rust-two-stage             still red                        29s
+  [1/1] control(6)   rust-invariant             PASS                              6s
+  [1/1] control(6)   engine-diagonal-path       still red                        43s
+  [1/1] control(6)   engine-diagonal-wired      still red                        18s
+  [1/1] control(6)   engine-grid-scan           still red                       150s
+  [1/1] control(6)   engine-ecs-query           still red                        31s
+  [1/1] control(6)   rust-multi-site            still red                        27s
+  [1/1] control(6)   rust-signature-change      PASS                              9s
+  [1/1] control(6)   rust-hidden-invariant      PASS                             12s
+  [1/1] control(6)   rust-trait-impl            still red                        17s
+  [1/1] control(6)   rust-plausible-wrong-fix   still red                        14s
+  [1/1] control(6)   rust-ineffective-edit      still red                        54s
+  [1/1] control(6)   rust-shifting-anchor       still red                        33s
+
+rows appended to evals/results/2026-09-09-full17-final\rows.jsonl
