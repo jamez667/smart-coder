@@ -1,0 +1,8 @@
+model mellum2-12b at http://localhost:11441/v1, built from 7cf7daf (4 tasks x 1 run(s) x 1 arm(s): control(6))
+
+  [1/1] control(6)   rust-misdirected           PASS                              8s
+  [1/1] control(6)   engine-diagonal-wired      still red                        68s
+  [1/1] control(6)   engine-grid-scan           still red                       108s
+  [1/1] control(6)   engine-ecs-query           still red                        57s
+
+rows appended to evals/results/2026-09-09-nudgefix\rows.jsonl
