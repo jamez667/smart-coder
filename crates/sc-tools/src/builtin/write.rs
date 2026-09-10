@@ -463,7 +463,7 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
             }
         }
     }
-    edit_file_with(&p, path, &content, &old_owned, &new_owned, crlf)
+    edit_file_with(workspace, &p, path, &content, &old_owned, &new_owned, crlf)
 }
 
 /// Turn literal escape sequences a model may have emitted as text (`\n`, `\t`,
@@ -514,6 +514,7 @@ fn unescape_literal(s: &str) -> String {
 /// `content`, `old_str` and `new_str` are LF; `crlf` says what the file on disk uses,
 /// and every write here restores it.
 fn edit_file_with(
+    workspace: &Path,
     p: &Path,
     path: &str,
     content: &str,
@@ -582,7 +583,7 @@ fn edit_file_with(
         // that the edit already landed (or it's working from a stale view), so it keeps
         // re-proposing a change that's no longer applicable. Show it the place in the
         // CURRENT file that most resembles what it asked for, so it re-anchors there.
-        return anchor_not_found(path, content, old_str);
+        return anchor_not_found(workspace, path, content, old_str, p);
     }
     if count > 1 {
         // Whole-line disambiguation (spec 04 — do the work the small model can't).
@@ -651,7 +652,7 @@ fn edit_file_with(
             return format!(
                 "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches); \
                  pick a UNIQUE anchor from the lines near the closest match below:\n{}",
-                anchor_not_found(path, content, old_str)
+                anchor_not_found(workspace, path, content, old_str, p)
                     .split_once('\n')
                     .map(|(_, block)| block.to_string())
                     .unwrap_or_default()
@@ -685,7 +686,13 @@ const MISS_MAX_LINES: usize = 30;
 /// and the numbered lines around the file line that most resembles the anchor's first
 /// line, [`MISS_CONTEXT`] either side of the anchor-length block, never more than
 /// [`MISS_MAX_LINES`].
-fn anchor_not_found(path: &str, content: &str, old_str: &str) -> String {
+fn anchor_not_found(
+    workspace: &Path,
+    path: &str,
+    content: &str,
+    old_str: &str,
+    p: &Path,
+) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let anchor: Vec<&str> = old_str.lines().collect();
     let probe = anchor
@@ -693,6 +700,15 @@ fn anchor_not_found(path: &str, content: &str, old_str: &str) -> String {
         .find(|l| !l.trim().is_empty())
         .copied()
         .unwrap_or("");
+    // Before blaming the anchor, ask whether it belongs to a DIFFERENT file. A model that
+    // copies an anchor out of the test it is trying to satisfy, then aims the edit at the
+    // source, gets "anchor not found" and dutifully hunts for a better anchor -- forever.
+    // Measured on `rust-two-stage`: the anchor occurred verbatim in test.rs and nowhere in
+    // lib.rs, and the closest-match block shown instead was scored on tokens like `.` and
+    // `a`, pointing into an unrelated function.
+    if let Some(elsewhere) = anchor_in_a_sibling(workspace, p, old_str) {
+        return elsewhere;
+    }
     let Some(best) = closest_line(&lines, probe) else {
         return format!(
             "edit_file {path}: anchor not found; no line of the file resembles the anchor \
@@ -708,6 +724,82 @@ fn anchor_not_found(path: &str, content: &str, old_str: &str) -> String {
         "edit_file {path}: anchor not found; closest match:\n{}",
         number_lines(&lines[lo..hi], lo + 1)
     )
+}
+
+/// The most sibling files scanned for a missed anchor. A miss is already the slow path, and
+/// the answer only has to beat "no idea"; reading a whole large workspace to improve one
+/// error message is not a trade worth making.
+const SIBLING_SCAN_MAX: usize = 60;
+
+/// The shortest anchor worth hunting for in other files, in non-whitespace CHARACTERS. A
+/// short fragment (`}`, `let x`) occurs in half the repository, so a "found it elsewhere"
+/// answer built on one would be noise pointing at an arbitrary file.
+///
+/// Counted in characters, not tokens, because a token count is a terrible proxy for
+/// distinctiveness: the live `rust-two-stage` anchor,
+/// `assert_eq!(compare(&v("1.4"), &v("1.4.0")), Ordering::Equal);`, is 3 whitespace-split
+/// tokens and 58 characters. A 4-token floor rejected the exact case this exists for --
+/// found by instrumenting the scan rather than reasoning about it.
+const SIBLING_MIN_CHARS: usize = 24;
+
+/// Does `old_str` appear verbatim in some OTHER file in the workspace? If so, name it.
+///
+/// THE BUG THIS EXISTS FOR. On `rust-two-stage` the model copied an assertion out of the
+/// frozen `test.rs` and sent it as an `edit_file` anchor against `lib.rs`. The string occurs
+/// exactly once in test.rs and not at all in lib.rs, so it got `anchor not found` with a
+/// closest-match block scored on shared punctuation -- an unrelated function eight lines
+/// into the file. It re-sent that anchor 14 times across 18 turns.
+///
+/// The harness could see the answer the whole time: it had the workspace, and `edit_file`
+/// receives it. Matching is whole-line and exact (the same `line_sig` idea the fuzzy path
+/// uses, minus the tolerance) because this only has to answer "is this text somewhere else",
+/// and a fuzzy hit here would point the model at the wrong file with confidence.
+fn anchor_in_a_sibling(workspace: &Path, target: &Path, old_str: &str) -> Option<String> {
+    let probe: Vec<String> = old_str
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let weight: usize = probe
+        .iter()
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+    if probe.is_empty() || weight < SIBLING_MIN_CHARS {
+        return None;
+    }
+    let target = target.canonicalize().ok();
+    for rel in super::util::source_files(workspace)
+        .into_iter()
+        .take(SIBLING_SCAN_MAX)
+    {
+        let Ok(cand) = safe_join(workspace, &rel) else {
+            continue;
+        };
+        if cand.canonicalize().ok() == target {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&cand) else {
+            continue;
+        };
+        let hay: Vec<String> = to_lf(&body)
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        let Some(at) = hay
+            .windows(probe.len().max(1))
+            .position(|w| w == probe.as_slice())
+        else {
+            continue;
+        };
+        return Some(format!(
+            "edit_file: that anchor is not in this file -- it is in {rel}, at line {}. You are \
+             editing the wrong file. If {rel} is the test that defines the behaviour, it is not \
+             the thing to change: fix the source it exercises. Otherwise re-send this edit with \
+             path {rel}.",
+            at + 1
+        ));
+    }
+    None
 }
 
 /// The index of the file line that shares the most whitespace-split tokens with

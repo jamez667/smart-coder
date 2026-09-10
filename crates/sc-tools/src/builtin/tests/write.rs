@@ -719,6 +719,70 @@ fn edit_file_allows_adding_a_function_beside_an_existing_one() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// **A missed anchor that lives in ANOTHER file names that file.**
+///
+/// The `rust-two-stage` shape: the model copies an assertion out of the frozen `test.rs` and
+/// sends it as an anchor against `lib.rs`. It occurs exactly once in test.rs and never in
+/// lib.rs. The old answer was `anchor not found; closest match:` plus a block scored on shared
+/// punctuation, pointing into an unrelated function -- so the model kept refining the anchor,
+/// which was never the problem. 14 attempts across 18 turns.
+#[test]
+fn a_missed_anchor_that_lives_in_another_file_says_which_file() {
+    let ws = temp_dir("sibling-anchor");
+    std::fs::write(
+        ws.join("lib.rs"),
+        "pub fn compare(a: u32, b: u32) -> std::cmp::Ordering {\n    a.cmp(&b)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("test.rs"),
+        "#[test]\nfn a_missing_component_counts_as_zero() {\n    assert_eq!(compare(&v(\"1.4\"), &v(\"1.4.0\")), Ordering::Equal);\n}\n",
+    )
+    .unwrap();
+
+    let e = call(json!({
+        "tool":"edit_file","path":"lib.rs",
+        "old_str":"    assert_eq!(compare(&v(\"1.4\"), &v(\"1.4.0\")), Ordering::Equal);",
+        "new_str":"    assert_eq!(compare(&v(\"1.4\"), &v(\"1.4.0\")), Ordering::Greater);"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(o.contains("test.rs"), "must name the file it IS in: {o}");
+    assert!(
+        o.contains("wrong file"),
+        "must say plainly that the path is wrong: {o}"
+    );
+    assert!(
+        !o.contains("closest match"),
+        "must not send it hunting for a better anchor: {o}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// DECLINE: a short anchor is in half the repository, so "it is in some other file" would be
+/// noise pointing at an arbitrary one. Below the token floor it stays the ordinary miss.
+#[test]
+fn a_short_missed_anchor_does_not_hunt_through_other_files() {
+    let ws = temp_dir("sibling-short");
+    std::fs::write(ws.join("lib.rs"), "fn a() {\n    let x = 1;\n}\n").unwrap();
+    std::fs::write(ws.join("other.rs"), "fn b() {\n    let y = 2;\n}\n").unwrap();
+
+    let e = call(json!({
+        "tool":"edit_file","path":"lib.rs","old_str":"let y","new_str":"let z"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(
+        !o.contains("wrong file"),
+        "a 2-token anchor must not accuse another file: {o}"
+    );
+    assert!(
+        o.contains("anchor not found"),
+        "still an ordinary miss: {o}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// THE REGRESSION, and its severity has deliberately changed.
 ///
 /// `old_str == new_str` used to be answered as a no-op -- but only on the paths that reach a

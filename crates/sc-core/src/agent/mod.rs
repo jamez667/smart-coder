@@ -2119,6 +2119,7 @@ mod escalation;
 mod prompt;
 mod stable;
 mod stall;
+mod under_test;
 mod window;
 
 #[cfg(test)]

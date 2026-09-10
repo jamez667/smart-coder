@@ -270,9 +270,21 @@ pub(super) fn dispatch(
             ))
         }
         "run_verification" => match verify_command {
-            Some(cmd) => ToolOutcome::Observation(
-                sc_verify::run_verification_in(sandbox, workspace, cmd).observation(),
-            ),
+            Some(cmd) => {
+                let report = sc_verify::run_verification_in(sandbox, workspace, cmd);
+                let mut obs = report.observation();
+                // A red suite names ONE location: the panic site, which on a contract-test
+                // rung is the frozen test file. Resolve the failing assertion to the code
+                // that implements it, so the observation points at something editable.
+                // Silent whenever the resolution is not unambiguous -- see `under_test`.
+                if !report.all_green() {
+                    if let Some(hint) = super::under_test::hint_for(workspace, &obs) {
+                        obs.push('\n');
+                        obs.push_str(&hint);
+                    }
+                }
+                ToolOutcome::Observation(obs)
+            }
             None => ToolOutcome::Observation(
                 "run_verification: no verification command is configured for this project".into(),
             ),

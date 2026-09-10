@@ -480,6 +480,63 @@ fn a_repeated_no_op_edit_is_reported_as_one_and_stalls() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// **A red verification names the SOURCE function, not only the frozen test.**
+///
+/// The wiring test for `agent::under_test`. Its own unit tests prove the resolver; this
+/// proves the resolver is actually REACHED -- the lesson from `dropped_definition`, whose
+/// nine unit tests all passed while its call site was dead.
+///
+/// The measured failure: on `rust-two-stage` the only file:line the harness ever produced
+/// was `panicked at test.rs:36`, in the file the model was forbidden to edit. It anchored
+/// 14 edits on test.rs content and never touched the bug.
+#[test]
+fn a_failing_verification_points_at_the_code_under_test() {
+    let ws = temp("under-test-wiring");
+    std::fs::write(
+        ws.join("lib.rs"),
+        "/// Order two versions.\npub fn compare(a: u32, b: u32) -> bool {\n    a > b\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("test.rs"),
+        "#[path = \"lib.rs\"]\nmod lib;\nuse lib::compare;\n\n#[test]\nfn eq() {\n    assert!(compare(1, 1));\n}\n",
+    )
+    .unwrap();
+
+    // A scripted red verification carrying the real panic shape.
+    let backend = Scripted::new(vec![r#"{"tool":"run_verification"}"#]);
+    let cfg = AgentConfig {
+        max_steps: 2,
+        verify_command: Some(
+            "printf 'thread %s panicked at test.rs:7:5:\\nassertion failed\\n' eq; exit 1"
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+    let sink = Collect::default();
+    let _ = sc_core::run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "make it pass",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let verifies = sink.tool_results("run_verification");
+    assert!(!verifies.is_empty(), "the verification ran");
+    let o = verifies.join("\n");
+    assert!(
+        o.contains("lib.rs"),
+        "the observation must name the SOURCE file, not only the test: {o}"
+    );
+    assert!(o.contains("compare()"), "and the function under test: {o}");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// **A mislabelled tool call runs as the tool its ARGUMENTS name, all the way through the loop.**
 ///
 /// THE HARNESS CAUSED THIS ONE. Observed live: the loop told the model *"STOP editing by anchor.
