@@ -241,6 +241,40 @@ pub fn destructive_replacement(old_str: &str, new_str: &str) -> Option<String> {
     ))
 }
 
+/// If `old_str` and `new_str` are the same text, say so — before the file is even read.
+/// `None` for every pair that could change something.
+///
+/// THE BUG THIS EXISTS FOR. Two live rung failures, same shape. On `rust-two-stage` the model
+/// sent a byte-identical `old_str`/`new_str` pair **14 times across 18 turns**; on
+/// `rust-trait-impl`, 9 more times. Neither run ever changed the line it was aiming at.
+///
+/// The existing [`NO_OP_EDIT_FILE`](super::write) answer could not help, because every one of
+/// its sites sits PAST a successful match. On two-stage the anchor never matched (it was copied
+/// out of a different file), so the model was told `anchor not found; closest match:` — a message
+/// about WHERE, when the defect was WHAT. It spent eighteen turns hunting for a better anchor,
+/// which is precisely what the harness told it to do, and the anchor was never the problem.
+///
+/// So this is judged on the PAIR, like [`destructive_replacement`], and checked before the file
+/// is read, like [`indistinct_anchor`]: a replacement identical to its anchor cannot change
+/// anything, in any file, at any match count. It is wrong on its own terms, so it is rejected on
+/// its own terms.
+///
+/// Compared after normalising line endings only. Leading/trailing whitespace is NOT trimmed: a
+/// pair differing only in indentation is a real re-indent, and `edit_file`'s indent-tolerant
+/// path exists to land exactly that.
+pub fn identical_replacement(old_str: &str, new_str: &str) -> Option<String> {
+    if old_str.replace("\r\n", "\n") != new_str.replace("\r\n", "\n") {
+        return None;
+    }
+    Some(
+        "old_str and new_str are byte-identical, so this edit cannot change anything -- in any \
+         file, at any anchor. Nothing was written. The ANCHOR is not the problem here: send the \
+         CHANGED text as new_str, i.e. what you want that code to BECOME, and leave old_str as \
+         the text you are replacing. To delete the line instead, send an empty new_str (\"\")."
+            .to_string(),
+    )
+}
+
 /// If `old_str` is too weak to ADDRESS a location at all, say so. `None` for every anchor
 /// that could plausibly identify one.
 ///

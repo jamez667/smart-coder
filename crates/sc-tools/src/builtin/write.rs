@@ -9,9 +9,10 @@
 
 use std::path::Path;
 
+use super::dropped_def::dropped_definition;
 use super::guards::{
-    delimiter_regression, destructive_replacement, duplicate_definition, indistinct_anchor,
-    is_code_path,
+    delimiter_regression, destructive_replacement, duplicate_definition, identical_replacement,
+    indistinct_anchor, is_code_path,
 };
 use super::read::{locate_function, Located};
 use super::util::{from_lf, number_lines, safe_join, to_lf, uses_crlf};
@@ -390,6 +391,15 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
     if let Some(msg) = indistinct_anchor(old_str) {
         return format!("edit_file {path} rejected: {msg}");
     }
+    // A replacement identical to its anchor cannot change anything, whatever the file holds, so
+    // it is judged before the MATCH -- and saying so here is the whole point. The
+    // `NO_OP_EDIT_FILE` answers below all sit past a successful match, so an identical pair whose
+    // anchor missed used to fall through to `anchor not found; closest match:` instead: a message
+    // about WHERE, when the defect is WHAT. Measured on `rust-two-stage`, that sent the model
+    // hunting for a better anchor for 18 turns while the anchor was never the problem.
+    if let Some(msg) = identical_replacement(old_str, new_str) {
+        return format!("edit_file {path} rejected: {msg}");
+    }
     // Normalize line endings to LF for matching/editing, on BOTH sides. A file checked out on
     // Windows is CRLF; the model, shown that file verbatim, faithfully copies CRLF into old_str
     // — but if we normalize only the file and not old_str, the `\r` in the anchor breaks the
@@ -425,6 +435,14 @@ pub fn edit_file(workspace: &Path, path: &str, old_str: &str, new_str: &str) -> 
         // destroy the line is wrong at every match count, and rejecting it here keeps the model
         // from re-sending it down the fuzzy path.
         if let Some(msg) = destructive_replacement(&old_owned, &new_owned) {
+            return format!("edit_file {path} rejected: {msg}");
+        }
+        // Same reasoning, one level up in meaning: an edit that drops a `fn` the anchor
+        // carried is destroying a DEFINITION rather than a line, and `destructive_replacement`
+        // cannot see it (its `new_str` is full of letters). Measured on `rust-trait-impl`: the
+        // model swapped `fn len` for `fn evict` four times -- three of the `evict` bodies were
+        // correct -- and every caller of `len` stopped compiling.
+        if let Some(msg) = dropped_definition(&old_owned, &new_owned) {
             return format!("edit_file {path} rejected: {msg}");
         }
         if content.matches(&old_owned).count() == 1 {

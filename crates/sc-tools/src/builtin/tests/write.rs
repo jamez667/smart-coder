@@ -663,10 +663,74 @@ fn assert_no_op(o: &str, why_fragment: &str) {
     }
 }
 
-/// THE REGRESSION. `old_str == new_str` is a no-op, and the harness must say so
-/// instead of "ok (1 replacement)".
+/// The `dropped_definition` guard reaches the model THROUGH `edit_file`, not just as a unit.
+///
+/// The verbatim edit from `rust-trait-impl`: asked to ADD `evict` and "leave the existing methods
+/// behaving exactly as they do now", the model swapped `fn len` out for it. It did this four
+/// times -- the trait plus all three impls -- and every caller of `len` stopped compiling. Its
+/// three `evict` bodies were correct; only the deletion was wrong.
 #[test]
-fn edit_file_with_an_identical_old_and_new_is_a_no_op() {
+fn edit_file_refuses_an_edit_that_deletes_a_function() {
+    let ws = temp_dir("dropped-fn");
+    let f = ws.join("layers.rs");
+    std::fs::write(
+        &f,
+        "impl Store for MemStore {\n    /// How many keys are live.\n    fn len(&self) -> usize {\n        self.map.len()\n    }\n}\n",
+    )
+    .unwrap();
+    let before = stamp(&f);
+
+    let e = call(json!({
+        "tool":"edit_file","path":"layers.rs",
+        "old_str":"    /// How many keys are live.\n    fn len(&self) -> usize {\n        self.map.len()\n    }",
+        "new_str":"    /// Remove the key, returning whether it was present.\n    fn evict(&mut self, key: &str) -> bool {\n        self.map.remove(key).is_some()\n    }"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(o.contains("rejected"), "the deletion must be refused: {o}");
+    assert!(o.contains("len"), "must name the function it drops: {o}");
+    assert_eq!(stamp(&f), before, "nothing may be written");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The other half of the contract: ADDING a method alongside the one already there is the
+/// correct move, and must sail through. A guard that blocked this would be worse than none.
+#[test]
+fn edit_file_allows_adding_a_function_beside_an_existing_one() {
+    let ws = temp_dir("added-fn");
+    let f = ws.join("layers.rs");
+    std::fs::write(
+        &f,
+        "impl Store for MemStore {\n    fn len(&self) -> usize {\n        self.map.len()\n    }\n}\n",
+    )
+    .unwrap();
+
+    let e = call(json!({
+        "tool":"edit_file","path":"layers.rs",
+        "old_str":"    fn len(&self) -> usize {\n        self.map.len()\n    }",
+        "new_str":"    fn len(&self) -> usize {\n        self.map.len()\n    }\n\n    fn evict(&mut self, key: &str) -> bool {\n        self.map.remove(key).is_some()\n    }"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(!o.contains("rejected"), "adding is not deleting: {o}");
+    let after = std::fs::read_to_string(&f).unwrap();
+    assert!(after.contains("fn len"), "len must survive: {after}");
+    assert!(after.contains("fn evict"), "evict must land: {after}");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// THE REGRESSION, and its severity has deliberately changed.
+///
+/// `old_str == new_str` used to be answered as a no-op -- but only on the paths that reach a
+/// successful match. It is now REJECTED by `identical_replacement` before the file is read, so
+/// the answer no longer depends on whether the anchor happened to resolve.
+///
+/// Why an outright rejection rather than the gentler no-op wording: the pair is wrong on its own
+/// terms, exactly like `indistinct_anchor`'s bare `!`, and both of those refuse. The no-op
+/// register is for a tool that WORKED on a vacuous request; this request cannot be carried out at
+/// all. Measured on `rust-two-stage`, the model sent an identical pair 14 times in 18 turns.
+#[test]
+fn edit_file_with_an_identical_old_and_new_is_rejected_before_the_file_is_read() {
     let ws = temp_dir("noop-edit");
     let f = ws.join("a.rs");
     std::fs::write(&f, "fn f() { return 1; }\n").unwrap();
@@ -678,7 +742,11 @@ fn edit_file_with_an_identical_old_and_new_is_a_no_op() {
     }));
     let o = obs(execute(&e, &ws));
 
-    assert_no_op(&o, "identical");
+    assert!(o.contains("rejected"), "must refuse the pair: {o}");
+    assert!(
+        o.contains("byte-identical"),
+        "must name the PAIR as the defect: {o}"
+    );
     assert!(
         !o.contains("1 replacement"),
         "must not claim a replacement landed: {o}"
@@ -687,12 +755,43 @@ fn edit_file_with_an_identical_old_and_new_is_a_no_op() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-/// The whole-line disambiguation path writes too, and it can also land on itself.
+/// THE POINT OF MOVING IT EARLIER. An identical pair whose anchor does NOT resolve used to fall
+/// all the way through to `anchor_not_found`, so the model was told its ANCHOR was wrong when the
+/// anchor was irrelevant -- the replacement could not have changed anything wherever it landed.
+/// That misdirection is what cost `rust-two-stage` eighteen turns of anchor-hunting.
+#[test]
+fn an_identical_pair_that_does_not_match_still_blames_the_pair_not_the_anchor() {
+    let ws = temp_dir("noop-nomatch");
+    let f = ws.join("lib.rs");
+    std::fs::write(&f, "fn compare(a: u32, b: u32) -> bool { a == b }\n").unwrap();
+
+    // An anchor copied out of a DIFFERENT file: it appears nowhere in lib.rs.
+    let anchor = "assert_eq!(compare(&v(\"1.4\"), &v(\"1.4.0\")), Ordering::Equal);";
+    let e = call(json!({
+        "tool":"edit_file","path":"lib.rs","old_str":anchor,"new_str":anchor
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(
+        o.contains("byte-identical"),
+        "the identical pair must be named first: {o}"
+    );
+    assert!(
+        !o.contains("anchor not found"),
+        "must NOT send the model hunting for a better anchor: {o}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The whole-line disambiguation path is reached only by a pair that differs, so its own
+/// self-landing no-op remains a no-op. Pinned so the new pre-check cannot swallow it.
 #[test]
 fn edit_file_whole_line_match_that_changes_nothing_is_a_no_op() {
     let ws = temp_dir("noop-wholeline");
     let f = ws.join("m.py");
-    // "return n" substring-matches twice, so this takes the whole-line branch.
+    // "return n" substring-matches twice, so this takes the whole-line branch. The pair
+    // DIFFERS (trailing spaces), so it passes the identical-pair guard and reaches the
+    // whole-line branch, which then trims and lands on the same text.
     std::fs::write(
         &f,
         "def is_even(n):\n    return n % 2 == 0\n\n\ndef double(n):\n    return n\n",
@@ -701,12 +800,18 @@ fn edit_file_whole_line_match_that_changes_nothing_is_a_no_op() {
     let before = stamp(&f);
 
     let e = call(json!({
-        "tool":"edit_file","path":"m.py","old_str":"return n","new_str":"return n"
+        "tool":"edit_file","path":"m.py","old_str":"return n","new_str":"return n  "
     }));
     let o = obs(execute(&e, &ws));
 
     assert_no_op(&o, "identical");
     assert_eq!(stamp(&f), before, "the file must not be rewritten at all");
+    // Pin the ROUTE, not just the outcome: this must be the whole-line branch (the only
+    // producer of that phrase, write.rs), not the new identical-pair pre-check swallowing it.
+    assert!(
+        !o.contains("byte-identical"),
+        "the pre-check must not claim this differing pair: {o}"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

@@ -24,6 +24,7 @@
 
 mod cargo;
 mod dispatch;
+mod dropped_def;
 mod flame;
 mod guards;
 mod read;
@@ -35,6 +36,8 @@ mod write;
 mod tests;
 
 pub use dispatch::{execute, handled_here, ToolOutcome, NOT_EXECUTED_HERE};
+// `dropped_definition` is used through `super::dropped_def::...` by `write.rs`; `mod builtin`
+// is private, so a re-export here would dead-end at the crate boundary as dead code.
 pub use registry::{
     default_registry, minimal_worker_registry, read_only_registry, six_tool_registry,
 };

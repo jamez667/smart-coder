@@ -424,12 +424,27 @@ fn a_repeated_no_op_edit_is_reported_as_one_and_stalls() {
     .unwrap();
 
     // 1. Every edit_file turn told the model the truth.
+    //
+    // The WORDING changed deliberately (2026-09-10): `identical_replacement` now refuses the
+    // pair up front, so this is `rejected: ... byte-identical` rather than the old
+    // `no-op (nothing written)`. The old answer only existed on the paths that reach a
+    // successful match, so an identical pair whose anchor MISSED fell through to
+    // `anchor not found` -- blaming the anchor for a replacement that could not have changed
+    // anything wherever it landed. Measured on `rust-two-stage`: 14 identical pairs in 18
+    // turns, every one answered with advice to fix the anchor.
+    //
+    // What must NOT change is the rest of this test: nothing written, no workspace change,
+    // and the loop still ends on the stall ladder.
     let edits = sink.tool_results("edit_file");
     assert!(!edits.is_empty(), "the model did attempt edits");
     for o in &edits {
         assert!(
-            o.contains("no-op") && o.contains("nothing written"),
-            "every no-op turn must say so, got: {o}"
+            o.contains("byte-identical"),
+            "every identical-pair turn must name the PAIR as the defect, got: {o}"
+        );
+        assert!(
+            !o.contains("anchor not found"),
+            "it must never send the model hunting for a better anchor: {o}"
         );
         assert!(
             !o.contains("1 replacement"),
