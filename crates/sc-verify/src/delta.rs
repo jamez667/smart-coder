@@ -56,11 +56,36 @@ fn signature(report: &TestReport) -> Vec<String> {
 pub fn note_run(command: &str, report: &TestReport) -> Option<String> {
     let now = signature(report);
     let prev = LAST_RUN.with(|l| l.borrow_mut().insert(command.to_string(), now.clone()))?;
-    describe(&prev, &now)
+    describe_run(&prev, &now, ran_no_tests(report))
+}
+
+/// Did this run fail without running any tests at all -- i.e. the build broke?
+///
+/// A `generic` failed report is one the parser found no test lines in (`parse.rs`), which
+/// for a compile failure means the suite never started. Its signature is `file:line`
+/// compile errors, a vocabulary that cannot intersect the previous run's test names.
+fn ran_no_tests(report: &TestReport) -> bool {
+    report.generic && !report.command_ok
 }
 
 /// The delta clause between two signatures.
+///
+/// `now_is_a_build_failure` suppresses the `now passing` half: see
+/// [`describe_run`]. Kept as the two-signature form for the tests that exercise
+/// ordinary pass/fail transitions.
+#[cfg(test)]
 fn describe(prev: &[String], now: &[String]) -> Option<String> {
+    describe_run(prev, now, false)
+}
+
+/// The delta clause between two signatures.
+///
+/// When `now_is_a_build_failure`, the `now passing` half is dropped. A test absent from a
+/// broken build did not start passing -- it did not run. Reporting it as fixed told the
+/// model its destructive edit was progress, which is precisely how `rust-ineffective-edit`
+/// and `rust-shifting-anchor` ended with a model cheerfully rewriting a file it had just
+/// destroyed. `newly failing` is kept: the compile errors are real and are what to fix.
+fn describe_run(prev: &[String], now: &[String], now_is_a_build_failure: bool) -> Option<String> {
     if prev == now {
         return match now.len() {
             0 => None,
@@ -82,8 +107,14 @@ fn describe(prev: &[String], now: &[String]) -> Option<String> {
     if !newly.is_empty() {
         parts.push(format!("newly failing: {}", list(&newly)));
     }
-    if !fixed.is_empty() {
+    if !fixed.is_empty() && !now_is_a_build_failure {
         parts.push(format!("now passing: {}", list(&fixed)));
+    }
+    // Suppressing `now passing` can leave nothing to say. No clause beats an empty one:
+    // `observation()` renders `Some(d)` as `{d} -- {body}`, so an empty string would reach
+    // the model as a bare ` -- `.
+    if parts.is_empty() {
+        return None;
     }
     Some(parts.join("; "))
 }
@@ -126,6 +157,55 @@ mod tests {
 
     fn s(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// THE DEFECT: a test that vanished because the crate stopped compiling is reported
+    /// as "now passing".
+    ///
+    /// A parsed run signs itself with TEST NAMES; a compile failure is `generic` and signs
+    /// itself with `file:line` COMPILE ERRORS. The two vocabularies never intersect, so
+    /// every test name from the previous run lands in `fixed` and is rendered as a win.
+    ///
+    /// Measured live on `rust-ineffective-edit`: the model replaced the whole of split.rs
+    /// with a bare `for` loop, the file no longer compiled, ZERO tests ran, and the harness
+    /// told it `now passing: a_short_label_past_an_hour_shows_the_minutes_within_that_hour,
+    /// a_split_never_lets_a_field_overflow_its_unit, ... +2 more`. It had just destroyed the
+    /// file and was told it had fixed five tests. Same shape on `rust-shifting-anchor`.
+    #[test]
+    fn a_compile_failure_never_reports_the_tests_it_stopped_running_as_passing() {
+        let broke = TestReport::generic_with_output(
+            false,
+            "error[E0601]: `main` function not found\n --> split.rs:1\n",
+        );
+        // Through the production path -- `ran_no_tests` included, not a hardcoded flag.
+        let clause = describe_run(
+            &s(&["a_split_totals_back", "a_field_never_overflows"]),
+            &signature(&broke),
+            ran_no_tests(&broke),
+        )
+        .expect("a delta is still reported");
+        assert!(
+            !clause.contains("now passing"),
+            "a build that does not compile ran no tests, so nothing can have started \
+             passing -- got: {clause}"
+        );
+        assert!(
+            clause.contains("newly failing") || clause.contains("split.rs:1"),
+            "the compile error itself must still be surfaced: {clause}"
+        );
+    }
+
+    /// The mirror case, so the fix cannot be "never say now passing". A genuine fix that
+    /// takes a test from failing to passing must still be reported.
+    #[test]
+    fn a_real_fix_is_still_reported_as_now_passing() {
+        let before = signature(&red(&["a", "b"]));
+        let after = signature(&red(&["b"]));
+        assert_eq!(
+            describe(&before, &after).as_deref(),
+            Some("now passing: a"),
+            "a real pass-transition must survive the compile-failure guard"
+        );
     }
 
     #[test]
