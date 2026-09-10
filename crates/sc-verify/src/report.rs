@@ -231,7 +231,12 @@ pub fn compile_checklist(raw: &str) -> Option<String> {
     if errs.len() > MAX_CHECKLIST {
         s.push_str(&format!("\n  … and {} more", errs.len() - MAX_CHECKLIST));
     }
-    s.push_str("\nGo to each file:line above and fix it (edit_function for a match arm / body).");
+    // No tool name here. This crate cannot see the run's registry, and `edit_function` is
+    // absent from the six-tool menu the scored runs use -- so on those runs this line used to
+    // order the model to call something it had no way to call. Which tool to reach for is the
+    // agent loop's business (`escalation::mention` picks one the registry actually offers);
+    // this checklist's job is the file:line list.
+    s.push_str("\nGo to each file:line above and fix it.");
     Some(s)
 }
 

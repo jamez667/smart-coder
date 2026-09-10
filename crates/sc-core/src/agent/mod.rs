@@ -80,7 +80,16 @@ fn unoffered_tool_mentioned(messages: &[Message], registry: &ToolRegistry) -> Op
 }
 
 /// [`unoffered_tool_mentioned`] for one harness-authored string: the first built-in tool
-/// it names in backticks that `registry` does not offer.
+/// it names that `registry` does not offer.
+///
+/// Backticks are the house style, but they are not required for a SNAKE_CASE name.
+/// `edit_function` sat bare in a parenthetical in `sc-verify`'s compile checklist --
+/// "(edit_function for a match arm / body)" -- reaching the model on every failed
+/// verification of a six-tool run, and this detector could not see it because it was
+/// looking for a quoting convention the offending string did not use. A name with an
+/// underscore in it is never ordinary English, so matching it bare costs no false
+/// positives. Single-word names (`finish`, `ask`) still REQUIRE backticks: those are
+/// real words and would fire on nearly every prompt.
 fn unoffered_tool_in(text: &str, registry: &ToolRegistry) -> Option<String> {
     // Every tool the harness knows how to build, taken from the DEFAULT registry
     // rather than a hand-kept list.
@@ -96,8 +105,35 @@ fn unoffered_tool_in(text: &str, registry: &ToolRegistry) -> Option<String> {
         .iter()
         .map(|s| s.name)
         .filter(|name| registry.get(name).is_none())
-        .find(|name| text.contains(&format!("`{name}`")))
+        .find(|name| names_tool(text, name))
         .map(str::to_string)
+}
+
+/// Does `text` name the tool `name` as a tool reference?
+///
+/// Backticked always counts. Bare counts only for a name with an underscore -- see
+/// [`unoffered_tool_in`] for why -- and then only as a whole word, so `edit_file` does
+/// not match inside `edit_file_range`.
+fn names_tool(text: &str, name: &str) -> bool {
+    if text.contains(&format!("`{name}`")) {
+        return true;
+    }
+    if !name.contains('_') {
+        return false;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(name) {
+        let start = from + rel;
+        let end = start + name.len();
+        let before_ok = start == 0 || !text[..start].chars().next_back().is_some_and(is_word);
+        let after_ok = !text[end..].chars().next().is_some_and(is_word);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 /// Check a directive the harness is about to inject, at the point it is injected, and

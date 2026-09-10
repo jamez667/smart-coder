@@ -883,6 +883,54 @@ fn unoffered_tool_detector_fires_only_on_harness_text_naming_a_missing_tool() {
     let _ = Role::System;
 }
 
+/// A snake_case tool name counts BARE, not only in backticks.
+///
+/// The live miss: `sc-verify`'s compile checklist ended "(edit_function for a match arm /
+/// body)" and led every failed-verification observation, so on a six-tool run the model was
+/// told to call a tool it did not have -- and this detector, matching only backticks, was
+/// silent. `edit_function` is an identifier, never English, so bare matching is safe for it
+/// while single words like `finish` still need backticks.
+#[test]
+fn a_bare_snake_case_tool_name_is_detected_but_a_bare_word_is_not() {
+    use sc_model::Message;
+
+    let six = registry_of(&[
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_command",
+        "run_verification",
+        "finish",
+    ]);
+
+    // THE regression: the exact string that shipped, unbackticked.
+    let checklist = vec![Message::system(
+        "COMPILE ERRORS to fix (1):\n  • a.rs:7 — mismatched types\n\
+         Go to each file:line above and fix it (edit_function for a match arm / body).",
+    )];
+    assert_eq!(
+        unoffered_tool_mentioned(&checklist, &six).as_deref(),
+        Some("edit_function"),
+        "a bare snake_case tool name must be caught"
+    );
+
+    // The exemption the detector was built around still holds: bare single words are
+    // ordinary English and must not fire, or every prompt carries a fault.
+    let prose = vec![Message::system(
+        "Edit lines carefully, then finish and ask if unsure.",
+    )];
+    assert_eq!(unoffered_tool_mentioned(&prose, &six), None);
+
+    // Whole-word only: a longer identifier that merely contains a tool name is not a
+    // reference to that tool.
+    let longer = vec![Message::system("see edit_function_helper in the notes")];
+    assert_eq!(unoffered_tool_mentioned(&longer, &six), None);
+
+    // And a tool the run DOES have is never a fault, bare or not.
+    let offered = vec![Message::system("use edit_file for this")];
+    assert_eq!(unoffered_tool_mentioned(&offered, &six), None);
+}
+
 /// A registry holding only the named built-in tools (plus nothing else).
 fn registry_of(names: &[&str]) -> sc_tools::ToolRegistry {
     let full = sc_tools::default_registry();
