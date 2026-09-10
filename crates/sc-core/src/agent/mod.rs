@@ -1085,7 +1085,12 @@ pub fn run_agent_observed(
                 metrics.record_valid();
                 malformed_streak = 0; // a parseable call broke the malformed-reply streak
                 let arg = key_arg(&call);
-                let action = action_hash(&call.name, &arg);
+                // The stall detector's identity, NOT `arg`. For an anchored edit this adds
+                // the anchor, so two different edits to one file are two different actions
+                // (see `action_key`). `arg` stays the bare path: it is threaded into the
+                // ToolCall event, the write-loop breaker's streak, `rewrite_target`'s read
+                // off disk, and the directive that names the file to rewrite.
+                let action = action_hash(&call.name, &action_key(&call));
                 let tool = call.name.clone();
                 sink.record(&AgentEvent::ToolCall {
                     tool: tool.clone(),
@@ -2086,7 +2091,7 @@ mod test_util;
 mod tests;
 
 use dispatch::{
-    blind_cut, dispatch, gate_finish, key_arg, looks_like_failure, mutating_path,
+    action_key, blind_cut, dispatch, gate_finish, key_arg, looks_like_failure, mutating_path,
     observation_cap_for, pre_apply_batched_writes, FinishGate, VerifyFreshness,
 };
 use escalation::{mention, stopped};

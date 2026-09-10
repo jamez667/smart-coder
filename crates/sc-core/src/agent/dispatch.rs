@@ -434,6 +434,13 @@ pub(super) fn blind_cut(obs: &str, trimmed: &str) -> Option<(usize, usize)> {
 /// second page hashes identical to the first and gets nudged away, so the model
 /// can never see lines 51+ of a file it must edit. A bare re-read (same path, no
 /// window, or the identical window) still dedups, which is the case we want to nudge.
+///
+/// **This value is a PATH wherever a path-bearing tool produced it**, and callers rely on
+/// that: the loop threads it into [`AgentEvent::ToolCall`]'s `arg` for display, tracks the
+/// write-loop breaker's streak by it, hands it to `rewrite_target` to READ the file off
+/// disk, and inlines it into the directive naming the file the model must rewrite. So
+/// nothing may be appended to it here. The stall detector's extra discriminator lives in
+/// [`action_key`], which is used for the action hash alone.
 pub(super) fn key_arg(call: &sc_tools::ValidatedCall) -> String {
     // `run_command`'s parameter is `command`, which was not in the list below — so
     // every shell call hashed to the SAME empty key. Two genuinely different
@@ -480,6 +487,78 @@ pub(super) fn key_arg(call: &sc_tools::ValidatedCall) -> String {
         }
     }
     String::new()
+}
+
+/// The identity of a call for the **stall detector** — [`key_arg`] plus, for an anchored
+/// or named edit, the anchor that says WHERE in the file the edit lands.
+///
+/// **An EDIT's identity is its path AND its anchor.** Keying an edit on its path alone was
+/// the fifth — and worst — instance of the bug [`key_arg`]'s own comments describe four
+/// times over (for `command`, `summary`, `crate` and `need`). Every editor keyed on `path`,
+/// so three consecutive, entirely different, entirely successful `edit_file` calls on one
+/// file hashed to one action and tripped `repeat_limit` (3). Measured on `rust-symptomatic`:
+/// three edits that each applied cleanly — the harness's own observations that turn read
+/// `edit_file lib.rs ok (1 replacement)` and `now passing: a_full_window_evicts_the_oldest`
+/// — were answered with "STOP — you are stuck in a loop calling 'edit_file' and making no
+/// progress". The directive then banned `edit_file`, the model rewrote the file wholesale,
+/// and the run regressed from 1 failing test to 2. The false positive landed on the one
+/// tool that makes progress, which is the worst place for it.
+///
+/// SEPARATE FROM [`key_arg`] on purpose. That value is a real path, and the loop reads the
+/// file off disk with it, tracks the write-loop breaker's streak by it, and names it to the
+/// model in the rewrite directive — appending an anchor there made the harness order a
+/// `write_file` to a path called `big.rs#249d985d`. Only the hash needs the discriminator,
+/// so only the hash gets it.
+pub(super) fn action_key(call: &sc_tools::ValidatedCall) -> String {
+    let base = key_arg(call);
+    match edit_anchor(call) {
+        // `path#xxxxxxxx` — the path stays in the clear so a debug dump still reads.
+        Some(anchor) => format!("{base}#{:08x}", short_hash(&anchor)),
+        None => base,
+    }
+}
+
+/// What distinguishes one edit of a file from another edit of the SAME file — the thing
+/// [`action_key`] folds into the hash so the stall detector can tell them apart. `None` for
+/// any call that is not an anchored/named edit, which keeps every other tool's action
+/// identity byte-for-byte what it was.
+///
+/// Per tool, the anchor is the argument that says WHERE in the file the edit lands:
+/// - `edit_file` → `old_str`, the exact snippet being replaced;
+/// - `edit_lines` → `start:end`, the whole line range (`start` alone is not enough:
+///   `edit_lines(a.rs, 1..5)` and `edit_lines(a.rs, 1..9)` are different edits);
+/// - `edit_function` → `name`, the function being replaced.
+///
+/// Deliberately NOT the replacement text (`new_str`/`new_text`/`new_body`/`content`).
+/// Writing two different bodies over the SAME anchor is thrash, and must still read as a
+/// repeat; and a whole-file `write_file`/`create_file` has no anchor at all, so rewriting
+/// one file three times running keeps tripping the detector exactly as before.
+fn edit_anchor(call: &sc_tools::ValidatedCall) -> Option<String> {
+    match call.name.as_str() {
+        "edit_file" => call.str("old_str").map(str::to_string),
+        "edit_lines" => Some(format!(
+            "{}:{}",
+            call.int("start").unwrap_or_default(),
+            call.int("end").unwrap_or_default()
+        )),
+        "edit_function" => call.str("name").map(str::to_string),
+        _ => None,
+    }
+}
+
+/// An 8-hex-digit digest of an edit anchor, for [`action_key`]'s `path#xxxxxxxx`.
+///
+/// Hashed rather than inlined because an `old_str` is arbitrary source — multi-line, and
+/// routinely kilobytes. A fixed-width suffix keeps the key one short readable line
+/// (`impl.sh#3f2a1c7b`) however big the anchor is. The suffix only has to DIFFER, not be
+/// legible: a collision costs one false repeat, which is what the action hash already
+/// tolerates by construction.
+fn short_hash(s: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish() as u32
 }
 
 /// Does a shell command look like an attempt to run the test suite? Used to
@@ -900,6 +979,147 @@ mod tests {
             key_arg(&page1),
             key_arg(&read_call("db.rs", Some(1), Some(50)))
         );
+    }
+
+    fn edit_call(path: &str, old: &str, new: &str) -> sc_tools::ValidatedCall {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), json!(path));
+        args.insert("old_str".to_string(), json!(old));
+        args.insert("new_str".to_string(), json!(new));
+        sc_tools::ValidatedCall {
+            name: "edit_file".to_string(),
+            args,
+        }
+    }
+
+    /// **An edit's identity is its path AND its anchor.**
+    ///
+    /// The fifth instance of `key_arg`'s recurring bug, and the worst: keying an edit on
+    /// `path` alone made every edit of one file the same action, so three successful edits
+    /// to `lib.rs` tripped `repeat_limit` (3) and the model was told to STOP while it was
+    /// turning tests green.
+    #[test]
+    fn action_key_distinguishes_two_edits_to_the_same_file() {
+        use crate::recovery::action_hash;
+
+        let first = edit_call("lib.rs", "let n = 1;", "let n = 2;");
+        let second = edit_call(
+            "lib.rs",
+            "fn evict(&mut self) {",
+            "fn evict(&mut self, n: u8) {",
+        );
+        assert_ne!(
+            action_key(&first),
+            action_key(&second),
+            "two different edits to one file must be different actions"
+        );
+        assert_ne!(
+            action_hash("edit_file", &action_key(&first)),
+            action_hash("edit_file", &action_key(&second)),
+            "and must not hash as a repeat"
+        );
+
+        // The same edit twice IS a repeat -- the case the detector must still catch.
+        assert_eq!(
+            action_key(&first),
+            action_key(&edit_call("lib.rs", "let n = 1;", "let n = 2;"))
+        );
+
+        // Shape: the path in the clear, plus a fixed-width suffix however big the anchor.
+        let k = action_key(&first);
+        assert!(k.starts_with("lib.rs#"), "{k}");
+        assert_eq!(k.len(), "lib.rs#".len() + 8, "{k}");
+        let huge = edit_call("lib.rs", &"x".repeat(20_000), "y");
+        assert_eq!(
+            action_key(&huge).len(),
+            k.len(),
+            "a kilobyte anchor must not bloat the key"
+        );
+
+        // A different FILE is still a different action, same anchor or not.
+        assert_ne!(
+            action_key(&first),
+            action_key(&edit_call("other.rs", "let n = 1;", "let n = 2;"))
+        );
+    }
+
+    /// **`key_arg` itself stays a PATH.** The loop reads the file off disk with it and
+    /// names it to the model in the rewrite directive, so the anchor must never leak in:
+    /// appending it there made the harness order a `write_file` to `big.rs#249d985d`.
+    #[test]
+    fn key_arg_stays_a_bare_path_for_an_edit() {
+        let e = edit_call("big.rs", "let n = 1;", "let n = 2;");
+        assert_eq!(key_arg(&e), "big.rs");
+        assert!(!key_arg(&e).contains('#'));
+    }
+
+    /// The other two editors anchor too: `edit_lines` on its full range (start alone is not
+    /// enough -- 1..5 and 1..9 are different edits) and `edit_function` on the name.
+    #[test]
+    fn action_key_distinguishes_line_and_function_edits() {
+        let lines = |start: i64, end: i64| {
+            let mut args = std::collections::BTreeMap::new();
+            args.insert("path".to_string(), json!("lib.rs"));
+            args.insert("start".to_string(), json!(start));
+            args.insert("end".to_string(), json!(end));
+            args.insert("new_text".to_string(), json!("// x"));
+            sc_tools::ValidatedCall {
+                name: "edit_lines".to_string(),
+                args,
+            }
+        };
+        assert_ne!(
+            action_key(&lines(1, 5)),
+            action_key(&lines(1, 9)),
+            "same start, different end"
+        );
+        assert_ne!(action_key(&lines(1, 5)), action_key(&lines(20, 24)));
+        assert_eq!(action_key(&lines(1, 5)), action_key(&lines(1, 5)));
+
+        let func = |name: &str| {
+            let mut args = std::collections::BTreeMap::new();
+            args.insert("path".to_string(), json!("lib.rs"));
+            args.insert("name".to_string(), json!(name));
+            args.insert("new_body".to_string(), json!("fn f() {}"));
+            sc_tools::ValidatedCall {
+                name: "edit_function".to_string(),
+                args,
+            }
+        };
+        assert_ne!(action_key(&func("evict")), action_key(&func("insert")));
+        assert_eq!(action_key(&func("evict")), action_key(&func("evict")));
+    }
+
+    /// A whole-file write has no anchor, so it keeps the plain path: rewriting one file
+    /// three times running must still read as a repeat. (That rewrite is exactly the
+    /// escalation the false loop pushed the model into, so the detector must still catch
+    /// it.)
+    #[test]
+    fn a_whole_file_write_keeps_the_plain_path_key() {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), json!("lib.rs"));
+        args.insert("content".to_string(), json!("fn main() {}"));
+        let a = sc_tools::ValidatedCall {
+            name: "write_file".to_string(),
+            args: args.clone(),
+        };
+        assert_eq!(action_key(&a), "lib.rs");
+
+        args.insert("content".to_string(), json!("fn main() { other(); }"));
+        let b = sc_tools::ValidatedCall {
+            name: "write_file".to_string(),
+            args,
+        };
+        assert_eq!(action_key(&b), action_key(&a), "a rewrite is a rewrite");
+    }
+
+    /// Every non-edit tool's action identity is untouched by the anchor split.
+    #[test]
+    fn action_key_matches_key_arg_for_every_non_edit_tool() {
+        let reads = read_call("db.rs", Some(51), Some(50));
+        assert_eq!(action_key(&reads), key_arg(&reads));
+        let cmd = run_command_call("ls -la");
+        assert_eq!(action_key(&cmd), key_arg(&cmd));
     }
 
     #[test]

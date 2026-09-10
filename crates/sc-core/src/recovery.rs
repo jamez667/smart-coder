@@ -77,8 +77,32 @@ impl StallDetector {
         repeat_limit: usize,
         no_progress_limit: usize,
     ) -> Progress {
+        // Taken ONCE, at the top, because BOTH branches below need it and `mem::take`
+        // consumes it: the repeat branch reads it to decide whether this turn was real
+        // work, and the progress branch reads it to decide whether to credit the byte
+        // change. Taking it inside the progress branch (where it used to live) would leave
+        // the repeat branch -- which runs first -- unable to see it at all.
+        let same_failure = std::mem::take(&mut self.unchanged_failure);
+
         // Repeated identical action.
-        if self.last_action == Some(action) {
+        //
+        // A REPEAT THAT DID WORK IS NOT A LOOP. This branch used to fire on the action hash
+        // alone, ahead of and independent of the progress logic below -- so three turns
+        // whose actions happened to hash alike tripped `Looping` (`repeat_limit` 3) even
+        // when every one of them applied cleanly and turned tests green. Together with
+        // `key_arg` keying every edit of a file on its path alone, that made three
+        // successful, different edits to one file read as a stall, and the harness answered
+        // real progress with "STOP -- you are stuck in a loop". Measured on
+        // `rust-symptomatic`: the run then rewrote the file wholesale and regressed from 1
+        // failing test to 2.
+        //
+        // The genuine loop cases are untouched, because none of them changes the workspace:
+        // a read cannot write, a no-op edit writes no bytes, and an edit the harness has
+        // ALREADY judged ineffective carries `same_failure` -- the very signal the progress
+        // branch below uses to refuse to credit a byte change. Only a turn that both changed
+        // the workspace and was not judged ineffective is exempt.
+        let did_real_work = changed_workspace && !same_failure;
+        if self.last_action == Some(action) && !did_real_work {
             self.repeat_count += 1;
         } else {
             self.repeat_count = 0;
@@ -93,8 +117,7 @@ impl StallDetector {
         //
         // The exception: a change the harness has already judged ineffective (the same
         // failure, again). That is idling that happens to touch bytes, and it counts as such.
-        let same_failure = std::mem::take(&mut self.unchanged_failure);
-        if changed_workspace && !same_failure {
+        if did_real_work {
             self.no_progress_count = 0;
             self.seen_since_progress.clear();
         } else if self.seen_since_progress.insert(action) && !same_failure {
@@ -166,10 +189,13 @@ mod tests {
     fn flags_repeated_identical_actions() {
         let mut d = StallDetector::default();
         let a = action_hash("read_file", "a.rs");
+        // `changed_workspace: false` -- a read cannot write, and a repeat that DID change
+        // the workspace is no longer a loop (see the regression test below). The fixture
+        // said `true` for a read, a combination the detector can never see in a real run.
         // repeat_limit = 3 -> the 3rd identical action trips it.
-        assert_eq!(d.observe(a, true, 3, 5), Progress::Ok);
-        assert_eq!(d.observe(a, true, 3, 5), Progress::Ok);
-        assert_eq!(d.observe(a, true, 3, 5), Progress::Looping);
+        assert_eq!(d.observe(a, false, 3, 5), Progress::Ok);
+        assert_eq!(d.observe(a, false, 3, 5), Progress::Ok);
+        assert_eq!(d.observe(a, false, 3, 5), Progress::Looping);
     }
 
     #[test]
@@ -177,9 +203,82 @@ mod tests {
         let mut d = StallDetector::default();
         let a = action_hash("read_file", "a.rs");
         let b = action_hash("read_file", "b.rs");
-        d.observe(a, true, 3, 5);
-        d.observe(a, true, 3, 5);
-        assert_eq!(d.observe(b, true, 3, 5), Progress::Ok); // streak broken
+        d.observe(a, false, 3, 5);
+        d.observe(a, false, 3, 5);
+        assert_eq!(d.observe(b, false, 3, 5), Progress::Ok); // streak broken
+    }
+
+    /// **THE REGRESSION: three successful edits to one file are not a loop.**
+    ///
+    /// Measured on `rust-symptomatic`. `key_arg` keyed every edit on its path alone, so
+    /// three entirely different `edit_file` calls on `lib.rs` hashed to one action; the
+    /// repeat branch counted them ahead of, and independently of, the progress logic, so
+    /// `repeat_limit` (3) tripped. The harness's own observations that turn read `edit_file
+    /// lib.rs ok (1 replacement)` and `now passing: a_full_window_evicts_the_oldest`, and it
+    /// answered with "STOP -- you are stuck in a loop calling 'edit_file' and making no
+    /// progress". The directive banned `edit_file`, the model rewrote the file wholesale,
+    /// and the run regressed from 1 failing test to 2.
+    ///
+    /// Both halves of the fix are exercised: `action_key` now gives those three edits
+    /// distinct hashes, AND -- tested here, the belt to that braces -- even an outright hash
+    /// collision cannot report `Looping` while every turn is changing the workspace
+    /// productively.
+    #[test]
+    fn three_successful_edits_to_one_file_are_not_a_loop() {
+        let mut d = StallDetector::default();
+        // The worst case: the SAME action hash every turn (what the old `key_arg`
+        // produced), every edit applying cleanly, and no unchanged-failure verdict against
+        // any of them. Real work must never read as a loop.
+        let a = action_hash("edit_file", "lib.rs");
+        for i in 0..6 {
+            assert_eq!(
+                d.observe(a, true, 3, 4),
+                Progress::Ok,
+                "successful edit #{i} is progress, not a loop"
+            );
+        }
+    }
+
+    /// ...and the genuine loop that must NOT be weakened: three identical edits that write
+    /// no bytes. A no-op write reports `changed_workspace: false` (nothing was written), so
+    /// the repeat branch counts it exactly as before.
+    #[test]
+    fn three_identical_no_op_edits_still_loop() {
+        let mut d = StallDetector::default();
+        let a = action_hash("edit_file", "lib.rs#deadbeef");
+        assert_eq!(d.observe(a, false, 3, 4), Progress::Ok);
+        assert_eq!(d.observe(a, false, 3, 4), Progress::Ok);
+        assert_eq!(d.observe(a, false, 3, 4), Progress::Looping);
+    }
+
+    /// Three identical reads still loop -- unchanged behaviour, and the purest loop there
+    /// is: nothing a read does can ever change the workspace.
+    #[test]
+    fn three_identical_reads_still_loop() {
+        let mut d = StallDetector::default();
+        let a = action_hash("read_file", "lib.rs");
+        assert_eq!(d.observe(a, false, 3, 4), Progress::Ok);
+        assert_eq!(d.observe(a, false, 3, 4), Progress::Ok);
+        assert_eq!(d.observe(a, false, 3, 4), Progress::Looping);
+    }
+
+    /// **An edit that changes bytes but leaves the same failure is still idling.**
+    ///
+    /// The exemption above is gated on `unchanged_failure`, not on the byte change alone.
+    /// A model retrying one ineffective edit gets no credit for having touched the file:
+    /// the repeat still counts, and the loop is caught at the limit exactly as before.
+    #[test]
+    fn a_changed_edit_that_keeps_the_same_failure_still_counts_as_a_repeat() {
+        let mut d = StallDetector::default();
+        let a = action_hash("edit_file", "lib.rs#c0ffee");
+        // `no_progress_limit` is high so only the `same_failure`/repeat paths can fire.
+        d.note_unchanged_failure();
+        assert_eq!(d.observe(a, true, 3, 9), Progress::Stuck); // judged ineffective
+        d.note_unchanged_failure();
+        assert_eq!(d.observe(a, true, 3, 9), Progress::Stuck); // repeat_count 1
+        d.note_unchanged_failure();
+        // repeat_count 2 -> Looping wins the priority order; either verdict is a stall.
+        assert_eq!(d.observe(a, true, 3, 9), Progress::Looping);
     }
 
     #[test]
