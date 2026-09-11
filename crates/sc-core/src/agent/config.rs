@@ -117,6 +117,33 @@ pub struct AgentConfig {
     /// but won't start another). The GUI's Cancel button flips this. `Arc` keeps
     /// `AgentConfig: Clone` and lets the flag cross to the worker thread.
     pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Sampling temperature for every turn of the run. `None` leaves
+    /// [`GenerateRequest`](sc_model::GenerateRequest)'s own default (0.2) alone.
+    ///
+    /// Exposed because the loop had no way to reach it: the request was built with
+    /// `GenerateRequest::new`, so every measured run sampled at 0.2 with no way to say
+    /// otherwise, and no caller could ask for a greedy draw.
+    pub temperature: Option<f32>,
+    /// Sampling seed for every turn of the run. `None` lets the server choose, which is
+    /// right for interactive work and wrong for measurement.
+    ///
+    /// THE MEASUREMENT THIS EXISTS FOR. `rust-two-stage` was run ten times on one commit
+    /// (2026-09-10) and scored 1 pass, 9 red -- against 2 of 3 for the same rung in the
+    /// full ladder an hour earlier. Every run opened with the same four turns and diverged
+    /// at turn 5: the run that passed re-read the file before its second edit, the nine
+    /// that failed re-sent near-identical ones. The step-4 prompts were the same size and
+    /// the same cache state; only the draw differed.
+    ///
+    /// So the ladder could not tell a fix from luck, and the numbers reported off it --
+    /// including a 6/12/10 spread over three identical passes -- had error bars wider than
+    /// anything being measured. Verified against the llama.cpp server: `temperature: 0`
+    /// with a fixed `seed` returns byte-identical replies, including on the native
+    /// tool-calling path the eval actually uses.
+    ///
+    /// A caller running repeats must VARY this per repeat (`sc-eval` uses `seed + round`).
+    /// One seed held constant across N runs makes N copies of a single draw, which looks
+    /// stable and measures nothing.
+    pub seed: Option<u64>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -229,6 +256,10 @@ impl Default for AgentConfig {
             diagnose: false,
             stream: false,
             cancel: None,
+            // Unset: interactive work keeps the backend's own sampling, and a default
+            // seed would make every session repeat one draw.
+            temperature: None,
+            seed: None,
         }
     }
 }

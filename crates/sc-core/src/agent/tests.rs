@@ -24,6 +24,77 @@ where
     CallbackBackend::new(name, caps, generate)
 }
 
+/// **A pinned seed and temperature reach the backend, on EVERY turn.**
+///
+/// The loop built its request with `GenerateRequest::new` and never touched sampling, so
+/// there was no route from config to the sampler at all: every measured run drew at 0.2
+/// with a server-chosen seed. `rust-two-stage` run ten times on one commit came back
+/// 1 pass / 9 red, diverging on a single turn -- the ladder could not tell a fix from a
+/// lucky draw.
+///
+/// Asserted per turn, not just on the first: a seed applied once and dropped afterwards
+/// would look right in a one-turn test and still leave the run unreproducible.
+#[test]
+fn a_pinned_seed_and_temperature_reach_every_request() {
+    use std::sync::Mutex;
+
+    let ws = temp_dir("seeded");
+    let seen: Mutex<Vec<(Option<u64>, f32)>> = Mutex::new(Vec::new());
+    let replies = Mutex::new(vec![
+        json!({"tool":"write_file","path":"a.txt","content":"hi"}).to_string(),
+        json!({"tool":"finish"}).to_string(),
+    ]);
+    let backend = scripted_backend("seeded", |req: &sc_model::GenerateRequest| {
+        seen.lock().unwrap().push((req.seed, req.temperature));
+        let mut r = replies.lock().unwrap();
+        Ok(GenerateResponse::new(if r.is_empty() {
+            json!({"tool":"finish"}).to_string()
+        } else {
+            r.remove(0)
+        }))
+    });
+
+    let cfg = AgentConfig {
+        seed: Some(4242),
+        temperature: Some(0.0),
+        ..AgentConfig::default()
+    };
+    let report = run_agent(&backend, "write a.txt", &ws, &cfg).unwrap();
+    assert!(report.steps >= 2, "the run must have taken turns");
+
+    let seen = seen.into_inner().unwrap();
+    assert!(!seen.is_empty(), "the backend was called");
+    for (i, (seed, temp)) in seen.iter().enumerate() {
+        assert_eq!(*seed, Some(4242), "turn {i} lost the seed");
+        assert_eq!(*temp, 0.0, "turn {i} lost the temperature");
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The other half of the contract: an UNPINNED run must keep the backend's own sampling.
+/// Forcing a default seed would make every interactive session replay one draw.
+#[test]
+fn an_unpinned_run_leaves_sampling_to_the_backend() {
+    use std::sync::Mutex;
+
+    let ws = temp_dir("unseeded");
+    let seen: Mutex<Vec<(Option<u64>, f32)>> = Mutex::new(Vec::new());
+    let backend = scripted_backend("unseeded", |req: &sc_model::GenerateRequest| {
+        seen.lock().unwrap().push((req.seed, req.temperature));
+        Ok(GenerateResponse::new(json!({"tool":"finish"}).to_string()))
+    });
+
+    let _ = run_agent(&backend, "do nothing", &ws, &AgentConfig::default()).unwrap();
+
+    let seen = seen.into_inner().unwrap();
+    assert!(!seen.is_empty(), "the backend was called");
+    for (seed, temp) in &seen {
+        assert_eq!(*seed, None, "an unpinned run must not invent a seed");
+        assert_eq!(*temp, 0.2, "and must keep GenerateRequest's own default");
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[test]
 fn writes_a_file_then_finishes() {
     let ws = temp_dir("write");

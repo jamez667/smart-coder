@@ -833,6 +833,17 @@ pub fn run_agent_observed(
         }
 
         let mut req = GenerateRequest::new(built.messages);
+        // Sampling, when the caller pinned it. Without this the loop had no route to the
+        // backend's sampler at all: every turn of every measured run drew at the
+        // `GenerateRequest` default of 0.2 with a server-chosen seed, so two runs of one
+        // rung on one commit could differ on a single turn and the ladder could not tell a
+        // fix from a lucky draw. See `AgentConfig::seed`.
+        if let Some(t) = cfg.temperature {
+            req.temperature = t;
+        }
+        if let Some(s) = cfg.seed {
+            req.seed = Some(s);
+        }
         // The reply budget the prompt was sized against (spec 05) must also be the
         // reply budget the request asks for. It was subtracted from the prompt but
         // never applied here, so every turn silently used `GenerateRequest`'s 1024

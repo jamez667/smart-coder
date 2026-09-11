@@ -5,6 +5,12 @@
 //!     sc-eval [SUITE_TOML]              the red->green demo suite (FileSolver)
 //!     sc-eval --agent [SUITE_TOML] [--url <U>] [--model <M>]   the same suite, real model
 //!             [--only <ID>] [--repeat <N>] [--log <DIR>]      one task, N times, streamed
+//!             [--seed <N>] [--temperature <T>]                reproducible sampling
+//!
+//! `--seed` is what makes a repeat measurable rather than merely repeated: round R draws
+//! with seed N+R-1, so the repeats stay independent and each replays exactly. Without it
+//! every run samples at 0.2 with a server-chosen seed, and one rung measured ten times on
+//! one commit came back 1 pass / 9 red -- error bars wider than any fix being measured.
 
 use std::process::ExitCode;
 
@@ -88,6 +94,9 @@ fn agent_suite(args: &[String]) -> ExitCode {
     let repeat: usize = flag(args, "--repeat")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    // `--seed <N>` makes the run reproducible: round R draws with seed N+R-1, so the
+    // repeats stay independent of each other and each one can be replayed exactly.
+    let seed_base: Option<u64> = flag(args, "--seed").and_then(|s| s.parse().ok());
     let tasks: Vec<_> = match only {
         Some(id) => suite.tasks.iter().filter(|t| t.id == id).cloned().collect(),
         None => suite.tasks.clone(),
@@ -129,9 +138,18 @@ fn agent_suite(args: &[String]) -> ExitCode {
         });
         let sink = file.map(sc_core::JsonLinesSink::new);
 
+        // Pin sampling when asked, so a repeat is reproducible rather than merely
+        // repeated. The seed is offset by the round: N repeats must be N INDEPENDENT
+        // draws that can each be replayed, not N copies of one draw -- a constant seed
+        // across repeats looks perfectly stable and measures nothing.
+        let cfg = sc_core::AgentConfig {
+            temperature: flag(args, "--temperature").and_then(|s| s.parse().ok()),
+            seed: seed_base.map(|s| s + round as u64 - 1),
+            ..sc_core::AgentConfig::default()
+        };
         let solver = match &sink {
-            Some(s) => AgentSolver::new(&backend).with_sink(s),
-            None => AgentSolver::new(&backend),
+            Some(s) => AgentSolver::with_config(&backend, cfg).with_sink(s),
+            None => AgentSolver::with_config(&backend, cfg),
         };
         let report = Report::new(run_suite(&tasks, &solver));
         println!("{}", report.summary());
