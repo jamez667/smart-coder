@@ -1081,6 +1081,27 @@ pub fn run_agent_observed(
             });
         }
 
+        // The reply carried a well-formed tool call wrapped in stray JSON punctuation --
+        // typically one extra `}`. NOT a repair: `extract_balanced` stops at the first
+        // complete object, so the object in front of the stray character parses on the STRICT
+        // path and no repair rung ever runs. The leftovers are discarded without a word, and
+        // the loop logs `parsed call: edit_file` as though the reply were clean.
+        //
+        // Measured across ten `rust-symptomatic` runs: 84 of 316 JSON-shaped replies were not
+        // valid JSON, and in one run the malformation began at turn 5 and persisted for all 36
+        // remaining turns. A drifting run scored as clean.
+        //
+        // Reported, never enforced. The recovered call is correct and rejecting it would turn
+        // 84 working turns into 84 wasted ones; this only makes the drift countable, so a run
+        // that is quietly degrading is flagged as degraded.
+        if crate::strategy::has_malformed_json_envelope(&resp.content) {
+            sink.record(&AgentEvent::HarnessFault {
+                kind: FaultKind::MalformedJsonAccepted,
+                detail: crate::strategy::malformed_envelope_detail(&resp.content),
+                step: step + 1,
+            });
+        }
+
         if read_only_run && capped_replies >= 3 && !this_reply_has_a_call {
             sink.record(&AgentEvent::Stalled {
                 trigger: "the model kept generating to the token cap instead of calling a tool"

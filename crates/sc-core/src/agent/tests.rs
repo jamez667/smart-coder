@@ -1205,6 +1205,51 @@ fn recent_edit_path_finds_the_last_mutated_file_not_the_last_read() {
     assert_eq!(recent_edit_path(&[]), None);
 }
 
+/// **THE CROSS-CHANNEL CONTRADICTION: never forbid the only whole-file writer.**
+///
+/// Within one directive the "recommend and forbid are disjoint" invariant already holds. The
+/// incoherence is BETWEEN channels: the anchor-miss advice in `mod.rs` tells a model whose
+/// edits keep missing to "STOP editing by anchor. Instead call `write_file` ... with the
+/// ENTIRE corrected file contents". The model complies, `write_file` becomes the looped tool,
+/// and the stall directive then forbids it -- barring both mutation tools in turn.
+///
+/// Measured on `rust-symptomatic` run-10: the anchor advice fired five times, the model
+/// complied 5/5, four compliances were rejected as no-ops, and at turn 37 the stall advice
+/// ordered `edit_file` while the anchor advice was still ordering `write_file`. Run-06 is the
+/// mirror: `edit_file` banned at turns 7/10/14 and re-permitted at 16.
+#[test]
+fn self_recovery_directive_never_forbids_the_only_whole_file_writer() {
+    use super::escalation::self_recovery_directive;
+
+    // The six-tool registry: `write_file` is the ONLY whole-file writer it offers.
+    let six = registry_of(&[
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_command",
+        "run_verification",
+        "finish",
+    ]);
+    let d = self_recovery_directive(&["write_file".to_string()], &six, 0, false);
+    assert!(
+        !d.contains("Do NOT emit `write_file`"),
+        "bars the only tool that can rewrite a whole file: {d}"
+    );
+    assert!(
+        d.contains("change what you write"),
+        "must say how to use it DIFFERENTLY instead of banning it: {d}"
+    );
+    assert_eq!(unoffered_tool_in(&d, &six), None, "{d}");
+
+    // The anchored editor is NOT the sole whole-file writer, so looping on it is still
+    // forbidden as before -- this must not become a blanket amnesty.
+    let d = self_recovery_directive(&["edit_file".to_string()], &six, 0, false);
+    assert!(
+        d.contains("Do NOT emit `edit_file` again"),
+        "an anchored-edit loop keeps its prohibition: {d}"
+    );
+}
+
 /// **THE CROSS-GUARD DEADLOCK: never steer at `write_file` for a file it will refuse.**
 ///
 /// `write.rs`'s own doc comment on `WRITE_FILE_OVERWRITE_MAX_LINES` predicted this -- "telling

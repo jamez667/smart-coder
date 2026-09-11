@@ -1389,6 +1389,179 @@ fn edit_file_partial_line_anchor_still_hits_the_delimiter_guard() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+// ---------------------------------------------------------------------------
+// "Your change is ALREADY in the file": the missed anchor whose cause is that the
+// model's own edit already landed.
+// ---------------------------------------------------------------------------
+
+/// **THE LIVE CASE.** Apply an edit, then send the SAME edit again.
+///
+/// Measured on `rust-symptomatic` run-06, on nine separate turns: the model sends
+/// `old_str` = the broken text and `new_str` = the fixed text, but an earlier turn already
+/// applied it, so `old_str` is gone. The old answer was `anchor not found; closest match:`
+/// followed by a block that IS the model's own `new_str` -- never saying so. The model had
+/// no way to read "you are done here" out of that.
+#[test]
+fn a_second_identical_edit_says_the_change_is_already_applied() {
+    let ws = temp_dir("already-applied");
+    std::fs::write(ws.join("lib.rs"), ring_buffer_fixture()).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "lib.rs",
+        "old_str": "            out.push(self.buf[(self.head + i) % self.cap]);",
+        "new_str": "            out.push(self.buf[(self.head + i) % self.len]);",
+    }));
+
+    // Turn 1: it lands.
+    let first = obs(execute(&e, &ws));
+    assert!(first.contains("ok"), "the first edit must land: {first}");
+    let after = std::fs::read_to_string(ws.join("lib.rs")).unwrap();
+
+    // Turn 2: the very same edit. The anchor is gone BECAUSE the work is done.
+    let o = obs(execute(&e, &ws));
+    assert!(
+        o.contains("ALREADY in the file"),
+        "must say the change is already present: {o}"
+    );
+    assert!(
+        o.contains("already been applied"),
+        "must say it plainly, not just hint: {o}"
+    );
+    // Line 16 of the fixture is the `out.push(...)` statement the edit rewrote.
+    assert!(o.contains("line 16"), "must name WHERE it already is: {o}");
+    // The failure this replaces: a bare re-anchoring instruction plus the model's own
+    // new_str echoed back as a "closest match".
+    assert!(
+        !o.contains("closest match"),
+        "must not echo its own new_str as somewhere to re-anchor: {o}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("lib.rs")).unwrap(),
+        after,
+        "nothing further written"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// The second half of the trap. The model copies the shown line into `old_str`, which makes
+/// the pair byte-identical; `identical_replacement` then tells it to change `new_str`, so it
+/// restores the old anchor and misses again. Each message pushed it into the state the other
+/// refused. The new wording must therefore tell it NOT to copy the text back into `old_str`.
+#[test]
+fn the_already_applied_message_does_not_steer_into_the_identical_pair_trap() {
+    let ws = temp_dir("already-applied-trap");
+    std::fs::write(ws.join("lib.rs"), ring_buffer_fixture()).unwrap();
+    let e = call(json!({
+        "tool": "edit_file",
+        "path": "lib.rs",
+        "old_str": "            out.push(self.buf[(self.head + i) % self.cap]);",
+        "new_str": "            out.push(self.buf[(self.head + i) % self.len]);",
+    }));
+    assert!(obs(execute(&e, &ws)).contains("ok"));
+    let o = obs(execute(&e, &ws));
+
+    assert!(o.contains("ALREADY in the file"), "got: {o}");
+    assert!(
+        o.contains("do NOT copy") || o.contains("not copy"),
+        "must warn against copying it into old_str -- the identical-pair trap: {o}"
+    );
+    // Short: observations are capped, and this one replaces a 30-line block.
+    assert!(
+        o.lines().count() <= 4,
+        "the message must stay terse, got {} lines: {o}",
+        o.lines().count()
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// **A GENUINE miss is untouched.** `new_str` is nowhere in the file, so this is a real
+/// re-anchoring problem and must still get the ordinary closest-match block. This is the
+/// test that stops the new predicate swallowing every miss.
+#[test]
+fn a_genuine_miss_still_gets_the_closest_match_message() {
+    let ws = temp_dir("already-applied-genuine");
+    let body: String = (1..=100).map(|n| format!("let v{n} = {n};\n")).collect();
+    std::fs::write(ws.join("big.rs"), &body).unwrap();
+    let e = call(json!({
+        "tool":"edit_file","path":"big.rs",
+        "old_str":"let v50 = 999;","new_str":"let v50 = 12345678;"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(
+        o.starts_with("edit_file big.rs: anchor not found; closest match:\n"),
+        "an honest miss keeps the ordinary message: {o}"
+    );
+    assert!(
+        !o.contains("ALREADY"),
+        "must not claim an edit landed when it did not: {o}"
+    );
+    assert_eq!(std::fs::read_to_string(ws.join("big.rs")).unwrap(), body);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// An EMPTY `new_str` is a deletion, and a deletion is never "already applied" -- every
+/// file trivially "contains" the empty string.
+///
+/// Two layers, and this pins both, the way `append_file_with_empty_content_is_a_no_op`
+/// does. A model cannot reach the writer with `new_str: ""` at all -- the VALIDATOR
+/// refuses it before dispatch -- but `edit_file` is public, and a predicate that claimed
+/// "already applied" for a deletion would tell the model to stop working on code it has
+/// not changed. So the writer is also called directly.
+#[test]
+fn an_empty_new_str_never_claims_the_change_is_applied() {
+    // Layer 1: the tool surface never lets a bare "" through.
+    let rejected = default_registry()
+        .validate(&json!({
+            "tool":"edit_file","path":"a.rs",
+            "old_str":"let nothing_like_this = 99;","new_str":""
+        }))
+        .expect_err("an empty new_str must not validate");
+    assert!(
+        rejected.to_string().contains("must not be empty"),
+        "got: {rejected}"
+    );
+
+    // Layer 2: the writer itself. Whitespace-only forms DO validate, so these reach it
+    // through the ordinary tool path as well.
+    let ws = temp_dir("already-applied-empty");
+    let src = "fn f() {\n    let x = 1;\n}\n";
+    std::fs::write(ws.join("a.rs"), src).unwrap();
+    for new_str in ["", "   ", "\n  \n"] {
+        let o =
+            crate::builtin::write::edit_file(&ws, "a.rs", "let nothing_like_this = 99;", new_str);
+        assert!(
+            !o.contains("ALREADY"),
+            "a deletion is not an applied change ({new_str:?}): {o}"
+        );
+        assert!(o.contains("anchor not found"), "ordinary miss: {o}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.rs")).unwrap(),
+        src,
+        "nothing written"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A SCRAP of a `new_str` never claims it either. `}` is in every Rust file; "already
+/// applied" built on one would be a confident lie that stops the model working.
+#[test]
+fn a_tiny_new_str_never_claims_the_change_is_applied() {
+    let ws = temp_dir("already-applied-scrap");
+    std::fs::write(ws.join("a.rs"), "fn f() {\n    let x = 1;\n}\n").unwrap();
+    let e = call(json!({
+        "tool":"edit_file","path":"a.rs",
+        "old_str":"let nothing_like_this = 99;","new_str":"}"
+    }));
+    let o = obs(execute(&e, &ws));
+    assert!(
+        !o.contains("ALREADY"),
+        "a one-character new_str is in every file: {o}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// Zero occurrences of the trimmed anchor still reports the missed anchor, unchanged.
 #[test]
 fn edit_file_absent_anchor_still_reports_not_found() {

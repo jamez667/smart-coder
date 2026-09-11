@@ -238,6 +238,71 @@ fn reports_a_harness_fault_when_the_reply_was_truncated() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// **A malformed-but-recovered reply must be COUNTED, not silently accepted.**
+///
+/// The wiring test for `strategy::has_malformed_json_envelope`. Its own unit tests prove the
+/// predicate; this proves the LOOP asks it -- the trap being a correct function behind a dead
+/// call site, which is how several guards shipped inert earlier in this work.
+///
+/// THE DEFECT. `extract_balanced` stops at the first complete `{...}`, so a reply ending
+/// `...,"tool":"edit_file"}}` parses on the STRICT path: no repair rung runs, the stray brace
+/// is discarded, and the turn logs as clean. Measured across ten `rust-symptomatic` runs: 84
+/// of 316 JSON-shaped replies were not valid JSON, one run drifting from turn 5 to turn 40.
+/// The call still works -- so this is reported, never enforced.
+#[test]
+fn a_malformed_json_envelope_is_flagged_but_still_runs() {
+    let ws = temp("malformed-envelope");
+    std::fs::write(ws.join("a.txt"), "before").unwrap();
+
+    // Turn 1 is the exact shape from the logs: one stray trailing brace. Turn 2 is clean, so
+    // the fault must NOT be raised indiscriminately.
+    let backend = Scripted::new(vec![
+        r#"{"tool":"write_file","path":"a.txt","content":"after"}}"#,
+        r#"{"tool":"finish"}"#,
+    ]);
+    let log = Mutex::new(Vec::new());
+    let sink = FnSink(|e: &AgentEvent| log.lock().unwrap().push(e.clone()));
+    run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "fix it",
+        &ws,
+        &AgentConfig::default(),
+        &sink,
+    )
+    .unwrap();
+
+    let events = log.into_inner().unwrap();
+    let flagged: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::HarnessFault { kind, step, .. }
+                if *kind == FaultKind::MalformedJsonAccepted =>
+            {
+                Some(*step)
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        flagged.len(),
+        1,
+        "exactly the malformed turn raises it -- the clean turn must not: {flagged:?}"
+    );
+    assert_eq!(flagged[0], 1, "raised on the turn it happened");
+
+    // ...and the call still RAN. Reported, never enforced.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+        "after",
+        "the recovered call must still be executed"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// **The second detector must be seen to fire.**
 ///
 /// A model that calls `run_verification` with no verify command configured gets a

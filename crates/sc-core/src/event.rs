@@ -278,6 +278,20 @@ pub enum FaultKind {
     /// declined to act -- the same misattribution `ReplyTruncated` exists to prevent,
     /// with the harness rather than the cap doing the cutting.
     StopSequenceMisfire,
+    /// A reply's tool call was accepted even though the reply was not valid JSON — the
+    /// model wrapped a well-formed object in stray punctuation (typically one extra `}`)
+    /// and the harness discarded the leftovers without a word.
+    ///
+    /// The balanced-brace scan stops at the first complete `{…}`, so the object in front
+    /// of the stray character parses on the STRICT path: no repair rung runs, and the loop
+    /// logs `parsed call: edit_file` as though the reply were clean. Measured across ten
+    /// `rust-symptomatic` runs: 84 of 316 JSON-shaped replies were not valid JSON, and one
+    /// run's malformation began at turn 5 and persisted for all 36 remaining turns.
+    ///
+    /// Reported, never enforced. The recovered call is correct and rejecting it would turn
+    /// 84 working turns into 84 wasted ones; the fault exists so a run that is quietly
+    /// drifting is counted as degraded instead of scoring as clean.
+    MalformedJsonAccepted,
 }
 
 impl FaultKind {
@@ -294,6 +308,7 @@ impl FaultKind {
             Self::PromptOverBudget => "prompt over budget",
             Self::VerifyUnavailable => "verify unavailable",
             Self::StopSequenceMisfire => "stop sequence misfire",
+            Self::MalformedJsonAccepted => "malformed json accepted",
         }
     }
 }

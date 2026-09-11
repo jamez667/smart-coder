@@ -533,6 +533,86 @@ fn uniquely_identified_tool<'a>(keys: &[&str], registry: &'a ToolRegistry) -> Op
     hit
 }
 
+/// Whether the reply's tool call was MALFORMED AT THE ENVELOPE — the JSON object itself was
+/// fine, but the model wrapped it in stray structural punctuation, most often one extra closing
+/// brace: `{"tool":"edit_file",…}}`.
+///
+/// **This is invisible to every other rung in this file, and that is the whole point.**
+/// [`extract_all_json_objects`] scans for the FIRST BALANCED `{…}` and stops there, so the
+/// trailing `}` is never handed to serde: the object in front of it parses cleanly on the strict
+/// path, `validated_calls` returns a valid call with no error, and not one repair function below
+/// runs. The harness then reports `parsed call: edit_file` as though nothing happened. Measured
+/// across ten `rust-symptomatic` runs (2026-09-11): of 316 JSON-shaped replies, 84 were not valid
+/// JSON, and in one run the extra brace appeared at turn 5 and persisted for all 36 remaining
+/// turns — never once mentioned to the model or the eval.
+///
+/// So this is deliberately NOT "did a repair fire". A repair firing is a different, already-
+/// visible condition; this is the silent one. It answers a narrower question: after taking every
+/// balanced object out of the reply, is what remains nothing but stray JSON punctuation?
+///
+/// The discrimination matters, because residue alone over-fires:
+///
+/// * `{…}<tool_call|>{…}` — a legitimate batched turn. Residue is `<tool_call|>`, a separator,
+///   not punctuation. Not a fault.
+/// * `Sure:\n{…}\ndone` — prose around the call, which this harness explicitly tolerates.
+///   Not a fault.
+/// * `{"content":"fn go() {}"}` — braces INSIDE a string. The scan is string-aware, so they
+///   are consumed with the object and leave no residue at all. Not a fault.
+/// * `{…}}` — residue is exactly `}`. Nothing legitimate produces that. A fault.
+///
+/// Only `}`, `]`, `,` and whitespace count, and the residue must be non-empty. Anything else —
+/// a letter, a separator, a fence — means the leftovers are prose or markup rather than a broken
+/// envelope, and the reply is left alone.
+///
+/// Reported, never enforced: the call in front of the brace is complete and correct, and the 84
+/// turns it rescued were working turns. Rejecting them would convert 84 recoveries into 84 wasted
+/// turns. This only makes the drift countable.
+pub fn has_malformed_json_envelope(raw: &str) -> bool {
+    let objects = extract_all_json_objects(raw);
+    // No object at all is a different failure (`NoJson`), already reported by the error path.
+    if objects.is_empty() {
+        return false;
+    }
+    // Only a reply that actually yielded a tool call can be "silently accepted" — a stray brace
+    // around an incidental prose dict is not a malformed CALL.
+    if !objects.iter().any(|o| o.contains("\"tool\"")) {
+        return false;
+    }
+    // Remove each extracted object from the raw text, in order, leaving only what sat outside
+    // them. Slice arithmetic (not `replace`) so an object appearing twice cannot over-delete.
+    let mut residue = String::new();
+    let mut cursor = 0usize;
+    for obj in &objects {
+        let start = (obj.as_ptr() as usize) - (raw.as_ptr() as usize);
+        residue.push_str(&raw[cursor..start]);
+        cursor = start + obj.len();
+    }
+    residue.push_str(&raw[cursor..]);
+
+    let trimmed = residue.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|c| matches!(c, '}' | ']' | ','))
+}
+
+/// The fault detail for a reply flagged by [`has_malformed_json_envelope`], naming the stray
+/// characters so the count is readable without opening the transcript.
+pub fn malformed_envelope_detail(raw: &str) -> String {
+    let objects = extract_all_json_objects(raw);
+    let mut residue = String::new();
+    let mut cursor = 0usize;
+    for obj in &objects {
+        let start = (obj.as_ptr() as usize) - (raw.as_ptr() as usize);
+        residue.push_str(&raw[cursor..start]);
+        cursor = start + obj.len();
+    }
+    residue.push_str(&raw[cursor..]);
+    let stray = residue.trim();
+    format!(
+        "the reply's tool call parsed, but it was wrapped in stray JSON punctuation (`{stray}`) \
+         -- the object was accepted by the balanced-brace scan and the extra characters silently \
+         discarded. The model's envelope is drifting; this reply was NOT valid JSON."
+    )
+}
+
 /// The note appended to a recovered call's observation, so the model learns the right NAME
 /// rather than silently having its mistake papered over. `named` is what it wrote, `recovered`
 /// is what actually ran.

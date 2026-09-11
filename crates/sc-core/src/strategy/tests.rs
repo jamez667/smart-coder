@@ -550,6 +550,143 @@ fn scratchpad_extract_fails_like_parse_repair_on_prose_alone() {
     assert_eq!(err, RepairError::NoJson);
 }
 
+/// (a) The reported defect: a trailing extra `}`. The call must STILL parse to the right
+/// thing — the recovery is what makes those 84 turns work — AND the reply must be flagged.
+#[test]
+fn a_trailing_brace_still_parses_and_is_flagged() {
+    let reg = default_registry();
+    // The exact shape from the run logs (keys in the order the model emitted them).
+    let raw =
+        r#"{"new_str":"let x = 2;","old_str":"let x = 1;","path":"lib.rs","tool":"edit_file"}}"#;
+
+    // Recovery is UNCHANGED: the call is still extracted, correctly, in full.
+    let call = ParseRepair
+        .extract(raw, &reg)
+        .expect("the trailing brace must not cost the turn");
+    assert_eq!(call.name, "edit_file");
+    assert_eq!(call.str("path"), Some("lib.rs"));
+    assert_eq!(call.str("old_str"), Some("let x = 1;"));
+    assert_eq!(call.str("new_str"), Some("let x = 2;"));
+
+    // ...but it is no longer SILENT.
+    assert!(
+        has_malformed_json_envelope(raw),
+        "the trailing `}}` must raise the fault"
+    );
+    // Proof the reply really was invalid JSON — i.e. the fault is telling the truth.
+    assert!(
+        serde_json::from_str::<serde_json::Value>(raw).is_err(),
+        "the raw reply is not valid JSON"
+    );
+    // The detail names the stray character, so a fault count is readable without the transcript.
+    let detail = malformed_envelope_detail(raw);
+    assert!(detail.contains('}'), "{detail}");
+    assert!(detail.contains("NOT valid JSON"), "{detail}");
+}
+
+/// (b) A clean reply must raise NO fault. This is the guard that stops the count becoming
+/// noise people learn to ignore.
+#[test]
+fn a_clean_reply_raises_no_malformed_envelope_fault() {
+    let reg = default_registry();
+    for raw in [
+        r#"{"tool":"read_file","path":"a.txt"}"#,
+        r#"{"tool":"finish"}"#,
+        r#"{"tool":"write_file","path":"a.py","content":"x = 1\ny = 2\n"}"#,
+    ] {
+        assert!(
+            ParseRepair.extract(raw, &reg).is_ok(),
+            "precondition: {raw} parses"
+        );
+        assert!(
+            !has_malformed_json_envelope(raw),
+            "clean reply wrongly flagged: {raw}"
+        );
+    }
+}
+
+/// (c) The shapes the strategy already tolerates must keep working AND stay unflagged. Each of
+/// these leaves something outside the object, so a naive "any leftover bytes" detector would
+/// fire on all of them — which is exactly the over-firing that makes a fault worthless.
+#[test]
+fn tolerated_reply_shapes_are_not_flagged_as_malformed() {
+    let reg = default_registry();
+
+    // Prose either side of the call — explicitly tolerated by the extractor.
+    let prose = "Sure:\n{\"tool\":\"write_file\",\"path\":\"x\",\"content\":\"a { b } c\"}\ndone";
+    assert_eq!(
+        ParseRepair.extract(prose, &reg).unwrap().str("content"),
+        Some("a { b } c")
+    );
+    assert!(!has_malformed_json_envelope(prose), "prose is not a fault");
+
+    // A legitimate batched turn: the `<tool_call|>` separator is residue, but it is markup.
+    let batched = "{\"tool\":\"read_file\",\"path\":\"test_app.py\"}<tool_call|>\
+                   {\"tool\":\"create_file\",\"path\":\"app.py\",\"content\":\"x = 1\"}";
+    assert_eq!(
+        ParseRepair.extract(batched, &reg).unwrap().name,
+        "create_file"
+    );
+    assert!(
+        !has_malformed_json_envelope(batched),
+        "a batched turn is not a malformed envelope"
+    );
+
+    // Braces INSIDE a string value. The scan is string-aware, so these leave no residue —
+    // the case most likely to produce a false positive if the detector were byte-naive.
+    let braces = r#"{"tool":"write_file","path":"a.rs","content":"fn go() {}"}"#;
+    assert_eq!(
+        ParseRepair.extract(braces, &reg).unwrap().str("content"),
+        Some("fn go() {}")
+    );
+    assert!(!has_malformed_json_envelope(braces), "code braces are safe");
+
+    // A reply with NO call at all is a different, already-reported failure (`NoJson`) —
+    // this detector must not also claim it.
+    let dicts = "I'll return {'result': 25} when given {'n': 5}.";
+    assert!(ParseRepair.extract(dicts, &reg).is_err());
+    assert!(
+        !has_malformed_json_envelope(dicts),
+        "a reply with no tool call is NoJson, not a malformed envelope"
+    );
+
+    // The repair rungs that DO fire keep working, and firing a repair is not itself this
+    // fault: a truncated write is malformed, but its residue is not stray punctuation.
+    let truncated =
+        "{\"tool\":\"write_file\",\"path\":\"styles.css\",\"content\":\"body {\\n  color: #333;";
+    assert_eq!(
+        ParseRepair.extract(truncated, &reg).unwrap().name,
+        "write_file"
+    );
+    assert!(
+        !has_malformed_json_envelope(truncated),
+        "a truncation is reported by its own path, not this one"
+    );
+}
+
+/// The trailing brace is flagged wherever it appears, including on the batched and
+/// whitespace-trailed shapes the run logs actually contain.
+#[test]
+fn malformed_envelope_is_detected_around_whitespace_and_batches() {
+    let reg = default_registry();
+
+    // Trailing brace followed by a newline — the common wire shape.
+    let ws = "{\"tool\":\"read_file\",\"path\":\"a.txt\"}}\n";
+    assert!(ParseRepair.extract(ws, &reg).is_ok());
+    assert!(
+        has_malformed_json_envelope(ws),
+        "whitespace must not hide it"
+    );
+
+    // A stray trailing comma is the same class of envelope drift.
+    let comma = "{\"tool\":\"read_file\",\"path\":\"a.txt\"},";
+    assert!(has_malformed_json_envelope(comma));
+
+    // A stray `]` (the model closed an array it never opened).
+    let bracket = "{\"tool\":\"read_file\",\"path\":\"a.txt\"}]";
+    assert!(has_malformed_json_envelope(bracket));
+}
+
 #[test]
 fn all_strategies_share_the_same_validating_extractor() {
     // Whatever the strategy, a valid tool-call string validates and a bad one

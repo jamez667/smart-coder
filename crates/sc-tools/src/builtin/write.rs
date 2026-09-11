@@ -590,7 +590,7 @@ fn edit_file_with(
         // that the edit already landed (or it's working from a stale view), so it keeps
         // re-proposing a change that's no longer applicable. Show it the place in the
         // CURRENT file that most resembles what it asked for, so it re-anchors there.
-        return anchor_not_found(workspace, path, content, old_str, p);
+        return anchor_not_found(workspace, path, content, old_str, new_str, p);
     }
     if count > 1 {
         // Whole-line disambiguation (spec 04 — do the work the small model can't).
@@ -660,7 +660,7 @@ fn edit_file_with(
             return format!(
                 "edit_file {path} error: old_str {old_str:?} is ambiguous ({count} matches); \
                  pick a UNIQUE anchor from the lines near the closest match below:\n{}",
-                anchor_not_found(workspace, path, content, old_str, p)
+                anchor_not_found(workspace, path, content, old_str, new_str, p)
                     .split_once('\n')
                     .map(|(_, block)| block.to_string())
                     .unwrap_or_default()
@@ -778,19 +778,99 @@ const MISS_CONTEXT: usize = 3;
 /// WHERE it had been looking.
 const MISS_MAX_LINES: usize = 30;
 
+/// The shortest `new_str` worth calling "already applied", in non-whitespace CHARACTERS.
+///
+/// Same reasoning — and the same units — as [`SIBLING_MIN_CHARS`]: a scrap like `}` or
+/// `x` occurs in nearly every file, so "your change is already here" built on one would
+/// be a confident lie. A false "already applied" is worse than today's message, because
+/// it tells the model to STOP working on code it has not actually changed yet.
+const APPLIED_MIN_CHARS: usize = 12;
+
+/// Is `new_str` already sitting in the file? Returns the 1-based line where it starts.
+///
+/// THE BUG THIS EXISTS FOR. On `rust-symptomatic` the commonest reason an anchor misses is
+/// that THE MODEL'S OWN EDIT ALREADY LANDED: it sends `old_str` = the pre-edit text and
+/// `new_str` = the post-edit text, but an earlier turn already applied it, so `old_str` is
+/// gone from the file. The harness then printed `anchor not found; closest match:` followed
+/// by a block that is literally the model's own `new_str` — and never said so. Measured on
+/// run-06: nine separate turns. Worse, the model would copy that block into `old_str`,
+/// making the pair byte-identical, which `identical_replacement` rejects by telling it to
+/// change `new_str` — so it restored the old anchor and missed again. The two messages each
+/// pushed it into the state the other refused.
+///
+/// Matching is deliberately conservative, because a FALSE "already applied" stops the model
+/// working on code it has not yet fixed:
+/// * exact containment first — the unarguable case;
+/// * failing that, the whole-line signature run that [`fuzzy_line_block_replace`] already
+///   trusts to REWRITE the file. Describing the file with it is strictly weaker than
+///   editing with it, so this invents no new tolerance.
+///
+/// Declines on blank/whitespace-only `new_str` (a deletion is not "already applied") and on
+/// anything below [`APPLIED_MIN_CHARS`] of real text.
+fn new_str_already_present(content: &str, new_str: &str) -> Option<usize> {
+    let sigs: Vec<String> = new_str.lines().filter_map(line_sig).collect();
+    if sigs.is_empty() {
+        return None; // empty or whitespace-only: a deletion, not an applied change
+    }
+    let weight: usize = sigs
+        .iter()
+        .map(|l| l.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+    if weight < APPLIED_MIN_CHARS {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    // Exact containment: report the line the match starts on.
+    if content.contains(new_str) {
+        let upto = content.split(new_str).next().unwrap_or("");
+        return Some(upto.matches('\n').count() + 1);
+    }
+    // Whitespace-tolerant: the same signature alignment the fuzzy replace uses.
+    let sig_idx: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| line_sig(l).map(|s| (i, s)))
+        .collect();
+    if sig_idx.len() < sigs.len() {
+        return None;
+    }
+    (0..=sig_idx.len() - sigs.len())
+        .find(|&w| (0..sigs.len()).all(|k| sig_idx[w + k].1 == sigs[k]))
+        .map(|w| sig_idx[w].0 + 1)
+}
+
 /// The missed-anchor observation: `edit_file <path>: anchor not found; closest match:`
 /// and the numbered lines around the file line that most resembles the anchor's first
 /// line, [`MISS_CONTEXT`] either side of the anchor-length block, never more than
 /// [`MISS_MAX_LINES`].
+///
+/// Except when the change is ALREADY IN THE FILE — see [`new_str_already_present`]. That
+/// answer comes first, because it is the one case where the right move is to stop editing
+/// rather than to re-anchor.
 fn anchor_not_found(
     workspace: &Path,
     path: &str,
     content: &str,
     old_str: &str,
+    new_str: &str,
     p: &Path,
 ) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let anchor: Vec<&str> = old_str.lines().collect();
+    // The edit already landed. Say THAT, not "anchor not found" — the anchor is missing
+    // precisely because the work is done, and the closest-match block we would otherwise
+    // print is the model's own new_str staring back at it.
+    //
+    // Ahead of the sibling-file check: that one answers "you are editing the wrong file",
+    // which would send the model to change a file when nothing needs changing at all.
+    if let Some(at) = new_str_already_present(content, new_str) {
+        return format!(
+            "edit_file {path}: anchor not found -- but your new_str is ALREADY in the file at \
+             line {at}. This edit has already been applied; nothing needs changing here. Do NOT \
+             re-send it and do NOT copy the text below into old_str. Move on: run the tests, or \
+             fix a DIFFERENT part of the code."
+        );
+    }
     let probe = anchor
         .iter()
         .find(|l| !l.trim().is_empty())

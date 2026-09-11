@@ -271,6 +271,37 @@ pub(super) fn self_recovery_directive(
         .flatten()
         .map(|t| format!("`{t}`"))
         .collect();
+    // THE CROSS-CHANNEL CONTRADICTION. Within this directive the invariant above holds. The
+    // incoherence is between CHANNELS: the anchor-miss advice in `mod.rs` tells a model whose
+    // edits keep missing to "STOP editing by anchor. Instead call `write_file` with the ENTIRE
+    // corrected file contents". The model complies, `write_file` becomes the looped tool, and
+    // this line then forbids it -- so the two mutation tools are barred one after the other.
+    //
+    // Measured on `rust-symptomatic` run-10: the anchor advice fired five times and the model
+    // complied 5/5; four of those compliances were rejected as no-ops, and at turn 37 the
+    // stall advice ordered `edit_file` while the anchor advice was still ordering
+    // `write_file`. Run-06 shows the mirror image: advice at turns 7/10/14 banned `edit_file`,
+    // advice at turn 16 re-permitted it.
+    //
+    // So: never forbid the ONLY tool that can rewrite a file wholesale. That is the same
+    // principle as `only_edit_tool` above -- do not take away the last usable move -- applied
+    // across channels rather than within one directive. When it bites, say how to use the
+    // tool differently instead, which is the advice the model can actually act on.
+    let looped_is_sole_whole_writer = ["write_file", "create_file"]
+        .iter()
+        .filter(|t| registry.get(t).is_some())
+        .all(|t| *t == looped)
+        && registry.get(looped).is_some();
+    if looped_is_sole_whole_writer && !acts.is_empty() {
+        out.push_str(&format!(
+            "Emit {} (an action that changes the workspace) this turn. `{looped}` is the only \
+             tool here that can rewrite a whole file, so it is NOT banned -- but sending it \
+             with the same contents again will not help: change what you write, not just how \
+             you send it.",
+            acts.join(" or ")
+        ));
+        return out;
+    }
     out.push_str(&format!(
         "Emit {} (an action that changes the workspace) this turn. Do NOT emit `{looped}` again.",
         acts.join(" or ")
