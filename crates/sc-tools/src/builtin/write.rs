@@ -87,8 +87,9 @@ pub fn write_file(workspace: &Path, path: &str, content: &str) -> String {
                     return format!(
                         "write_file {path} rejected: {path} already exists and is {existing_lines} \
                          lines — too large to safely overwrite (a full rewrite drops code and \
-                         breaks the build). Use edit_file to change a specific snippet, or \
-                         append_file to add new code at the end. Make a small, surgical change."
+                         breaks the build). Use edit_file to change a specific snippet: anchor \
+                         on a unique line you have READ, and send only the replacement. Make a \
+                         small, surgical change."
                     );
                 }
             }

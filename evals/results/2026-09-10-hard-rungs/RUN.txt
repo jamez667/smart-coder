@@ -1,0 +1,4 @@
+commit: 91fa1ad
+started: 2026-09-11T05:14:40Z
+purpose: are the 4 never-passers ALWAYS failing, or just unlucky at n=3?
+each rung x6, seeds 1..6 (--seed offsets per round)
