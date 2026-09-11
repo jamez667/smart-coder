@@ -31,3 +31,33 @@ tool calls: 21/21 valid (100.0%)
 largest reply: 440 tokens
   log: evals/results/2026-09-10-hard-rungs/logs-engine-grid-scan\run-1789104576-3.ndjson
 --- run 4/6 ---
+  [STILL-RED] engine-grid-scan
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 5 interventions
+0/1 passed (0%)
+tool calls: 35/40 valid (87.5%)
+largest reply: 1426 tokens
+
+!! 2 HARNESS FAULT(S) - this run was degraded:
+       2x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-10-hard-rungs/logs-engine-grid-scan\run-1789104612-4.ndjson
+--- run 5/6 ---
+  [STILL-RED] engine-grid-scan
+         29 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 3 interventions
+0/1 passed (0%)
+tool calls: 28/29 valid (96.6%)
+largest reply: 3072 tokens
+
+!! 3 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+       1x reply truncated
+       1x tool not offered
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-10-hard-rungs/logs-engine-grid-scan\run-1789104887-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] engine-grid-scan
+         15 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 15/15 valid (100.0%)
+largest reply: 826 tokens
+  log: evals/results/2026-09-10-hard-rungs/logs-engine-grid-scan\run-1789105004-6.ndjson
