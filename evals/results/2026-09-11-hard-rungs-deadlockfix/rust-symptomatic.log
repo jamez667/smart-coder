@@ -1,0 +1,44 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [PASS] rust-symptomatic
+1/1 passed (100%)
+tool calls: 10/10 valid (100.0%)
+largest reply: 110 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-rust-symptomatic\run-1789136767-1.ndjson
+--- run 2/6 ---
+  [STILL-RED] rust-symptomatic
+         26 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 7 interventions
+0/1 passed (0%)
+tool calls: 26/26 valid (100.0%)
+largest reply: 431 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-rust-symptomatic\run-1789136778-2.ndjson
+--- run 3/6 ---
+  [STILL-RED] rust-symptomatic
+         29 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 6 interventions
+0/1 passed (0%)
+tool calls: 29/29 valid (100.0%)
+largest reply: 418 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-rust-symptomatic\run-1789136807-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] rust-symptomatic
+         27 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 5 interventions
+0/1 passed (0%)
+tool calls: 27/27 valid (100.0%)
+largest reply: 418 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-rust-symptomatic\run-1789136835-4.ndjson
+--- run 5/6 ---
+  [PASS] rust-symptomatic
+1/1 passed (100%)
+tool calls: 10/10 valid (100.0%)
+largest reply: 428 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-rust-symptomatic\run-1789136859-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] rust-symptomatic
+         26 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 26/26 valid (100.0%)
+largest reply: 446 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-rust-symptomatic\run-1789136872-6.ndjson

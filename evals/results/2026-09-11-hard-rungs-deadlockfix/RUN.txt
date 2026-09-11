@@ -1,0 +1,6 @@
+commit: 4413e2d  (stall-ladder deadlock fix)
+baseline: evals/results/2026-09-10-hard-rungs @ 1a3e3e3 -- 0/6, 1/6, 0/6, 0/6
+started: 2026-09-11T14:26:06Z
+model: mellum2-12b @ localhost:11441 (GPU1)
+cmd: --only <rung> --seed 1 --repeat 6   (same seeds as baseline)
+expectation stated BEFORE the run: fewer wasted turns, NOT more passes.

@@ -79,10 +79,15 @@ pub const SKIP_FILES: &[&str] = &[
 /// the canonical starfield query returned seven copies of `investigate-probe.md`
 /// above any code, because that file contains the question *and* the answer.
 ///
-/// Skipped by directory NAME at any depth, which is blunt: a project whose real
-/// source lives in a directory called `logs` would lose it. That has not happened,
-/// and the alternative -- reading file contents to guess whether they are a
-/// transcript -- is worse than a rule you can read.
+/// Matched at any depth against a directory's own name, as an exact match OR a
+/// `<name>-` prefix (see [`is_skipped_dir`]). The prefix half was added after an exact
+/// match let `logs-engine-ecs-query` through while excluding `logs` -- a distinction with
+/// no meaning, since both hold the same recorded transcripts.
+///
+/// Blunt on purpose: a project whose real source lives in a directory called `logs` would
+/// lose it. That has not happened, and the alternative -- reading file contents to guess
+/// whether they are a transcript -- is worse than a rule you can read. The prefix is
+/// narrow enough that `logsmith` and `login` are untouched.
 pub const SKIP_DIR_NAMES_LOGS: &[&str] = &["logs"];
 
 /// Whether a file `name` is one the walk refuses to yield.
@@ -96,7 +101,20 @@ pub fn is_skipped_file(name: &str) -> bool {
 /// `source_files` pair already treated them: a new `.mypy_cache` needs no code
 /// change to stay out of a prompt.
 pub fn is_skipped_dir(name: &str) -> bool {
-    name.starts_with('.') || SKIP_DIRS.contains(&name) || SKIP_DIR_NAMES_LOGS.contains(&name)
+    name.starts_with('.')
+        || SKIP_DIRS.contains(&name)
+        // PREFIX, not exact. `logs` was excluded and `logs-engine-ecs-query` was not, though
+        // both hold the same recorded transcripts. Measured: 52 run-log files, 8.4 MB, indexed
+        // as if they were source, and the retrieval query "why does a long tool result get cut
+        // off" returned FIFTEEN of them in its top 25 -- pushing `truncate.rs`, the file that
+        // answers it, out of the result set entirely and turning the shipped suite red.
+        //
+        // That is the exact failure this list's own doc comment describes: a search matching
+        // the harness's transcript of being asked the same question. The rule was right; only
+        // its match was too narrow.
+        || SKIP_DIR_NAMES_LOGS
+            .iter()
+            .any(|l| name == *l || name.starts_with(&format!("{l}-")))
 }
 
 /// One file found by the walk.
@@ -317,6 +335,27 @@ name = \"serde\"
         let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(rels, vec!["src/main.rs"], "only real source survives");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A `logs-<tag>` directory is recorded output too.**
+    ///
+    /// The rule matched the exact name `logs`, so `evals/results/*/logs-engine-ecs-query`
+    /// was indexed as source. Measured: 52 run-log files, 8.4 MB, and the shipped retrieval
+    /// query "why does a long tool result get cut off" returned FIFTEEN of them in its top
+    /// 25 -- displacing `crates/sc-context/src/truncate.rs`, the file that answers it, out
+    /// of the result set and turning the suite red.
+    ///
+    /// The prefix must not swallow a real directory that merely starts with the letters:
+    /// only `logs` itself and `logs-...` count.
+    #[test]
+    fn a_hyphenated_logs_directory_is_skipped_but_a_similar_name_is_not() {
+        assert!(is_skipped_dir("logs"));
+        assert!(is_skipped_dir("logs-engine-ecs-query"));
+        assert!(is_skipped_dir("logs-A"));
+        // Real source that happens to start with the same letters stays indexed.
+        assert!(!is_skipped_dir("logsmith"));
+        assert!(!is_skipped_dir("logsapi"));
+        assert!(!is_skipped_dir("login"));
     }
 
     #[test]

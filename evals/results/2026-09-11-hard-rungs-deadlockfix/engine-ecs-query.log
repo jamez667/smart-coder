@@ -1,0 +1,59 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [STILL-RED] engine-ecs-query
+         24 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 24/24 valid (100.0%)
+largest reply: 1515 tokens
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-engine-ecs-query\run-1789137314-1.ndjson
+--- run 2/6 ---
+  [STILL-RED] engine-ecs-query
+         23 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 22/23 valid (95.7%)
+largest reply: 1173 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-engine-ecs-query\run-1789137343-2.ndjson
+--- run 3/6 ---
+  [SOLVER-ERR] engine-ecs-query (backend error: http://localhost:11441/v1/chat/completions returned HTTP 400: {"error":{"code":400,"message":"request (25910 tokens) exceeds the available context size (24576 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":25910,"n_ctx":24576}})
+0/1 passed (0%)
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-engine-ecs-query\run-1789137386-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] engine-ecs-query
+         19 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 18/19 valid (94.7%)
+largest reply: 1500 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-engine-ecs-query\run-1789137544-4.ndjson
+--- run 5/6 ---
+  [STILL-RED] engine-ecs-query
+         24 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 23/24 valid (95.8%)
+largest reply: 1114 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-engine-ecs-query\run-1789137642-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] engine-ecs-query
+         17 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), 4 interventions
+0/1 passed (0%)
+tool calls: 15/17 valid (88.2%)
+largest reply: 1709 tokens
+
+!! 2 HARNESS FAULT(S) - this run was degraded:
+       2x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-hard-rungs-deadlockfix/logs-engine-ecs-query\run-1789137668-6.ndjson
