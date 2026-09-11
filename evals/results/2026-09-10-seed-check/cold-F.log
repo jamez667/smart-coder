@@ -1,0 +1,13 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+  [PASS] rust-two-stage
+1/1 passed (100%)
+tool calls: 7/10 valid (70.0%)
+largest reply: 974 tokens
+
+!! 3 HARNESS FAULT(S) - this run was degraded:
+       3x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-10-seed-check/logs-F\run-1789100092-1.ndjson

@@ -128,3 +128,53 @@ in the server. It has not yet been isolated.
 
 **Standing conclusion: the ladder is still not a reproducible instrument, and
 numbers taken off it still carry the error bars described above.**
+
+
+---
+
+## RESOLVED: it is not the harness, the seed, the context, or the cache
+
+The decisive test, run with `--verbose` so the fully-assembled prompt is logged
+and can be diffed byte for byte.
+
+**Same seed, both servers restarted so the KV slot was genuinely empty** (runs F
+and G, `cached=0 / prefill=1228` at turn 1 in both):
+
+| turn | prompt | reply |
+|---|---|---|
+| 1-5 | byte-identical | byte-identical |
+| 6 | byte-identical | **diverges mid-sentence** |
+
+Turns 1 to 5 match exactly, prompt AND reply. Turn 6 receives a byte-identical
+prompt in both runs and returns different text. F then finished in 10 turns, G
+took 23. Both happened to pass, which is coincidence and not reproducibility.
+
+So every candidate is eliminated in turn:
+
+* **Harness/context bleed** -- refuted. Prompts are byte-identical up to the
+  divergence; the assembly is clean.
+* **Sampling** -- refuted. Same seed, same temperature; the control (seed 99,
+  cold) behaves differently, so the seed is plumbed and does matter.
+* **KV cache inheritance** -- refuted. Both runs began cold after a restart and
+  still diverged.
+* **Delta-memory leak** -- already fixed, and unrelated: the baselines matched.
+
+**What remains is the server.** Turns 1-5 are short structured tool calls; turn 6
+is the first long free-text reply, and the two versions share a long identical
+prefix before splitting mid-sentence. That is the signature of nondeterministic
+floating-point reduction in batched/MoE kernels: llama.cpp does not guarantee
+bitwise-identical logits across runs even at temperature 0 with a fixed seed, and
+a difference far below sampling threshold only changes an emitted token once a
+reply is long enough for it to cross a boundary.
+
+### What this means for the ladder
+
+Run-level reproducibility is not achievable from our side on this server. The
+seed plumbing is still worth having -- it removes one real source of variance and
+makes the draw replayable in principle -- but it cannot make an agent run
+deterministic while the backend is not.
+
+The instrument must therefore be treated as statistical. Report n and the spread,
+never a single figure; do not compare single runs across commits; and size any
+claimed improvement against the observed run-to-run variance, which on
+`rust-two-stage` alone spanned 1/10 to 2/3.

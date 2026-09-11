@@ -1,0 +1,2 @@
+{"type":"RunStarted","task":"Task: The version comparator says `1.4` and `1.4.0` are different versions. They are the same version — a missing component counts as zero. Fix it so the tests pass.\n\nThe change is verified by running: rustc --test --edition 2021 -o t_two_stage.exe test.rs && ./t_two_stage.exe\nMake that command exit 0. Do not edit any test files.","prompt_budget":4300}
+{"type":"BaselineVerification","green":false,"summary":"run_verification: 1 failed, 5 passed:"}

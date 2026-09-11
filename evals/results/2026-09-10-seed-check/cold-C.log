@@ -1,0 +1,7 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+  [SOLVER-ERR] rust-two-stage (backend error: http://localhost:11441/v1/chat/completions returned HTTP 503: {"error":{"message":"Loading model","type":"unavailable_error","code":503}})
+0/1 passed (0%)
+  log: evals/results/2026-09-10-seed-check/logs-C\run-1789097799-1.ndjson

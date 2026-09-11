@@ -6,6 +6,7 @@
 //!     sc-eval --agent [SUITE_TOML] [--url <U>] [--model <M>]   the same suite, real model
 //!             [--only <ID>] [--repeat <N>] [--log <DIR>]      one task, N times, streamed
 //!             [--seed <N>] [--temperature <T>]                reproducible sampling
+//!             [--verbose]                                     log the assembled prompt
 //!
 //! `--seed` is what makes a repeat measurable rather than merely repeated: round R draws
 //! with seed N+R-1, so the repeats stay independent and each replays exactly. Without it
@@ -145,6 +146,12 @@ fn agent_suite(args: &[String]) -> ExitCode {
         let cfg = sc_core::AgentConfig {
             temperature: flag(args, "--temperature").and_then(|s| s.parse().ok()),
             seed: seed_base.map(|s| s + round as u64 - 1),
+            // `--verbose` emits the fully-assembled prompt each turn
+            // (`AgentEvent::PromptAssembled`) into the NDJSON. Off by default because the
+            // payload is large; it exists so two runs can be diffed BYTE FOR BYTE, which
+            // is the only way to tell "the harness sent different text" from "the server
+            // answered differently to the same text".
+            verbose: args.iter().any(|a| a == "--verbose"),
             ..sc_core::AgentConfig::default()
         };
         let solver = match &sink {

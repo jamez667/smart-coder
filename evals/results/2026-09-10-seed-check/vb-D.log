@@ -1,0 +1,14 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+  [STILL-RED] rust-two-stage
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 1 interventions
+0/1 passed (0%)
+tool calls: 35/40 valid (87.5%)
+largest reply: 1106 tokens
+
+!! 5 HARNESS FAULT(S) - this run was degraded:
+       5x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-10-seed-check/logs-D\run-1789097919-1.ndjson

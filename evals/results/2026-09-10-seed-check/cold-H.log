@@ -1,0 +1,10 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+  [STILL-RED] rust-two-stage
+         27 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 27/27 valid (100.0%)
+largest reply: 596 tokens
+  log: evals/results/2026-09-10-seed-check/logs-H\run-1789100239-1.ndjson

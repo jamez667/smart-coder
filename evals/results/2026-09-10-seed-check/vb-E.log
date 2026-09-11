@@ -1,0 +1,9 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+  [PASS] rust-two-stage
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 418 tokens
+  log: evals/results/2026-09-10-seed-check/logs-E\run-1789098064-1.ndjson
