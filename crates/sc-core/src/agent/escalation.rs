@@ -30,6 +30,29 @@ pub(super) const DIAGNOSIS_LIMIT: usize = 2;
 
 /// The last few distinct tools the model has used, most-recent first — context for
 /// the self-recovery directive so it names what the model keeps doing.
+/// The path the most recent MUTATING turn was aimed at, if any.
+///
+/// The stall ladder needs it to answer one question before it recommends a wholesale
+/// rewrite: is this file too large for `write_file` to accept? `recent_tools` throws the
+/// arg away, and without it the directive can only guess -- see
+/// [`self_recovery_directive`]'s `oversize_target`.
+///
+/// Only mutating tools count. A `read_file` arg is a path too, but the file the model last
+/// READ is not necessarily the file it is failing to WRITE, and steering off the wrong one
+/// is how this class of bug started.
+pub(super) fn recent_edit_path(history: &[TurnRecord]) -> Option<&str> {
+    history
+        .iter()
+        .rev()
+        .find(|t| {
+            matches!(
+                t.tool.as_str(),
+                "edit_file" | "edit_lines" | "edit_function" | "write_file" | "create_file"
+            ) && !t.arg.is_empty()
+        })
+        .map(|t| t.arg.as_str())
+}
+
 pub(super) fn recent_tools(history: &[TurnRecord]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in history.iter().rev() {
@@ -87,10 +110,36 @@ pub(super) fn mention(registry: &ToolRegistry, preferred: &[&'static str]) -> Op
 /// While it is zero the model really does still have everything it read, and the directive
 /// says so; once turns have been evicted that claim is false, and a harness that asserts
 /// something the model can see is false teaches it to distrust the rest of the directive.
+/// `oversize_target` says the file this loop is about is larger than
+/// [`sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES`], so `write_file` WILL refuse to overwrite it.
+///
+/// THE DEADLOCK THIS ENDS. `write.rs`'s own doc comment on that constant predicted it: *"the
+/// agent loop's failed-edit escalation has to answer the SAME question before it steers a
+/// stuck model at `write_file`: telling it to rewrite a file this guard will then refuse is a
+/// deadlock."* The failed-edit path in `mod.rs` does ask (via `rewrite_target`). This one
+/// never did, because it takes no workspace and no path.
+///
+/// Measured on `engine-ecs-query`, run 3, steps 27-28 -- one turn apart:
+///
+/// ```text
+///   advice: Emit `write_file` … this turn. Do NOT emit `edit_file` again.
+///   result: write_file src/world.rs rejected: … 276 lines — too large to safely
+///           overwrite … Use edit_file
+/// ```
+///
+/// The harness recommended `write_file`, forbade `edit_file`, and then refused `write_file`
+/// and told it to use `edit_file`. Both moves closed in two turns.
+///
+/// With the flag set, `write_file` is dropped from the recommendations. On a six-tool run
+/// where the model is looping on `edit_file` that empties both lists, which routes into the
+/// `only_edit_tool` branch -- the branch already written for "you are looping on the only
+/// tool that can change the workspace", whose advice (widen or re-copy the anchor EXACTLY) is
+/// the correct guidance here and never forbids the one tool that can still work.
 pub(super) fn self_recovery_directive(
     recent: &[String],
     registry: &ToolRegistry,
     evicted: usize,
+    oversize_target: bool,
 ) -> String {
     let looped = recent
         .first()
@@ -99,7 +148,14 @@ pub(super) fn self_recovery_directive(
     // The recommendable edit tools, with the looped one removed: it must never appear as a
     // recommendation next to its own prohibition.
     let keep = |t: Option<&'static str>| t.filter(|n| *n != looped);
-    let whole = keep(mention(registry, &["write_file", "create_file"]));
+    // A file `write_file` will refuse is not a recommendable whole-rewrite target, however
+    // much the registry offers the tool. Dropping it here (rather than wording around it
+    // later) is what routes an `edit_file` loop on a big file into `only_edit_tool`.
+    let whole = if oversize_target {
+        None
+    } else {
+        keep(mention(registry, &["write_file", "create_file"]))
+    };
     let anchored = keep(mention(
         registry,
         &["edit_file", "edit_lines", "edit_function"],

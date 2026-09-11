@@ -1076,12 +1076,12 @@ fn self_recovery_directive_never_names_a_tool_the_run_cannot_call() {
     use super::escalation::self_recovery_directive;
     let recent = vec!["read_file".to_string()];
 
-    let full = self_recovery_directive(&recent, &sc_tools::default_registry(), 0);
+    let full = self_recovery_directive(&recent, &sc_tools::default_registry(), 0, false);
     assert!(full.contains("`write_file`") && full.contains("`edit_file`"));
     assert!(full.contains("`run_verification`"));
 
     let six = registry_of(&["read_file", "write_file", "edit_lines", "finish"]);
-    let d = self_recovery_directive(&recent, &six, 0);
+    let d = self_recovery_directive(&recent, &six, 0, false);
     assert!(
         d.contains("`write_file`") && d.contains("`edit_lines`"),
         "{d}"
@@ -1093,7 +1093,7 @@ fn self_recovery_directive_never_names_a_tool_the_run_cannot_call() {
     assert_eq!(unoffered_tool_in(&d, &six), None);
 
     let read_only = registry_of(&["read_file", "finish"]);
-    let d = self_recovery_directive(&recent, &read_only, 0);
+    let d = self_recovery_directive(&recent, &read_only, 0, false);
     assert!(d.contains("`finish`"), "{d}");
     assert_eq!(unoffered_tool_in(&d, &read_only), None, "{d}");
 }
@@ -1113,7 +1113,7 @@ fn self_recovery_directive_never_recommends_and_forbids_the_same_tool() {
     use super::escalation::self_recovery_directive;
 
     let full = sc_tools::default_registry();
-    let d = self_recovery_directive(&["edit_file".to_string()], &full, 0);
+    let d = self_recovery_directive(&["edit_file".to_string()], &full, 0, false);
     assert!(
         !d.contains("Emit `write_file` or `edit_file`"),
         "recommends the looped tool it then forbids: {d}"
@@ -1131,7 +1131,7 @@ fn self_recovery_directive_never_recommends_and_forbids_the_same_tool() {
 
     // The same must hold for every edit tool in the registry, in both directions.
     for looped in ["write_file", "edit_file"] {
-        let d = self_recovery_directive(&[looped.to_string()], &full, 0);
+        let d = self_recovery_directive(&[looped.to_string()], &full, 0, false);
         let forbids = d.contains(&format!("Do NOT emit `{looped}` again"));
         let recommends = d.contains(&format!("Emit `{looped}`"))
             || d.contains(&format!("or `{looped}`"))
@@ -1157,7 +1157,7 @@ fn self_recovery_directive_on_the_only_edit_tool_says_how_to_use_it_differently(
         (&["read_file", "write_file", "finish"][..], "write_file"),
     ] {
         let reg = registry_of(tools);
-        let d = self_recovery_directive(&[looped.to_string()], &reg, 0);
+        let d = self_recovery_directive(&[looped.to_string()], &reg, 0, false);
         assert!(
             !d.contains(&format!("Do NOT emit `{looped}`")),
             "forbids the only edit tool: {d}"
@@ -1172,6 +1172,94 @@ fn self_recovery_directive_on_the_only_edit_tool_says_how_to_use_it_differently(
     }
 }
 
+/// `recent_edit_path` finds the file the loop is actually about: the most recent MUTATING
+/// turn's arg, never a read's.
+///
+/// The distinction is load-bearing. A `read_file` arg is a path too, but the file the model
+/// last READ is not necessarily the one it is failing to WRITE, and sizing the wrong file is
+/// how the deadlock this feeds would come back wearing a different hat.
+#[test]
+fn recent_edit_path_finds_the_last_mutated_file_not_the_last_read() {
+    use super::escalation::recent_edit_path;
+    use sc_context::TurnRecord;
+
+    let h = vec![
+        TurnRecord::new("edit_file", "src/world.rs", true),
+        TurnRecord::new("read_file", "tests/contract.rs", false),
+        TurnRecord::new("run_verification", "", true),
+    ];
+    assert_eq!(recent_edit_path(&h), Some("src/world.rs"));
+
+    // Most recent mutation wins.
+    let h = vec![
+        TurnRecord::new("edit_file", "a.rs", true),
+        TurnRecord::new("write_file", "b.rs", false),
+    ];
+    assert_eq!(recent_edit_path(&h), Some("b.rs"));
+
+    // Reads only, or an empty arg: nothing to size.
+    let h = vec![TurnRecord::new("read_file", "a.rs", false)];
+    assert_eq!(recent_edit_path(&h), None);
+    let h = vec![TurnRecord::new("edit_file", "", true)];
+    assert_eq!(recent_edit_path(&h), None);
+    assert_eq!(recent_edit_path(&[]), None);
+}
+
+/// **THE CROSS-GUARD DEADLOCK: never steer at `write_file` for a file it will refuse.**
+///
+/// `write.rs`'s own doc comment on `WRITE_FILE_OVERWRITE_MAX_LINES` predicted this -- "telling
+/// it to rewrite a file this guard will then refuse is a deadlock" -- and the failed-edit path
+/// in `mod.rs` asks (`rewrite_target`). The stall ladder never did.
+///
+/// Measured on `engine-ecs-query`, run 3, one turn apart:
+///
+/// ```text
+///   step 27  advice: Emit `write_file` … Do NOT emit `edit_file` again.
+///   step 28  result: write_file src/world.rs rejected: … 276 lines — too large … Use edit_file
+/// ```
+///
+/// Both moves closed. With `oversize_target`, `write_file` leaves the recommendations, which
+/// on a six-tool `edit_file` loop empties both lists and routes into the `only_edit_tool`
+/// branch -- keep using the one tool that can work, with DIFFERENT arguments.
+#[test]
+fn self_recovery_directive_does_not_steer_at_write_file_for_an_oversize_file() {
+    use super::escalation::self_recovery_directive;
+
+    let six = registry_of(&[
+        "read_file",
+        "edit_file",
+        "write_file",
+        "run_command",
+        "run_verification",
+        "finish",
+    ]);
+    let looped = vec!["edit_file".to_string()];
+
+    // Baseline: a normal-sized target still offers the wholesale rewrite.
+    let ok = self_recovery_directive(&looped, &six, 0, false);
+    assert!(
+        ok.contains("`write_file`"),
+        "a small file may still be rewritten: {ok}"
+    );
+
+    // Oversize: `write_file` must not be named as a way out, and `edit_file` -- the only
+    // tool left that can change anything -- must NOT be forbidden.
+    let d = self_recovery_directive(&looped, &six, 0, true);
+    assert!(
+        !d.contains("`write_file`"),
+        "steers at a rewrite the guard will refuse: {d}"
+    );
+    assert!(
+        !d.contains("Do NOT emit `edit_file`"),
+        "forbids the only tool that can still work: {d}"
+    );
+    assert!(
+        d.contains("Emit `edit_file` this turn with DIFFERENT arguments."),
+        "must land in the only_edit_tool branch with a concrete move: {d}"
+    );
+    assert_eq!(unoffered_tool_in(&d, &six), None, "{d}");
+}
+
 /// The read-only arm carried the same contradiction latently: it tells the model to call
 /// `finish`, then appends "Do NOT emit {looped} again" -- which reads as "call `finish` NOW
 /// ... do NOT emit `finish` again" when `finish` is the tool being looped on.
@@ -1180,7 +1268,7 @@ fn self_recovery_directive_looping_on_finish_does_not_forbid_finish() {
     use super::escalation::self_recovery_directive;
 
     let read_only = registry_of(&["read_file", "finish"]);
-    let d = self_recovery_directive(&["finish".to_string()], &read_only, 0);
+    let d = self_recovery_directive(&["finish".to_string()], &read_only, 0, false);
     assert!(d.contains("call `finish` NOW"), "{d}");
     assert!(
         !d.contains("Do NOT emit `finish`"),
@@ -1190,7 +1278,7 @@ fn self_recovery_directive_looping_on_finish_does_not_forbid_finish() {
     assert!(d.contains("`summary`"), "{d}");
 
     // The normal read-only case is untouched: looping on `read_file` still forbids it.
-    let d = self_recovery_directive(&["read_file".to_string()], &read_only, 0);
+    let d = self_recovery_directive(&["read_file".to_string()], &read_only, 0, false);
     assert!(d.contains("Do NOT emit `read_file` again."), "{d}");
 }
 
@@ -1200,7 +1288,12 @@ fn self_recovery_directive_looping_on_finish_does_not_forbid_finish() {
 fn self_recovery_directive_keeps_the_normal_case_intact() {
     use super::escalation::self_recovery_directive;
 
-    let d = self_recovery_directive(&["read_file".to_string()], &sc_tools::default_registry(), 0);
+    let d = self_recovery_directive(
+        &["read_file".to_string()],
+        &sc_tools::default_registry(),
+        0,
+        false,
+    );
     assert!(
         d.contains(
             "Emit `write_file` or `edit_file` (an action that changes the workspace) \
@@ -1222,13 +1315,13 @@ fn self_recovery_directive_softens_the_you_have_everything_claim_after_eviction(
     let recent = vec!["read_file".to_string()];
     let reg = sc_tools::default_registry();
 
-    let fresh = self_recovery_directive(&recent, &reg, 0);
+    let fresh = self_recovery_directive(&recent, &reg, 0, false);
     assert!(
         fresh.contains("You already have everything you read"),
         "{fresh}"
     );
 
-    let evicted = self_recovery_directive(&recent, &reg, 3);
+    let evicted = self_recovery_directive(&recent, &reg, 3, false);
     assert!(
         !evicted.contains("You already have everything you read"),
         "claims something false after eviction: {evicted}"

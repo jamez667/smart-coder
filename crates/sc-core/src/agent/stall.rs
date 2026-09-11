@@ -21,8 +21,8 @@ use crate::recovery::{Progress, StallDetector};
 use crate::runlog::RunLogSink;
 
 use super::escalation::{
-    escalate, finished_stall_directive, recent_tools, self_recovery_directive, ADVISOR_LIMIT,
-    DIAGNOSIS_LIMIT, SELF_RECOVERY_LIMIT,
+    escalate, finished_stall_directive, recent_edit_path, recent_tools, self_recovery_directive,
+    ADVISOR_LIMIT, DIAGNOSIS_LIMIT, SELF_RECOVERY_LIMIT,
 };
 use super::prompt::gather_sources;
 use super::window::RecentWindow;
@@ -242,8 +242,20 @@ pub(super) fn handle_stall(
             stall.reset();
             // `recent.evicted()` decides whether the directive may claim the model still
             // has everything it read: once turns have been compacted away, it does not.
-            let advice =
-                self_recovery_directive(&recent_tools(history), registry, recent.evicted());
+            // Ask the same question `write_file` will ask, BEFORE recommending it: a file
+            // over the threshold cannot be rewritten wholesale, so steering at it is a
+            // deadlock (measured on engine-ecs-query: recommend write_file, forbid
+            // edit_file, then write_file refuses and says use edit_file). The constant is
+            // public for exactly this -- one threshold, one answer.
+            let oversize = recent_edit_path(history)
+                .and_then(|p| std::fs::read_to_string(workspace.join(p)).ok())
+                .is_some_and(|c| c.lines().count() > sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES);
+            let advice = self_recovery_directive(
+                &recent_tools(history),
+                registry,
+                recent.evicted(),
+                oversize,
+            );
             super::report_if_unoffered(&advice, registry, step, sink);
             sink.record(&AgentEvent::Advice {
                 trigger: stuck.to_string(),

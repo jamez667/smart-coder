@@ -372,6 +372,93 @@ impl EventSink for Collect {
     }
 }
 
+/// **THE CROSS-GUARD DEADLOCK, through the real loop: the stall ladder must not steer at
+/// `write_file` for a file `write_file` will refuse.**
+///
+/// The wiring test for `escalation::self_recovery_directive`'s `oversize_target`. Its own
+/// unit tests call the directive directly; this proves `handle_stall` actually COMPUTES the
+/// fact and passes it -- the trap being a correct function behind a dead call site, which is
+/// how three guards shipped inert earlier in this work.
+///
+/// Measured on `engine-ecs-query`, run 3, one turn apart:
+///
+/// ```text
+///   step 27  advice: Emit `write_file` … Do NOT emit `edit_file` again.
+///   step 28  result: write_file src/world.rs rejected: … 276 lines — too large … Use edit_file
+/// ```
+///
+/// Recommend a tool, forbid the alternative, then refuse the recommendation and name the
+/// forbidden one. Both moves closed in two turns.
+#[test]
+fn the_stall_ladder_does_not_steer_at_write_file_for_an_oversize_file() {
+    use std::sync::Mutex;
+
+    // A sink that keeps the ADVICE, which `Collect` drops.
+    #[derive(Default)]
+    struct Advice(Mutex<Vec<String>>);
+    impl EventSink for Advice {
+        fn record(&self, e: &AgentEvent) {
+            if let AgentEvent::Advice { advice, .. } = e {
+                self.0.lock().unwrap().push(advice.clone());
+            }
+        }
+    }
+
+    let ws = temp("oversize-steer");
+    // Comfortably over WRITE_FILE_OVERWRITE_MAX_LINES (150), so `write_file` refuses it.
+    let mut big = String::from("is_even() { return 1; }\n");
+    for i in 0..200 {
+        big.push_str(&format!("# filler line {i}\n"));
+    }
+    std::fs::write(ws.join("impl.sh"), &big).unwrap();
+    assert!(
+        big.lines().count() > sc_tools::WRITE_FILE_OVERWRITE_MAX_LINES,
+        "fixture must exceed the rewrite threshold"
+    );
+    std::fs::write(
+        ws.join("test.sh"),
+        ". ./impl.sh\nis_even 4 || exit 1\nif is_even 3; then exit 1; fi\nexit 0\n",
+    )
+    .unwrap();
+
+    // Alternating edits that change bytes and fix nothing: the shape that reaches the ladder.
+    let to_two =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 1;","new_str":"return 2;"}"#;
+    let to_one =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"return 2;","new_str":"return 1;"}"#;
+    let backend = Scripted::new(vec![
+        to_two, to_one, to_two, to_one, to_two, to_one, to_two, to_one, to_two, to_one,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 10,
+        verify_command: Some("sh test.sh".to_string()),
+        ..Default::default()
+    };
+    let sink = Advice::default();
+    let _ = sc_core::run_agent_observed(
+        &backend,
+        None,
+        &default_registry(),
+        &ParseRepair,
+        "fix it",
+        &ws,
+        &cfg,
+        &sink,
+    )
+    .unwrap();
+
+    let advice = sink.0.into_inner().unwrap();
+    assert!(!advice.is_empty(), "the ladder must have fired");
+    for a in &advice {
+        assert!(
+            !a.contains("`write_file`"),
+            "steered at a rewrite the guard will refuse (impl.sh is {} lines): {a}",
+            big.lines().count()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// **A model repeating a no-op edit must be TOLD it is a no-op, and must stall.**
 ///
 /// THE MEASURED COST. `edit_file` answered "ok (1 replacement)" for an edit whose
