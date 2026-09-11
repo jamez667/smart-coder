@@ -205,6 +205,15 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
             task.fixture.display()
         )));
     }
+    // This workspace is brand new, so nothing that ran on this thread before is a
+    // predecessor of what runs in it. Without this, `--repeat N` -- same command, same
+    // process, same thread, N fresh fixtures -- describes each fixture's FIRST
+    // verification as a delta against the previous repeat's final state, and two rungs
+    // sharing `cargo test --offline -q` contaminate each other inside one pass.
+    // Measured on `rust-two-stage` x10: the untouched baseline of repeats 8 and 9 read
+    // `now passing: padding_still_respects_a_later_component`, a test the model had
+    // never touched in a fixture it had never seen.
+    sc_verify::forget_runs();
 
     // (1) verify-red-first: the unsolved fixture must fail.
     match verify(ws.path(), &task.verify_cmd, task_timeout(task)) {
@@ -302,6 +311,39 @@ mod tests {
     fn still_red_when_solver_does_nothing() {
         let (_keep, task) = red_fixture();
         assert_eq!(run_task(&task, &NoopSolver).outcome, Outcome::StillRed);
+    }
+
+    /// **`run_task` clears the verification delta memory, so one repeat cannot describe
+    /// the next.**
+    ///
+    /// The wiring test for `sc_verify::forget_runs`. Its own unit test proves the reset
+    /// works; this proves `run_task` actually performs it -- the trap being a correct
+    /// function with a dead call site.
+    ///
+    /// The leak: `note_run` remembers per COMMAND in a thread-local, and `--repeat N`
+    /// runs the same command in one process on one thread against N fresh fixtures.
+    /// Measured on `rust-two-stage` x10 -- repeat 1's baseline read
+    /// `run_verification: 1 failed, 5 passed:` and every later repeat inherited a delta,
+    /// with repeats 8 and 9 telling an untouched workspace `now passing: ...`.
+    #[test]
+    fn a_repeat_does_not_inherit_the_previous_runs_verification_delta() {
+        // Prime the memory for this command, exactly as a previous repeat would leave it.
+        // Done through `note_run` rather than by shelling out: the state is the point, and
+        // a unit test has no business running a verify command against the repo root.
+        sc_verify::forget_runs();
+        let _ = sc_verify::note_run("sh test.sh", &sc_verify::TestReport::generic(false));
+
+        let (_keep, task) = red_fixture();
+        let _ = run_task(&task, &NoopSolver);
+
+        // `run_task` started a fresh workspace, so nothing on this thread is a
+        // predecessor: the NEXT first-run for this command must have no delta to report.
+        let report = sc_verify::TestReport::generic(false);
+        assert_eq!(
+            sc_verify::note_run("sh test.sh", &report),
+            None,
+            "a fresh run_task must clear the delta memory for its verify command"
+        );
     }
 
     #[test]

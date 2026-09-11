@@ -1,0 +1,5 @@
+commit: fbbac5e
+started: 2026-09-11T02:09:06Z
+model: mellum2-12b @ localhost:11441 (GPU1, 3080)
+note: GPU0 at ~52% (user desktop/game) throughout
+cmd: sc-eval --agent --only rust-two-stage --repeat 10

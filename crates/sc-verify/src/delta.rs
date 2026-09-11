@@ -9,6 +9,20 @@
 //! The previous signature lives in a thread-local keyed by the command string: the
 //! agent loop runs its verifications on one thread, and two workspaces on the same
 //! thread would normally run different commands. Nothing here is persisted.
+//!
+//! THAT ASSUMPTION IS NOT SAFE ON ITS OWN, and the eval breaks it. `sc-eval --repeat N`
+//! runs the SAME command, in the same process on the same thread, against N freshly
+//! copied workspaces; and two ladder rungs share the spelling `cargo test --offline -q`.
+//! The workspace resets, the memory of what failed does not, so a brand-new fixture's
+//! FIRST verification gets described as a delta against the previous run's final state.
+//!
+//! Measured on `rust-two-stage` x10 (2026-09-10): repeat 1 read
+//! `run_verification: 1 failed, 5 passed:`, and every repeat after it was prefixed with
+//! inherited state -- `same 1 failure as last run`, and on repeats 8 and 9 the baseline
+//! of an untouched fixture claimed `now passing: padding_still_respects_a_later_component`.
+//! The model is told, on turn zero, that it fixed and broke tests it has never seen.
+//!
+//! So a caller that starts a fresh workspace must say so: [`forget_runs`].
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,6 +32,16 @@ use crate::report::{compile_errors, TestReport};
 thread_local! {
     /// command -> the failure signature of its most recent run on this thread.
     static LAST_RUN: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Forget every remembered signature on this thread.
+///
+/// Call this when a FRESH workspace starts, so the first verification of new code is
+/// reported on its own terms instead of as a delta against whatever ran here last. The
+/// eval's `run_task` does it per task; a long-lived agent session never needs to, because
+/// its workspace persists for the life of the run.
+pub fn forget_runs() {
+    LAST_RUN.with(|l| l.borrow_mut().clear());
 }
 
 /// How many names a delta clause lists before saying `+N more`.
@@ -157,6 +181,38 @@ mod tests {
 
     fn s(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// THE LEAK. A fresh workspace must not inherit the last one's failure signature.
+    ///
+    /// `note_run` remembers per COMMAND, and the eval reruns one command against many
+    /// freshly copied fixtures in a single process. Before `forget_runs`, the second
+    /// fixture's very first verification was reported as a delta against the first
+    /// fixture's last one -- so an untouched workspace was told what it had "fixed".
+    #[test]
+    fn a_fresh_workspace_does_not_inherit_the_previous_runs_signature() {
+        let cmd = "sh test.sh --forget-runs-fixture";
+        forget_runs();
+
+        // Workspace one: two runs, so the second legitimately carries a delta.
+        assert_eq!(
+            note_run(cmd, &red(&["a", "b"])),
+            None,
+            "first run, no delta"
+        );
+        assert_eq!(
+            note_run(cmd, &red(&["a"])).as_deref(),
+            Some("now passing: b"),
+            "within ONE workspace the delta is real and must survive"
+        );
+
+        // A new workspace begins. Its first verification is a first run, not a delta.
+        forget_runs();
+        assert_eq!(
+            note_run(cmd, &red(&["a", "b"])),
+            None,
+            "a fresh fixture's baseline must be reported on its own terms"
+        );
     }
 
     /// THE DEFECT: a test that vanished because the crate stopped compiling is reported

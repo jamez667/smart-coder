@@ -1,0 +1,77 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/10 ---
+  [STILL-RED] rust-two-stage
+         23 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 6 interventions
+0/1 passed (0%)
+tool calls: 23/23 valid (100.0%)
+largest reply: 659 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092546-1.ndjson
+--- run 2/10 ---
+  [STILL-RED] rust-two-stage
+         19 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 19/19 valid (100.0%)
+largest reply: 593 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092620-2.ndjson
+--- run 3/10 ---
+  [STILL-RED] rust-two-stage
+         10 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 10/10 valid (100.0%)
+largest reply: 668 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092649-3.ndjson
+--- run 4/10 ---
+  [STILL-RED] rust-two-stage
+         15 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 15/15 valid (100.0%)
+largest reply: 441 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092676-4.ndjson
+--- run 5/10 ---
+  [STILL-RED] rust-two-stage
+         15 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 15/15 valid (100.0%)
+largest reply: 487 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092695-5.ndjson
+--- run 6/10 ---
+  [STILL-RED] rust-two-stage
+         14 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 14/14 valid (100.0%)
+largest reply: 593 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092716-6.ndjson
+--- run 7/10 ---
+  [STILL-RED] rust-two-stage
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 5 interventions
+0/1 passed (0%)
+tool calls: 39/40 valid (97.5%)
+largest reply: 314 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092742-7.ndjson
+--- run 8/10 ---
+  [STILL-RED] rust-two-stage
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 332 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092794-8.ndjson
+--- run 9/10 ---
+  [STILL-RED] rust-two-stage
+         25 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 25/25 valid (100.0%)
+largest reply: 717 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092824-9.ndjson
+--- run 10/10 ---
+  [PASS] rust-two-stage
+1/1 passed (100%)
+tool calls: 8/8 valid (100.0%)
+largest reply: 586 tokens
+  log: evals/results/2026-09-10-two-stage-x10/logs\run-1789092884-10.ndjson
