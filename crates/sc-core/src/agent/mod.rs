@@ -651,8 +651,27 @@ pub fn run_agent_observed(
     // told so (observed live 2026-06-15: ~10 verifications on an unchanged failure, every
     // edit resetting the stall, the run dying at the step budget instead of escalating).
     const UNCHANGED_FAILURE_LIMIT: usize = 3;
-    let mut last_failure_sig: Option<u64> = None;
-    let mut failure_sig_streak = 0usize;
+    // Recent verification signatures, newest last -- NOT just the previous one.
+    //
+    // THE BLIND SPOT THIS CLOSES. It used to be a single `last_failure_sig`, so the streak
+    // only grew while the SAME failure repeated back-to-back. A model oscillating between two
+    // states defeats that completely: the signature differs every turn, the streak resets to
+    // 1 every turn, and the limit is never reached -- so `note_unchanged_failure` is never
+    // armed, `did_real_work` stays true (each edit genuinely writes bytes), and the stall
+    // detector reports Ok forever.
+    //
+    // Measured on `rust-symptomatic` x10 (2026-09-11): two runs alternated between exactly
+    // two byte-identical edit calls for 27 and 19 consecutive turns -- flipping the suite
+    // between "1 failed, 2 passed" and "2 failed, 1 passed" -- and the detector fired ZERO
+    // times in both, burning the entire 40-turn budget. The harness even labelled each half
+    // of the cycle `now passing:` / `newly failing:`, reading as progress in both directions.
+    //
+    // A short window fixes it without touching `StallDetector`: count how many times the
+    // CURRENT signature already appears among the recent ones. A 2-cycle reaches the limit in
+    // ~4 verifications; a converging run, whose signature is new each time, never does.
+    const FAILURE_SIG_WINDOW: usize = 6;
+    let mut recent_failure_sigs: std::collections::VecDeque<u64> =
+        std::collections::VecDeque::new();
     // Is the eviction loop currently in its "evict deeper" pass? Set the moment the
     // builder reports it had to drop or clip, cleared when the loop settles on a prompt.
     // It exists so the deeper WINDOW_EVICT_TARGET is applied ONLY on a turn where eviction
@@ -1997,8 +2016,7 @@ pub fn run_agent_observed(
                     // what green does not mean ("keep going until every part is applied"),
                     // which a model that HAS applied every part reads as an instruction to
                     // check again. See `done_steer`.
-                    last_failure_sig = None;
-                    failure_sig_streak = 0;
+                    recent_failure_sigs.clear();
                     let steer = escalation::done_steer(registry);
                     report_if_unoffered(&steer, registry, step, sink);
                     recent.push_observation(&truncate_observation(
@@ -2012,13 +2030,15 @@ pub fn run_agent_observed(
                 } else {
                     let observation = report.observation();
                     let sig = failure_signature(&observation);
-                    if last_failure_sig == Some(sig) {
-                        failure_sig_streak += 1;
-                    } else {
-                        last_failure_sig = Some(sig);
-                        failure_sig_streak = 1;
+                    // How many times this exact failure has come back inside the window --
+                    // not how many times in a ROW. Consecutive counting is what an
+                    // oscillation walks straight through.
+                    let seen = recent_failure_sigs.iter().filter(|s| **s == sig).count() + 1;
+                    recent_failure_sigs.push_back(sig);
+                    while recent_failure_sigs.len() > FAILURE_SIG_WINDOW {
+                        recent_failure_sigs.pop_front();
                     }
-                    if failure_sig_streak >= UNCHANGED_FAILURE_LIMIT {
+                    if seen >= UNCHANGED_FAILURE_LIMIT {
                         stall_detector.note_unchanged_failure();
                     }
                     // Surface the failing tests so the next turn is grounded.

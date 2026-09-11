@@ -153,6 +153,80 @@ fn an_advisor_nudge_breaks_a_loop_and_lets_it_finish() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// **AN OSCILLATION IS A STALL, even though every turn writes bytes.**
+///
+/// THE BLIND SPOT. The unchanged-failure detector counted CONSECUTIVE identical failure
+/// signatures, so a model flipping between two states defeated it entirely: the signature
+/// differs every turn, the streak resets to 1 every turn, the limit is never reached, and
+/// `note_unchanged_failure` never arms. `did_real_work` then stays true -- each edit really
+/// does write bytes -- so the stall detector reports Ok forever.
+///
+/// Measured on `rust-symptomatic` x10 (2026-09-11): two runs alternated between two
+/// byte-identical edit calls for 27 and 19 consecutive turns, flipping the suite between
+/// "1 failed, 2 passed" and "2 failed, 1 passed", and the detector fired ZERO times in
+/// either. Both burned the full 40-turn budget having regressed the baseline.
+///
+/// Here `flip.sh` fails a DIFFERENT test depending on what the file says, so the two states
+/// carry two different signatures -- exactly the shape that used to be invisible.
+#[test]
+fn an_oscillation_between_two_failing_states_stalls() {
+    let ws = temp("oscillation");
+    std::fs::write(
+        ws.join("impl.sh"),
+        "mode() { echo one; }
+",
+    )
+    .unwrap();
+    // Whichever mode the file is in, exactly one (different) test fails -- so the failure
+    // SIGNATURE alternates rather than repeating.
+    //
+    // MUST be libtest-shaped. `sc_verify::detect` sniffs for "running " + "test result:" and
+    // only then parses NAMED cases. A bare `FAILED foo` is a GENERIC failure whose
+    // observation always begins with the same constant line, and `failure_signature` hashes
+    // the first line plus the failed-case lines -- so both states would hash IDENTICALLY.
+    // The first version of this fixture did exactly that and was VACUOUS: it passed with the
+    // fix sabotaged, which is how the hole was found.
+    std::fs::write(
+        ws.join("test.sh"),
+        ". ./impl.sh
+if [ \"$(mode)\" = one ]; then N=alpha; else N=beta; fi
+echo 'running 1 test'
+echo \"test $N ... FAILED\"
+echo 'test result: FAILED. 0 passed; 1 failed; 0 ignored'
+exit 1
+",
+    )
+    .unwrap();
+
+    let to_two =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"echo one","new_str":"echo two"}"#;
+    let to_one =
+        r#"{"tool":"edit_file","path":"impl.sh","old_str":"echo two","new_str":"echo one"}"#;
+    let backend = Scripted::new(vec![
+        to_two, to_one, to_two, to_one, to_two, to_one, to_two, to_one, to_two, to_one, to_two,
+        to_one, to_two, to_one,
+    ]);
+    let cfg = AgentConfig {
+        max_steps: 14,
+        verify_command: Some("sh test.sh".to_string()),
+        ..Default::default()
+    };
+    let report = run(&backend, None, &ws, &cfg);
+
+    assert!(
+        matches!(report.stop_reason, StopReason::Stalled(_)),
+        "an oscillation must be caught as a stall, got {:?} after {} steps",
+        report.stop_reason,
+        report.steps
+    );
+    assert!(
+        report.steps < 14,
+        "it must stop BEFORE the budget, took {}",
+        report.steps
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// **An edit that leaves the same test red is not progress.**
 ///
 /// Every edit changes bytes, and a workspace change used to reset the stall detector
