@@ -1,0 +1,78 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/10 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 39/40 valid (97.5%)
+largest reply: 3072 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163331-1.ndjson
+--- run 2/10 ---
+  [STILL-RED] rust-symptomatic
+         19 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 5 interventions
+0/1 passed (0%)
+tool calls: 19/19 valid (100.0%)
+largest reply: 425 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163422-2.ndjson
+--- run 3/10 ---
+  [STILL-RED] rust-symptomatic
+         30 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 7 interventions
+0/1 passed (0%)
+tool calls: 30/30 valid (100.0%)
+largest reply: 431 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163446-3.ndjson
+--- run 4/10 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 1 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 430 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163480-4.ndjson
+--- run 5/10 ---
+  [STILL-RED] rust-symptomatic
+         30 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 7 interventions
+0/1 passed (0%)
+tool calls: 30/30 valid (100.0%)
+largest reply: 412 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163517-5.ndjson
+--- run 6/10 ---
+  [STILL-RED] rust-symptomatic
+         23 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 6 interventions
+0/1 passed (0%)
+tool calls: 23/23 valid (100.0%)
+largest reply: 418 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163546-6.ndjson
+--- run 7/10 ---
+  [STILL-RED] rust-symptomatic
+         15 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 15/15 valid (100.0%)
+largest reply: 417 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163576-7.ndjson
+--- run 8/10 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 60 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163593-8.ndjson
+--- run 9/10 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 142 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163632-9.ndjson
+--- run 10/10 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 7 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 426 tokens
+  log: evals/results/2026-09-11-symptomatic-trace/logs\run-1789163684-10.ndjson

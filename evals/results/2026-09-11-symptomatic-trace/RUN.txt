@@ -1,0 +1,9 @@
+commit: 235f503
+started: 2026-09-11T21:48:50Z
+model: mellum2-12b @ 11441 (GPU1), no tiel
+rung: rust-symptomatic (0/6 recently; 50-line fixture so traces stay readable)
+cmd: --only rust-symptomatic --seed 1 --repeat 10 --verbose
+
+--verbose emits PromptAssembled with the FULL messages array, so each trace
+carries: prompt IN (every message), what the harness DID (tool call, result,
+advice, faults, verification), and the model's raw response OUT.
