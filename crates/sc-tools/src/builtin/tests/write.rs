@@ -998,6 +998,83 @@ fn create_file_has_no_no_op_case() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// **A landing edit shows the file as it NOW reads, so the next anchor is not stale.**
+///
+/// THE MEASURED BUG. A successful edit answered `ok (1 replacement)` and showed nothing, so
+/// the model's picture stayed one change out of date and its next anchor was copied from
+/// that stale picture. On `engine-diagonal-wired` x6 it aimed 140 of 198 turns at the RIGHT
+/// files and still landed 32 edits against 88 failures -- and of 48 missed anchors, 13 came
+/// straight after one of its own successful edits while ZERO came after a `read_file`.
+///
+/// Gated on the file being larger than the echo window: if the whole file fits in the echo
+/// the model can already see it, and echoing would be noise on every trivial edit (which is
+/// why `a_real_write_still_reports_exactly_as_before` still passes untouched).
+#[test]
+fn a_landing_edit_echoes_the_changed_region_of_a_big_file() {
+    let ws = temp_dir("echo-region");
+    // Over the echo window, so a stale view is possible and the echo fires.
+    let mut src = String::new();
+    for i in 1..=60 {
+        src.push_str(&format!(
+            "fn f{i}() {{ {i} }}
+"
+        ));
+    }
+    std::fs::write(ws.join("big.rs"), &src).unwrap();
+
+    let e = call(json!({
+        "tool":"edit_file","path":"big.rs",
+        "old_str":"fn f40() { 40 }","new_str":"fn f40() { 4000 }"
+    }));
+    let o = obs(execute(&e, &ws));
+
+    assert!(o.contains("1 replacement"), "the edit still lands: {o}");
+    assert!(
+        o.contains("big.rs now reads:"),
+        "must echo the new state: {o}"
+    );
+    // The CHANGED region, not the file head.
+    assert!(
+        o.contains("40: fn f40() { 4000 }"),
+        "must show the edited line: {o}"
+    );
+    assert!(
+        !o.contains("1: fn f1()"),
+        "must not echo the file head: {o}"
+    );
+    // Bounded: the echo cannot flood the observation.
+    assert!(
+        o.lines().count() <= 32,
+        "echo must stay bounded, got {} lines: {o}",
+        o.lines().count()
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A file small enough to hold in view gets NO echo: the model just wrote it and can see
+/// all of it, so repeating it back is noise on every trivial edit.
+#[test]
+fn a_small_file_edit_does_not_echo() {
+    let ws = temp_dir("echo-small");
+    std::fs::write(
+        ws.join("s.rs"),
+        "fn f() { return 1; }
+",
+    )
+    .unwrap();
+    let o = obs(execute(
+        &call(json!({
+            "tool":"edit_file","path":"s.rs","old_str":"return 1;","new_str":"return 2;"
+        })),
+        &ws,
+    ));
+    assert_eq!(
+        o, "edit_file s.rs ok (1 replacement)",
+        "no echo on a small file"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 /// **THE HAPPY PATH IS PINNED.** The no-op guard must not touch the wording of a real
 /// edit — the messages below are the exact bytes each writer produced before the fix,
 /// and several places (the UI, `looks_like_failure`, the batched-write note) key on them.

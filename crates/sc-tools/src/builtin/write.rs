@@ -537,7 +537,10 @@ fn edit_file_with(
                 return no_op(&format!("edit_file {path}"), NO_OP_EDIT_FILE);
             }
             return match std::fs::write(p, from_lf(&fuzzed, crlf)) {
-                Ok(()) => format!("edit_file {path} ok (1 replacement, whitespace-tolerant match)"),
+                Ok(()) => format!(
+                    "edit_file {path} ok (1 replacement, whitespace-tolerant match){}",
+                    changed_region(path, &fuzzed, new_str)
+                ),
                 Err(e) => format!("edit_file {path} error: {e}"),
             };
         }
@@ -575,7 +578,10 @@ fn edit_file_with(
             }
             return match std::fs::write(p, from_lf(&spliced, crlf)) {
                 Ok(()) => {
-                    format!("edit_file {path} ok (1 replacement, matched ignoring indentation)")
+                    format!(
+                        "edit_file {path} ok (1 replacement, matched ignoring indentation){}",
+                        changed_region(path, &spliced, new_str)
+                    )
                 }
                 Err(e) => format!("edit_file {path} error: {e}"),
             };
@@ -616,8 +622,9 @@ fn edit_file_with(
             }
             return match std::fs::write(p, from_lf(&joined, crlf)) {
                 Ok(()) => format!(
-                    "edit_file {path} ok (1 replacement, matched whole line {})",
-                    i + 1
+                    "edit_file {path} ok (1 replacement, matched whole line {}){}",
+                    i + 1,
+                    changed_region(path, &joined, new_str)
                 ),
                 Err(e) => format!("edit_file {path} error: {e}"),
             };
@@ -671,9 +678,73 @@ fn edit_file_with(
         return no_op(&format!("edit_file {path}"), NO_OP_EDIT_FILE);
     }
     match std::fs::write(p, from_lf(&updated, crlf)) {
-        Ok(()) => format!("edit_file {path} ok (1 replacement)"),
+        Ok(()) => format!(
+            "edit_file {path} ok (1 replacement){}",
+            changed_region(path, &updated, new_str)
+        ),
         Err(e) => format!("edit_file {path} error: {e}"),
     }
+}
+
+/// Lines of context shown either side of the region an edit just changed.
+const ECHO_CONTEXT: usize = 3;
+/// The most lines an after-edit echo ever shows. `edit_file` draws the TIGHT observation
+/// cap (`observation_cap_for`'s default, not the generous file-read one), so an echo that
+/// ran long would evict the very context this exists to save.
+const ECHO_MAX_LINES: usize = 24;
+
+/// The file as it reads NOW around the text just written, numbered.
+///
+/// THE MEASURED BUG. A successful edit answered `ok (1 replacement)` and showed nothing, so
+/// the model's picture of the file stayed one change out of date. Its next anchor was copied
+/// from that stale picture and missed. On `engine-diagonal-wired` x6 the model aimed 140 of
+/// 198 turns at the RIGHT files and still landed only 32 edits against 88 failures -- and of
+/// 48 missed anchors, 13 came immediately after one of its own successful edits and ZERO came
+/// after a `read_file`. The anchors were not bad; the view behind them was.
+///
+/// So every landing edit now returns the changed region. `docs/notes/next-harness-work.md`
+/// item 4 called this before the evidence arrived: "returning a numbered view of the changed
+/// region after an edit -- so the model can chain its next edit without a fresh `read_file`".
+///
+/// Bounded hard: [`ECHO_MAX_LINES`] beats the tight observation cap, and a `new_str` longer
+/// than that is shown from its start rather than truncated in the middle, because the top of
+/// a freshly written block is where the next anchor gets copied from.
+fn changed_region(path: &str, updated: &str, new_str: &str) -> String {
+    let lines: Vec<&str> = updated.lines().collect();
+    // Only when a stale view is actually POSSIBLE. If the whole file fits inside the echo
+    // window the model can already see all of it, so the echo is noise on every trivial
+    // edit -- and it would rewrite the observation of a one-line file, which
+    // `a_real_write_still_reports_exactly_as_before` pins byte-for-byte and is right to.
+    // The threshold is the window itself rather than a new invented number.
+    if lines.len() <= ECHO_MAX_LINES {
+        return String::new();
+    }
+    // Where the new text starts, in line terms. `new_str` was just written, so it is present
+    // -- but a whitespace-tolerant or indent-tolerant match may have altered it on the way in,
+    // so fall back to its first non-blank line before giving up.
+    let probe = new_str
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if probe.is_empty() {
+        return String::new();
+    }
+    let Some(at) = lines
+        .iter()
+        .position(|l| l.trim() == probe || l.contains(probe))
+    else {
+        return String::new();
+    };
+    let written = new_str.lines().count().max(1);
+    let lo = at.saturating_sub(ECHO_CONTEXT);
+    let hi = (at + written + ECHO_CONTEXT)
+        .min(lines.len())
+        .min(lo + ECHO_MAX_LINES);
+    format!(
+        "\n{path} now reads:\n{}",
+        number_lines(&lines[lo..hi], lo + 1)
+    )
 }
 
 /// Lines of context shown either side of the closest block on a missed anchor.

@@ -105,12 +105,29 @@ were already correct.
 
 ---
 
-## 4. Let the model act on what it just read
+## 4. Let the model act on what it just read — DONE (2026-09-11)
 
 The trace shows a read-then-act pattern costing two turns where one would do.
 Returning a numbered view of the changed region after an edit — so the model
 can chain its next edit without a fresh `read_file` — would cut turns directly.
-Speculative until 1 and 2 land; listed so it is not lost.
+
+**Landed, and the evidence arrived after the note was written.** Measured on
+`engine-diagonal-wired` x6 (2026-09-11): the model aimed 140 of 198 turns at the
+RIGHT files and still landed only 32 edits against 88 failures. Of its 48 missed
+anchors, **13 came immediately after one of its own successful edits and ZERO
+came after a `read_file`** — the anchors were fine, the view behind them was one
+change out of date, because `ok (1 replacement)` showed nothing.
+
+Every landing `edit_file` now appends `<path> now reads:` with the changed region
+numbered (`changed_region` in `sc-tools`'s `write.rs`, wired at all four success
+sites). Bounded at 24 lines — `edit_file` draws the TIGHT observation cap, so a
+long echo would evict the context this exists to save — and gated on the file
+being larger than that window: if the whole file fits in the echo the model can
+already see it, and echoing would be noise on every trivial edit.
+
+Not yet measured against a run. The mechanism is pinned by tests; whether it
+converts turns is the next measurement, and it should be judged on TIEL's turn
+count, since Mellum fails these rungs for reasons no view fixes.
 
 ---
 
