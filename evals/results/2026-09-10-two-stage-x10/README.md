@@ -92,3 +92,39 @@ something false about its own progress.** A false loop-stall, a broken build
 reported as tests newly passing, and now a fresh fixture reported as a delta
 against a workspace that no longer exists. All three were invisible in the
 model's replies and obvious in the prompt.
+
+---
+
+## CORRECTION (same day, after commit 7ccda47)
+
+Commit `7ccda47` added seed/temperature plumbing and its message claims this
+makes a repeat reproducible. **That claim is not supported and should not be
+relied on.**
+
+Tested immediately after, on the freshly built binary: `rust-two-stage` twice
+with `--seed 1`, everything else identical.
+
+    run A: [STILL-RED]  40 steps
+    run B: [PASS]        2 turns
+
+Same seed, same commit, same server, opposite outcomes. The two runs differed
+from step 1 onward: run A reported `cached=0` on its first turn, run B
+`cached=855`.
+
+The plumbing itself is real and tested -- the seed does reach every request,
+sabotage-verified. What is NOT established is that pinning it makes an agent run
+reproducible. Something outside the sampler differs between runs.
+
+**The KV cache is NOT the cause.** A powered probe settles it: one identical
+request, fixed seed, 6 draws with `cache_prompt: true` and 6 with it `false` --
+all twelve byte-identical (sha1 `862685562fd4`). The server is deterministic
+under a fixed seed regardless of cache state. An earlier probe that appeared to
+show cache-driven divergence was comparing requests whose own payloads differed;
+it was measuring itself, not the cache.
+
+So a single request is reproducible and a whole RUN is not. That puts the
+divergence in what the harness SENDS between turns, not in the sampler and not
+in the server. It has not yet been isolated.
+
+**Standing conclusion: the ladder is still not a reproducible instrument, and
+numbers taken off it still carry the error bars described above.**
