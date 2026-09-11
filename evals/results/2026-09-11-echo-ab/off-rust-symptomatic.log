@@ -1,0 +1,46 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [STILL-RED] rust-symptomatic
+         28 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 7 interventions
+0/1 passed (0%)
+tool calls: 28/28 valid (100.0%)
+largest reply: 591 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-rust-symptomatic\run-1789161239-1.ndjson
+--- run 2/6 ---
+  [STILL-RED] rust-symptomatic
+         18 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 18/18 valid (100.0%)
+largest reply: 425 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-rust-symptomatic\run-1789161290-2.ndjson
+--- run 3/6 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 1 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 421 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-rust-symptomatic\run-1789161308-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 144 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-rust-symptomatic\run-1789161349-4.ndjson
+--- run 5/6 ---
+  [STILL-RED] rust-symptomatic
+         24 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 6 interventions
+0/1 passed (0%)
+tool calls: 24/24 valid (100.0%)
+largest reply: 425 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-rust-symptomatic\run-1789161399-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 1 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 421 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-rust-symptomatic\run-1789161423-6.ndjson

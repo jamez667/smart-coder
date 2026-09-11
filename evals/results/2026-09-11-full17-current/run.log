@@ -1,0 +1,110 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] rust-stated
+  [PASS] rust-located
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 3 interventions
+  [STILL-RED] rust-misdirected
+         37 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+  [PASS] rust-two-stage
+  [PASS] rust-invariant
+  [PASS] engine-diagonal-path
+  [STILL-RED] engine-diagonal-wired
+         15 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 4 interventions
+  [STILL-RED] engine-grid-scan
+         34 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 5 interventions
+  [STILL-RED] engine-ecs-query
+         17 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), 5 interventions
+  [PASS] rust-multi-site
+  [PASS] rust-signature-change
+  [STILL-RED] rust-hidden-invariant
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 3 interventions
+  [STILL-RED] rust-trait-impl
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 9 interventions
+  [PASS] rust-plausible-wrong-fix
+  [PASS] rust-ineffective-edit
+  [PASS] rust-shifting-anchor
+10/17 passed (59%)
+tool calls: 282/304 valid (92.8%)
+largest reply: 3072 tokens
+
+!! 15 HARNESS FAULT(S) - this run was degraded:
+      14x stop sequence misfire
+       1x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-full17-current/logs\run-1789150880-1.ndjson
+--- run 2/3 ---
+  [PASS] rust-stated
+  [PASS] rust-located
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 8 interventions
+  [STILL-RED] rust-misdirected
+         39 steps, stopped: Stalled("many turns with no change to the workspace; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+  [PASS] rust-two-stage
+  [PASS] rust-invariant
+  [STILL-RED] engine-diagonal-path
+         16 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), 2 interventions
+  [STILL-RED] engine-diagonal-wired
+         27 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 7 interventions
+  [STILL-RED] engine-grid-scan
+         24 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 11 interventions
+  [STILL-RED] engine-ecs-query
+         24 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+  [PASS] rust-multi-site
+  [STILL-RED] rust-signature-change
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 3 interventions
+  [STILL-RED] rust-hidden-invariant
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 2 interventions
+  [PASS] rust-trait-impl
+  [STILL-RED] rust-plausible-wrong-fix
+         24 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 7 interventions
+  [PASS] rust-ineffective-edit
+  [PASS] rust-shifting-anchor
+8/17 passed (47%)
+tool calls: 311/340 valid (91.5%)
+largest reply: 3072 tokens
+
+!! 26 HARNESS FAULT(S) - this run was degraded:
+      20x stop sequence misfire
+       6x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-full17-current/logs\run-1789151793-2.ndjson
+--- run 3/3 ---
+  [PASS] rust-stated
+  [PASS] rust-located
+  [STILL-RED] rust-symptomatic
+         40 steps, stopped: BudgetExhausted, agent knew it was red
+  [STILL-RED] rust-misdirected
+         39 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+  [PASS] rust-two-stage
+  [PASS] rust-invariant
+  [STILL-RED] engine-diagonal-path
+         14 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 6 interventions
+  [STILL-RED] engine-diagonal-wired
+         30 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+  [STILL-RED] engine-grid-scan
+         29 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 5 interventions
+  [STILL-RED] engine-ecs-query
+         21 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+  [PASS] rust-multi-site
+  [PASS] rust-signature-change
+  [STILL-RED] rust-hidden-invariant
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 6 interventions
+  [STILL-RED] rust-trait-impl
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 2 interventions
+  [STILL-RED] rust-plausible-wrong-fix
+         27 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+  [PASS] rust-ineffective-edit
+  [PASS] rust-shifting-anchor
+8/17 passed (47%)
+tool calls: 341/347 valid (98.3%)
+largest reply: 3006 tokens
+
+!! 6 HARNESS FAULT(S) - this run was degraded:
+       5x stop sequence misfire
+       1x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-full17-current/logs\run-1789152639-3.ndjson

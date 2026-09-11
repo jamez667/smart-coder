@@ -1,0 +1,67 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [STILL-RED] engine-ecs-query
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 1515 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-engine-ecs-query\run-1789158793-1.ndjson
+--- run 2/6 ---
+  [STILL-RED] engine-ecs-query
+         24 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 23/24 valid (95.8%)
+largest reply: 1173 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-engine-ecs-query\run-1789158842-2.ndjson
+--- run 3/6 ---
+  [STILL-RED] engine-ecs-query
+         35 steps, stopped: Stalled("many turns with no change to the workspace; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 28/35 valid (80.0%)
+largest reply: 1119 tokens
+
+!! 7 HARNESS FAULT(S) - this run was degraded:
+       7x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-engine-ecs-query\run-1789158878-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] engine-ecs-query
+         24 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 20/24 valid (83.3%)
+largest reply: 1105 tokens
+
+!! 4 HARNESS FAULT(S) - this run was degraded:
+       4x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-engine-ecs-query\run-1789158909-4.ndjson
+--- run 5/6 ---
+  [STILL-RED] engine-ecs-query
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 36/40 valid (90.0%)
+largest reply: 2958 tokens
+
+!! 6 HARNESS FAULT(S) - this run was degraded:
+       4x stop sequence misfire
+       2x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-engine-ecs-query\run-1789159016-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] engine-ecs-query
+         23 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 4 interventions
+0/1 passed (0%)
+tool calls: 21/23 valid (91.3%)
+largest reply: 1178 tokens
+
+!! 2 HARNESS FAULT(S) - this run was degraded:
+       2x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-engine-ecs-query\run-1789159115-6.ndjson

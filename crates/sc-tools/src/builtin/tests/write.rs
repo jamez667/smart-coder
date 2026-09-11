@@ -1051,6 +1051,29 @@ fn a_landing_edit_echoes_the_changed_region_of_a_big_file() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+/// The A/B off switch actually switches it off.
+///
+/// Pinned because the experiment it exists for is worthless if the control arm is silently
+/// still echoing -- and an env var is exactly the kind of seam that rots unnoticed.
+///
+/// Drives the PREDICATE, not the environment. The first version of this test called
+/// `set_var`, which is process-global: cargo runs tests in parallel threads, so it switched
+/// the echo off underneath `a_landing_edit_echoes_the_changed_region_of_a_big_file` running
+/// concurrently and failed it. A test that only passes under `--test-threads=1` is a
+/// landmine, since the gate runs parallel.
+#[test]
+fn the_echo_can_be_switched_off_for_an_ab() {
+    use crate::builtin::write::echo_disabled_by;
+
+    assert!(echo_disabled_by(Some("1")), "any non-zero value disables");
+    assert!(echo_disabled_by(Some("yes")));
+    assert!(!echo_disabled_by(Some("0")), "an explicit 0 keeps it ON");
+    assert!(
+        !echo_disabled_by(None),
+        "unset keeps it ON -- the default ships enabled"
+    );
+}
+
 /// A file small enough to hold in view gets NO echo: the model just wrote it and can see
 /// all of it, so repeating it back is noise on every trivial edit.
 #[test]

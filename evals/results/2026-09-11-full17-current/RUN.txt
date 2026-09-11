@@ -1,0 +1,6 @@
+commit: 54c2766
+started: 2026-09-11T18:21:20Z
+model: mellum2-12b @ localhost:11441 (GPU1)
+prior full-17: 2026-09-10 @ 1a3e3e3 -- 6/17, 12/17, 10/17
+since then: deadlock fix (4413e2d), logs-index fix (041b41c), after-edit echo (54c2766)
+cmd: --agent evals/ladder/suite.toml --seed 1 --repeat 3

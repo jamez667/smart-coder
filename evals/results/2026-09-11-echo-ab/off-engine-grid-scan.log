@@ -1,0 +1,52 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [STILL-RED] engine-grid-scan
+         40 steps, stopped: BudgetExhausted, agent knew it was red, 6 interventions
+0/1 passed (0%)
+tool calls: 40/40 valid (100.0%)
+largest reply: 1219 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-engine-grid-scan\run-1789159711-1.ndjson
+--- run 2/6 ---
+  [STILL-RED] engine-grid-scan
+         39 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 4 interventions
+0/1 passed (0%)
+tool calls: 39/39 valid (100.0%)
+largest reply: 1264 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-engine-grid-scan\run-1789159983-2.ndjson
+--- run 3/6 ---
+  [STILL-RED] engine-grid-scan
+         21 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 21/21 valid (100.0%)
+largest reply: 440 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-engine-grid-scan\run-1789160082-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] engine-grid-scan
+         34 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 5 interventions
+0/1 passed (0%)
+tool calls: 30/34 valid (88.2%)
+largest reply: 2435 tokens
+
+!! 6 HARNESS FAULT(S) - this run was degraded:
+       3x prompt over budget
+       2x stop sequence misfire
+       1x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-off-engine-grid-scan\run-1789160118-4.ndjson
+--- run 5/6 ---
+  [STILL-RED] engine-grid-scan
+         28 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 9 interventions
+0/1 passed (0%)
+tool calls: 28/28 valid (100.0%)
+largest reply: 965 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-engine-grid-scan\run-1789160431-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] engine-grid-scan
+         15 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 15/15 valid (100.0%)
+largest reply: 827 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-off-engine-grid-scan\run-1789160583-6.ndjson

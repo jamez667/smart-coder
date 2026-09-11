@@ -1,0 +1,56 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [STILL-RED] rust-hidden-invariant
+         40 steps, stopped: BudgetExhausted, agent knew it was red
+0/1 passed (0%)
+tool calls: 28/40 valid (70.0%)
+largest reply: 426 tokens
+
+!! 12 HARNESS FAULT(S) - this run was degraded:
+      12x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-hidden-invariant\run-1789159420-1.ndjson
+--- run 2/6 ---
+  [PASS] rust-hidden-invariant
+1/1 passed (100%)
+tool calls: 9/10 valid (90.0%)
+largest reply: 417 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-hidden-invariant\run-1789159473-2.ndjson
+--- run 3/6 ---
+  [PASS] rust-hidden-invariant
+1/1 passed (100%)
+tool calls: 7/7 valid (100.0%)
+largest reply: 232 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-hidden-invariant\run-1789159493-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] rust-hidden-invariant
+         23 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 4 interventions
+0/1 passed (0%)
+tool calls: 19/23 valid (82.6%)
+largest reply: 542 tokens
+
+!! 4 HARNESS FAULT(S) - this run was degraded:
+       4x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-hidden-invariant\run-1789159501-4.ndjson
+--- run 5/6 ---
+  [STILL-RED] rust-hidden-invariant
+         34 steps, stopped: Stalled("many turns with no change to the workspace; the harness intervened 2 times with no change to the workspace between them"), agent knew it was red, 4 interventions
+0/1 passed (0%)
+tool calls: 34/34 valid (100.0%)
+largest reply: 303 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-hidden-invariant\run-1789159544-5.ndjson
+--- run 6/6 ---
+  [STILL-RED] rust-hidden-invariant
+         28 steps, stopped: Stalled("repeating the same action without progress"), agent knew it was red, 5 interventions
+0/1 passed (0%)
+tool calls: 28/28 valid (100.0%)
+largest reply: 266 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-hidden-invariant\run-1789159593-6.ndjson

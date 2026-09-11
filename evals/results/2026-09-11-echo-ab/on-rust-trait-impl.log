@@ -1,0 +1,50 @@
+smart-coder eval harness
+  solver: agent (mellum2-12b @ http://localhost:11441/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/6 ---
+  [STILL-RED] rust-trait-impl
+         11 steps, stopped: Stalled("repeating the same action without progress; the harness intervened 2 times with no change to the workspace between them"), 4 interventions
+0/1 passed (0%)
+tool calls: 8/11 valid (72.7%)
+largest reply: 352 tokens
+
+!! 3 HARNESS FAULT(S) - this run was degraded:
+       3x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-trait-impl\run-1789159626-1.ndjson
+--- run 2/6 ---
+  [PASS] rust-trait-impl
+1/1 passed (100%)
+tool calls: 12/12 valid (100.0%)
+largest reply: 1079 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-trait-impl\run-1789159634-2.ndjson
+--- run 3/6 ---
+  [PASS] rust-trait-impl
+1/1 passed (100%)
+tool calls: 19/19 valid (100.0%)
+largest reply: 457 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-trait-impl\run-1789159648-3.ndjson
+--- run 4/6 ---
+  [STILL-RED] rust-trait-impl
+         38 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 28/38 valid (73.7%)
+largest reply: 206 tokens
+
+!! 10 HARNESS FAULT(S) - this run was degraded:
+      10x stop sequence misfire
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-trait-impl\run-1789159666-4.ndjson
+--- run 5/6 ---
+  [PASS] rust-trait-impl
+1/1 passed (100%)
+tool calls: 7/7 valid (100.0%)
+largest reply: 1110 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-trait-impl\run-1789159686-5.ndjson
+--- run 6/6 ---
+  [PASS] rust-trait-impl
+1/1 passed (100%)
+tool calls: 13/13 valid (100.0%)
+largest reply: 1093 tokens
+  log: evals/results/2026-09-11-echo-ab/logs-on-rust-trait-impl\run-1789159696-6.ndjson

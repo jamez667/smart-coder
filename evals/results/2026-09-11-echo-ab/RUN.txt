@@ -1,0 +1,16 @@
+commit: 54c2766 + uncommitted SC_NO_EDIT_ECHO switch
+started: 2026-09-11T20:11:46Z
+model: mellum2-12b @ 11441 (GPU1) -- NO tiel, per instruction
+
+arms:   ON = default (echo enabled)   OFF = SC_NO_EDIT_ECHO=1
+seeds:  1-6, identical in both arms; identical binary; only the env var differs
+rungs:  engine-grid-scan engine-ecs-query rust-symptomatic rust-hidden-invariant rust-trait-impl
+
+PRIMARY metric: median turns on failed runs + median PEAK PROMPT.
+SECONDARY: pass rate (expected flat; n=6 cannot resolve it).
+
+PREDICTION recorded before the run:
+  if the echo caused the 09-10 -> 09-11 regression (turns 23->34, peak prompt
+  7857->10401, budget-exhausted 4->9), the OFF arm shows a lower peak prompt and
+  fewer budget-exhausted runs. If the arms match, that regression was variance or
+  one of the other two commits, and the echo is exonerated.

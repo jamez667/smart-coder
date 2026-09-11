@@ -693,6 +693,14 @@ const ECHO_CONTEXT: usize = 3;
 /// ran long would evict the very context this exists to save.
 const ECHO_MAX_LINES: usize = 24;
 
+/// Whether an `SC_NO_EDIT_ECHO` value turns the after-edit echo off.
+///
+/// Split out so the A/B switch can be tested without `set_var`, which is process-global and
+/// leaks across cargo's parallel test threads.
+pub(crate) fn echo_disabled_by(v: Option<&str>) -> bool {
+    v.is_some_and(|v| v != "0")
+}
+
 /// The file as it reads NOW around the text just written, numbered.
 ///
 /// THE MEASURED BUG. A successful edit answered `ok (1 replacement)` and showed nothing, so
@@ -710,6 +718,22 @@ const ECHO_MAX_LINES: usize = 24;
 /// than that is shown from its start rather than truncated in the middle, because the top of
 /// a freshly written block is where the next anchor gets copied from.
 fn changed_region(path: &str, updated: &str, new_str: &str) -> String {
+    // An off switch, for measuring this feature against itself.
+    //
+    // It exists because the first run WITH the echo regressed the numbers it was meant to
+    // improve: median failed-run turns 23 -> 34, budget-exhausted runs 4 -> 9, and median
+    // PEAK PROMPT 7,857 -> 10,401 (+32%) across two 51-run passes. The echo is the obvious
+    // suspect -- 113 emissions of up to 24 numbered lines, each persisting in the window --
+    // but those passes differ in three commits, so the comparison cannot separate this
+    // change from the others or from run-to-run variance.
+    //
+    // An env var rather than `AgentConfig`: threading a flag through the loop into this
+    // crate is a real API change, and making one to run an experiment gets the experiment
+    // shipped. If the A/B says keep it, this becomes proper config; if it says drop it, the
+    // whole function goes and takes the switch with it.
+    if echo_disabled_by(std::env::var("SC_NO_EDIT_ECHO").ok().as_deref()) {
+        return String::new();
+    }
     let lines: Vec<&str> = updated.lines().collect();
     // Only when a stale view is actually POSSIBLE. If the whole file fits inside the echo
     // window the model can already see all of it, so the echo is noise on every trivial
