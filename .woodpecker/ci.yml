@@ -67,7 +67,32 @@ steps:
       # real python/pytest interpreter) are #[ignore]d, so the default
       # `cargo test` run stays deterministic and self-contained — no backend, no
       # interpreter, no network.
+      #
+      # The WHOLE workspace, including the four crates scripts/check.sh excludes
+      # for time (sc-eval, sc-trace, sc-comply-author, sc-cli). They are slow, not
+      # flaky — the local gate skips them so that it stays fast enough to actually
+      # get run, and this is where they are covered instead.
       - cargo test --workspace
+
+  # The slow suites, and the reports worth reading: retrieval ranking (spec 23),
+  # the gateway routing benchmark, and spec-anchor drift (spec 17).
+  #
+  # **A separate step, and deliberately not blocking.** These catch real
+  # regressions — a stale spec anchor, a query that stopped finding its function —
+  # but none of them is a reason to refuse a merge on its own, and a red build
+  # nobody can act on immediately is a red build people learn to ignore.
+  #
+  # `failure: ignore` means the step reports and moves on. Read it; do not be
+  # blocked by it.
+  - name: reports
+    image: rust:1.97.1-bookworm
+    failure: ignore
+    environment:
+      CARGO_TERM_COLOR: always
+    commands:
+      - cargo test --quiet -p sc-eval retrieval:: -- --nocapture
+      - cargo test --quiet -p sc-gateway --test bench -- --nocapture
+      - cargo run --quiet -p sc-cli -- trace --check
 
   # **The browser harness is not run here, deliberately.** `web/e2e/` holds 28
   # Playwright tests, and they are a development tool rather than a gate.
