@@ -108,7 +108,21 @@ impl RetrievalSuite {
                     // won the top hit for all seven smart-coder queries on the
                     // first run. A perfectly self-fulfilling, perfectly useless
                     // result.
-                    idx.files.retain(|p, _| !p.starts_with("evals/retrieval/"));
+                    //
+                    // `evals/results/` is the same hazard a directory over: a run
+                    // write-up is PROSE ABOUT the code, written in the question's
+                    // vocabulary rather than the code's, so it outranks the
+                    // implementation for the very queries this suite asks. The
+                    // dated results are committed (see .gitignore), so this is not
+                    // hypothetical -- `2026-09-11-compaction-rung/RUN.txt` names
+                    // budgets and tokens six times and took the top hit for
+                    // `sc-prompt-token-budget` away from `sc-context/src/budget.rs`.
+                    // Excluded for the same reason and not as a special case: what
+                    // the suite grades is finding CODE, and the eval's own paper
+                    // trail is not code.
+                    idx.files.retain(|p, _| {
+                        !p.starts_with("evals/retrieval/") && !p.starts_with("evals/results/")
+                    });
                     idx
                 });
                 grade(q, index)
