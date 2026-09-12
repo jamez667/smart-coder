@@ -1,6 +1,6 @@
 //! Workspace helpers: the sandbox join and the filesystem source-file ledger.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use sc_proto::{DcError, Result};
 
@@ -58,18 +58,14 @@ pub(super) fn from_lf(lf: &str, crlf: bool) -> String {
 
 /// Join `rel` onto `workspace`, rejecting absolute paths and `..` traversal
 /// (spec 04 — sandboxed to the workspace root).
+///
+/// The rule itself is [`sc_fsutil::safe_join`]; this wraps it to add this crate's error
+/// type. It moved to a leaf when the plugin host needed the same containment for a
+/// plugin's path arguments (spec 25) and could not depend on this crate — the same
+/// reason `is_noise_dir` and `source_files` moved there.
 pub fn safe_join(workspace: &Path, rel: &str) -> Result<PathBuf> {
-    let rp = Path::new(rel);
-    if rp.is_absolute() {
-        return Err(DcError::Eval(format!("absolute paths not allowed: {rel}")));
-    }
-    for c in rp.components() {
-        match c {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => return Err(DcError::Eval(format!("path escapes workspace: {rel}"))),
-        }
-    }
-    Ok(workspace.join(rp))
+    sc_fsutil::safe_join(workspace, rel)
+        .ok_or_else(|| DcError::Eval(format!("path escapes workspace: {rel}")))
 }
 
 #[cfg(test)]

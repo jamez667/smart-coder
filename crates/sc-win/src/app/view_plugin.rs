@@ -51,6 +51,7 @@ impl App {
         // draining holds `&mut self.plugins`.
         let mut pushed: Vec<(String, String, sc_plugin_proto::Content)> = Vec::new();
         let mut stopped: Vec<(String, String)> = Vec::new();
+        let mut requests: Vec<(String, PluginMessage)> = Vec::new();
 
         for p in plugins.running.iter_mut() {
             let plugin_id = p.manifest.as_ref().map(|m| m.id.clone());
@@ -62,10 +63,13 @@ impl App {
                                 pushed.push((id, panel, content));
                             }
                         }
-                        // Everything else in v1 is a request needing a reply, which is
-                        // the next slice of work. Logged rather than dropped silently so
-                        // a plugin using an unimplemented call can see that it arrived.
-                        other => p.push_log(format!("unhandled: {other:?}")),
+                        // A request. Answered below, outside this loop, because
+                        // answering needs `&mut self` while this holds `&mut self.plugins`.
+                        other => {
+                            if let Some(id) = plugin_id.clone() {
+                                requests.push((id, other));
+                            }
+                        }
                     },
                     PluginEvent::Ready(_) => {}
                     PluginEvent::Stopped(r) => {
@@ -75,6 +79,23 @@ impl App {
                         };
                         stopped.push((p.dir_name.clone(), why));
                     }
+                }
+            }
+        }
+
+        // Requests, answered in arrival order. EVERY request gets a reply, including a
+        // failure — a dropped reply is a plugin waiting forever.
+        for (plugin_id, msg) in requests {
+            let Some(reply) = self.answer_plugin(&msg) else {
+                continue;
+            };
+            if let Some(plugins) = self.plugins.as_mut() {
+                if let Some(p) = plugins
+                    .running
+                    .iter_mut()
+                    .find(|p| p.manifest.as_ref().is_some_and(|m| m.id == plugin_id))
+                {
+                    p.send(&reply);
                 }
             }
         }

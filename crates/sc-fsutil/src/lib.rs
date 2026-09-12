@@ -1,20 +1,56 @@
 //! Filesystem conventions shared by **both products** (spec 21).
 //!
-//! Smart Coder ships as two executables built from one workspace: the agent app and
-//! the Crafter, an editor that does not depend on a single model crate. That split is
-//! structural — `cargo tree -p sc-crafter` names no model code — which means anything
-//! the editor needs cannot live in `sc-iterate` or `sc-tools`.
+//! The editor half (`sc-craft-ui`) depends on no crate that can reach a model, and
+//! `scripts/check.*` asserts that with `cargo tree`. So anything the editor needs cannot
+//! live in `sc-iterate`, `sc-tools` or any other model crate — it lives here instead.
 //!
-//! These two helpers are exactly that case. Both were de-duplicated *into* agent crates
+//! These helpers are exactly that case. Each was de-duplicated *into* an agent crate
 //! before the split (the doc comments on the old re-exports explain why, at length, and
 //! they were right to). Pushing them down here keeps the de-duplication while letting
-//! the editor reach them: one definition, two consumers, no model dependency.
+//! the editor reach them: one definition, several consumers, no model dependency.
+//!
+//! [`safe_join`] arrived later and for a sharper reason: the plugin host needs the same
+//! workspace containment for a plugin's path arguments that the agent's tools need for a
+//! model's (spec 25). Two copies of a containment rule is how one of them ends up weaker.
 //!
 //! The dependency floor is deliberate. This crate depends on `sc-index` and nothing
 //! else, and adding anything that reaches a network or a model would silently hand the
 //! Crafter a transitive path to one.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+
+/// Join `rel` onto `workspace`, refusing anything that escapes it.
+///
+/// Absolute paths and any `..` component are rejected; `.` is allowed and harmless. This
+/// is the **one** containment rule in the workspace, and both callers that matter are
+/// adversarial in different ways: the agent's tools sandbox a model's path arguments
+/// (spec 04), and the plugin host sandboxes a plugin's (spec 25).
+///
+/// `Option` rather than a rich error because this crate has no error type and must not
+/// grow one — `sc-tools` wraps it to add its own. A rejection has exactly one cause
+/// worth reporting, and the caller knows the path it passed.
+///
+/// Rejecting `..` **lexically** is deliberate. A canonicalising check would follow
+/// symlinks and hit the filesystem, which means it cannot be used on a path that does not
+/// exist yet (every file a write tool creates) and would make the rule untestable
+/// without a real directory tree. The lexical rule is stricter: it refuses
+/// `a/../b` even though that stays inside, and refusing a path the caller could have
+/// spelled plainly costs nothing.
+pub fn safe_join(workspace: &Path, rel: &str) -> Option<PathBuf> {
+    let rp = Path::new(rel);
+    if rp.is_absolute() {
+        return None;
+    }
+    for c in rp.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            // ParentDir, RootDir, and Windows' Prefix (`C:`, `\server\share`) all
+            // escape, the last two being why `is_absolute` alone is not enough.
+            _ => return None,
+        }
+    }
+    Some(workspace.join(rp))
+}
 
 /// Directories excluded from a walk: VCS, build output, tooling caches, dependencies,
 /// and generated-asset folders.
@@ -201,6 +237,41 @@ mod tests {
         ] {
             assert!(is_test_file(rel), "{rel} must read as a test");
         }
+    }
+
+    #[test]
+    fn a_relative_path_joins_onto_the_workspace() {
+        let ws = Path::new("/ws");
+        assert_eq!(safe_join(ws, "src/main.rs"), Some(ws.join("src/main.rs")));
+        assert_eq!(
+            safe_join(ws, "./src/main.rs"),
+            Some(ws.join("./src/main.rs"))
+        );
+    }
+
+    /// The rule this function exists for. Both callers pass paths chosen by something
+    /// that may be adversarial — a model's tool argument, or a plugin's request.
+    #[test]
+    fn traversal_and_absolute_paths_are_refused() {
+        let ws = Path::new("/ws");
+        for bad in ["../secrets", "src/../../etc/passwd", "/etc/passwd", ".."] {
+            assert_eq!(safe_join(ws, bad), None, "{bad} must be refused");
+        }
+    }
+
+    /// A Windows drive prefix escapes without being caught by `is_absolute` on every
+    /// platform, so the component walk has to reject it too.
+    #[test]
+    fn a_windows_prefix_is_refused() {
+        assert_eq!(safe_join(Path::new("/ws"), r"C:\Windows\System32"), None);
+    }
+
+    /// Refused lexically even though it stays inside, because the alternative is a
+    /// canonicalising check that touches the filesystem and cannot run on a path that
+    /// does not exist yet.
+    #[test]
+    fn a_harmless_parent_component_is_still_refused() {
+        assert_eq!(safe_join(Path::new("/ws"), "a/../b"), None);
     }
 
     #[test]

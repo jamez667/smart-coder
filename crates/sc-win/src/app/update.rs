@@ -43,9 +43,19 @@ impl App {
                 // Forward to THAT pane's active buffer — not the focused one — and adopt the
                 // widget's own modified flag, so the dirty dot can't drift from the buffer.
                 if let Some(tab) = self.panes.get_mut(pane).and_then(|p| p.active_tab_mut()) {
+                    // Read before the editor borrow: `editor_mut()` holds `tab` mutably.
+                    let was_dirty = tab.dirty;
                     if let Some(editor) = tab.editor_mut() {
                         let task = editor.update(&ev);
-                        tab.dirty = editor.is_modified();
+                        let now_dirty = editor.is_modified();
+                        tab.dirty = now_dirty;
+                        // Bumped on any event that could have changed the text. Erring
+                        // toward over-counting is deliberate: a version that moves when
+                        // the text did not costs a plugin one rejected edit and a
+                        // re-read, while one that fails to move lets a stale edit land.
+                        if now_dirty || was_dirty {
+                            tab.version = tab.version.wrapping_add(1);
+                        }
                         // Re-wrap with the SAME id: the editor's own follow-up tasks (a
                         // scroll after paste, say) must come back to the pane that sent them.
                         return task.map(move |ev| Message::EditorEvent(pane, ev));

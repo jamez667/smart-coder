@@ -160,7 +160,36 @@ paid for twice — the file tree is cached because re-walking per frame *"made
 filtering laggy"*, and the workspace sync was slowed from 500ms to 2s because a
 steady drip of git spawns *"is felt as typing lag"*.
 
-### Buffer edits, and why they survived the spike
+### Buffer edits, and the fork they required
+
+`buffer.edit` nearly did not survive. The capability depended on an editor behaviour
+nobody had checked — can an edit applied from outside land on the undo stack? — and the
+first look said yes: `iced-code-editor` exposes `CommandHistory` with `push` and
+`begin_group`/`end_group`, and `TextBuffer` with `replace_range`.
+
+Looking properly said no. Every piece is public **except the one that joins them**:
+`CodeEditor`'s own `buffer` and `history` fields are `pub(crate)`, and `content()` reads
+without writing. There is no way to apply an edit from outside at all.
+
+The alternatives were all worse than they sound. Driving the widget with synthetic
+`Paste` messages replaces the whole buffer on every plugin edit — cursor lost, every edit
+a whole-file change — and cannot express a range edit anyway, because there is no message
+to set a selection. Rebuilding the `CodeEditor` from new text discards the undo stack
+outright, which breaks the rule below that this feature exists to keep.
+
+So the widget is now a **fork**: `sc-editor`, from `iced-code-editor` 0.3.11, MIT. It adds
+one message, `ApplyEdit`, handled as a composite of upstream's own `DeleteRangeCommand`
+and `InsertTextCommand` so the whole edit is one undo entry. `crates/sc-editor/FORK.md`
+carries the change list, and keeping that list short is the point: every line changed is a
+line to re-apply when pulling upstream.
+
+The fork is also forward-looking. Decorations and inline hints are deferred parts of this
+API, and both need changes in the widget — a dependency that cannot be changed would have
+deferred them permanently rather than deliberately.
+
+<!--@ crates/sc-editor/src/canvas_editor/update.rs -->
+
+### The rules an edit obeys
 
 `buffer.edit` carries the buffer version the plugin last saw. A mismatch is
 rejected with `version_conflict` and nothing is applied — without that, a slow
