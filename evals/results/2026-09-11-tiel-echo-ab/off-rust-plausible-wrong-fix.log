@@ -1,0 +1,22 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] rust-plausible-wrong-fix
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 108 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-rust-plausible-wrong-fix\run-1789173588-1.ndjson
+--- run 2/3 ---
+  [PASS] rust-plausible-wrong-fix
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 108 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-rust-plausible-wrong-fix\run-1789173596-2.ndjson
+--- run 3/3 ---
+  [PASS] rust-plausible-wrong-fix
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 126 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-rust-plausible-wrong-fix\run-1789173602-3.ndjson

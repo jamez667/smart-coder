@@ -1,0 +1,22 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] rust-two-stage
+1/1 passed (100%)
+tool calls: 4/4 valid (100.0%)
+largest reply: 250 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-two-stage\run-1789171853-1.ndjson
+--- run 2/3 ---
+  [PASS] rust-two-stage
+1/1 passed (100%)
+tool calls: 4/4 valid (100.0%)
+largest reply: 188 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-two-stage\run-1789171864-2.ndjson
+--- run 3/3 ---
+  [PASS] rust-two-stage
+1/1 passed (100%)
+tool calls: 4/4 valid (100.0%)
+largest reply: 221 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-two-stage\run-1789171874-3.ndjson

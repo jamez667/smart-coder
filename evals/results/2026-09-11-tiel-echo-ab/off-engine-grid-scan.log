@@ -1,0 +1,22 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] engine-grid-scan
+1/1 passed (100%)
+tool calls: 8/8 valid (100.0%)
+largest reply: 736 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-engine-grid-scan\run-1789172997-1.ndjson
+--- run 2/3 ---
+  [PASS] engine-grid-scan
+1/1 passed (100%)
+tool calls: 8/8 valid (100.0%)
+largest reply: 943 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-engine-grid-scan\run-1789173038-2.ndjson
+--- run 3/3 ---
+  [PASS] engine-grid-scan
+1/1 passed (100%)
+tool calls: 7/7 valid (100.0%)
+largest reply: 790 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-engine-grid-scan\run-1789173088-3.ndjson

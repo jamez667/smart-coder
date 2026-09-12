@@ -1,0 +1,26 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] engine-diagonal-path
+1/1 passed (100%)
+tool calls: 3/4 valid (75.0%)
+largest reply: 3072 tokens
+
+!! 1 HARNESS FAULT(S) - this run was degraded:
+       1x reply truncated
+   A fault means the HARNESS damaged the model's input or output. Treat the scores above as a lower bound until these are gone.
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-engine-diagonal-path\run-1789172823-1.ndjson
+--- run 2/3 ---
+  [PASS] engine-diagonal-path
+1/1 passed (100%)
+tool calls: 3/4 valid (75.0%)
+largest reply: 862 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-engine-diagonal-path\run-1789172863-2.ndjson
+--- run 3/3 ---
+  [PASS] engine-diagonal-path
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 886 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-off-engine-diagonal-path\run-1789172904-3.ndjson

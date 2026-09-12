@@ -1,0 +1,22 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] rust-signature-change
+1/1 passed (100%)
+tool calls: 10/10 valid (100.0%)
+largest reply: 318 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-signature-change\run-1789172374-1.ndjson
+--- run 2/3 ---
+  [PASS] rust-signature-change
+1/1 passed (100%)
+tool calls: 10/10 valid (100.0%)
+largest reply: 318 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-signature-change\run-1789172395-2.ndjson
+--- run 3/3 ---
+  [PASS] rust-signature-change
+1/1 passed (100%)
+tool calls: 10/10 valid (100.0%)
+largest reply: 318 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-signature-change\run-1789172415-3.ndjson

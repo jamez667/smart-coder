@@ -1,0 +1,26 @@
+commit: d2cd8a2
+started: 2026-09-12T00:08:39Z
+model: tiel-coder-35b @ localhost:11436 (no mellum resident)
+arms:  ON = default (echo enabled)   OFF = SC_NO_EDIT_ECHO=1
+shape: 17 rungs x 3 repeats x 2 arms = 102 runs, identical binary, identical
+       seeds (--seed 1 --repeat 3); ONLY the env var differs.
+
+CONTROL VERIFIED BEFORE SPENDING THE GPU: on engine-grid-scan, OFF produced
+0 echoes in 8 turns and ON produced 3 in 9. The arms genuinely differ, so a
+'no difference' result will mean something.
+
+WHAT THIS IS FOR. The tiel full-17 at this commit scored 51/51 with median 4.0
+turns against a historical baseline of median 6.0. I will NOT attribute that to
+the four fixes: three of them (revisit clause, already-applied message,
+sole-whole-writer exemption) fired ZERO times in 252 turns. Only the after-edit
+echo fired often (85). This isolates it.
+
+PREDICTION, recorded BEFORE the run:
+  PASS RATE: 17/17 both arms. Tiel has no headroom; this cannot resolve anything.
+  TURNS: the real question. If the echo caused the 6.0 -> 4.0 drop, the OFF arm
+  climbs back toward 6. If both arms sit near 4, the echo is EXONERATED and the
+  drop came from something else among the commits since the baseline.
+  PRIOR: the mellum A/B found the echo did NOT shorten runs there (30.5 vs 34.0
+  median, inside noise). If it helps tiel, that is a model-dependent result and
+  genuinely interesting; if not, two independent A/Bs agree and I should stop
+  crediting it.

@@ -1,0 +1,24 @@
+commit: d2cd8a2  (the four trace-analysis fixes)
+started: 2026-09-11T23:06:15Z
+model: mellum2-12b @ localhost:11441 (GPU1), no tiel
+cmd: --agent evals/ladder/suite.toml --seed 1 --repeat 3
+
+BASELINES for comparison:
+  2026-09-10 @ 1a3e3e3 : 6/17, 12/17, 10/17   (28/51 pooled)
+  2026-09-11 @ 54c2766 : 10/17, 8/17, 8/17    (26/51 pooled)
+
+the four fixes since 54c2766:
+  - oscillation no longer labelled as progress (sc-verify delta history)
+  - anchor-miss says when new_str is ALREADY applied (sc-tools)
+  - malformed-but-parsed replies now raise MalformedJsonAccepted (sc-core)
+  - stall directive never forbids the only whole-file writer (sc-core)
+  - plus the period-2 stall fix at 6a626a9
+
+PREDICTION, recorded BEFORE the run:
+  PASS RATE: unchanged. n=3 is noise-dominated here (a rung measured 2/3 then
+  1/10 on unchanged code), and none of the four gives the model a capability it
+  lacked -- it never proposes the fix on the rungs that fail.
+  WHAT SHOULD MOVE: fewer turns burned on oscillations (the period-2 stall now
+  fires), and a NEW 'malformed json accepted' fault count that was previously
+  invisible -- expect a large number, since 84 of 316 replies were malformed.
+  If the fault count is ~0, the wiring is dead and I should distrust it.

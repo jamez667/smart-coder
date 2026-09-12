@@ -1,0 +1,22 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] engine-ecs-query
+1/1 passed (100%)
+tool calls: 7/7 valid (100.0%)
+largest reply: 651 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-engine-ecs-query\run-1789172258-1.ndjson
+--- run 2/3 ---
+  [PASS] engine-ecs-query
+1/1 passed (100%)
+tool calls: 6/6 valid (100.0%)
+largest reply: 598 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-engine-ecs-query\run-1789172293-2.ndjson
+--- run 3/3 ---
+  [PASS] engine-ecs-query
+1/1 passed (100%)
+tool calls: 5/5 valid (100.0%)
+largest reply: 614 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-engine-ecs-query\run-1789172308-3.ndjson

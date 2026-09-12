@@ -1,0 +1,20 @@
+commit: d2cd8a2  (the four trace-analysis fixes + period-2 stall fix)
+started: 2026-09-11T23:30:05Z
+model: tiel-coder-35b @ localhost:11436 (17.7GB split across both cards)
+cmd: --agent evals/ladder/suite.toml --seed 1 --repeat 3
+
+BASELINE (488 historical tiel runs, OLD commits -- see caveat):
+  pass ~97-99%   median steps 6   mean steps 7.1   median wall ~18s
+
+CAVEAT: every baseline row predates today. A turn-count delta therefore
+confounds the four fixes with everything else changed since 35c438b. This is
+NOT a clean A/B; treat any movement as suggestive, not attributed.
+
+PREDICTION, recorded BEFORE the run:
+  PASS RATE: ~unchanged. Tiel already passes 32-38 of 37; there is no headroom.
+  TURNS: little to save. The oscillation/stall fixes only bite on runs that go
+  LONG, and tiel's median is 6 turns. Expect a small or null effect -- if turns
+  drop sharply I should suspect the measurement, not celebrate.
+  FAULTS: expect FAR fewer MalformedJsonAccepted than mellum's 58-in-410-turns.
+  If tiel shows a similar RATE, that reframes it as a harness parsing issue
+  rather than a weak-model tell -- which would be the most useful finding here.

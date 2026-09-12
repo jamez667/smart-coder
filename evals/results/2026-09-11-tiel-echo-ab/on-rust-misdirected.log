@@ -1,0 +1,22 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+--- run 1/3 ---
+  [PASS] rust-misdirected
+1/1 passed (100%)
+tool calls: 5/5 valid (100.0%)
+largest reply: 211 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-misdirected\run-1789171812-1.ndjson
+--- run 2/3 ---
+  [PASS] rust-misdirected
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 228 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-misdirected\run-1789171825-2.ndjson
+--- run 3/3 ---
+  [PASS] rust-misdirected
+1/1 passed (100%)
+tool calls: 3/3 valid (100.0%)
+largest reply: 217 tokens
+  log: evals/results/2026-09-11-tiel-echo-ab/logs-on-rust-misdirected\run-1789171840-3.ndjson
