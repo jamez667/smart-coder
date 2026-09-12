@@ -478,7 +478,12 @@ mod tests {
     /// *their* project and clicks the menu item, and the report must describe
     /// that project. Asserted by auditing a throwaway tree and checking the
     /// results differ from this repository's and that the report names it.
+    ///
+    /// **Not in the pre-commit gate**, at ~28s, for the same reason as
+    /// `a_report_generates_with_no_model_configured`: it audits this whole repository to
+    /// have something real to compare the throwaway tree against.
     #[test]
+    #[ignore = "slow: audits this whole repo, ~28s"]
     fn the_audit_targets_the_opened_project_not_this_repo() {
         let tmp = std::env::temp_dir().join("sc-win-comply-target-test");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -517,7 +522,16 @@ mod tests {
     }
 
     /// The deterministic path produces a full report with no model at all.
+    ///
+    /// **Not in the pre-commit gate**, at ~28s. Nothing here is slow by accident: it runs
+    /// a real ten-framework audit over this entire repository, which is the point — a
+    /// fixture directory would not prove the engine copes with a project of this size.
+    ///
+    /// It is hermetic (no model, no network), so unlike the backend-dialling tests this
+    /// is purely a time trade rather than a reliability one. Run it with `--ignored`
+    /// after touching `sc-comply` or this module; CI runs it on every push.
     #[test]
+    #[ignore = "slow: audits this whole repo, ~28s"]
     fn a_report_generates_with_no_model_configured() {
         let tmp = std::env::temp_dir().join("sc-win-comply-test-none");
         let _ = std::fs::remove_dir_all(&tmp);

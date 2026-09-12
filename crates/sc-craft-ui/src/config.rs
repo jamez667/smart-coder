@@ -198,29 +198,94 @@ mod tests {
         assert_ne!(Product::SmartCoder.dir_name(), Product::Crafter.dir_name());
     }
 
+    /// Serializes the tests that redirect the state directory.
+    ///
+    /// `SC_STATE_DIR` is a PROCESS-WIDE env var, and cargo runs tests on several threads.
+    /// Without this, one test's `set_var` is visible to every other test in the binary and
+    /// its `remove_var` yanks the redirect out from under whichever one is mid-run —
+    /// which is exactly how `an_empty_config_writes_no_keys` came to fail about one run in
+    /// six while passing on every re-run.
+    ///
+    /// Holding the lock for the whole test makes the redirect exclusive; removing it on
+    /// drop means a panicking test cannot leak the redirect into whatever runs next.
+    fn state_dir_guard(dir: &std::path::Path) -> StateDirGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A poisoned lock means an earlier test panicked while holding it. The redirect is
+        // cleared on drop regardless, so recovering is right — failing every later test
+        // would just bury the original failure.
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = std::fs::create_dir_all(dir);
+        std::env::set_var("SC_STATE_DIR", dir);
+        StateDirGuard {
+            dir: dir.to_path_buf(),
+            _lock: lock,
+        }
+    }
+
+    struct StateDirGuard {
+        dir: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for StateDirGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("SC_STATE_DIR");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A unique scratch directory.
+    ///
+    /// Keyed by THREAD id as well as process id: `std::process::id()` is the same for
+    /// every test in a binary, so two tests using it got the same directory and deleted
+    /// each other's files.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "sc-craft-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
     /// A config with nothing set writes no keys at all, rather than a file full of empty
     /// strings that would read back as "explicitly blank".
     #[test]
     fn an_empty_config_writes_no_keys() {
-        let dir = std::env::temp_dir().join(format!("sc-craft-cfg-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("SC_STATE_DIR", &dir);
+        let dir = scratch("cfg");
+        let _guard = state_dir_guard(&dir);
+
         CraftConfig::default().save();
+
         let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
         assert_eq!(text, "{}", "no key should be written: {text}");
-        std::env::remove_var("SC_STATE_DIR");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A malformed file degrades to defaults rather than failing the launch.
     #[test]
     fn a_corrupt_config_loads_as_default() {
-        let dir = std::env::temp_dir().join(format!("sc-craft-bad-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch("bad");
+        let _guard = state_dir_guard(&dir);
         std::fs::write(dir.join("config.json"), "{not json").unwrap();
-        std::env::set_var("SC_STATE_DIR", &dir);
+
         assert_eq!(CraftConfig::load(), CraftConfig::default());
-        std::env::remove_var("SC_STATE_DIR");
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A round trip: what is saved is what loads back.
+    #[test]
+    fn settings_survive_a_save_and_load() {
+        let dir = scratch("round");
+        let _guard = state_dir_guard(&dir);
+
+        let cfg = CraftConfig {
+            compile_command: Some("cargo check".to_string()),
+            unity_path: None,
+            workspace: Some(std::path::PathBuf::from("C:/proj")),
+        };
+        cfg.save();
+
+        let back = CraftConfig::load();
+        assert_eq!(back.compile_command.as_deref(), Some("cargo check"));
+        assert_eq!(back.workspace, cfg.workspace);
+        assert_eq!(back.unity_path, None, "an unset field stays unset");
     }
 }

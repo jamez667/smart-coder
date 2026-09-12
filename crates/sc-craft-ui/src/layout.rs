@@ -1442,7 +1442,16 @@ mod tests {
     fn a_corrupt_layout_file_falls_back_to_the_defaults() {
         for junk in ["", "not json", "[1,2,3]", r#"{"layout":{"leaf":"nope"}}"#] {
             let store = LayoutStore::parse(junk);
-            assert_eq!(store.get(), Layout::default_for_product(), "junk: {junk:?}");
+            let got = store.get();
+            // Asserted against BOTH product defaults rather than `default_for_product()`,
+            // which reads the process-global product — a global the plugin-panel tests
+            // below flip, so calling it here could see a different product than
+            // `store.get()` did a moment earlier. What this test is actually about is
+            // that junk yields a usable default, not which product's default it is.
+            assert!(
+                got == Layout::craft_default() || got == Layout::assistant_default(),
+                "junk {junk:?} must fall back to a product default, got {got:?}"
+            );
         }
     }
 

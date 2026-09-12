@@ -175,7 +175,19 @@ fn git_helpers_are_safe_outside_a_repo() {
 
 /// A spawned agent run against an unreachable backend still streams a terminal
 /// `UiEvent` (Failed) rather than hanging — the UI always learns the run ended.
+///
+/// **Not in the pre-commit gate.** It is the one test in this crate that genuinely dials
+/// out, and it takes ~163s to do it: the comment below assumed port 1 would refuse
+/// instantly, but the backend retries with backoff, so this waits through the whole
+/// ladder. Worse than slow, it is *environment-dependent* — its duration changes with
+/// what is listening and how the machine's network stack refuses, so the gate would be
+/// fast on one box and minutes on another.
+///
+/// The property is real and worth keeping, so this is `#[ignore]` rather than deleted:
+/// run it with `--ignored` after touching the session spawn path. The same reasoning as
+/// `tests/probe_live.rs` and `tests/ab_ladder.rs`, which the repo already gates this way.
 #[test]
+#[ignore = "live: dials a backend, ~163s"]
 fn unreachable_backend_yields_a_terminal_event() {
     let cfg = UiConfig {
         // A port nothing listens on ⇒ the backend call errors fast.

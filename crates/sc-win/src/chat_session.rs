@@ -206,8 +206,10 @@ mod tests {
 
     /// A spawned chat turn against an unreachable backend still yields a terminal event
     /// (Failed) rather than hanging — the UI always learns the turn ended. Mirrors the
-    /// `Session` unreachable-backend test.
+    /// `Session` unreachable-backend test, and is `#[ignore]` for the same reason: it
+    /// dials out, so its cost depends on the machine rather than on the code.
     #[test]
+    #[ignore = "live: dials a backend"]
     fn unreachable_backend_yields_a_failed_event() {
         let cfg = UiConfig {
             base_url: "http://127.0.0.1:1/v1".to_string(),

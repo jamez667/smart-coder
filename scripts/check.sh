@@ -28,6 +28,47 @@ else
   echo "==> the interface (already built; SC_BUILD_WEB=1 to rebuild)"
 fi
 
+# ---------------------------------------------------------------------------
+# The slow half, started FIRST and collected at the end.
+#
+# Five suites plus the two report steps hold ~77s of the ~119s this gate spends
+# running tests: spec traceability walks every spec and every crate, the retrieval
+# eval ranks against the real repository, the compliance authoring tests build
+# framework packs, and so on. None of them is slow by accident -- each does real
+# work over the real tree, which is exactly why they catch things. Spec anchors
+# broke today and this is what noticed.
+#
+# So they are not dropped, they are OVERLAPPED. They start here, run while
+# rustfmt/clippy/check and the fast tests do their thing, and are waited on at the
+# bottom. The gate reports every failure it always did; it just stops making you
+# wait for the slow ones in series.
+#
+# A failure is still fatal -- see the wait at the end.
+SLOW_LOG="$(mktemp -t sc-check-slow.XXXXXX)"
+trap 'rm -f "$SLOW_LOG"' EXIT
+echo "==> slow suites (started in the background)"
+(
+  set +e
+  {
+    cargo test --quiet -p sc-eval -p sc-trace -p sc-comply-author -p sc-cli || exit 1
+    # The gateway benchmark: does routing a plain-language need reach the right
+    # capability? Model-free and deterministic -- routing is a pure function of the
+    # need text and the capability table -- so a vocabulary change that starts
+    # misrouting fails the build with the need named.
+    echo
+    echo "--- gateway benchmark ---"
+    cargo test --quiet -p sc-gateway --test bench -- --nocapture || exit 1
+    # Spec drift (spec 17): anchors that no longer resolve, assertions that are
+    # false. Deterministic and model-free. `unknown` never gates and an ungoverned
+    # crate only warns -- this fails on BROKEN or STALE.
+    echo
+    echo "--- spec traceability ---"
+    cargo run --quiet -p sc-cli -- trace --check || exit 1
+  } > "$SLOW_LOG" 2>&1
+  echo "$?" > "$SLOW_LOG.status"
+) &
+SLOW_PID=$!
+
 echo "==> rustfmt (check)"
 cargo fmt --all -- --check
 
@@ -37,8 +78,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "==> build"
 cargo check --workspace
 
-echo "==> tests"
-cargo test --workspace
+echo "==> tests (the fast half; the slow suites are running in parallel)"
+cargo test --workspace   --exclude sc-eval --exclude sc-trace --exclude sc-comply-author --exclude sc-cli
 
 # THE CRAFTER'S GUARANTEE (spec 21).
 #
@@ -67,30 +108,20 @@ if [ -n "$FORBIDDEN" ]; then
     exit 1
 fi
 
-# Retrieval quality (spec 23): does a vague, user-phrased question still find the
-# right function? Model-free and GPU-free -- search is a pure function of the repo
-# bytes and the query -- so it is an ordinary test, and a ranking regression fails
-# the build naming the query instead of quietly making investigations worse.
+# ---------------------------------------------------------------------------
+# Collect the slow half.
 #
-# Run explicitly (it is part of `cargo test --workspace` above) so its report is
-# visible in the gate's output rather than buried among two thousand other tests.
-echo "==> retrieval eval"
-cargo test --quiet -p sc-eval retrieval:: -- --nocapture
-
-# The gateway benchmark: does routing a plain-language need reach the right
-# capability, and does the reduction still leave the caller what they needed?
-# Model-free and deterministic for the same reason as the retrieval eval above --
-# routing is a pure function of the need text and the capability table -- so a
-# vocabulary change that starts misrouting fails the build with the need named.
-#
-# Printed for the same reason: a score nobody sees is a score nobody watches.
-echo "==> gateway benchmark"
-cargo test --quiet -p sc-gateway --test bench -- --nocapture
-
-# Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
-# Deterministic and model-free, so it costs nothing to run every time. `unknown`
-# never gates and an ungoverned crate only warns — this fails on BROKEN or STALE.
-echo "==> spec traceability"
-cargo run --quiet -p sc-cli -- trace --check
+# Its output is printed in full rather than summarised: the retrieval eval and the
+# spec-traceability report are meant to be READ, not merely passed. A score nobody
+# sees is a score nobody watches.
+echo "==> slow suites (waiting)"
+wait "$SLOW_PID" || true
+cat "$SLOW_LOG"
+SLOW_STATUS="$(cat "$SLOW_LOG.status" 2>/dev/null || echo 1)"
+rm -f "$SLOW_LOG.status"
+if [ "$SLOW_STATUS" != "0" ]; then
+  echo "the slow suites failed -- see the output above" >&2
+  exit 1
+fi
 
 echo "All checks passed."
