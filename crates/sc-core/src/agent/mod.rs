@@ -840,6 +840,15 @@ pub fn run_agent_observed(
             sink.record(&AgentEvent::PromptAssembled {
                 step: step + 1,
                 tokens: built.tokens_used,
+                // The ceiling this turn was actually measured against. `tokens` alone
+                // cannot say how close the prompt came to eviction, and the fitting
+                // budget is `budget - fixed_overhead`, not `budget`.
+                budget: built.budget,
+                fixed_overhead: built.fixed_overhead,
+                // `Zone` is a sc-context type with no Serde derive, and adding one
+                // would put a serde edge into a crate that has none purely for a log
+                // line. The debug name is what a human greps for anyway.
+                zones_evicted: built.dropped.iter().map(|z| format!("{z:?}")).collect(),
                 messages: built
                     .messages
                     .iter()

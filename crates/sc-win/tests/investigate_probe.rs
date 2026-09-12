@@ -56,6 +56,7 @@ fn probe_the_star_trail_question() {
                     step,
                     tokens,
                     messages,
+                    ..
                 } => {
                     let _ = writeln!(log, "### Prompt for step {step} ({tokens} tokens)\n");
                     for m in messages {

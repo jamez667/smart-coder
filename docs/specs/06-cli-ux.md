@@ -110,7 +110,9 @@ agent presents the phase artifact and waits for a decision:
 ## Inspection & debugging
 
 - `--verbose` / `-v` — show the full assembled prompt per turn (what the model
-  *actually saw*, [05](05-context-management.md)).
+  *actually saw*, [05](05-context-management.md)), with the turn's `budget`, the
+  `fixed_overhead` charged outside the messages, and any whole zones evicted to
+  make it fit.
 - `--log <path>` — write the structured session log; default to a per-session
   file under the config dir.
 - `smart-coder replay <id>` — step through a recorded session

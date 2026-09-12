@@ -103,6 +103,7 @@ impl TuiState {
                 step,
                 tokens,
                 messages,
+                ..
             } => {
                 // The full prompt is large; in the live log show a compact marker
                 // (the JSON/session log carries the verbatim text for inspection).

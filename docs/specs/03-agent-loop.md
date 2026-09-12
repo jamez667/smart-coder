@@ -130,7 +130,10 @@ same stop reason. That is how a harness change is regression-tested against
 fixed model behavior, with no inference, GPU or seed involved; a replay that
 asks for one more turn than the recording has is itself a behaviour change and
 fails. The replayed backend must advertise the capabilities of the one that made
-the recording, or the prompt budget — and so the loop's choices — differ.
+the recording, or the prompt budget — and so the loop's choices — differ. The
+recorded prompt dump carries the budget and fixed overhead it was fit against, so
+that mismatch can be read off the log rather than inferred from divergent tool
+calls.
 
 ## Human-in-the-loop (v1)
 

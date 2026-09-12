@@ -44,9 +44,39 @@ pub enum AgentEvent {
     /// is about to see (spec 06 `--verbose`, spec 05). Only emitted when verbose is
     /// on (the payload is large), so normal runs/logs stay lean. One entry per
     /// message in send order.
+    ///
+    /// `budget` and `fixed_overhead` are what make `tokens` READABLE. Without them
+    /// a log says the prompt was 18,653 tokens and cannot say whether that was
+    /// comfortable or one token from eviction: the ceiling is
+    /// `budget - fixed_overhead`, because the native `tools` JSON rides outside the
+    /// messages but inside the same window (453 tokens for the six-tool eval
+    /// registry, measured against llama.cpp's `/tokenize`). Measured cost of not
+    /// having them: across 31 logged runs exactly one shows a history summary, and
+    /// its log cannot say whether the window had saturated or a single oversized
+    /// reply forced a sacred segment to be clipped — two different situations with
+    /// the same visible symptom.
+    ///
+    /// `zones_evicted` is named for what it actually holds: whole NON-SACRED zones
+    /// the builder dropped. It is NOT a compaction signal. The recent window is
+    /// sacred, so the eviction that produces a history summary happens in the loop
+    /// (whole turns leaving the window) and never appears here — measured on a run
+    /// driven to saturation, headroom fell from 25,051 to 561 and the summary
+    /// appeared on turn 12 with `zones_evicted` empty on all 15 turns. Read
+    /// saturation from `tokens` against `budget - fixed_overhead`.
     PromptAssembled {
         step: usize,
         tokens: usize,
+        /// The hard prompt budget for the run (`prompt_budget`).
+        budget: usize,
+        /// Tokens the request carries outside the messages — the native `tools`
+        /// schema — charged against the same budget and included in `tokens`.
+        fixed_overhead: usize,
+        /// Whole non-sacred zones the builder evicted to make the prompt fit, as
+        /// their debug names. Empty on a turn that fit as assembled — the common
+        /// case, and the one that must stay byte-identical — and empty also when
+        /// the loop compacted the (sacred) recent window, which is not a zone
+        /// eviction and is not reported here.
+        zones_evicted: Vec<String>,
         messages: Vec<PromptMessage>,
     },
     /// A model turn. `prompt_tokens` is the assembled-prompt size; `raw` is the
@@ -417,6 +447,7 @@ impl<W: Write> TranscriptSink<W> {
                 step,
                 tokens,
                 messages,
+                ..
             } => {
                 let mut s = format!(
                     "\n---------------- TURN {step} — ASSEMBLED PROMPT ({tokens} tokens) ----------------\n"
@@ -585,6 +616,20 @@ mod tests {
             AgentEvent::Planned {
                 steps: vec!["a".into(), "b".into()],
             },
+            // The verbose prompt dump round-trips too: `replay` reads it back, and a
+            // field that serializes but does not deserialize would be found only by
+            // a replay that silently lost the budget it was meant to explain.
+            AgentEvent::PromptAssembled {
+                step: 3,
+                tokens: 26_000,
+                budget: 26_419,
+                fixed_overhead: 453,
+                zones_evicted: vec!["HistorySummary".into()],
+                messages: vec![PromptMessage {
+                    role: "user".into(),
+                    content: "read src/a.rs".into(),
+                }],
+            },
             AgentEvent::ModelTurn {
                 step: 1,
                 prompt_tokens: 10,
@@ -624,6 +669,9 @@ mod tests {
             sink.record(&AgentEvent::PromptAssembled {
                 step: 1,
                 tokens: 790,
+                budget: 17408,
+                fixed_overhead: 0,
+                zones_evicted: Vec::new(),
                 messages: vec![
                     PromptMessage {
                         role: "system".into(),

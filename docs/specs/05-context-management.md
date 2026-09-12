@@ -138,6 +138,19 @@ The exact assembled context for any turn is logged and viewable
 first question is "what did it actually see?" — and the answer is always
 available.
 
+The verbose prompt dump carries `budget` and `fixed_overhead` alongside `tokens`,
+so a log can say how close a turn came to the ceiling — which is
+`budget - fixed_overhead`, since the native `tools` JSON is charged against the
+same window (453 tokens for the six-tool eval registry, counted by the server's
+tokenizer). Without them a recorded 18,653 tokens cannot be told apart from a
+comfortable turn or one a token short of eviction.
+
+Its `zones_evicted` list names only whole non-sacred zones the builder dropped.
+Because the recent window is sacred, **history compaction happens in the loop and
+never appears there**: an empty `zones_evicted` does not mean nothing was evicted.
+Measured on a run driven to saturation, the history summary appeared on turn 12
+with `zones_evicted` empty on every one of the 15 turns.
+
 ## Tuning knobs (config)
 
 - `context_tokens` cap and response reserve. `response_reserve_tokens` (default

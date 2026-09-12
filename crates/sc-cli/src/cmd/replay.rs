@@ -81,6 +81,7 @@ fn print_event(ev: &sc_core::AgentEvent) {
             step,
             tokens,
             messages,
+            ..
         } => {
             // Verbose: the full prompt the model saw (spec 06). Print every message
             // verbatim so replay reproduces exactly what was sent.

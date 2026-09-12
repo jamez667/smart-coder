@@ -492,6 +492,9 @@ mod tests {
         let rows = agent_rows(&AgentEvent::PromptAssembled {
             step: 0,
             tokens: 10,
+            budget: 4096,
+            fixed_overhead: 0,
+            zones_evicted: Vec::new(),
             messages: Vec::new(),
         });
         assert!(rows.is_empty());

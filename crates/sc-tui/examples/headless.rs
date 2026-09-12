@@ -91,6 +91,7 @@ fn fmt_event(e: &AgentEvent) -> String {
             step,
             tokens,
             messages,
+            ..
         } => {
             format!("⌖ prompt[{step}]: {} msgs, {tokens} tok", messages.len())
         }
