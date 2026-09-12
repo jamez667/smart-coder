@@ -1,0 +1,133 @@
+commit: d24606e + uncommitted evals/ladder/tasks/context-compaction/
+started: 2026-09-11 (tiel-coder-35b @ localhost:11436)
+cmd: --agent evals/ladder/suite.toml --only context-compaction --repeat 1 --verbose --seed 1
+
+WHAT THIS RUN IS FOR: not a pass rate. The question is whether a live model ever
+reaches the loop's history compaction, which has fired ONCE in 31 logged runs and
+was probably a clipped oversized reply rather than a filled window.
+
+SIZING, measured before the run (llama.cpp /tokenize, tiel):
+  budget                        26,419   (32768 * 0.9 - 3072)
+  six-tool schema overhead         453
+  fitting ceiling               25,966
+  one channel module            ~2,250   delivered as a numbered read
+  lib.rs + series.rs            ~1,780
+  whole crate read once         28,929   = 111% of the ceiling
+  predicted saturation          read 13 of 14, reading front to back
+
+PREDICTION, recorded BEFORE the run:
+  COMPACTION: yes, IF the model reads most of the twelve channels. That is the
+  whole bet. If it reads three, edits three, verifies and gives up, the window
+  never fills and the rung has not done its job -- that outcome means the
+  fixture needs more channels, not that compaction is broken.
+
+  PASS: probably NOT, and that is acceptable. Twelve delegations plus a lifted
+  primitive is more mechanical edit volume than any rung in the suite, against
+  max_steps 40. Tiel passes 32-38 of 37 on the existing rungs; I expect this one
+  to be its first honest red. A red run that COMPACTS is a success here; a green
+  run that never compacts would mean the sizing is wrong.
+
+  TURNS: expect the 40-step cap to be hit, or close to it.
+
+WHAT WOULD FALSIFY THE RUNG:
+  - no `Earlier (N turns) summary:` in any assembled prompt  -> too small
+  - PromptOverBudget fault                                   -> too big
+  - the model edits one channel and finishes green           -> contract test is weak
+
+================================================================================
+RESULT: STILL-RED, 15 steps, Stalled("many turns with no change to the workspace")
+
+THE PREDICTION WAS WRONG, AND THE WAY IT WAS WRONG IS THE FINDING.
+
+I predicted the model would read most of twelve channels and saturate around
+read 13. It never got the chance. Peak was 18,559 = 71% of the 25,966 ceiling,
+and no history summary ever appeared. The compaction question is UNRESOLVED --
+the run was guillotined, not completed.
+
+What the model actually did, and it was right:
+   1-6   read series.rs, lib.rs, chan_ambient.rs, tests/contract.rs (twice, once
+         via run_command), chan_reactor.rs
+   7-8   added `window_stats` to Series -- the primitive the task asks for
+   9-15  delegated chan_ambient, chan_comms, chan_coolant, chan_cryo, chan_dock,
+         chan_gyro, chan_hull -- one per turn, each `ok (1 replacement)`
+
+Seven of twelve channels delegated, primitive in place, five mechanical edits
+from green. Every edit succeeded; is_error was false on all nine.
+
+WHY IT WAS KILLED. The two failing tests are the cross-channel ones, which by
+construction cannot pass until ALL twelve sites are fixed. So the verification
+signature was identical on every turn of the sweep:
+
+    x7  "same 2 failures as last run -- 2 failed, 11 passed"
+
+UNCHANGED_FAILURE_LIMIT is 3. On the third repeat `note_unchanged_failure` armed,
+and in recovery.rs:104 `did_real_work = changed_workspace && !same_failure` went
+false. From then on every novel, successful, byte-changing edit was scored as no
+work, and recovery.rs:133 returned Stuck unconditionally on `same_failure`.
+
+The advice the model was then given says its arguments "failed every turn so far"
+and to retry `edit_file` with DIFFERENT arguments. They had not failed. Following
+that advice would abandon a correct sweep -- the same regression shape recorded
+in the rust-symptomatic commit.
+
+THE GENERAL DEFECT, independent of this fixture: any task whose observable test
+outcome cannot move until N sites are fixed is guillotined once N > ~3. Fixture
+size is irrelevant to it.
+
+The irony worth recording: recovery.rs pins an invariant named
+`three_successful_edits_to_one_file_are_not_a_loop`. Here NINE successful edits
+across EIGHT distinct files were called a loop.
+
+WHAT I AM NOT DOING: fixing it unilaterally. The obvious change -- credit a novel
+edit target under `same_failure` -- directly contradicts the pinned invariant
+`an_unchanged_failure_makes_the_next_observe_stuck_despite_a_workspace_change`
+(recovery.rs:328), which asserts exactly that case is Stuck, and weakens the
+oscillation guard added in 6a626a9 today. That trade-off needs deciding, not
+assuming.
+
+RUNG STATUS: the fixture graded correctly end to end (red-first E0599, solution
+green 13/13, shortcut provably fails, demo FileSolver PASS). Whether it forces
+compaction is still unknown, because the harness stopped the run at 71%.
+
+================================================================================
+SECOND FINDING (unrelated to the stall): the fixture turns the retrieval gate red
+
+`sc-eval --lib retrieval::tests::the_shipped_retrieval_suite_passes` fails with
+the new fixture in the tree:
+
+  FAIL  sc-prompt-token-budget   not in top 25 -- top hit was
+                                 crates/sc-model/src/openai.rs:850
+
+The query is "where do we decide how many tokens the prompt is allowed to use",
+graded against crates/sc-context/src/budget.rs at the LOOSE bar (top 25), over
+the whole repo as its fixture.
+
+ATTRIBUTED BY A/B, not assumed:
+  gate at e8b15ec (before any of today's work)      PASS
+  gate with my committed event.rs, fixture removed  PASS
+  gate with the fixture present                     FAIL
+  gate with ALL ladder fixtures removed             budget.rs at RANK 19 of 25
+
+So my code is not the cause; the fixture is. But rank 19 of a 25 bar is the
+standing condition -- the query was six places from red before I added anything,
+and 28 new files, twelve of them near-identical copies of the same
+capacity/window/retains vocabulary, were enough to push it over.
+
+WHY THIS FIXTURE AND NOT THE OTHER ELEVEN: it is 2,550 lines against the next
+largest at 532, and the twelve channels are deliberately identical, so the index
+sees twelve copies of one document about "how many samples this channel retains"
+-- which is the same many-similar-documents effect the logs- prefix fix in
+sc-index/src/walk.rs was written for, arriving from a new direction.
+
+A FIX THAT DOES NOT WORK: excluding evals/ladder/tasks from the walk. Two
+retrieval queries (diagonal-path-cuts-corners, grid-flood-fill) USE ladder
+fixtures as their fixture directory, and removing them fails those two instead.
+
+THE SHAPE THAT WOULD WORK: exclude eval fixtures only when the fixture being
+indexed is the whole repo, exactly as retrieval.rs:108 already excludes the
+suite's own directory so it cannot answer its own questions --
+`idx.files.retain(|p, _| !p.starts_with("evals/retrieval/"))`. Eval fixtures are
+data the harness is scored on, not source anyone searches for.
+
+NOT DONE, deliberately: that is a behaviour change to the retrieval gate, and it
+is the second decision of this session that needs weighing rather than assuming.

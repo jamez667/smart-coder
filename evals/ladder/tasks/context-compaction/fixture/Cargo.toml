@@ -1,0 +1,8 @@
+[package]
+name = "void_telemetry_task"
+version = "0.1.0"
+edition = "2021"
+
+# No dependencies on purpose. The point of this rung is the SIZE of the source
+# the model must hold in context, and a dependency would add build time without
+# adding a line the model has to read.

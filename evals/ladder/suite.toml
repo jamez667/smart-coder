@@ -453,3 +453,80 @@ verify_cmd = "rustc --test --edition 2021 -o t_shifting.exe test.rs && ./t_shift
 contract_tests = ["test.rs"]
 tags = ["rung:recovery-anchor-miss", "lang:rust"]
 timeout_secs = 300
+
+# --- Context pressure --------------------------------------------------------
+#
+# WHY THIS RUNG EXISTS -- it is not another cross-file rung with more files.
+#
+# The rungs above grade diagnostic distance and spread. This one grades what
+# happens when the work does not FIT. Measured across 31 logged runs on two
+# models, the loop's history compaction fired exactly ONCE, and that once was
+# most likely a single 9,782-char reply forcing a sacred segment to be clipped
+# rather than the window filling. Eviction has unit tests and an end-to-end test
+# driven by a scripted backend; no live model had ever reached it. A path that
+# only ever runs in tests is a path that is not really tested.
+#
+# So this fixture is SIZED, and the size is measured rather than guessed. The
+# prompt's fitting ceiling on tiel is 25,966 tokens (a 26,419 budget less the
+# 453-token six-tool schema, both counted by the server's own tokenizer). One
+# channel module costs ~2,250 tokens delivered as a numbered read; lib.rs plus
+# series.rs cost ~1,780. Eleven channels is the first count that crosses the
+# ceiling; twelve ship, because a model interleaves verification and re-reads
+# rather than reading front to back. Reading the crate in order saturates on
+# read 13 of 14 -- mid-task, with edits still to come.
+#
+# The work itself is the same "one primitive, N call sites" shape as
+# engine-grid-scan, scaled: all twelve channels hand-rolled the same windowed
+# aggregate, and all twelve carry the same boundary error -- the doc comment
+# promises `[from, to]` inclusive at both ends, the code tests `t_ms > from`, so
+# a reading on the shared edge of two adjacent panes is reported in neither.
+# All twelve are wrong on purpose; one wrong site would let a model stop reading
+# early, which is exactly what this rung must not allow.
+#
+# The shortcut is closed by construction rather than by subtlety, and the
+# distinction is worth stating: patching `>` to `>=` in all twelve channels
+# without lifting the primitive fails to COMPILE, because the contract test
+# calls `Series::window_stats` directly (verified: E0599 at six sites). A model
+# that takes the shortcut is told precisely what is missing. What the rung
+# measures is whether the harness can still finish the job once the window has
+# filled -- not whether the model can guess the fix.
+#
+# FAIRNESS, and the reason this is a harness test rather than a memory test:
+# after compaction the model keeps the task anchor, the system prompt, the
+# retrieved zone, the last ten turns verbatim, and a one-line summary of the
+# rest -- `Earlier (N turns) summary: - read: src/chan_gyro.rs, ...`. The
+# summary records each turn's tool and its bare path argument, so every file it
+# has already read remains addressable and re-readable. Nothing the fix needs is
+# knowable only from an evicted observation.
+#
+# A run that never saturates is still a valid run: the rung is red until every
+# call site is fixed, and the cross-channel test forces that breadth. Compaction
+# is the consequence of doing the work, not a precondition for scoring it.
+
+[[tasks]]
+id = "context-compaction"
+description = """
+This crate is the telemetry subsystem of a real game: `series.rs` is the shared \
+ring buffer, and each `chan_*.rs` module owns one sensor channel -- its units, \
+its capacity, what counts as a spike for that sensor, and how its dashboard row \
+reads.
+
+Every channel exposes `window(from, to)`, aggregating the readings in a time \
+window. Each one hand-rolled that walk over the series it owns, so the crate now \
+holds twelve copies of the same loop.
+
+`cargo test` fails: a reading landing exactly on a window's start is reported in \
+neither of the two adjacent dashboard panes that share it. The doc comment on \
+every one of those functions already says what the rule should be.
+
+Lift the walk into `Series` as `window_stats(from, to) -> WindowStats`, correct \
+it there, and use it from EVERY channel in place of its own copy. Each channel's \
+`window`, `peak` and `count_in` must keep their current names and behaviour.
+
+`cargo test` must pass. Do not edit tests/contract.rs."""
+fixture = "tasks/context-compaction/fixture"
+solution = "tasks/context-compaction/solution"
+verify_cmd = "cargo test --offline -q"
+contract_tests = ["tests/contract.rs"]
+tags = ["rung:context-compaction", "lang:rust"]
+timeout_secs = 300

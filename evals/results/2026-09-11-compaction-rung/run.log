@@ -1,0 +1,10 @@
+smart-coder eval harness
+  solver: agent (tiel-coder-35b @ http://localhost:11436/v1)
+  suite: evals/ladder/suite.toml
+
+  [STILL-RED] context-compaction
+         15 steps, stopped: Stalled("many turns with no change to the workspace"), agent knew it was red, 2 interventions
+0/1 passed (0%)
+tool calls: 15/15 valid (100.0%)
+largest reply: 594 tokens
+  log: evals/results/2026-09-11-compaction-rung/logs\run-1789186541-1.ndjson
