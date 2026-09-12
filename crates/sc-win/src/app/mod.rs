@@ -262,6 +262,7 @@ mod logic_c;
 mod logic_compile;
 mod logic_flame;
 mod logic_save;
+mod plugin_requests;
 mod update;
 mod view_claude;
 mod view_code;
@@ -439,16 +440,60 @@ mod tests {
     ///
     /// `App::default()` reads and writes REAL machine state, so a test that toggles a panel
     /// otherwise rewrites the developer's actual `layout.json` — which it did, once, before this
-    /// existed. Tests that mutate the layout must call this first.
-    fn redirect_layout_state(name: &str) -> std::path::PathBuf {
+    /// Point layout/splits/recents state at a scratch directory for the duration of one
+    /// test, and keep other tests out of it.
+    ///
+    /// **`SC_STATE_DIR` is process-wide and cargo runs tests on several threads.** Each
+    /// test getting its own directory is not enough on its own: they all write the same
+    /// env var, so one test's redirect is visible to every other and its cleanup pulls
+    /// the rug from whichever is mid-run. That is exactly how
+    /// `the_panel_arrangement_survives_a_reload` came to fail about one run in five while
+    /// passing on every re-run.
+    ///
+    /// The returned guard holds a lock for the whole test and clears the redirect on
+    /// drop, so a panicking test cannot leak it into the next one. It derefs to the path,
+    /// so call sites read exactly as they did when this returned a `PathBuf`.
+    fn redirect_layout_state(name: &str) -> StateDirGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A poisoned lock means an earlier test panicked holding it. The redirect is
+        // cleared on drop regardless, so recovering is right — failing every later test
+        // would bury the original failure.
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "sc-win-layout-{name}-{:?}",
             std::thread::current().id()
         ));
         let _ = std::fs::create_dir_all(&dir);
-        // SAFETY: single-threaded test process state; each test uses its own directory.
+        // SAFETY: the lock above makes this the only test touching the variable.
         unsafe { std::env::set_var("SC_STATE_DIR", &dir) };
-        dir
+        StateDirGuard { dir, _lock: lock }
+    }
+
+    /// Holds the state-directory redirect for one test. See [`redirect_layout_state`].
+    struct StateDirGuard {
+        dir: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for StateDirGuard {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.dir
+        }
+    }
+
+    impl AsRef<std::path::Path> for StateDirGuard {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.dir
+        }
+    }
+
+    impl Drop for StateDirGuard {
+        fn drop(&mut self) {
+            // SAFETY: still holding the lock, so no other test is reading it.
+            unsafe { std::env::remove_var("SC_STATE_DIR") };
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     /// The panel arrangement survives a save/load round trip.
@@ -824,7 +869,7 @@ mod tests {
         // Type into the SECOND pane while the first is focused.
         let _ = app.update(Message::EditorEvent(
             second,
-            iced_code_editor::Message::CharacterInput('X'),
+            sc_editor::Message::CharacterInput('X'),
         ));
 
         assert_eq!(
@@ -1320,9 +1365,8 @@ mod tests {
         // Stand in for typing. The widget only mutates through input events (there is no
         // setter), so a test substitutes a buffer with the post-edit contents — what's under
         // test here is the SAVE path, not the widget's own key handling.
-        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(
-            iced_code_editor::CodeEditor::new("edited\n", "rs"),
-        ));
+        app.panes.focused_mut().tabs[0].buf =
+            Buffer::Live(Box::new(sc_editor::CodeEditor::new("edited\n", "rs")));
         app.panes.focused_mut().tabs[0].dirty = true;
 
         app.save_active_tab(false);
@@ -1354,9 +1398,10 @@ mod tests {
             app.panes.focused_mut().tabs[0].trailing_newline,
             "recorded at open"
         );
-        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(
-            iced_code_editor::CodeEditor::new("fn main() { /* edited */ }\n", "rs"),
-        ));
+        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(sc_editor::CodeEditor::new(
+            "fn main() { /* edited */ }\n",
+            "rs",
+        )));
         app.panes.focused_mut().tabs[0].dirty = true;
 
         app.save_active_tab(false);
@@ -1375,9 +1420,10 @@ mod tests {
             .position(|t| t.path == "no-nl.rs")
             .unwrap();
         assert!(!app.panes.focused_mut().tabs[i].trailing_newline);
-        app.panes.focused_mut().tabs[i].buf = Buffer::Live(Box::new(
-            iced_code_editor::CodeEditor::new("still no newline", "rs"),
-        ));
+        app.panes.focused_mut().tabs[i].buf = Buffer::Live(Box::new(sc_editor::CodeEditor::new(
+            "still no newline",
+            "rs",
+        )));
         app.panes.focused_mut().tabs[i].dirty = true;
         app.save_active_tab(false);
         assert_eq!(
@@ -1399,7 +1445,7 @@ mod tests {
         let (mut app, dir) = app_with_file("f.rs", "original\n");
         app.select_file("f.rs".to_string());
         app.panes.focused_mut().tabs[0].buf =
-            Buffer::Live(Box::new(iced_code_editor::CodeEditor::new("mine\n", "rs")));
+            Buffer::Live(Box::new(sc_editor::CodeEditor::new("mine\n", "rs")));
         app.panes.focused_mut().tabs[0].dirty = true;
 
         // Something else (the agent) writes the file, and the stamp moves.
@@ -1442,9 +1488,10 @@ mod tests {
     fn an_agent_reload_leaves_a_dirty_buffer_alone() {
         let (mut app, dir) = app_with_file("g.rs", "original\n");
         app.select_file("g.rs".to_string());
-        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(
-            iced_code_editor::CodeEditor::new("my unsaved work\n", "rs"),
-        ));
+        app.panes.focused_mut().tabs[0].buf = Buffer::Live(Box::new(sc_editor::CodeEditor::new(
+            "my unsaved work\n",
+            "rs",
+        )));
         app.panes.focused_mut().tabs[0].dirty = true;
 
         // The agent writes the file, and the app reloads the shown file.

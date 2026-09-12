@@ -19,6 +19,7 @@ members = [
     "crates/sc-fsutil",
     "crates/sc-craft-ui",
     "crates/sc-plugin-proto",
+    "crates/sc-editor",
     "crates/sc-android",
     "crates/sc-core",
     "crates/sc-comply-author",

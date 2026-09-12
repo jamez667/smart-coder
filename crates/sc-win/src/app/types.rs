@@ -720,7 +720,7 @@ pub(crate) enum Message {
     /// a keystroke delivered in the same batch as the click that moved focus lands in the wrong
     /// file — silent, and exactly the kind of bug that only shows up under real use. The view
     /// knows which pane emitted it, so it says so.
-    EditorEvent(sc_win::layout::EditorId, iced_code_editor::Message),
+    EditorEvent(sc_win::layout::EditorId, sc_editor::Message),
     /// Flip the active tab between the read-only review view and the editor.
     ToggleTabView,
     /// Write the active tab to disk (Ctrl+S). Refuses on a save conflict.

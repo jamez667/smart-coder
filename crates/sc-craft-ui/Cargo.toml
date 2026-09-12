@@ -21,8 +21,10 @@ sc-fsutil = { path = "../sc-fsutil" }
 # The plugin wire protocol (spec 25). Serde and a JSON codec only — see its manifest.
 sc-plugin-proto = { path = "../sc-plugin-proto" }
 iced = { version = "0.14", features = ["tokio", "canvas", "advanced", "image"] }
-# See the note in sc-win's manifest: pinned exactly, pre-1.0 and single-maintainer.
-iced-code-editor = "=0.3.11"
+# The code editor widget, FORKED from iced-code-editor 0.3.11 (see crates/sc-editor/FORK.md).
+# It was a pinned dependency; it became a fork because the plugin API has to apply an edit
+# to an open buffer and upstream exposes no way to do that (spec 25).
+sc-editor = { path = "../sc-editor" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde_json = { workspace = true }

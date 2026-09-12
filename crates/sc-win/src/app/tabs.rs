@@ -49,7 +49,7 @@ impl Origin {
 /// A tab's editable content, or the reason it has none.
 pub(crate) enum Buffer {
     /// A real editor over the file's full contents.
-    Live(Box<iced_code_editor::CodeEditor>),
+    Live(Box<sc_editor::CodeEditor>),
     /// Not editable — [`NoEdit::reason`] says why, shown where the caret would be. The review
     /// view still works, so the file is never simply unopenable.
     ReadOnly(NoEdit),
@@ -87,6 +87,17 @@ pub(crate) struct Tab {
     /// The file's fingerprint when it was opened or last saved. Compared against disk on every
     /// save to catch the agent writing underneath us.
     pub(crate) opened: DiskStamp,
+    /// Bumped on every edit to the buffer.
+    ///
+    /// Distinct from [`Self::opened`], which fingerprints the DISK. This counts changes to
+    /// the in-memory text, and exists for the plugin protocol's version check (spec 25): a
+    /// plugin reads at version N, computes an edit, and sends N back; if the user has typed
+    /// since, the edit is refused rather than applied against text that has moved.
+    ///
+    /// Starts at 0 and only ever increases within a tab's life. It is never persisted —
+    /// a reopened file starts from 0 again, which is correct, because a plugin holding a
+    /// version across a close has nothing to apply it to.
+    pub(crate) version: u64,
 }
 
 impl std::fmt::Debug for Tab {
@@ -118,7 +129,7 @@ impl Tab {
             Ok(bytes) => match sc_win::editbuf::classify(&bytes) {
                 Classified::Editable { text, ending, bom } => {
                     let trailing = text.ends_with('\n');
-                    let mut ed = iced_code_editor::CodeEditor::new(&text, syntax);
+                    let mut ed = sc_editor::CodeEditor::new(&text, syntax);
                     ed.set_theme(editor_theme());
                     (Buffer::Live(Box::new(ed)), ending, bom, trailing)
                 }
@@ -140,11 +151,12 @@ impl Tab {
             bom,
             trailing_newline,
             opened: stamp,
+            version: 0,
         }
     }
 
     /// The live editor, if this tab has one.
-    pub(crate) fn editor(&self) -> Option<&iced_code_editor::CodeEditor> {
+    pub(crate) fn editor(&self) -> Option<&sc_editor::CodeEditor> {
         match &self.buf {
             Buffer::Live(e) => Some(e),
             Buffer::ReadOnly(_) => None,
@@ -152,7 +164,7 @@ impl Tab {
     }
 
     /// The live editor, mutably.
-    pub(crate) fn editor_mut(&mut self) -> Option<&mut iced_code_editor::CodeEditor> {
+    pub(crate) fn editor_mut(&mut self) -> Option<&mut sc_editor::CodeEditor> {
         match &mut self.buf {
             Buffer::Live(e) => Some(e),
             Buffer::ReadOnly(_) => None,
@@ -180,9 +192,9 @@ impl Tab {
 ///   left of every file. Line numbers are legible from their dimmer text alone.
 /// * The canvas is [`crate::app::EDITOR_BG`], a shade darker than the panel around it, so the
 ///   document reads as recessed into the panel rather than flush with the chrome.
-fn editor_theme() -> iced_code_editor::Style {
-    let base = iced_code_editor::from_iced_theme(&iced::Theme::TokyoNight);
-    iced_code_editor::Style {
+fn editor_theme() -> sc_editor::Style {
+    let base = sc_editor::from_iced_theme(&iced::Theme::TokyoNight);
+    sc_editor::Style {
         background: crate::app::EDITOR_BG,
         // Same colour, no separator — the gutter is part of the editor, not a column beside it.
         gutter_background: crate::app::EDITOR_BG,

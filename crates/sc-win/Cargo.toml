@@ -27,6 +27,8 @@ sc-craft-ui = { path = "../sc-craft-ui" }
 # The plugin wire protocol (spec 25). Named directly rather than reached through
 # sc-craft-ui, because this crate builds HostMessages of its own.
 sc-plugin-proto = { path = "../sc-plugin-proto" }
+# The workspace containment rule, shared with the agent's tools (spec 25).
+sc-fsutil = { path = "../sc-fsutil" }
 # The folded-stack parser and flame layout, shared with the agent tool. Zero deps.
 sc-flame = { path = "../sc-flame" }
 sc-comply = { path = "../sc-comply" }
@@ -43,14 +45,13 @@ sc-verify = { path = "../sc-verify" }
 sc-web = { path = "../sc-web" }
 sc-proto = { path = "../sc-proto" }
 iced = { version = "0.14", features = ["tokio", "canvas", "advanced", "image"] }
-# The CODE pane's EDIT view (spec 21). A canvas-based editor that owns its own scroll state,
-# which is what makes a scroll-synced line-number gutter possible at all: iced's built-in
-# `text_editor` does not expose its scroll offset, and upstream declined to add it
-# (iced-rs/iced#2970, closed unmerged: "not reasonable to implement externally"). Brings syntax
-# highlighting, folding, undo and search with it.
-# PINNED EXACTLY: pre-1.0 and single-maintainer, so a patch release must never arrive
-# unreviewed. Bump deliberately, then re-run scripts/check.ps1.
-iced-code-editor = "=0.3.11"
+# The CODE pane's EDIT view (spec 21), FORKED from iced-code-editor 0.3.11 — see
+# crates/sc-editor/FORK.md for what diverged and why. A canvas-based editor that owns its
+# own scroll state, which is what makes a scroll-synced line-number gutter possible at all:
+# iced's built-in `text_editor` does not expose its scroll offset, and upstream declined to
+# add it (iced-rs/iced#2970, closed unmerged). Brings syntax highlighting, folding, undo
+# and search with it.
+sc-editor = { path = "../sc-editor" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde_json = { workspace = true }
