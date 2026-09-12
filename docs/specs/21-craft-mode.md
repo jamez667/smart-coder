@@ -1,5 +1,40 @@
 # 21 — Craft mode: the editor without the model
 
+> **Superseded in mechanism, not in principle.** Craft mode was a *setting*: one
+> binary, a `cfg.craft()` predicate consulted at every backend builder, a
+> `craft-only` cargo feature that pinned it true, and ~1,600 lines of tests
+> proving each refusal fired. None of that exists any more.
+>
+> What replaced it is what this spec's own Principle asked for. The editor is
+> `sc-craft-ui` <!--@ crates/sc-craft-ui/src/lib.rs -->, a crate whose dependency
+> tree contains nothing that can reach a model; `scripts/check.*` asserts that
+> with `cargo tree`. The model is not refused at runtime — it is absent from the
+> build. That is the *"honoured structurally, not cosmetically"* below, finally
+> taken literally.
+>
+> The dependency rule has one consequence worth recording, because it reverses an
+> earlier decision deliberately. `is_noise_dir` and `source_files` had been
+> de-duplicated *into* `sc-iterate` and `sc-tools` — both model crates the editor
+> may not depend on. Rather than re-fork them, they moved down to a leaf,
+> `sc-fsutil` <!--@ crates/sc-fsutil/src/lib.rs -->, which depends only on
+> `sc-index`. One definition, three consumers, and the editor can reach it.
+>
+> [25](25-plugins.md) then finishes the thought: there is one desktop product,
+> the IDE, and the agent is a plugin it loads. "Craft mode" is no plugin
+> installed.
+>
+> **Still current:** the Principle, the non-goals discussion, Part 3 (the
+> editor), Part 4 (modular panels) and Part 5 (compile and check). These
+> describe the editor, which is exactly what survived.
+>
+> **Historical, describing removed code:** Part 1 (the first-run choice), Part 2
+> (the runtime kill), *What Craft mode hides*, and *Switching modes*. There is no
+> first-run question, no `Mode` enum, no Settings toggle and nothing to switch.
+> They are kept because the reasoning in them is why the current design looks the
+> way it does — Part 2's insistence that the health probe was the one caller that
+> dialled out on a timer is the argument that a runtime predicate can always be
+> missed by a caller added later, which is the case for the crate split.
+
 ## Principle
 
 `smart-coder` assumes you want an agent. Craft mode is the setting where you
