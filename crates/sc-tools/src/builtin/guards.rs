@@ -90,16 +90,50 @@ pub fn delimiter_regression(before: &str, after: &str) -> Option<String> {
 
 /// Top-level definition names in `src`, keyed by kind+name (e.g. `fn:draw_row`, `struct:Rect`),
 /// with a count. Scans line-leading `fn` / `pub fn` / `struct` / `enum` / `trait` / `const` /
-/// `static` declarations — a lightweight signal (no full parse) that's enough to catch a
+/// `static` / `mod` declarations — a lightweight signal (no full parse) that's enough to catch a
 /// re-emitted definition. `impl` blocks are deliberately excluded (multiple `impl` of a type are
 /// legal). Visibility/`async`/`unsafe`/`pub(crate)` prefixes are skipped.
+///
+/// Items inside a named inline `mod` are counted too, keyed by their module path
+/// (`fn:npc_reactor_tests::the_latch_holds`). Without that, a re-appended `#[cfg(test)] mod`
+/// was invisible on BOTH counts — `mod` was not a recognised kind, and every item inside it is
+/// indented, so the top-level rule skipped it. Measured on a real corruption: a 7,157-line
+/// `ship.rs` holding 61 copies of one test module showed the guard just 5 top-level `fn`s, a
+/// count that never rose, while 63 `mod` declarations and 435 indented `fn`s went unseen.
+///
+/// Module-qualifying the nested names is what keeps this from crying wolf: `new`, `record` and
+/// `default` legitimately repeat across sibling `impl` blocks in one file, so a flat count of
+/// indented `fn`s would reject ordinary edits. Only items in a *named module* are qualified;
+/// bodies of fns and bare `impl` blocks stay unscanned, as before.
 pub fn top_level_defs(src: &str) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
     let mut out: HashMap<String, usize> = HashMap::new();
+    // The innermost named inline `mod` we are inside, with the brace depth it opened at, so
+    // items nested in it can be counted under a path that keeps sibling modules distinct.
+    let mut module: Option<(String, i32)> = None;
+    let mut depth: i32 = 0;
     for line in src.lines() {
-        // Only TOP-LEVEL defs (no leading indentation) — a nested `fn` inside another fn/impl is a
-        // different scope and legitimately repeatable; we want file-level redefinitions.
-        if line.starts_with([' ', '\t']) {
+        let indented = line.starts_with([' ', '\t']);
+        // Track brace depth to know when an inline `mod` closes. Counted on every line
+        // (indented or not) so the module scope ends at the right place. Braces inside string
+        // and char literals can skew this; a miscount only mis-scopes a name, and the
+        // count-must-RISE rule in `duplicate_definition` keeps that from inventing a duplicate.
+        let braces = line
+            .chars()
+            .filter(|&c| c == '{' || c == '}')
+            .fold(0i32, |acc, c| if c == '{' { acc + 1 } else { acc - 1 });
+        // Leaving the module's own block closes its scope.
+        if let Some((_, opened_at)) = &module {
+            if depth + braces <= *opened_at {
+                module = None;
+            }
+        }
+        let prev_depth = depth;
+        depth += braces;
+        // Indented lines are scanned ONLY when directly inside a named module: a nested `fn`
+        // inside another fn or an `impl` is a different scope and legitimately repeatable.
+        let in_module = module.as_ref().is_some_and(|(_, at)| prev_depth == at + 1);
+        if indented && !in_module {
             continue;
         }
         // Strip leading visibility / modifiers so `pub async unsafe fn foo` still keys on `foo`.
@@ -119,7 +153,7 @@ pub fn top_level_defs(src: &str) -> std::collections::HashMap<String, usize> {
                 }
             }
         }
-        let kind = ["fn", "struct", "enum", "trait", "static"]
+        let kind = ["fn", "struct", "enum", "trait", "static", "mod"]
             .into_iter()
             .find(|kw| {
                 t.strip_prefix(kw)
@@ -127,13 +161,27 @@ pub fn top_level_defs(src: &str) -> std::collections::HashMap<String, usize> {
             });
         if let Some(kind) = kind {
             let rest = t[kind.len()..].trim_start();
-            // The name is up to the first delimiter: `(` for fn, `<`/`{`/`:`/whitespace otherwise.
+            // The name is up to the first delimiter: `(` for fn, `<`/`{`/`:`/`;`/whitespace
+            // otherwise. `;` matters for `mod other;` and `static X;`, whose name would
+            // otherwise keep the terminator and never match its own braced form.
             if let Some(name) = rest
-                .split(|c: char| c == '(' || c == '<' || c == '{' || c == ':' || c.is_whitespace())
+                .split(|c: char| {
+                    c == '(' || c == '<' || c == '{' || c == ':' || c == ';' || c.is_whitespace()
+                })
                 .next()
                 .filter(|s| !s.is_empty())
             {
-                *out.entry(format!("{kind}:{name}")).or_default() += 1;
+                // Qualify by enclosing module so sibling modules' same-named items stay distinct.
+                let key = match &module {
+                    Some((m, _)) => format!("{kind}:{m}::{name}"),
+                    None => format!("{kind}:{name}"),
+                };
+                *out.entry(key).or_default() += 1;
+                // A `mod x {` on this line opens the scope its body is counted under. Only
+                // inline modules (`mod x;` declarations have no body and nothing to duplicate).
+                if kind == "mod" && line.contains('{') && module.is_none() {
+                    module = Some((name.to_string(), prev_depth));
+                }
             }
         }
     }

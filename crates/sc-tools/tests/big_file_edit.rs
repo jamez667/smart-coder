@@ -7,9 +7,15 @@
 use std::path::{Path, PathBuf};
 
 fn workspace(lines: usize) -> PathBuf {
+    // A process-wide counter, not just a timestamp: Windows' clock is coarse (~15ms), so two
+    // tests starting together got nanosecond stamps that were byte-identical and shared one
+    // directory — whichever finished second saw the other's edit and failed. Only under
+    // `--test-threads>1`, which is the default, so it surfaced as an intermittent failure.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!(
-        "sc-bigedit-{}-{}",
+        "sc-bigedit-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

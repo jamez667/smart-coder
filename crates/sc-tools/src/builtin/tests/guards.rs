@@ -487,3 +487,79 @@ fn the_indistinct_anchor_guard_does_not_fire_on_a_legitimate_edit() {
     assert!(o.contains("ok"), "a distinctive anchor still edits: {o}");
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// A re-appended `#[cfg(test)] mod` was the single worst corruption the guard could not see:
+/// `mod` was not a recognised kind, and every item inside a module is indented, so the
+/// top-level-only rule skipped the lot. Measured on a real 7,157-line `ship.rs`: 61 copies of one
+/// test module, of which the guard saw nothing (5 top-level fns, a count that never rose).
+#[test]
+fn duplicate_definition_flags_a_re_appended_module() {
+    let m = "\
+#[cfg(test)]
+mod npc_reactor_tests {
+    use super::*;
+
+    #[test]
+    fn the_latch_holds() {
+        assert!(true);
+    }
+}
+";
+    // The exact corruption: the whole module appended a second time.
+    let dup = duplicate_definition(m, &format!("{m}{m}"));
+    assert!(dup.is_some(), "a re-appended module must be flagged");
+    let msg = dup.unwrap();
+    assert!(msg.contains("npc_reactor_tests"), "names the module: {msg}");
+    // Appending a genuinely different module is fine.
+    let other = m.replace("npc_reactor_tests", "miner_tests");
+    assert!(
+        duplicate_definition(m, &format!("{m}{other}")).is_none(),
+        "a differently-named module is not a duplicate"
+    );
+}
+
+/// The reason nested items are keyed by module path rather than counted flat: `new`, `record` and
+/// `default` legitimately repeat across sibling `impl` blocks and sibling modules in one file.
+/// A flat count of indented `fn`s would reject those ordinary edits (7 `record`s live in one real
+/// file in this repo), so module-qualifying the name is what keeps the guard from crying wolf.
+#[test]
+fn same_named_items_in_sibling_modules_are_not_duplicates() {
+    let src = "\
+mod a {
+    pub fn new() {}
+}
+mod b {
+    pub fn new() {}
+}
+";
+    let d = top_level_defs(src);
+    assert_eq!(d.get("fn:a::new").copied(), Some(1), "scoped to its module");
+    assert_eq!(d.get("fn:b::new").copied(), Some(1), "scoped to its module");
+    assert!(!d.contains_key("fn:new"), "never counted unqualified");
+    // Adding a third sibling module with the same fn name is still not a duplicate.
+    let more = format!("{src}mod c {{\n    pub fn new() {{}}\n}}\n");
+    assert!(duplicate_definition(src, &more).is_none());
+    // Sibling `impl` blocks keep their old behaviour: not scanned, never flagged.
+    let impls = "impl Foo { fn new() {} }\nimpl Bar { fn new() {} }\n";
+    assert!(duplicate_definition("", impls).is_none(), "impls untouched");
+}
+
+/// A duplicate INSIDE one module still has to fire — scoping must not become a blind spot.
+#[test]
+fn duplicate_definition_flags_a_repeat_within_one_module() {
+    let before = "mod t {\n    fn a() {}\n}\n";
+    let after = "mod t {\n    fn a() {}\n    fn a() {}\n}\n";
+    let dup = duplicate_definition(before, after);
+    assert!(dup.is_some(), "a repeat inside one module must be flagged");
+    assert!(dup.unwrap().contains("a"));
+}
+
+/// `mod x;` is a declaration, not a definition with a body — it opens no scope, so items after it
+/// must not be swallowed into it and mis-keyed.
+#[test]
+fn a_bare_mod_declaration_opens_no_scope() {
+    let src = "mod other;\npub fn top() {}\n";
+    let d = top_level_defs(src);
+    assert_eq!(d.get("fn:top").copied(), Some(1), "stays top-level");
+    assert_eq!(d.get("mod:other").copied(), Some(1));
+}
