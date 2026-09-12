@@ -202,6 +202,14 @@ impl App {
                     format!("{} events", self.claude_feed.len())
                 }
             }
+            // A plugin's own summary would need a round trip, and this is built while
+            // dragging — so it reports what the host knows: how much the panel is
+            // showing. A plugin that wants to say more says it in the panel.
+            PanelKind::Plugin(id) => match self.plugin_content(id) {
+                Some(rows) if !rows.is_empty() => format!("{} items", rows.len()),
+                Some(_) => "empty".to_string(),
+                None => "no content yet".to_string(),
+            },
         };
 
         let ghost = container(
@@ -516,6 +524,7 @@ impl App {
             }
             PanelKind::Claude => self.view_claude_panel(),
             PanelKind::Flame => self.view_flame_panel(),
+            PanelKind::Plugin(id) => self.view_plugin_panel(id),
         }
     }
 }

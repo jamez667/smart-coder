@@ -45,14 +45,18 @@ Invoke-Step 'tests' { cargo test --workspace }
 $Forbidden = @('sc-core', 'sc-model', 'sc-swarm', 'sc-workflow', 'sc-iterate',
                'sc-verify', 'sc-web', 'sc-proto', 'sc-comply', 'sc-tools')
 Invoke-Step 'the crafter links no model code' {
-    $tree = cargo tree -p sc-crafter --prefix none --no-dedupe 2>$null
-    if (-not $tree) { throw "cargo tree -p sc-crafter produced nothing" }
+    # Asserted against `sc-craft-ui` rather than the Crafter binary: the binary is
+    # step 6 of spec 25's migration and does not exist yet, and the rule is really
+    # about this crate anyway -- it is the widest part of the editor's tree, and the
+    # one a model crate would most plausibly be added to.
+    $tree = cargo tree -p sc-craft-ui --prefix none --no-dedupe 2>$null
+    if (-not $tree) { throw "cargo tree -p sc-craft-ui produced nothing" }
     # Match the crate NAME at the start of a line, so a path containing the string
     # (or a crate that merely mentions one) cannot trip this.
     $names = $tree | ForEach-Object { ($_ -split ' ')[0] } | Where-Object { $_ }
     $found = $names | Where-Object { $Forbidden -contains $_ } | Sort-Object -Unique
     if ($found) {
-        throw ("the Crafter must not link model code, but its tree contains: " +
+        throw ("the editor must not link model code, but its tree contains: " +
                ($found -join ', ') +
                ". See spec 21 -- the editor half belongs in sc-craft-ui.")
     }

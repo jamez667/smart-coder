@@ -24,6 +24,9 @@ path = "src/lib.rs"
 # profiler and compile diagnostics all live there and are shared verbatim with
 # `smart-coder-crafter`. What this crate adds on top is everything that talks to a model.
 sc-craft-ui = { path = "../sc-craft-ui" }
+# The plugin wire protocol (spec 25). Named directly rather than reached through
+# sc-craft-ui, because this crate builds HostMessages of its own.
+sc-plugin-proto = { path = "../sc-plugin-proto" }
 # The folded-stack parser and flame layout, shared with the agent tool. Zero deps.
 sc-flame = { path = "../sc-flame" }
 sc-comply = { path = "../sc-comply" }

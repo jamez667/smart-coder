@@ -18,6 +18,8 @@ description = "The editor half of Smart Coder (spec 21): buffers, layout, git, f
 sc-flame = { path = "../sc-flame" }
 sc-index = { path = "../sc-index" }
 sc-fsutil = { path = "../sc-fsutil" }
+# The plugin wire protocol (spec 25). Serde and a JSON codec only — see its manifest.
+sc-plugin-proto = { path = "../sc-plugin-proto" }
 iced = { version = "0.14", features = ["tokio", "canvas", "advanced", "image"] }
 # See the note in sc-win's manifest: pinned exactly, pre-1.0 and single-maintainer.
 iced-code-editor = "=0.3.11"

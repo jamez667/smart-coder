@@ -157,13 +157,44 @@ fn tailnet_host() -> Option<String> {
     Some(name.trim_end_matches('.').to_string())
 }
 
+/// Discover, start and hand-shake every plugin, and install the panel registry.
+///
+/// A free function rather than a method because it must run BEFORE `App::default()` —
+/// see the ordering note in [`run`]. Returns the set for the app to own.
+///
+/// Blocking, and bounded by the handshake timeout per plugin. Startup is the one place a
+/// synchronous wait is correct here: the registry has to be complete before any layout is
+/// read. Spec 25 flags the Windows spawn cost of this as the thing to measure, and names
+/// lazy activation as the answer if it turns out to be bad.
+fn start_plugins() -> sc_craft_ui::plugin::Plugins {
+    let dir = sc_craft_ui::plugin::plugins_dir();
+    let scan = sc_craft_ui::plugin::discover::scan(&dir);
+    // No plugins is the overwhelmingly common case and must cost nothing beyond the
+    // directory read that just found nothing.
+    if scan.found.is_empty() && scan.rejected.is_empty() {
+        return sc_craft_ui::plugin::Plugins::default();
+    }
+    let workspace = sc_win::persist::load().last_project;
+    let (plugins, registry) = sc_craft_ui::plugin::Plugins::start(scan, workspace.as_deref());
+    sc_craft_ui::plugin::registry::install(registry);
+    plugins
+}
+
 pub fn run() -> iced::Result {
     // iced 0.14: `application(boot, update, view)` where boot returns the initial
     // (State, Task); title/subscription/theme are builder methods. If a project was
     // remembered from last session, greet with its README/roadmap on boot.
     iced::application(
         || {
+            // PLUGINS FIRST (spec 25), and the ordering is load-bearing rather than
+            // stylistic: `App::default()` reads `layout.json`, and a leaf naming a plugin
+            // panel can only resolve once that plugin's panels are in the registry.
+            // Starting plugins afterwards would prune every plugin panel out of the saved
+            // layout on every launch — and it would look like the layout not persisting,
+            // not like a startup ordering bug.
+            let plugins = start_plugins();
             let mut app = App::default();
+            app.plugins = Some(plugins);
             // The restored project needs detecting, or the Compile button stays dead until the
             // user re-picks the folder (spec 21).
             app.refresh_project_kind();
@@ -238,6 +269,7 @@ mod view_comply;
 mod view_core;
 mod view_flame;
 mod view_layout;
+mod view_plugin;
 pub(crate) use view_layout::{Drag, DragSubject};
 mod view_menus;
 mod view_panels;

@@ -51,13 +51,17 @@ cargo test --workspace
 # It fails the moment someone adds a model crate to `sc-crafter` or `sc-craft-ui`. That
 # mistake is otherwise SILENT: the Crafter would still compile, still run, still look
 # right, and no longer be what it says it is.
+# Asserted against `sc-craft-ui` rather than the Crafter binary: the binary is step 6
+# of spec 25's migration and does not exist yet, and the rule is really about this
+# crate anyway -- it is the widest part of the editor's tree, and the one a model crate
+# would most plausibly be added to.
 echo "==> the crafter links no model code"
-CRAFTER_TREE="$(cargo tree -p sc-crafter --prefix none --no-dedupe)"
+CRAFTER_TREE="$(cargo tree -p sc-craft-ui --prefix none --no-dedupe)"
 # Match the crate NAME at the start of a line, so a path containing the string (or a
 # crate that merely mentions one) cannot trip this.
 FORBIDDEN="$(echo "$CRAFTER_TREE" | awk '{print $1}' | sort -u | grep -E     '^(sc-core|sc-model|sc-swarm|sc-workflow|sc-iterate|sc-verify|sc-web|sc-proto|sc-comply|sc-tools)$' || true)"
 if [ -n "$FORBIDDEN" ]; then
-    echo "the Crafter must not link model code, but its tree contains:" >&2
+    echo "the editor must not link model code, but its tree contains:" >&2
     echo "$FORBIDDEN" >&2
     echo "See spec 21 -- the editor half belongs in sc-craft-ui." >&2
     exit 1

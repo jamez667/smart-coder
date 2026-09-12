@@ -429,6 +429,30 @@ pub(crate) struct App {
     /// Persisted divider positions, keyed by split id — the ONE place split positions are saved.
     /// The panel tree stores ids, not fractions, so this needed no change to serve it.
     pub(crate) splits: sc_win::splits::SplitStore,
+
+    // --- Plugins (spec 25) ---
+    /// The running plugins, their failures, and their logs.
+    ///
+    /// `None` in a test-constructed `App`: `Plugins::start` spawns processes, so
+    /// `Default` does not do it and `run()` installs this after the handshakes.
+    pub(crate) plugins: Option<sc_craft_ui::plugin::Plugins>,
+    /// The last content each plugin panel pushed, already flattened.
+    ///
+    /// Flattened on ARRIVAL rather than on paint: the limits and the nesting walk are the
+    /// expensive part, and doing them per frame would put a plugin's content size on the
+    /// render path. Absent ⇒ the plugin has pushed nothing yet, which the panel reports
+    /// differently from an empty push.
+    pub(crate) plugin_panels: std::collections::BTreeMap<
+        sc_craft_ui::plugin::PluginPanelId,
+        Vec<sc_craft_ui::plugin::view::Row>,
+    >,
+    /// In-progress values for plugin form fields, keyed by `(panel, field)`.
+    ///
+    /// Held by the HOST rather than echoed to the plugin per keystroke: a round trip per
+    /// character is the same mistake as a per-keystroke `buffer.changed` carrying text.
+    /// The values cross the wire once, on submit.
+    pub(crate) plugin_fields:
+        std::collections::BTreeMap<(sc_craft_ui::plugin::PluginPanelId, String), String>,
 }
 
 /// A line-comment triage running on a worker thread: the classify call + the comment it's
@@ -636,6 +660,9 @@ impl Default for App {
             dock_side: None,
             drop_target: None,
             panel_slots: std::collections::BTreeMap::new(),
+            plugins: None,
+            plugin_panels: std::collections::BTreeMap::new(),
+            plugin_fields: std::collections::BTreeMap::new(),
             window_w: 1040.0,
             window_h: 800.0,
             splits,
@@ -724,6 +751,14 @@ pub(crate) enum Message {
     ClaudeInputChanged(String),
     /// Open/close the Claude panel's ⚙ options menu.
     ToggleClaudeMenu,
+
+    // --- Plugins (spec 25) ---
+    /// A clickable row in a plugin panel was pressed: run its command.
+    PluginCommand(sc_craft_ui::plugin::PluginPanelId, String, Vec<String>),
+    /// A plugin form field was typed into.
+    PluginFieldChanged(sc_craft_ui::plugin::PluginPanelId, String, String),
+    /// A plugin form's submit button was pressed.
+    PluginFormSubmit(sc_craft_ui::plugin::PluginPanelId),
     /// The options menu's filter text changed.
     ClaudeFilterChanged(String),
     /// Step the model selector to the next choice (Default → Opus → Sonnet → Haiku → …).

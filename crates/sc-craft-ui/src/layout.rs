@@ -65,6 +65,12 @@ pub enum PanelKind {
     /// it — the first attempt hung a button off the Chat composer, which both buried it inside
     /// an Assistant-only panel and left the run with nowhere to appear.
     Claude,
+    /// A panel contributed by a plugin (spec 25).
+    ///
+    /// Carries an interned handle rather than the plugin and panel names, so this enum
+    /// stays `Copy` — which `panels()`, `contains`, `dedup`, `prune`, `slot_of` and
+    /// `menu_panels` all rely on. [`crate::plugin::registry`] maps it back to names.
+    Plugin(crate::plugin::PluginPanelId),
     /// The profiler: a flame graph over a recorded or imported profile (spec 24).
     ///
     /// Not `needs_model()`. Reading a profile is a local, deterministic act — no model is
@@ -97,6 +103,16 @@ impl PanelKind {
             PanelKind::Chat => Cow::Borrowed("chat"),
             PanelKind::Claude => Cow::Borrowed("claude"),
             PanelKind::Flame => Cow::Borrowed("flame"),
+            // `plugin:<plugin>:<panel>`. The prefix is what guarantees no collision with
+            // the host's own slugs, and this string seeds the `splits.json` divider keys
+            // as well as spelling the leaf in `layout.json` — see the registry.
+            PanelKind::Plugin(id) => crate::plugin::registry::registry()
+                .get(id)
+                .map(|p| Cow::Owned(p.slug()))
+                // An unregistered handle cannot normally exist: handles come from the
+                // registry. Spelling it unresolvably rather than panicking means a bug
+                // here costs one pruned panel, not the window.
+                .unwrap_or(Cow::Borrowed("plugin:?:?")),
         }
     }
 
@@ -113,6 +129,14 @@ impl PanelKind {
             "chat" => Some(PanelKind::Chat),
             "claude" => Some(PanelKind::Claude),
             "flame" => Some(PanelKind::Flame),
+            rest if rest.starts_with("plugin:") => {
+                // `None` when the plugin is not loaded, which is the WHOLE mechanism by
+                // which a saved layout survives a disabled plugin: `Layout::parse`
+                // already collapses a `None` leaf onto its sibling.
+                crate::plugin::registry::registry()
+                    .from_slug(rest)
+                    .map(PanelKind::Plugin)
+            }
             rest => rest
                 .strip_prefix("editor:")
                 .and_then(|n| n.parse().ok())
@@ -125,15 +149,23 @@ impl PanelKind {
     /// Every editor pane is just "Editor" here: the header names what the panel *is*, and a
     /// number would be noise on the common single-pane layout. [`Self::menu_label`] disambiguates
     /// where it matters.
-    pub fn label(self) -> &'static str {
+    /// Returns `Cow` rather than `&'static str` because a plugin panel's title arrives
+    /// at runtime in the handshake. Every built-in is still borrowed, so the common case
+    /// allocates nothing.
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
         match self {
-            PanelKind::Files => "Files",
-            PanelKind::Git => "Source control",
-            PanelKind::Editor(_) => "Editor",
-            PanelKind::Bottom => "Panel",
-            PanelKind::Chat => "Chat",
-            PanelKind::Claude => "Claude Code",
-            PanelKind::Flame => "Profiler",
+            PanelKind::Files => Cow::Borrowed("Files"),
+            PanelKind::Git => Cow::Borrowed("Source control"),
+            PanelKind::Editor(_) => Cow::Borrowed("Editor"),
+            PanelKind::Bottom => Cow::Borrowed("Panel"),
+            PanelKind::Chat => Cow::Borrowed("Chat"),
+            PanelKind::Claude => Cow::Borrowed("Claude Code"),
+            PanelKind::Flame => Cow::Borrowed("Profiler"),
+            PanelKind::Plugin(id) => crate::plugin::registry::registry()
+                .get(id)
+                .map(|p| Cow::Owned(p.title.clone()))
+                .unwrap_or(Cow::Borrowed("Plugin")),
         }
     }
 
@@ -144,7 +176,7 @@ impl PanelKind {
         match self {
             PanelKind::Editor(EditorId(0)) => Cow::Borrowed("Editor"),
             PanelKind::Editor(EditorId(n)) => Cow::Owned(format!("Editor {}", n + 1)),
-            other => Cow::Borrowed(other.label()),
+            other => other.label(),
         }
     }
 
@@ -184,6 +216,16 @@ pub fn menu_panels(layout: &Layout) -> Vec<PanelKind> {
     out.push(PanelKind::Chat);
     out.push(PanelKind::Claude);
     out.push(PanelKind::Flame);
+    // Every registered plugin panel, whether or not it is currently shown. Offering
+    // them is not decoration: this menu is the ONLY way to bring a hidden panel back, so
+    // a plugin panel missing from here can be hidden once and then never recovered —
+    // which is what `the_view_menu_offers_the_profiler_in_both_products` calls a
+    // silent-bug guard.
+    out.extend(
+        crate::plugin::registry::registry()
+            .all()
+            .map(|(id, _)| PanelKind::Plugin(id)),
+    );
     out
 }
 
@@ -1034,6 +1076,153 @@ mod tests {
             .expect("still usable");
         assert!(!sane.contains(PanelKind::Chat));
         assert!(sane.contains(PanelKind::Editor(EditorId::FIRST)));
+    }
+
+    // ---------------------------------------------------------------------
+    // Plugin panels (spec 25)
+    // ---------------------------------------------------------------------
+
+    /// A plugin panel's slug round-trips, and keeps the `plugin:` prefix that guarantees
+    /// it cannot collide with a host panel or a host split id.
+    ///
+    /// Uses the PROCESS-GLOBAL registry, so it installs one. That is safe here and only
+    /// here: `install` is a `OnceLock` set, so the first test to run wins and the rest
+    /// see the same registry — which is why every plugin-panel test below shares one
+    /// fixture rather than each installing its own.
+    #[test]
+    fn a_plugin_panel_round_trips_through_its_slug() {
+        let id = install_test_registry();
+        let kind = PanelKind::Plugin(id);
+        assert_eq!(kind.slug(), "plugin:test-plug:main");
+        assert_eq!(PanelKind::from_slug("plugin:test-plug:main"), Some(kind));
+    }
+
+    /// **The mechanism that lets a saved layout outlive a disabled plugin.**
+    ///
+    /// A leaf naming an unloaded plugin resolves to `None`, and `Layout::parse` already
+    /// collapses a `None` leaf onto its sibling — the same path a `chat` leaf takes in
+    /// the Crafter. No new code, which is the point.
+    #[test]
+    fn a_layout_naming_an_absent_plugin_collapses_onto_its_sibling() {
+        install_test_registry();
+        let v = serde_json::json!({
+            "split": {
+                "id": "body|bottom",
+                "axis": "v",
+                "a": {"leaf": "editor"},
+                "b": {"leaf": "plugin:not-installed:panel"}
+            }
+        });
+        let parsed = Layout::parse(&v).expect("the split collapses rather than failing");
+        assert_eq!(
+            parsed,
+            Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
+            "the surviving child replaces the split"
+        );
+    }
+
+    /// A layout that is ONLY an absent plugin's panel falls back to the default rather
+    /// than rendering an empty window — the "at least one editor pane" rule still holds.
+    #[test]
+    fn a_layout_of_only_absent_plugins_falls_back_to_the_default() {
+        install_test_registry();
+        let store = LayoutStore::parse(
+            &serde_json::json!({
+                "version": 2,
+                "layout": {"leaf": "plugin:not-installed:panel"}
+            })
+            .to_string(),
+        );
+        assert_eq!(store.get(), Layout::default_for_product());
+    }
+
+    /// A plugin panel is not an agent surface, so the Crafter does not prune it. The
+    /// Crafter is exactly where a plugin panel is most of the point.
+    #[test]
+    fn a_plugin_panel_is_not_pruned_as_a_model_surface() {
+        let id = install_test_registry();
+        assert!(!PanelKind::Plugin(id).needs_model());
+        assert!(!PanelKind::Plugin(id).is_editor());
+    }
+
+    /// The View menu offers every registered plugin panel — the only way to bring a
+    /// hidden one back, so its absence would make hiding one permanent.
+    #[test]
+    fn the_view_menu_offers_plugin_panels() {
+        let id = install_test_registry();
+        let menu = menu_panels(&Layout::craft_default());
+        assert!(
+            menu.contains(&PanelKind::Plugin(id)),
+            "a plugin panel must be recoverable: {menu:?}"
+        );
+    }
+
+    /// A plugin panel's title comes from the registry, so the header and the View menu
+    /// show what the plugin called it.
+    #[test]
+    fn a_plugin_panel_is_labelled_from_its_manifest() {
+        let id = install_test_registry();
+        assert_eq!(PanelKind::Plugin(id).label(), "Test Panel");
+        assert_eq!(PanelKind::Plugin(id).menu_label(), "Test Panel");
+    }
+
+    /// Dragging a plugin panel produces a split id that is deterministic and cannot
+    /// collide with a host one. `splits.json` keys must be stable, and the existing test
+    /// on host ids documents why: a changed id silently resets the user's dividers.
+    #[test]
+    fn a_plugin_panel_makes_a_collision_free_split_id() {
+        let id = install_test_registry();
+        // `move_panel` moves a panel already in the tree, so put it there first — the
+        // same order the UI follows (View menu adds it, then you drag it).
+        let with_panel = Layout::craft_default()
+            .insert_at(
+                PanelKind::Plugin(id),
+                PanelKind::Bottom,
+                Side::Bottom,
+                "seed:plugin",
+            )
+            .expect("the panel can be added");
+        let moved = with_panel
+            .move_panel(
+                PanelKind::Plugin(id),
+                PanelKind::Editor(EditorId::FIRST),
+                Side::Right,
+            )
+            .expect("the drop lands");
+        // Asserted through the serialized form, which is what actually reaches
+        // `splits.json` — the divider keys are the `split` fields of the tree.
+        let json = moved.to_json().to_string();
+        assert!(
+            json.contains("plugin:test-plug:main|editor"),
+            "the new split is keyed by the plugin slug: {json}"
+        );
+        // The `plugin:` prefix is the collision guarantee against the four host ids.
+        for host in [
+            "\"chat|code\"",
+            "\"explorer:git|files\"",
+            "\"explorer|body\"",
+        ] {
+            assert!(
+                !json.contains(&format!("\"split\":{host}")) || json.contains("plugin:"),
+                "must not reuse a host split id: {json}"
+            );
+        }
+    }
+
+    /// Installs a one-panel registry and returns its handle.
+    ///
+    /// The registry is a `OnceLock`, so this is idempotent: the first caller installs,
+    /// every later one gets the same handle back. That is what lets the plugin tests
+    /// above share a fixture without ordering between them.
+    fn install_test_registry() -> crate::plugin::PluginPanelId {
+        let mut r = crate::plugin::PanelRegistry::default();
+        let id = r.register("test-plug", "main", "Test Panel");
+        crate::plugin::registry::install(r);
+        // Re-resolve through the global: if another test installed first, the handle
+        // from OUR local registry would be meaningless.
+        crate::plugin::registry::registry()
+            .from_slug("plugin:test-plug:main")
+            .unwrap_or(id)
     }
 
     /// A pre-split `layout.json` held `craft` + `assistant`. Each product adopts its own half,

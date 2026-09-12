@@ -111,7 +111,7 @@ pub fn state_dir() -> PathBuf {
 ///
 /// Small on purpose. Every field here is about *editing* — there is nothing to configure
 /// about a model, because there is no model. It grows only as the editor grows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CraftConfig {
     /// The command that builds/checks the open project (`cargo check`, `npm run build`).
     ///
@@ -128,16 +128,6 @@ pub struct CraftConfig {
     /// project the user chose — nothing here generates files, so there is no scratch dir
     /// to isolate and no reason to avoid the user's own tree.
     pub workspace: Option<PathBuf>,
-}
-
-impl Default for CraftConfig {
-    fn default() -> Self {
-        Self {
-            compile_command: None,
-            unity_path: None,
-            workspace: None,
-        }
-    }
 }
 
 impl CraftConfig {

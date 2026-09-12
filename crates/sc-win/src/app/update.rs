@@ -190,6 +190,40 @@ impl App {
             // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
             Message::RunIterate => self.start(RunKind::StagedBuild),
             Message::ClaudeInputChanged(s) => self.claude_input = s,
+            // --- Plugins (spec 25) ---
+            //
+            // Every arm here is fire-and-forget: the plugin is told what happened and
+            // answers in its own time by pushing new content. Nothing blocks, and a dead
+            // plugin costs a no-op write rather than a stall.
+            Message::PluginCommand(panel, command, args) => {
+                self.send_to_plugin_of(panel, |_| sc_plugin_proto::HostMessage::CommandInvoked {
+                    command: command.clone(),
+                    args: args.clone(),
+                });
+            }
+            Message::PluginFieldChanged(panel, field, value) => {
+                // Held host-side until submit. A round trip per keystroke is the same
+                // mistake as a per-keystroke `buffer.changed` carrying text.
+                self.plugin_fields.insert((panel, field), value);
+            }
+            Message::PluginFormSubmit(panel) => {
+                // Only this panel's fields, in a stable order — `BTreeMap` gives
+                // deterministic output so a plugin parsing the payload sees the same
+                // shape every time.
+                let values: Vec<(String, String)> = self
+                    .plugin_fields
+                    .iter()
+                    .filter(|((p, _), _)| *p == panel)
+                    .map(|((_, f), v)| (f.clone(), v.clone()))
+                    .collect();
+                let encoded = sc_craft_ui::plugin::view::encode_form(&values);
+                self.send_to_plugin_of(panel, |panel_id| {
+                    sc_plugin_proto::HostMessage::PanelEvent {
+                        panel: panel_id,
+                        value: encoded.clone(),
+                    }
+                });
+            }
             Message::ToggleClaudeMenu => {
                 self.claude_menu = !self.claude_menu;
                 // A stale filter would hide most of the menu the next time it opens, which
@@ -329,6 +363,7 @@ impl App {
             }
             Message::Tick => {
                 self.pump();
+                self.pump_plugins();
                 // Drive the live code-view refresh OFF the UI thread (returns Task::none unless a
                 // reload is due). This is the fix for the Execute-plan freeze.
                 // Also keep the chat pinned to the bottom as content streams in (unless the user

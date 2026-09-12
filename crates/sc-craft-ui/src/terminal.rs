@@ -361,7 +361,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn host_mode() -> ExecMode {
         ExecMode::Host {

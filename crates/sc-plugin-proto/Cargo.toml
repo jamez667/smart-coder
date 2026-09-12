@@ -1,0 +1,14 @@
+[package]
+name = "sc-plugin-proto"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The plugin wire protocol (spec 25): one definition, shared by the IDE host and every plugin."
+
+[dependencies]
+# DELIBERATELY the whole dependency list. This crate is linked by the IDE *and* by
+# every plugin, including third-party ones; anything added here is imposed on all of
+# them. Serde and a JSON codec are the protocol, and nothing else is.
+serde = { workspace = true }
+serde_json = { workspace = true }

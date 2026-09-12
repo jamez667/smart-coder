@@ -58,6 +58,7 @@ pub mod layout;
 pub mod markdown;
 pub mod minimap;
 pub mod persist;
+pub mod plugin;
 pub mod proc;
 pub mod project;
 pub mod splits;
