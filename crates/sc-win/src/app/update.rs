@@ -106,30 +106,6 @@ impl App {
             }
             Message::DiscardAndQuit => return Self::quit(),
             Message::CancelQuit => self.confirm_quit = false,
-            Message::ChooseMode(craft) => {
-                use sc_win::config::Mode;
-                // Unreachable in a craft-only build — `mode_chosen()` is true there, so the
-                // first-run question never opens. Guarded anyway: this is the write that would
-                // leave a `mode` in config.json for a later ordinary build to honour.
-                if !self.cfg.mode_switchable() {
-                    return Task::none();
-                }
-                self.cfg.mode = Some(if craft { Mode::Craft } else { Mode::Assistant });
-                // The default layout differs per mode, and `App::default` picked one before the
-                // question was answered — so re-derive it now that we know.
-                self.layout = self.layouts.get(craft);
-                self.sync_panes_to_layout();
-                self.cfg.save_config();
-                // Finish the boot the prompt was holding up. `run()` skips the welcome and the
-                // conversation while the question is open, because both are Assistant-shaped and
-                // would have to be undone the moment someone answered "Just code".
-                if self.picked_workspace.is_some() {
-                    self.show_welcome();
-                    if !craft {
-                        self.open_conversation();
-                    }
-                }
-            }
             Message::RunCompile => return self.start_compile(),
             Message::CompileDone(report) => {
                 self.compiling = false;
@@ -143,55 +119,6 @@ impl App {
                 if let Some(line) = self.panes.focused_mut().pending_scroll_line.take() {
                     return self.scroll_code_to_line(self.panes.focused_id(), line);
                 }
-            }
-            Message::EscapePressed => {
-                // Only meaningful while the first-run question is open. Deliberately narrow:
-                // Escape closing arbitrary UI is a separate decision, not one to make here.
-                if !self.cfg.mode_chosen() {
-                    return Task::done(Message::DeclineToChoose);
-                }
-            }
-            Message::DeclineToChoose => {
-                // Closing the question is not an answer. Nothing is written, so the prompt
-                // returns on the next launch. No dirty-buffer check: the question blocks boot,
-                // so there is nothing open yet to lose.
-                return Self::quit();
-            }
-            Message::ToggleCraftMode(on) => {
-                use sc_win::config::Mode;
-                // The toggle isn't rendered in a craft-only build, so this can only arrive from a
-                // stale queued `Task`. Refusing here keeps the "never writes a mode" claim a
-                // property of the build rather than of the view.
-                if !self.cfg.mode_switchable() {
-                    return Task::none();
-                }
-                self.cfg.mode = Some(if on { Mode::Craft } else { Mode::Assistant });
-                if on {
-                    // A run must never outlive the switch into a mode that claims no model is
-                    // contacted — cancel first, then drop the surfaces. Both sessions: an agent
-                    // run and a chat turn are separate workers.
-                    if let Some(s) = &self.session {
-                        s.cancel();
-                    }
-                    if let Some(s) = &self.chat_session {
-                        s.cancel();
-                    }
-                    // The health badge showed a *model* endpoint's state; in Craft mode there is
-                    // no such thing, so clear it rather than leaving a stale verdict on screen.
-                    self.backend_health = None;
-                    self.health_rx = None;
-                    // Land on the only tab that still means anything.
-                    self.settings_tab = SettingsTab::General;
-                }
-                // Swap to the arrangement saved for the mode being entered. Per-mode layouts are
-                // what make toggling back and forth non-destructive: each is found as it was
-                // left, rather than one mode silently rearranging the other.
-                self.layout = self.layouts.get(self.cfg.craft());
-                self.sync_panes_to_layout();
-                // Persist immediately. Mode is an answer to a question we promised to ask once;
-                // losing it to a crash before the next save-on-close would ask again and read as
-                // the app ignoring them.
-                self.cfg.save_config();
             }
             Message::VerifyChanged(s) => self.verify_input = s,
             Message::SuffixChanged(s) => self.suffix_input = s,
@@ -226,14 +153,7 @@ impl App {
 
                 let workspace = self.workspace_root();
                 let out_dir = sc_win::comply::output_dir(&workspace);
-                // Craft mode forces the deterministic audit. Hiding the picker is not enough on
-                // its own — a value chosen before the switch would still be sitting in
-                // `comply_model` — so the decision is made HERE, where the run is spawned.
-                let choice = if self.cfg.craft() {
-                    sc_win::comply::ComplyModel::None
-                } else {
-                    self.comply_model
-                };
+                let choice = self.comply_model;
                 let cfg = self.cfg.clone();
                 return Task::perform(
                     async move {
@@ -741,9 +661,9 @@ impl App {
                             ))
                         })
                 };
-                if let Some(next) = next.and_then(|l| l.sanitize(self.cfg.craft())) {
+                if let Some(next) = next.and_then(|l| l.sanitize()) {
                     self.layout = next.clone();
-                    self.layouts.set(self.cfg.craft(), next);
+                    self.layouts.set(next);
                     self.layouts.save();
                 }
                 self.open_menu = None;
@@ -833,10 +753,10 @@ impl App {
                             if let Some(next) = self
                                 .layout
                                 .move_to_edge(kind, side)
-                                .and_then(|l| l.sanitize(self.cfg.craft()))
+                                .and_then(|l| l.sanitize())
                             {
                                 self.layout = next.clone();
-                                self.layouts.set(self.cfg.craft(), next);
+                                self.layouts.set(next);
                                 self.layouts.save();
                             }
                         } else if let Some((target, side, outer)) = self.drop_target {
@@ -848,9 +768,9 @@ impl App {
                             } else {
                                 self.layout.move_panel(kind, target, side)
                             };
-                            if let Some(next) = moved.and_then(|l| l.sanitize(self.cfg.craft())) {
+                            if let Some(next) = moved.and_then(|l| l.sanitize()) {
                                 self.layout = next.clone();
-                                self.layouts.set(self.cfg.craft(), next);
+                                self.layouts.set(next);
                                 self.layouts.save();
                             }
                         }
@@ -864,8 +784,8 @@ impl App {
             Message::FocusPane(id) => self.panes.focus(id),
             Message::SplitEditor => self.split_editor(),
             Message::ResetLayout => {
-                self.layout = sc_win::layout::Layout::default_for(self.cfg.craft());
-                self.layouts.set(self.cfg.craft(), self.layout.clone());
+                self.layout = sc_win::layout::Layout::default_for_product();
+                self.layouts.set(self.layout.clone());
                 self.layouts.save();
                 self.open_menu = None;
             }
@@ -1067,11 +987,11 @@ impl App {
                     .iter()
                     .map(|&p| (p, self.plan.path_for(p)))
                     .collect();
-                let rows: Vec<sc_win::comments::PhaseComments<'_>> = files
+                let rows: Vec<sc_win::sendback::PhaseComments<'_>> = files
                     .iter()
                     .filter_map(|(phase, file)| {
                         let file = file.as_deref()?;
-                        Some(sc_win::comments::PhaseComments {
+                        Some(sc_win::sendback::PhaseComments {
                             phase: *phase,
                             file,
                             notes: self.comments.on_file(file).map(|(_, c)| c).collect(),
@@ -1079,7 +999,7 @@ impl App {
                     })
                     .collect();
 
-                let resolved = sc_win::comments::resolve_sendback(&rows);
+                let resolved = sc_win::sendback::resolve_sendback(&rows);
                 let commented: Vec<String> = rows
                     .iter()
                     .filter(|r| !r.notes.is_empty())

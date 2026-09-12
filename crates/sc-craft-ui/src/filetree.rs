@@ -27,15 +27,17 @@ pub struct TreeRow {
 /// Directory names never worth showing (VCS, build output, tooling caches, deps, and
 /// generated-asset folders).
 ///
-/// Re-exported from `sc_iterate` rather than kept as a second copy. Both lists feed
-/// PROMPT TEXT to the model -- this one via the explorer and the workspace overview,
-/// `sc-iterate`'s via the repo overview it builds for the remote server -- so a
-/// divergence (someone adds `.venv` to one) silently changes agent behaviour between
-/// the desktop and the server, which is precisely the behaviour-identical guarantee
-/// `sc-iterate` exists to provide. The two were byte-identical, down to the same
-/// fourteen-name match arm; the extraction had been done and the original never
-/// deleted.
-pub use sc_iterate::is_noise_dir;
+/// Re-exported from [`sc_fsutil`] rather than kept as a second copy. The list feeds the
+/// explorer here and PROMPT TEXT on the agent side -- the workspace overview, and the
+/// repo overview `sc-iterate` builds for the remote server -- so a divergence (someone
+/// adds `.venv` to one) silently changes agent behaviour between the desktop and the
+/// server. The two were byte-identical once, down to the same fourteen-name match arm;
+/// the extraction had been done and the original never deleted.
+///
+/// It sat in `sc-iterate` until the editor was split out (spec 21). That crate is model
+/// code and cannot appear in the Crafter's dependency tree, so the definition moved down
+/// to a leaf both products can reach -- keeping one list rather than re-forking it.
+pub use sc_fsutil::is_noise_dir;
 
 /// Build the flattened explorer rows for `root`, honoring the set of `collapsed`
 /// directories (a collapsed dir contributes its own row but none of its children).

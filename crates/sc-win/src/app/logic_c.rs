@@ -411,12 +411,6 @@ impl App {
     /// A real 1-token completion is used (not a `/models` ping) so a router with no model
     /// loaded reads as `NoModel`, not healthy.
     pub(crate) fn tick_health_probe(&mut self) {
-        // Craft mode contacts no model (spec 21). The subscription is already unregistered, so
-        // this is the second line of defence: any future caller that reaches here — a manual
-        // refresh, a replayed message — still cannot spawn the probe thread.
-        if self.cfg.craft() {
-            return;
-        }
         // 1) Adopt a completed probe.
         if let Some(rx) = &self.health_rx {
             if let Ok(h) = rx.try_recv() {
@@ -535,7 +529,11 @@ impl App {
             );
         }
         let sc = self.ensure_session_container(&image)?;
-        Ok(ExecMode::Container(sc))
+        // The terminal takes the container's docker NAME, not the `SessionContainer` — that
+        // type is `sc-verify`'s, and the terminal lives in the editor crate now (spec 21).
+        Ok(ExecMode::Container {
+            name: sc.name().to_string(),
+        })
     }
 
     /// Ensure the workspace's shared session container is running (starting it once on first
@@ -710,8 +708,8 @@ impl App {
                         self.verify_text = Some(summary.clone());
                     }
                     // Record files the agent actually edited/wrote (for the iterate banner).
-                    if sc_win::codeview::is_mutating_touch(&e) {
-                        if let Some(rel) = sc_win::codeview::file_touched_by(&e) {
+                    if sc_win::follow::is_mutating_touch(&e) {
+                        if let Some(rel) = sc_win::follow::file_touched_by(&e) {
                             if !self.edited_files.contains(&rel) {
                                 self.edited_files.push(rel);
                             }
@@ -731,7 +729,7 @@ impl App {
                     // Follow the agent: when it touches a file and we're in follow mode,
                     // show that file in the code panel — so edits land in front of you.
                     if self.follow_agent {
-                        if let Some(rel) = sc_win::codeview::file_touched_by(&e) {
+                        if let Some(rel) = sc_win::follow::file_touched_by(&e) {
                             // Never yank the pane away from a buffer with unsaved edits: the
                             // user is mid-sentence in a file the agent happens to be touching.
                             // Following is a convenience; their typing is not.

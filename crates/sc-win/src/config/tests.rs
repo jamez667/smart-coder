@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::file::{
     is_gemini_url, parse_config, serialize_config, ConfigFields, GEMINI_OPENAI_BASE_URL,
 };
-use super::types::{Connection, Mode, Provider, UiConfig};
+use super::types::{Connection, Provider, UiConfig};
 use super::workspace::{detect_verify_command, repo_overview, source_files};
 
 #[test]
@@ -25,114 +25,6 @@ fn detect_verify_command_matches_the_test_language() {
 
     // Nothing recognizable → the fallback.
     assert_eq!(detect_verify_command(&[], "the-fallback"), "the-fallback");
-}
-
-#[test]
-fn mode_round_trips_through_config_json() {
-    // The answer to the first-run question has to survive a restart. A mode that reset would
-    // read as the app ignoring the user — the worst possible first impression for this feature.
-    for m in [Mode::Craft, Mode::Assistant] {
-        let cfg = UiConfig {
-            mode: Some(m),
-            ..UiConfig::default()
-        };
-        let json = serialize_config(&ConfigFields {
-            mode: cfg.mode.map(|m| m.slug().to_string()),
-            ..ConfigFields::default()
-        });
-        let back = parse_config(&json);
-        assert_eq!(
-            back.mode.as_deref().and_then(Mode::from_slug),
-            Some(m),
-            "{} did not survive the round trip: {json}",
-            m.slug()
-        );
-    }
-}
-
-#[test]
-fn an_unchosen_mode_writes_nothing_and_stays_unchosen() {
-    // Tri-state: absent means NEVER CHOSEN, which is what raises the first-run prompt. It must
-    // not collapse into a default, or the prompt would never fire on a fresh install.
-    let json = serialize_config(&ConfigFields {
-        mode: None,
-        ..ConfigFields::default()
-    });
-    assert!(
-        !json.contains("mode"),
-        "unchosen must not be written: {json}"
-    );
-    assert!(parse_config(&json).mode.is_none());
-    // A craft-only build has nothing to ask, so "unchosen" is not a state it can be in — see
-    // `a_craft_only_build_needs_no_first_run_question`.
-    #[cfg(not(feature = "craft-only"))]
-    assert!(!UiConfig::default().mode_chosen(), "default is unchosen");
-}
-
-/// A craft-only build is Craft whatever the config or the environment say.
-///
-/// The whole feature is this one predicate: every existing guard — the backend builders, the
-/// health probe, the panel pruning — already routes through `craft()`, so pinning it here fires
-/// all of them at once rather than adding a second enforcement path that could drift.
-#[cfg(feature = "craft-only")]
-#[test]
-fn a_craft_only_build_is_craft_whatever_the_config_says() {
-    let cfg = UiConfig {
-        mode: Some(Mode::Assistant),
-        ..UiConfig::default()
-    };
-    assert!(cfg.craft(), "a stale Assistant in config.json cannot win");
-    assert!(UiConfig::default().craft(), "and neither can an absent one");
-}
-
-/// A craft-only build never asks which mode to use, and never offers to switch.
-#[cfg(feature = "craft-only")]
-#[test]
-fn a_craft_only_build_needs_no_first_run_question() {
-    assert!(
-        UiConfig::default().mode_chosen(),
-        "there is nothing to choose between, so the question would have one honest answer"
-    );
-    assert!(!UiConfig::default().mode_switchable(), "and no way back");
-}
-
-/// A craft-only build never writes `mode` — not even while saving something else.
-///
-/// The trap this guards: `save_config` also runs on ordinary connection edits. Stamping a `mode`
-/// into config.json would pin a user into Craft in a LATER ordinary build, with no record of
-/// their ever having chosen it.
-#[cfg(feature = "craft-only")]
-#[test]
-fn a_craft_only_build_never_persists_a_mode() {
-    let cfg = UiConfig {
-        mode: Some(Mode::Craft),
-        ..UiConfig::default()
-    };
-    let json = serialize_config(&ConfigFields {
-        mode: cfg
-            .mode
-            .filter(|_| cfg.mode_switchable())
-            .map(|m| m.slug().to_string()),
-        ..ConfigFields::default()
-    });
-    assert!(
-        !json.contains("\"mode\""),
-        "a craft-only build must leave no mode behind: {json}"
-    );
-}
-
-/// An ordinary build still offers both modes. The complement of the tests above, so a stray
-/// `cfg!` that hard-wired Craft everywhere would fail something.
-#[cfg(not(feature = "craft-only"))]
-#[test]
-fn an_ordinary_build_still_switches_modes() {
-    assert!(UiConfig::default().mode_switchable());
-    assert!(!UiConfig::default().craft(), "unchosen is not Craft");
-    let cfg = UiConfig {
-        mode: Some(Mode::Craft),
-        ..UiConfig::default()
-    };
-    assert!(cfg.craft());
 }
 
 /// The endpoint-agnostic knobs survive a restart (spec 21).
@@ -181,88 +73,6 @@ fn an_absent_or_malformed_posture_flag_is_off_not_on() {
     let json = serialize_config(&ConfigFields::default());
     assert!(!json.contains("yolo"), "{json}");
     assert!(!json.contains("dry_run"), "{json}");
-}
-
-#[test]
-fn a_corrupt_mode_asks_again_rather_than_guessing() {
-    // Guessing here is the one failure this feature cannot afford: silently resolving garbage to
-    // Assistant would put someone who chose Craft back in front of a model. Unparseable ⇒ None ⇒
-    // ask again.
-    let f = parse_config(r#"{"mode":"CRAFT MODE PLEASE"}"#);
-    assert_eq!(
-        f.mode.as_deref(),
-        Some("CRAFT MODE PLEASE"),
-        "read verbatim"
-    );
-    assert_eq!(
-        f.mode.as_deref().and_then(Mode::from_slug),
-        None,
-        "but rejected"
-    );
-}
-
-/// The Assistant half of this is what a craft-only build has no way to express — there, EVERY
-/// builder returns `None` and the contrast that makes the assertions meaningful doesn't exist.
-/// `a_craft_only_build_is_craft_whatever_the_config_says` covers that build.
-#[cfg(not(feature = "craft-only"))]
-#[test]
-fn craft_mode_builds_no_backend_at_all() {
-    // THE contract behind "no language model is contacted" (spec 21), asserted on CONSTRUCTION
-    // rather than on any proxy for it.
-    //
-    // This matters because constructing a backend is not free: `backend()` and `orchestrator()`
-    // end in `with_detected_context()`, a live `/models` probe. Returning one at all IS the
-    // network call. Making the builders `Option` puts that in the type system, so a caller added
-    // later cannot dial out without handling the `None` — whereas guarding each call site only
-    // ever protects the sites someone remembered to guard.
-    let craft = UiConfig {
-        mode: Some(Mode::Craft),
-        // Fully configured — the refusal must come from the MODE, not from missing config.
-        advisor_model: Some("advisor-model".into()),
-        orchestrator_model: Some("planner-model".into()),
-        ..UiConfig::default()
-    };
-    assert!(craft.backend().is_none(), "no coder backend");
-    assert!(craft.orchestrator().is_none(), "no planner backend");
-    assert!(craft.advisor().is_none(), "no advisor backend");
-    assert!(
-        craft.swarm_advisor().is_none(),
-        "and none via the swarm path"
-    );
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    assert!(craft.backend_cancellable(cancel).is_none());
-
-    // The same config in Assistant mode DOES build them — otherwise the assertions above would
-    // pass for the wrong reason (e.g. a builder that never returns anything).
-    let assistant = UiConfig {
-        mode: Some(Mode::Assistant),
-        ..craft.clone()
-    };
-    assert!(assistant.advisor().is_some(), "Assistant still builds one");
-}
-
-/// Pins the TRI-STATE, which only an ordinary build has: a craft-only build collapses it on
-/// purpose, and `a_craft_only_build_is_craft_whatever_the_config_says` pins that instead.
-#[cfg(not(feature = "craft-only"))]
-#[test]
-fn craft_is_only_true_when_craft_was_actually_chosen() {
-    // `craft()` is the single predicate for "no model", so the unchosen case must NOT read as
-    // Craft — until the user answers, the app behaves as Assistant and the prompt does the
-    // asking. Getting this backwards would silently disable the agent for every fresh install.
-    let unchosen = UiConfig::default();
-    assert!(!unchosen.craft(), "unchosen is not Craft");
-
-    let craft = UiConfig {
-        mode: Some(Mode::Craft),
-        ..UiConfig::default()
-    };
-    assert!(craft.craft() && craft.mode_chosen());
-
-    let assistant = UiConfig {
-        mode: Some(Mode::Assistant),
-        ..UiConfig::default()
-    };
-    assert!(!assistant.craft() && assistant.mode_chosen());
 }
 
 #[test]
@@ -392,30 +202,6 @@ fn resolve_stages_same_provider_leaves_orchestrator_none() {
     cfg.resolve_stages();
     assert_eq!(cfg.orchestrator_url, None);
     assert_eq!(cfg.orchestrator_key, None);
-}
-
-#[test]
-fn resolve_stages_clears_a_stale_planner_model_when_routed_back_to_local() {
-    // The live bug (2026-07-21): the planner was routed to Local but `orchestrator_model` still
-    // held `gemini-2.5-flash-lite` from a previous Gemini routing. `orchestrator()` then asked
-    // the LOCAL endpoint for that model — the local server served whatever was loaded under the
-    // bogus name, so the LOCAL coder model ran the planning phases mislabeled as Gemini.
-    // Routing the planner to the coder's connection must clear the model so it falls back to the
-    // local coder model.
-    let mut cfg = UiConfig {
-        coder_provider: Provider::Local,
-        planner_provider: Provider::Local,
-        orchestrator_model: Some("gemini-2.5-flash-lite".into()), // stale
-        model: "qwen3-coder-30b".into(),
-        ..UiConfig::default()
-    };
-    cfg.resolve_stages();
-    assert_eq!(
-        cfg.orchestrator_model, None,
-        "stale Gemini planner model cleared"
-    );
-    // And orchestrator() then uses the local coder model, not the stale name.
-    // (orchestrator() falls back to self.model when orchestrator_model is None.)
 }
 
 #[test]
@@ -648,9 +434,32 @@ fn swarm_workers_default_to_no_think_and_pin_frozen() {
     assert_eq!(sc.worker.permission.frozen_paths, vec!["tests/a.py"]);
 }
 
+#[test]
+fn resolve_stages_clears_a_stale_planner_model_when_routed_back_to_local() {
+    // The live bug (2026-07-21): the planner was routed to Local but `orchestrator_model` still
+    // held `gemini-2.5-flash-lite` from a previous Gemini routing. `orchestrator()` then asked
+    // the LOCAL endpoint for that model — the local server served whatever was loaded under the
+    // bogus name, so the LOCAL coder model ran the planning phases mislabeled as Gemini.
+    // Routing the planner to the coder's connection must clear the model so it falls back to the
+    // local coder model.
+    let mut cfg = UiConfig {
+        coder_provider: Provider::Local,
+        planner_provider: Provider::Local,
+        orchestrator_model: Some("gemini-2.5-flash-lite".into()), // stale
+        model: "qwen3-coder-30b".into(),
+        ..UiConfig::default()
+    };
+    cfg.resolve_stages();
+    assert_eq!(
+        cfg.orchestrator_model, None,
+        "stale Gemini planner model cleared"
+    );
+    // And orchestrator() then uses the local coder model, not the stale name.
+    // (orchestrator() falls back to self.model when orchestrator_model is None.)
+}
+
 /// The second half — a configured advisor DOES build — is unavailable in a craft-only build,
 /// where no builder returns anything by design.
-#[cfg(not(feature = "craft-only"))]
 #[test]
 fn advisor_requires_a_model() {
     // No advisor model ⇒ no advisor backend.

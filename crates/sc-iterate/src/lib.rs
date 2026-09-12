@@ -299,26 +299,12 @@ pub fn repo_overview(workspace: &Path) -> String {
 }
 
 /// Directories excluded from the repo overview (VCS/build/generated noise).
-pub fn is_noise_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "target"
-            | ".git"
-            | "node_modules"
-            | "__pycache__"
-            | ".smart-coder"
-            | ".pytest_cache"
-            | "screenshots"
-            | "dist"
-            | "build"
-            | "Library"
-            | "Temp"
-            | "obj"
-            | "Logs"
-            | "UserSettings"
-            | "Builds"
-    ) || name.starts_with('.') && name != "."
-}
+///
+/// Re-exported from [`sc_fsutil`], which is the one definition. It lives in a leaf
+/// crate because the editor-only Crafter build needs the same list and cannot depend
+/// on this crate: the Crafter's guarantee is that no model code is in its dependency
+/// tree at all (spec 21), and `sc-iterate` is model code.
+pub use sc_fsutil::is_noise_dir;
 
 /// A windowless `git -C <workspace>` command.
 fn git(workspace: &Path) -> Command {

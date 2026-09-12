@@ -1,0 +1,13 @@
+[package]
+name = "sc-fsutil"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Leaf filesystem conventions shared by the agent and the editor: the noise-dir skip list and the source-file ledger."
+
+[dependencies]
+# The one walk (spec 23). This is the ONLY dependency, and it must stay that way:
+# the point of this crate is that `sc-craft-ui` can depend on it without pulling in
+# anything that talks to a model.
+sc-index = { path = "../sc-index" }

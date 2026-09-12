@@ -33,13 +33,10 @@ impl UiState {
     }
 }
 
-/// The directory the state file lives in: `%APPDATA%\smart-coder` on Windows (always set),
-/// falling back to the system temp dir so we never fail to have *somewhere*.
+/// The directory the state file lives in — the RUNNING PRODUCT's (spec 21). See
+/// [`crate::config::state_dir`], which also honours `SC_STATE_DIR` for tests.
 fn state_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("smart-coder")
+    crate::config::state_dir()
 }
 
 /// The full path to the state file.

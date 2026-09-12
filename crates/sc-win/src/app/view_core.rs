@@ -27,9 +27,7 @@ impl App {
         // The run outcome now lives in the BUILD panel of the bottom strip (not a top
         // banner), so it no longer shoves the three columns down.
         let mut body_col = column![].spacing(GAP);
-        // The phase strip tracks an agent workflow, so it has no meaning in Craft mode. Guarded
-        // rather than assumed impossible: a plan from before the switch would otherwise linger.
-        if self.plan.started() && !self.cfg.craft() {
+        if self.plan.started() {
             body_col = body_col.push(self.view_step_flow());
         }
         // The bottom strip is a PANEL now (`PanelKind::Bottom`), sized by the tree's
@@ -70,11 +68,6 @@ impl App {
         // Over the per-tab prompt: quitting discards everything, so if both are somehow open the
         // more consequential question is the one to answer.
         if let Some(prompt) = self.view_quit_confirm() {
-            layers = layers.push(prompt);
-        }
-        // LAST, so nothing renders over it: until a mode is chosen, the app is not usable and
-        // no other overlay should be reachable (spec 21).
-        if let Some(prompt) = self.view_first_run() {
             layers = layers.push(prompt);
         }
         layers.width(Fill).height(Fill).into()

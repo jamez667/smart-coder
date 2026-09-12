@@ -1,0 +1,26 @@
+[package]
+name = "sc-craft-ui"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The editor half of Smart Coder (spec 21): buffers, layout, git, file tree, terminal, profiler. Shared by both products; depends on no model code."
+
+[dependencies]
+# EVERY dependency here is load-bearing for the split. The Crafter's guarantee is that
+# `cargo tree -p sc-crafter` names no crate that can reach a model, and this crate is
+# the widest part of that tree. Adding sc-core, sc-model, sc-swarm, sc-workflow,
+# sc-iterate, sc-verify or sc-tools here would break that guarantee silently — the
+# Crafter would still compile, and would no longer be what it claims to be.
+#
+# scripts/check.* asserts this with `cargo tree`, so the mistake fails the gate rather
+# than shipping.
+sc-flame = { path = "../sc-flame" }
+sc-index = { path = "../sc-index" }
+sc-fsutil = { path = "../sc-fsutil" }
+iced = { version = "0.14", features = ["tokio", "canvas", "advanced", "image"] }
+# See the note in sc-win's manifest: pinned exactly, pre-1.0 and single-maintainer.
+iced-code-editor = "=0.3.11"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rfd = "0.17"
+serde_json = { workspace = true }

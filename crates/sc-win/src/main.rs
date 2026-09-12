@@ -7,8 +7,6 @@
 
 mod app;
 mod canvas;
-mod flamecanvas;
-mod minimap;
 
 fn main() -> iced::Result {
     // Load a root `.env` (if present) into the environment FIRST, so a key kept there — e.g.

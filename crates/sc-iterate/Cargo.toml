@@ -8,5 +8,7 @@ description = "The iterate-mode flavor (instruction, verify-command detection, g
 
 [dependencies]
 sc-core = { path = "../sc-core" }
+# The noise-dir list, shared with the editor-only Crafter build (spec 21).
+sc-fsutil = { path = "../sc-fsutil" }
 sc-tools = { path = "../sc-tools" }
 sc-verify = { path = "../sc-verify" }

@@ -40,25 +40,28 @@ cargo check --workspace
 echo "==> tests"
 cargo test --workspace
 
-# The CRAFT-ONLY build (spec 21). A cargo feature is only compiled when something
-# asks for it, so without these two gates the flag rots silently: nothing in the
-# default build would notice a `cfg(feature = "craft-only")` block that stopped
-# compiling, or a test whose assumptions the pinned mode invalidates.
+# THE CRAFTER'S GUARANTEE (spec 21).
 #
-# Built into a SEPARATE target dir. Cargo writes every feature variant of a binary to
-# the same `target/debug/sc-win.exe`, so these steps used to leave a craft-only
-# executable sitting at the path a developer then launches -- an app with no Chat, no
-# Claude panel and no backend badge, from a config that says `assistant`. That looked
-# like the layout being corrupted or the mode being wrong, and it was neither: it was
-# the gate silently replacing the binary. Isolating the target dir costs a little disk
-# and makes the gate incapable of touching what you run.
-CRAFT_TARGET="${CARGO_TARGET_DIR:-target}/craft-only"
-
-echo "==> clippy (craft-only)"
-CARGO_TARGET_DIR="$CRAFT_TARGET" cargo clippy -p sc-win --all-targets --features craft-only -- -D warnings
-
-echo "==> tests (craft-only)"
-CARGO_TARGET_DIR="$CRAFT_TARGET" cargo test -p sc-win --features craft-only
+# `smart-coder-crafter` is an editor that cannot contact a language model, and the whole
+# of that claim is its dependency tree: no crate that can reach a model is in it. This
+# check is what keeps the claim true, and it replaced ~1,600 lines of tests that asserted
+# each individual refusal at runtime -- a test proves a path was refused on the day it
+# ran, a dependency tree proves the path does not exist.
+#
+# It fails the moment someone adds a model crate to `sc-crafter` or `sc-craft-ui`. That
+# mistake is otherwise SILENT: the Crafter would still compile, still run, still look
+# right, and no longer be what it says it is.
+echo "==> the crafter links no model code"
+CRAFTER_TREE="$(cargo tree -p sc-crafter --prefix none --no-dedupe)"
+# Match the crate NAME at the start of a line, so a path containing the string (or a
+# crate that merely mentions one) cannot trip this.
+FORBIDDEN="$(echo "$CRAFTER_TREE" | awk '{print $1}' | sort -u | grep -E     '^(sc-core|sc-model|sc-swarm|sc-workflow|sc-iterate|sc-verify|sc-web|sc-proto|sc-comply|sc-tools)$' || true)"
+if [ -n "$FORBIDDEN" ]; then
+    echo "the Crafter must not link model code, but its tree contains:" >&2
+    echo "$FORBIDDEN" >&2
+    echo "See spec 21 -- the editor half belongs in sc-craft-ui." >&2
+    exit 1
+fi
 
 # Retrieval quality (spec 23): does a vague, user-phrased question still find the
 # right function? Model-free and GPU-free -- search is a pure function of the repo

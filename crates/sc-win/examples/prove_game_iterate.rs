@@ -48,7 +48,7 @@ fn main() {
     while !done && Instant::now() < deadline {
         for ev in session.drain_events() {
             if let UiEvent::Agent(e) = &ev {
-                if let Some(f) = sc_win::codeview::file_touched_by(e) {
+                if let Some(f) = sc_win::follow::file_touched_by(e) {
                     if !touched.contains(&f) {
                         touched.push(f);
                     }

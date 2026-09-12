@@ -86,7 +86,7 @@ and a final result object. That is a stream of events, which is exactly the shap
 
 Requirements:
 
-- **Spawn through `proc::command`** <!--@ crates/sc-win/src/proc.rs -->, never
+- **Spawn through `proc::command`** <!--@ crates/sc-craft-ui/src/proc.rs -->, never
   `std::process::Command` directly. That helper sets `CREATE_NO_WINDOW` on
   Windows; the rule exists because subprocess spawns previously flashed hundreds
   of console windows during git polling, and a new spawn site that bypasses it

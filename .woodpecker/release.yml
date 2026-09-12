@@ -1,4 +1,4 @@
-# Release pipeline — builds the sc-win desktop client and publishes it to GitHub
+# Release pipeline — builds BOTH desktop products and publishes them to GitHub
 # Releases. Fires ONLY when a version tag is pushed:
 #
 #     git tag v0.1.0
@@ -49,9 +49,14 @@ steps:
         > /etc/apt/sources.list.d/github-cli.list
       - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
 
-      # Build the release binary and strip it (44MB unstripped -> ~34MB).
-      - cargo build --release -p sc-win
-      - strip target/release/sc-win
+      # Build BOTH products and strip them (44MB unstripped -> ~34MB each).
+      #
+      # `smart-coder` is the agent app; `smart-coder-crafter` is the editor, which links
+      # no model code at all (spec 21). They are separate crates, so this is two builds --
+      # but they share `sc-craft-ui`, so the second is mostly cache hits.
+      - cargo build --release -p sc-win -p sc-crafter
+      - strip target/release/smart-coder
+      - strip target/release/smart-coder-crafter
 
       # Package + publish + prune in ONE shell entry (each `commands:` entry is a
       # fresh shell, so the vars must all live together). CI_COMMIT_TAG, CI_REPO
@@ -70,27 +75,39 @@ steps:
         REPO="$$CI_REPO"
         if [ -z "$$TAG" ]; then echo "CI_COMMIT_TAG is empty - not a tag build?" >&2; exit 1; fi
         if [ -z "$$GITHUB_TOKEN" ]; then echo "github_token secret is not set in Woodpecker" >&2; exit 1; fi
-        PKG="sc-win-$$TAG-linux-x86_64"
         export GH_TOKEN="$$GITHUB_TOKEN"
 
-        # Assemble the package dir: binary + LICENSE + a runtime-deps note.
-        mkdir -p "dist/$$PKG"
-        cp target/release/sc-win "dist/$$PKG/"
-        cp LICENSE "dist/$$PKG/"
-        printf '%s\n' \
-          'smart-coder desktop client (sc-win), Linux x86_64.' \
-          'Run: ./sc-win' \
-          'Needs these shared libraries installed (Debian/Ubuntu names):' \
-          '  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0' \
-          '  libwayland-client0 libwayland-cursor0 libwayland-egl1' \
-          '  libfontconfig1 libfreetype6' \
-          > "dist/$$PKG/README.txt"
-        tar -czf "dist/$$PKG.tar.gz" -C dist "$$PKG"
+        # The shared-library note is the same for both: both are the same iced GUI.
+        SO1='Needs these shared libraries installed (Debian/Ubuntu names):'
+        SO2='  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0'
+        SO3='  libwayland-client0 libwayland-cursor0 libwayland-egl1'
+        SO4='  libfontconfig1 libfreetype6'
 
-        # Publish to GitHub Releases (create, or upload the asset if it exists).
-        gh release create "$$TAG" "dist/$$PKG.tar.gz" \
+        # Two products, two tarballs (spec 21). Packaged in a loop so they cannot
+        # drift -- the only per-product values are the binary name and one line of
+        # description.
+        ASSETS=""
+        for BIN in smart-coder smart-coder-crafter; do
+          if [ "$$BIN" = "smart-coder" ]; then
+            WHAT='Smart Coder desktop client -- the editor plus the agent.'
+          else
+            WHAT='Smart Coder Crafter -- the editor. Contacts no language model.'
+          fi
+          PKG="$$BIN-$$TAG-linux-x86_64"
+          mkdir -p "dist/$$PKG"
+          cp "target/release/$$BIN" "dist/$$PKG/"
+          cp LICENSE "dist/$$PKG/"
+          printf '%s\n' "$$WHAT" 'Linux x86_64.' "Run: ./$$BIN" \
+            "$$SO1" "$$SO2" "$$SO3" "$$SO4" > "dist/$$PKG/README.txt"
+          tar -czf "dist/$$PKG.tar.gz" -C dist "$$PKG"
+          ASSETS="$$ASSETS dist/$$PKG.tar.gz"
+        done
+
+        # Publish to GitHub Releases (create with both assets, or upload them if the
+        # release already exists). Unquoted $$ASSETS on purpose: it is a list.
+        gh release create "$$TAG" $$ASSETS \
           --repo "$$REPO" --title "$$TAG" --generate-notes \
-          || gh release upload "$$TAG" "dist/$$PKG.tar.gz" --repo "$$REPO" --clobber
+          || gh release upload "$$TAG" $$ASSETS --repo "$$REPO" --clobber
 
         # Retention: keep only the 3 newest releases; delete older releases AND
         # their tags (--cleanup-tag) so old assets don't accumulate and eat disk.

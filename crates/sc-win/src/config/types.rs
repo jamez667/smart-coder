@@ -19,39 +19,6 @@ pub enum ToolCalling {
     Gbnf,
 }
 
-/// How the app works: with the agent, or without it (spec 21).
-///
-/// [`Mode::Craft`] is not "the app with the AI switched off" — it is the app's other half. The
-/// model is absent *structurally*: no backend is constructed, no health probe is registered, and
-/// nothing dials out. See [`UiConfig::craft`] for the single predicate every caller reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
-    /// Editor, files, git, terminal — no model is ever contacted.
-    Craft,
-    /// Everything in Craft, plus the agent, chat and review gates.
-    #[default]
-    Assistant,
-}
-
-impl Mode {
-    /// The stable slug persisted in config.json.
-    pub fn slug(self) -> &'static str {
-        match self {
-            Mode::Craft => "craft",
-            Mode::Assistant => "assistant",
-        }
-    }
-    /// Parse a slug back to a mode. Unknown/blank ⇒ `None`, which the caller treats as
-    /// "never chosen" — a corrupt value asks again rather than guessing on the user's behalf.
-    pub fn from_slug(s: &str) -> Option<Self> {
-        match s.trim() {
-            "craft" => Some(Mode::Craft),
-            "assistant" => Some(Mode::Assistant),
-            _ => None,
-        }
-    }
-}
-
 /// A backend *connection*: an endpoint + optional key, named for the settings UI. There is a
 /// **fixed set of two** — [`Provider::Local`] and [`Provider::Gemini`] — so a key (the Gemini
 /// one) lives on exactly one connection and never bleeds onto the local endpoint. Each pipeline
@@ -109,12 +76,6 @@ pub struct Connection {
 /// So the connection model is additive: nothing downstream had to change.
 #[derive(Debug, Clone)]
 pub struct UiConfig {
-    /// How the app works (spec 21): [`Mode::Assistant`] (with the agent) or [`Mode::Craft`]
-    /// (without it). `None` means **never chosen** — a fresh install, or a config.json whose
-    /// stored value was corrupt. The distinction is what lets the first-run prompt ask once and
-    /// never nag again; a bad value asks again rather than picking for the user.
-    pub mode: Option<Mode>,
-
     // --- Connections (the fixed Local + Gemini endpoints) + per-stage routing ---
     /// The local endpoint connection (url + optional key).
     pub local_conn: Connection,
@@ -218,7 +179,6 @@ impl Default for UiConfig {
         Self {
             // Unchosen. Not `Assistant`: "never asked" and "chose the agent" are different
             // states, and only the first should raise the first-run prompt.
-            mode: None,
             // ONE model does everything now (plan + implement) — no swarm, no advisor.
             // NEUTRAL fallback only: the standard llama.cpp port + a generic tag. The
             // real machine-specific endpoint (which model, which port) is NOT baked into
@@ -282,39 +242,7 @@ impl Default for UiConfig {
     }
 }
 
-impl UiConfig {
-    /// Whether the model is off (spec 21). **The one predicate for "no model".**
-    ///
-    /// Read this rather than matching on [`Self::mode`], so the unchosen case can never be
-    /// mistaken for Craft: until the user answers, the app behaves as Assistant and the
-    /// first-run prompt does the asking. Every backend builder and the health-probe
-    /// subscription consult this.
-    ///
-    /// In a `craft-only` build this is unconditionally `true`, and that is the ENTIRE mechanism
-    /// of that build. Every guard the feature needs already exists and already routes through
-    /// here; pinning the predicate makes all of them fire at once, rather than introducing a
-    /// second enforcement path that could drift from the runtime one.
-    pub fn craft(&self) -> bool {
-        cfg!(feature = "craft-only") || self.mode == Some(Mode::Craft)
-    }
-
-    /// Whether the user has ever chosen a mode. `false` ⇒ show the first-run prompt.
-    ///
-    /// A `craft-only` build has nothing to ask: there is no second mode to choose between, so the
-    /// first-run question would be a dialog with one honest answer.
-    pub fn mode_chosen(&self) -> bool {
-        cfg!(feature = "craft-only") || self.mode.is_some()
-    }
-
-    /// Whether this build can switch modes at all.
-    ///
-    /// The one predicate for "offer the mode UI". A `craft-only` build hides the Settings toggle
-    /// and never writes `mode` to `config.json` — writing it would leave a stale, unreachable
-    /// setting behind that a later ordinary build would silently honour.
-    pub fn mode_switchable(&self) -> bool {
-        !cfg!(feature = "craft-only")
-    }
-}
+impl UiConfig {}
 
 /// Attach `key` to `backend` as a bearer token when it is set and non-blank; otherwise return
 /// the backend unchanged (the local-server default — no `Authorization` header). Centralizes the

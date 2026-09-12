@@ -16,18 +16,23 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use sc_verify::SessionContainer;
-
 /// Where a terminal command runs. The app chooses this from its sandbox config: `Host` runs
 /// on the local machine via the platform shell; `Container` runs `docker exec` into the
 /// workspace's persistent session container (the sandbox), so neither the user's typed
 /// commands nor (later) the agent's touch the host.
+///
+/// `Container` carries the container's docker **name** rather than an
+/// `sc_verify::SessionContainer`. `exec_command` only ever read `.name()` off it, and this
+/// crate is in the Crafter's dependency tree, where `sc-verify` may not appear (spec 21).
+/// The agent build passes `SessionContainer::name()` straight in, so nothing changed for
+/// it — and the Crafter keeps a working sandboxed terminal, which it would have lost if
+/// the variant had simply been deleted.
 #[derive(Debug, Clone)]
 pub enum ExecMode {
     /// Run on the host through the platform shell, from `cwd`.
     Host { cwd: PathBuf },
-    /// Run inside the workspace's persistent sandbox container.
-    Container(SessionContainer),
+    /// Run inside the workspace's persistent sandbox container, by docker name.
+    Container { name: String },
 }
 
 impl ExecMode {
@@ -57,7 +62,19 @@ impl ExecMode {
             // `docker exec` already sets `-w /workspace`; no host cwd applies. Routed through
             // `proc::` isn't needed (docker's own client shows no console), but the constructed
             // Command carries no console-suppression flag here — acceptable, docker is quiet.
-            ExecMode::Container(sc) => sc.exec_command(cmdline),
+            ExecMode::Container { name } => {
+                // Mirrors `sc_verify::SessionContainer::exec_command`: the container
+                // mounts the workspace at /workspace and idles, so an exec lands there.
+                let mut c = Command::new("docker");
+                c.arg("exec")
+                    .arg("-w")
+                    .arg("/workspace")
+                    .arg(name)
+                    .arg("sh")
+                    .arg("-c")
+                    .arg(cmdline);
+                c
+            }
         }
     }
 }
@@ -419,14 +436,11 @@ mod tests {
 
     #[test]
     fn container_mode_execs_into_the_session() {
-        let sc = SessionContainer::new(Path::new("/tmp/ws"), "img");
-        let (prog, args) = parts(&ExecMode::Container(sc.clone()).build("cargo build"));
+        let name = "sc-ws-00000000deadbeef".to_string();
+        let (prog, args) = parts(&ExecMode::Container { name: name.clone() }.build("cargo build"));
         assert_eq!(prog, "docker");
         assert_eq!(args[0], "exec");
-        assert!(
-            args.contains(&sc.name().to_string()),
-            "targets our container"
-        );
+        assert!(args.contains(&name), "targets our container");
         assert_eq!(args.last().unwrap(), "cargo build");
     }
 

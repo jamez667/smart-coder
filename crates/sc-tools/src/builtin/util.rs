@@ -5,71 +5,22 @@ use std::path::{Component, Path, PathBuf};
 use sc_proto::{DcError, Result};
 
 /// List the **source** files actually on disk under `workspace` (workspace-relative,
-/// `/`-separated, sorted), excluding test files and tooling caches/deps. This is
-/// filesystem ground truth — what the run has *really* built so far, independent of the
-/// model's own action history — so the agent loop can show the model a progress ledger and
-/// stop it re-creating files that already exist (spec 03/05).
+/// `/`-separated), excluding test files, tooling caches/deps, and the workflow's own
+/// artifacts. This is filesystem ground truth — what the run has *really* built so far,
+/// independent of the model's own action history — so the agent loop can show the model
+/// a progress ledger and stop it re-creating files that already exist (spec 03/05).
 ///
 /// The directory policy is [`sc_index::walk`]'s, shared with every other walk in the
-/// project (spec 23) — including skipping BUILD OUTPUT, which several of the old
-/// walks were missing. Measured on a real Rust project: 40,585 of 41,180 "source"
-/// files were build artifacts, 98.5% noise burying 595 real files. What stays *here*
-/// is the policy that is genuinely this ledger's own: tests are frozen, not output,
-/// and the workflow's own artifacts are not project source.
+/// project (spec 23) — including skipping BUILD OUTPUT, which several of the old walks
+/// were missing. Measured on a real Rust project: 40,585 of 41,180 "source" files were
+/// build artifacts, 98.5% noise burying 595 real files.
 ///
-/// `sc_win::config::workspace::source_files` used to be a hand-synced copy of this
-/// and now calls it.
-pub fn source_files(workspace: &Path) -> Vec<String> {
-    sc_index::walk(workspace, &sc_index::WalkOptions::default())
-        .into_iter()
-        .map(|f| f.rel)
-        .filter(|rel| !is_test_file(rel) && !is_workflow_artifact(rel))
-        .collect()
-}
-
-/// Whether a path is the workflow's **own output** rather than project source.
-///
-/// `specs/<slug>/` holds the planning artifacts a run writes — `spec.md`,
-/// `state.json`, and the daemon's `lease.json` — and unlike `.smart-coder/` it is
-/// deliberately not hidden, because those artifacts are meant to be reviewed as a
-/// diff and committed.
-///
-/// Surveying them as *source* feeds a run its own bookkeeping. Observed live: a
-/// spec drafted against an empty repository listed `lease.json` under "Files to
-/// Touch", because the only file the survey found was the lease the drafting run
-/// was itself holding. The model was reasoning correctly about a survey that was
-/// wrong.
-fn is_workflow_artifact(rel: &str) -> bool {
-    let lower = rel.to_ascii_lowercase();
-    if !lower.starts_with("specs/") {
-        return false;
-    }
-    // Only the machinery — a hand-written `specs/foo/notes.md` is still source,
-    // and excluding a whole directory tree would hide real design documents.
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-    matches!(
-        name,
-        "state.json"
-            | "lease.json"
-            | "spec.md"
-            | "architecture.md"
-            | "layout.md"
-            | "breakdown.md"
-            | "decomposition.md"
-    )
-}
-
-/// Whether a workspace-relative path looks like a test file (so it's excluded from the
-/// source-file ledger — the tests are frozen, not the run's output).
-fn is_test_file(rel: &str) -> bool {
-    let lower = rel.to_ascii_lowercase();
-    lower.contains("/tests/")
-        || lower.starts_with("tests/")
-        || lower.contains("test_")
-        || lower.contains(".test.")
-        || lower.contains("_test.")
-        || lower.contains(".spec.")
-}
+/// Re-exported from [`sc_fsutil`], which is now the one definition. It moved to a leaf
+/// crate so the editor-only Crafter build can share it: the Crafter's guarantee is that
+/// no model code appears in its dependency tree at all (spec 21), and this crate is
+/// model code. The ledger's own policy — tests are frozen rather than output, and the
+/// workflow's artifacts are not project source — moved with it.
+pub use sc_fsutil::source_files;
 
 /// Render `lines` with 1-based line numbers starting at `first`, one `N: text` per
 /// line. This is the ONE format every tool uses to show file content, so a number the

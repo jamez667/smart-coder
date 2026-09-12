@@ -6,25 +6,24 @@ license.workspace = true
 repository.workspace = true
 description = "Native Windows vibe-coding desktop app: type intent, watch the agent/swarm work over the proven core (spec 12 / M9)."
 
+# The agent product. `smart-coder-crafter` is a separate crate (`sc-crafter`) rather than a
+# second `[[bin]]` here, because a bin target in this crate would link this crate's whole
+# dependency tree — including every model crate — and the Crafter's guarantee is that its
+# tree contains none of them (spec 21).
 [[bin]]
-name = "sc-win"
+name = "smart-coder"
 path = "src/main.rs"
 
 [lib]
 name = "sc_win"
 path = "src/lib.rs"
 
-[features]
-# A CRAFT-ONLY build: the editor, with no mode and no way back to the agent (spec 21).
-#
-# Deliberately a flag on the ordinary binary rather than a separate crate graph. The agent crates
-# still compile in — Craft mode was always a *runtime* kill, enforced at the backend builders,
-# and duplicating that as a compile-time split would mean two divergent enforcement paths where
-# today there is one. This flag only pins the switch: `craft()` answers true unconditionally, so
-# every existing guard fires exactly as it does for a user who chose Craft.
-craft-only = []
-
 [dependencies]
+# THE EDITOR. Smart Coder is the Crafter plus an agent (spec 21), so the editor half is a
+# dependency rather than a mode: buffers, layout, git, the file tree, the terminal, the
+# profiler and compile diagnostics all live there and are shared verbatim with
+# `smart-coder-crafter`. What this crate adds on top is everything that talks to a model.
+sc-craft-ui = { path = "../sc-craft-ui" }
 # The folded-stack parser and flame layout, shared with the agent tool. Zero deps.
 sc-flame = { path = "../sc-flame" }
 sc-comply = { path = "../sc-comply" }

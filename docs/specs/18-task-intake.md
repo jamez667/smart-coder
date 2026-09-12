@@ -501,7 +501,7 @@ server takes a `--no-token` flag that disables auth entirely, and the swarm serv
 authenticates nothing at all. Both are defensible for a localhost dashboard
 launched for a minute; neither has any equivalent on a public server. And each
 mirror launch appends its connection URL — token included — to
-`remote-sessions.jsonl` <!--@ crates/sc-win/src/persist.rs -->, which never
+`remote-sessions.jsonl` <!--@ crates/sc-craft-ui/src/persist.rs -->, which never
 rotates: fine for a secret that dies at exit, an append-only log of every key ever
 minted for anything longer. **No credential on this path is written to that file.**
 

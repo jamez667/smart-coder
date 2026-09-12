@@ -54,7 +54,7 @@ while reading the stage breakdown needs that reach, and simplifying it to "send
 back one phase" would remove the pipeline's only path for a late discovery.
 
 *Not built, and awkwardly placed:* the resolution logic lives in the desktop crate
-<!--@ crates/sc-win/src/comments.rs -->, not the engine, so this surface cannot
+<!--@ crates/sc-craft-ui/src/comments.rs -->, not the engine, so this surface cannot
 inherit it by depending on `sc-workflow` — it would have to be lifted into the
 engine first. The `Gate` trait is also narrower than the feature: it receives the
 current phase and one artifact, never the whole state, so a gate implementation

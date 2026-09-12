@@ -31,28 +31,33 @@ Invoke-Step 'rustfmt (check)' { cargo fmt --all -- --check }
 Invoke-Step 'clippy (deny warnings)' { cargo clippy --workspace --all-targets -- -D warnings }
 Invoke-Step 'build' { cargo check --workspace }
 Invoke-Step 'tests' { cargo test --workspace }
-# The CRAFT-ONLY build (spec 21). A cargo feature is only compiled when something asks
-# for it, so without these two gates the flag rots silently: nothing in the default
-# build would notice a `cfg(feature = "craft-only")` block that stopped compiling, or a
-# test whose assumptions the pinned mode invalidates.
+# THE CRAFTER'S GUARANTEE (spec 21).
 #
-# Built into a SEPARATE target dir. Cargo writes every feature variant of a binary to the
-# same target\debug\sc-win.exe, so these steps used to leave a craft-only executable at the
-# path a developer then launches -- an app with no Chat, no Claude panel and no backend
-# badge, from a config that says `assistant`. That looked like a corrupted layout and was
-# neither: it was the gate replacing the binary.
-$CraftBase = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
-$CraftTarget = Join-Path $CraftBase 'craft-only'
-Invoke-Step 'clippy (craft-only)' {
-    $env:CARGO_TARGET_DIR = $CraftTarget
-    try { cargo clippy -p sc-win --all-targets --features craft-only -- -D warnings }
-    finally { Remove-Item Env:CARGO_TARGET_DIR -EA SilentlyContinue }
+# `smart-coder-crafter` is an editor that cannot contact a language model, and the whole
+# of that claim is its dependency tree: no crate that can reach a model is in it. This
+# check is what keeps the claim true, and it replaced ~1,600 lines of tests that asserted
+# each individual refusal at runtime -- a test proves a path was refused on the day it
+# ran, a dependency tree proves the path does not exist.
+#
+# It fails the moment someone adds a model crate to `sc-crafter` or `sc-craft-ui`. That
+# mistake is otherwise SILENT: the Crafter would still compile, still run, still look
+# right, and no longer be what it says it is.
+$Forbidden = @('sc-core', 'sc-model', 'sc-swarm', 'sc-workflow', 'sc-iterate',
+               'sc-verify', 'sc-web', 'sc-proto', 'sc-comply', 'sc-tools')
+Invoke-Step 'the crafter links no model code' {
+    $tree = cargo tree -p sc-crafter --prefix none --no-dedupe 2>$null
+    if (-not $tree) { throw "cargo tree -p sc-crafter produced nothing" }
+    # Match the crate NAME at the start of a line, so a path containing the string
+    # (or a crate that merely mentions one) cannot trip this.
+    $names = $tree | ForEach-Object { ($_ -split ' ')[0] } | Where-Object { $_ }
+    $found = $names | Where-Object { $Forbidden -contains $_ } | Sort-Object -Unique
+    if ($found) {
+        throw ("the Crafter must not link model code, but its tree contains: " +
+               ($found -join ', ') +
+               ". See spec 21 -- the editor half belongs in sc-craft-ui.")
+    }
 }
-Invoke-Step 'tests (craft-only)' {
-    $env:CARGO_TARGET_DIR = $CraftTarget
-    try { cargo test -p sc-win --features craft-only }
-    finally { Remove-Item Env:CARGO_TARGET_DIR -EA SilentlyContinue }
-}
+
 # Spec drift (spec 17): anchors that no longer resolve, assertions that are false.
 # Deterministic and model-free, so it costs nothing to run every time. `unknown`
 # never gates and an ungoverned crate only warns — this fails on BROKEN or STALE.

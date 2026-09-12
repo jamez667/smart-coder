@@ -81,15 +81,16 @@ impl UiConfig {
     /// Build the coder/worker backend, applying the requested tool-calling
     /// enforcement — the mirror of `Cli::backend()`.
     ///
-    /// **`None` in Craft mode** (spec 21). This is the seam that makes "no model is contacted" a
-    /// property of the type rather than of discipline: a caller added later cannot dial out
-    /// without handling the `None`, whereas guarding each call site only protects the sites
-    /// someone remembered to guard. Note constructing a backend is not free — it ends in
-    /// `with_detected_context()`, a live `/models` probe — so this really is the network seam.
+    /// Constructing a backend is not free — it ends in `with_detected_context()`, a live
+    /// `/models` probe — so this is the network seam.
+    ///
+    /// Still returns `Option` though it no longer returns `None`. It used to answer `None` in
+    /// Craft mode, which is how "no model is contacted" was enforced; that is now the Crafter
+    /// being a separate executable with no model crate linked into it (spec 21). The signature
+    /// stays because roughly forty call sites handle the `None`, and flattening them would be a
+    /// large diff for no behaviour change — and because a future "backend unavailable" case
+    /// would want it back.
     pub fn backend(&self) -> Option<OpenAiBackend> {
-        if self.craft() {
-            return None;
-        }
         let b = match self.tool_calling {
             ToolCalling::None => OpenAiBackend::new(self.base_url.clone(), self.model.clone()),
             ToolCalling::Native => {
@@ -123,11 +124,8 @@ impl UiConfig {
 
     /// Build the advisor backend if a model was set — its own URL if given, else the
     /// coder endpoint (mirror of `Cli::advisor()`).
-    /// `None` in Craft mode, as well as when no advisor model is set (spec 21).
+    /// `None` when no advisor model is set.
     pub fn advisor(&self) -> Option<OpenAiBackend> {
-        if self.craft() {
-            return None;
-        }
         let url = self
             .advisor_url
             .clone()
@@ -140,12 +138,10 @@ impl UiConfig {
 
     /// Build the orchestrator (decomposer) backend — its own URL/model if set, else
     /// the worker endpoint/model (mirror of `Cli::orchestrator()`).
-    /// `None` in Craft mode (spec 21) — like [`Self::backend`], this ends in a live `/models`
-    /// probe, so returning it at all would be contacting a model.
+    ///
+    /// `Option` for the same reason as [`Self::backend`]: the Craft-mode `None` is gone, the
+    /// signature stayed.
     pub fn orchestrator(&self) -> Option<OpenAiBackend> {
-        if self.craft() {
-            return None;
-        }
         let url = self
             .orchestrator_url
             .clone()

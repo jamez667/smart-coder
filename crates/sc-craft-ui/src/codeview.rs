@@ -1,13 +1,16 @@
 //! The right-hand CODE panel model: reading a selected file into numbered, bounded
-//! display lines, and deciding *which* file to show as the agent works
-//! ("follow the agent" — the code pane auto-jumps to the file being edited).
+//! display lines.
 //!
-//! Pure logic, no iced types, host-testable. `app.rs` calls [`load`] for the display
-//! lines and [`file_touched_by`] to follow the event stream.
+//! Pure logic, no iced types, host-testable. Both products call [`load`] for the
+//! display lines.
+//!
+//! **"Follow the agent"** — deciding which file to show as the agent works — used to
+//! live here too. It reads `sc_core::AgentEvent`, so it moved to `sc_win::follow`
+//! when the editor was split out (spec 21): this crate is in the Crafter's dependency
+//! tree, and nothing model-shaped may be. [`normalize`] stayed, and is `pub` because
+//! that half still needs it.
 
 use std::path::Path;
-
-use sc_core::AgentEvent;
 
 /// A rendered file for the code viewer: numbered lines plus a header path. Capped so a
 /// giant generated file can't blow the render / memory.
@@ -215,55 +218,11 @@ fn code_fence_body(s: &str) -> Option<String> {
     }
 }
 
-/// If this event is a tool call that *touches a file*, return the workspace-relative
-/// path it touched — so the code pane can follow the agent to it. Covers the file-bearing
-/// tools (read/write/edit/create); returns `None` for everything else.
+/// Normalize a path to a workspace-relative, forward-slashed form. A stray leading
+/// `./` or backslashes shouldn't defeat a tree/highlight match.
 ///
-/// The `arg` on these events is the path the tool acted on (see `sc-cli`'s `print_event`
-/// / the tool schemas): for `read_file`/`write_file`/`create_file`/`edit_file` it is the
-/// file path. We surface writes/edits *and* reads: watching the agent read the file it's
-/// about to change is part of "watch it work", and the next edit re-selects the same file.
-pub fn file_touched_by(ev: &AgentEvent) -> Option<String> {
-    if let AgentEvent::ToolCall { tool, arg } = ev {
-        if matches!(
-            tool.as_str(),
-            // smart-coder's own tools (spec 04) …
-            "read_file" | "write_file" | "create_file" | "edit_file"
-            // … and Claude Code's, which are PascalCase and a different vocabulary
-            // entirely (spec 22). Without these a Claude Code run edits files and the
-            // outcome banner reports zero, while the code pane follows nothing.
-            | "Read" | "Write" | "Edit" | "NotebookEdit"
-        ) {
-            let path = arg.trim();
-            if !path.is_empty() {
-                return Some(normalize(path));
-            }
-        }
-    }
-    None
-}
-
-/// Whether a touched file is an *edit/write* (a real change) vs. a mere read — the pane
-/// prefers to pin to files being changed, but falls back to reads when nothing's been
-/// edited yet.
-pub fn is_mutating_touch(ev: &AgentEvent) -> bool {
-    matches!(
-        ev,
-        AgentEvent::ToolCall { tool, .. }
-            if matches!(
-                tool.as_str(),
-                "write_file" | "create_file" | "edit_file"
-                // Claude Code's writing tools (spec 22). `Read` is deliberately absent —
-                // it is a touch but not a change, exactly like `read_file`.
-                | "Write" | "Edit" | "NotebookEdit"
-            )
-    )
-}
-
-/// Normalize a tool's path arg to a workspace-relative, forward-slashed form. Tool args
-/// are already workspace-relative in practice, but a stray leading `./` or backslashes
-/// shouldn't defeat the tree/highlight match.
-fn normalize(path: &str) -> String {
+/// `pub` for `sc_win::follow`, which normalizes tool-call path args with it.
+pub fn normalize(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
@@ -333,74 +292,5 @@ mod tests {
     fn partial_edit_preview_none_before_anything_useful() {
         assert!(partial_edit_preview("{\"tool\":\"wri").is_none());
         assert!(partial_edit_preview("").is_none());
-    }
-
-    #[test]
-    fn edit_and_read_calls_select_their_file_others_dont() {
-        let edit = AgentEvent::ToolCall {
-            tool: "edit_file".to_string(),
-            arg: "crates/city/src/sim.rs".to_string(),
-        };
-        assert_eq!(
-            file_touched_by(&edit).as_deref(),
-            Some("crates/city/src/sim.rs")
-        );
-        assert!(is_mutating_touch(&edit));
-
-        let read = AgentEvent::ToolCall {
-            tool: "read_file".to_string(),
-            arg: "./crates/city/src/main.rs".to_string(),
-        };
-        assert_eq!(
-            file_touched_by(&read).as_deref(),
-            Some("crates/city/src/main.rs"),
-            "leading ./ normalized"
-        );
-        assert!(!is_mutating_touch(&read), "a read is not a mutation");
-
-        // A non-file tool selects nothing.
-        let other = AgentEvent::ToolCall {
-            tool: "run_verification".to_string(),
-            arg: String::new(),
-        };
-        assert!(file_touched_by(&other).is_none());
-    }
-
-    /// **Claude Code's tools count too** (spec 22).
-    ///
-    /// Its vocabulary is a different one — PascalCase `Edit`/`Write` rather than
-    /// `edit_file`/`write_file`. Recognising only ours meant a Claude Code run edited files
-    /// and the outcome banner reported zero while the code pane followed nothing: two silent
-    /// failures, because an unmatched tool name simply matches nothing.
-    #[test]
-    fn claude_codes_tool_vocabulary_is_recognised_too() {
-        for tool in ["Edit", "Write", "NotebookEdit"] {
-            let ev = AgentEvent::ToolCall {
-                tool: tool.to_string(),
-                arg: "src/main.rs".to_string(),
-            };
-            assert_eq!(
-                file_touched_by(&ev).as_deref(),
-                Some("src/main.rs"),
-                "{tool}"
-            );
-            assert!(is_mutating_touch(&ev), "{tool} writes, so it is a mutation");
-        }
-
-        // `Read` is a touch but NOT a mutation — the same distinction `read_file` draws.
-        let read = AgentEvent::ToolCall {
-            tool: "Read".to_string(),
-            arg: "src/lib.rs".to_string(),
-        };
-        assert_eq!(file_touched_by(&read).as_deref(), Some("src/lib.rs"));
-        assert!(!is_mutating_touch(&read), "reading is not changing");
-
-        // A Claude Code tool that isn't about files selects nothing.
-        let bash = AgentEvent::ToolCall {
-            tool: "Bash".to_string(),
-            arg: "cargo test".to_string(),
-        };
-        assert!(file_touched_by(&bash).is_none());
-        assert!(!is_mutating_touch(&bash));
     }
 }

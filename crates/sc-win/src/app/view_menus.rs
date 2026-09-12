@@ -570,12 +570,6 @@ impl App {
     /// buttons sit inline on its row, beside the file you review in CODE. A `Gate` at the front of
     /// the queue therefore renders nothing here (the master list owns it).
     pub(crate) fn view_gatebar(&self) -> Option<Element<'_, Message>> {
-        // Only an agent asks to run a shell command, so the queue is empty in Craft mode by
-        // construction. Guarded anyway: a pending confirm from before the switch must not
-        // survive into a mode where nothing can answer it.
-        if self.cfg.craft() {
-            return None;
-        }
         // A Claude Code run handles its own permission prompts (spec 22), so this bar stays
         // empty for its duration. The notice saying so lives in the Claude PANEL, beside the
         // run it describes — a notice in a bar the user may not have on screen defeats itself.
@@ -621,24 +615,15 @@ impl App {
                     stage_toggle_button
                 })
         };
-        // In Craft mode the model tabs are hidden entirely rather than shown disabled: they
-        // configure an endpoint nothing will contact (spec 21).
-        let tabs = if self.cfg.craft() {
-            row![tab("General", SettingsTab::General)]
-        } else {
-            row![
-                tab("General", SettingsTab::General),
-                tab("Connections", SettingsTab::Connections),
-                tab("Routing", SettingsTab::Routing),
-            ]
-        }
+        let tabs = row![
+            tab("General", SettingsTab::General),
+            tab("Connections", SettingsTab::Connections),
+            tab("Routing", SettingsTab::Routing),
+        ]
         .spacing(8);
 
         let body = match self.settings_tab {
             SettingsTab::General => self.view_general_tab(),
-            // Craft mode hides these tabs, but the field can still hold a stale value from
-            // before the switch — fall back to General rather than rendering a dead panel.
-            _ if self.cfg.craft() => self.view_general_tab(),
             SettingsTab::Connections => self.view_connections_tab(),
             SettingsTab::Routing => self.view_routing_tab(),
         };
@@ -648,72 +633,18 @@ impl App {
             .into()
     }
 
-    /// The GENERAL tab: how the app works — Craft (no model) or Assistant (spec 21).
+    /// The GENERAL tab.
     ///
-    /// The copy states exactly what Craft mode does and nothing grander: *no language model is
-    /// contacted*. It deliberately does NOT claim a general network kill switch — git push and
-    /// the terminal still reach the network, obviously and by design. Overclaiming here would be
-    /// worse than underclaiming, because the user who wants this setting is the one most likely
-    /// to check.
+    /// This used to lead with the Craft/Assistant switch — the setting that decided whether a
+    /// model was ever contacted. There is no switch now: that choice is which executable you
+    /// launched (spec 21), and this build is the one with the agent. Someone who wants the
+    /// editor alone runs `smart-coder-crafter`, which has its own General tab with no model
+    /// settings in it at all.
     pub(crate) fn view_general_tab(&self) -> Element<'_, Message> {
-        let craft = self.cfg.craft();
-        // A craft-only build has no second mode, so it shows a statement rather than a control.
-        // A disabled checkbox would be worse than none: it implies a setting that exists and is
-        // merely unavailable, when in this build there is nothing to switch to.
-        let toggle: Element<'_, Message> = if self.cfg.mode_switchable() {
-            checkbox(craft)
-                .label("Craft mode — just code, no AI")
-                .on_toggle(Message::ToggleCraftMode)
-                .style(checkbox_style)
-                .into()
-        } else {
-            text("This is a Craft-only build — just code, no AI.")
-                .size(12)
-                .color(GOOD)
-                .into()
-        };
-
-        // What the mode actually does, stated plainly. Both branches are the same size and
-        // weight: switching back is exactly as easy as switching away, and neither reads as the
-        // recommended path.
-        let detail: Element<'_, Message> = if craft {
-            column![
-                text(if self.cfg.mode_switchable() {
-                    "On. No language model is contacted."
-                } else {
-                    // Not "On" — nothing turned it on, and nothing can turn it off.
-                    "No language model is contacted."
-                })
-                .size(11)
-                .color(GOOD),
-                text("The editor, file tree, git and terminal work as normal. Chat, the agent, review gates and the remote mirror are hidden, and no backend health check runs.")
-                    .size(11)
-                    .color(FG_MUTED),
-                text("Git and anything you run in the terminal still reach the network — this setting is about models, not connectivity.")
-                    .size(10)
-                    .color(FG_MUTED),
-            ]
-        } else {
-            column![
-                text("Off. The agent, chat and review gates are available.")
-                    .size(11)
-                    .color(FG_MUTED),
-                text("Turn this on to work without any model. Nothing is lost — the editor, file tree, git and terminal are the same in both modes.")
-                    .size(11)
-                    .color(FG_MUTED),
-            ]
-        }
-        .spacing(6)
-        .into();
+        let mut col = column![text("GENERAL").size(11).color(FG_MUTED)].spacing(10);
 
         // The Unity editor path. Only shown for a Unity project — a setting for a toolchain you
         // aren't using is noise, and the Hub convention finds it without help on most machines.
-        let mut col = column![
-            text("HOW YOU WORK").size(11).color(FG_MUTED),
-            toggle,
-            detail,
-        ]
-        .spacing(10);
 
         if self.project_kind == sc_win::project::ProjectKind::Unity {
             let version = sc_win::project::unity_version(&self.workspace_root())

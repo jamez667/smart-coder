@@ -179,32 +179,22 @@ pub fn run() -> iced::Result {
             // Boot is deferred while the first-run question is open (spec 21): opening a
             // conversation is Assistant-shaped, and doing it before the user has said which mode
             // they want would mean undoing it the moment they answer "Just code".
-            // `Message::ChooseMode` finishes this once they have.
-            if app.picked_workspace.is_some() && app.cfg.mode_chosen() {
+            if app.picked_workspace.is_some() {
                 app.show_welcome();
-                if !app.cfg.craft() {
-                    app.open_conversation();
-                }
+                app.open_conversation();
             }
             // Remote-mirror mode (Claude-Code-remote style): when SC_REMOTE is set, start a
             // mirror server so a phone can attach to THIS live session — see the chat + agent
             // activity, send chat, approve/deny, stop. Bound to 127.0.0.1 (front it with
             // `tailscale serve`); every request needs the printed per-run token.
-            // Refused in Craft mode (spec 21): the mirror exists to bring agent output to a
-            // phone and to accept chat/approvals back, so starting it would be a model surface
-            // arriving through a side door. Say why rather than failing silently — someone who
-            // set SC_REMOTE deliberately deserves to know it was ignored.
+            //
+            // This used to be refused in Craft mode, the mirror being an agent surface. The
+            // editor is now its own executable (spec 21) and carries none of this code, so
+            // there is nothing left to refuse.
             if std::env::var("SC_REMOTE").is_ok() {
-                if app.should_start_mirror() {
-                    app.remote = Some(start_mirror());
-                    // Publish the initially-open project so the phone shows it on first connect.
-                    app.publish_workspace_to_remote();
-                } else {
-                    eprintln!(
-                        "SC_REMOTE ignored: the remote mirror is an agent surface, and this \
-                         install is in Craft mode (Settings ▸ General)."
-                    );
-                }
+                app.remote = Some(start_mirror());
+                // Publish the initially-open project so the phone shows it on first connect.
+                app.publish_workspace_to_remote();
             }
             (app, Task::none())
         },
@@ -265,128 +255,18 @@ pub(crate) use tabs::*;
 mod tests {
     use super::*;
     use sc_win::comply::ComplyModel;
-    use sc_win::config::Mode;
-
-    /// An `App` in a known mode.
-    ///
-    /// `App::default()` reads the developer's real config.json, so a test that cares about mode
-    /// must SET it rather than assume — otherwise it passes or fails depending on whose machine
-    /// it runs on.
-    fn app_in(mode: Mode) -> App {
-        let mut app = App::default();
-        app.cfg.mode = Some(mode);
-        app
-    }
-
-    /// Craft mode spawns no health probe.
-    ///
-    /// This is the mode's whole promise (spec 21): no language model is contacted. The probe is
-    /// the one caller that dials out on a TIMER rather than on a user action, and it builds an
-    /// `OpenAiBackend` DIRECTLY instead of going through `UiConfig::backend()` — so a
-    /// mode-aware builder would miss it entirely. Asserting on the spawn, not the builder, is
-    /// what keeps that hole closed.
-    #[test]
-    fn craft_mode_never_spawns_the_health_probe() {
-        let mut app = app_in(Mode::Craft);
-        app.health_rx = None;
-        app.last_health_probe = None; // "never probed" ⇒ a probe is due
-
-        app.tick_health_probe();
-
-        assert!(
-            app.health_rx.is_none(),
-            "Craft mode must not put a probe in flight"
-        );
-        assert!(
-            app.last_health_probe.is_none(),
-            "and must not record having probed"
-        );
-    }
 
     /// The same tick DOES probe in Assistant mode — otherwise the test above would pass for the
     /// wrong reason (e.g. a probe that never fires in either mode).
-    // A craft-only build has one mode, so there is no switch to exercise.
-    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn assistant_mode_still_spawns_the_health_probe() {
-        let mut app = app_in(Mode::Assistant);
+        let mut app = App::default();
         app.health_rx = None;
         app.last_health_probe = None;
 
         app.tick_health_probe();
 
         assert!(app.health_rx.is_some(), "Assistant mode probes as before");
-    }
-
-    /// Switching to Craft clears the backend verdict.
-    ///
-    /// A stale "backend reachable" badge left on screen in a mode that contacts no backend is a
-    /// lie about the thing the user just asked us to stop doing.
-    // A craft-only build has one mode, so there is no switch to exercise.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn entering_craft_mode_clears_the_backend_health_verdict() {
-        let mut app = app_in(Mode::Assistant);
-        app.backend_health = Some(sc_model::BackendHealth::Ready);
-
-        let _ = app.update(Message::ToggleCraftMode(true));
-
-        assert!(app.cfg.craft(), "mode switched");
-        assert!(app.backend_health.is_none(), "stale verdict dropped");
-        assert!(app.health_rx.is_none(), "no probe left in flight");
-    }
-
-    /// Chat send is refused in Craft mode — at the entry point, not just in the view.
-    ///
-    /// Hiding the composer is presentation. This asserts the REFUSAL: a keyboard shortcut, a
-    /// replayed message, or a caller added later must not be able to spawn a model turn.
-    #[test]
-    fn craft_mode_refuses_to_send_chat() {
-        let mut app = app_in(Mode::Craft);
-        app.intent = "write me a parser".to_string();
-
-        app.send_chat();
-
-        assert!(app.chat_session.is_none(), "no model turn may be spawned");
-        assert_eq!(app.intent, "write me a parser", "composer left untouched");
-    }
-
-    /// Same for starting a run.
-    #[test]
-    fn craft_mode_refuses_to_start_a_run() {
-        let mut app = app_in(Mode::Craft);
-        app.intent = "build the thing".to_string();
-
-        app.start(RunKind::Agent);
-
-        assert!(app.session.is_none(), "no run may be spawned");
-    }
-
-    /// Craft mode refuses Claude Code (spec 22) — it is a model surface like any other.
-    ///
-    /// Two independent conditions, tested apart so a pass can't come from the wrong one: the
-    /// mode refuses it even with the CLI installed, and a missing CLI hides it even in
-    /// Assistant mode.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn craft_mode_refuses_claude_code_and_so_does_a_missing_cli() {
-        let mut craft = app_in(Mode::Craft);
-        craft.claude_available = true; // installed, and still refused
-        assert!(
-            !craft.claude_code_available(),
-            "Craft mode contacts no model, and Claude Code is a model surface"
-        );
-
-        let mut assistant = app_in(Mode::Assistant);
-        assistant.claude_available = false;
-        assert!(
-            !assistant.claude_code_available(),
-            "a menu item that always fails is worse than no menu item"
-        );
-
-        // The complement, so this cannot pass by never offering it at all.
-        assistant.claude_available = true;
-        assert!(assistant.claude_code_available());
     }
 
     /// A Claude Code run says approvals are delegated, rather than showing an empty bar.
@@ -399,10 +279,9 @@ mod tests {
     /// Its positive case needs a real subprocess, so what is asserted here is the half that
     /// can go wrong silently: a finished run must not leave the notice on screen claiming
     /// smart-coder is not gating, when the next run through the normal path would be.
-    #[cfg(not(feature = "craft-only"))]
     #[test]
     fn the_delegated_approvals_notice_does_not_outlive_its_run() {
-        let mut app = app_in(Mode::Assistant);
+        let mut app = App::default();
         app.claude_run = true;
         app.session = None; // the run ended
         assert!(
@@ -411,81 +290,9 @@ mod tests {
         );
 
         // And Craft mode shows nothing at all, whatever the flags say.
-        let mut craft = app_in(Mode::Craft);
+        let mut craft = App::default();
         craft.claude_run = true;
         assert!(craft.view_gatebar().is_none());
-    }
-
-    /// A stale message cannot start a run the UI would not have offered.
-    ///
-    /// The button is hidden when unavailable, but a queued `Task` or a message in flight across
-    /// a mode switch can still arrive — so the handler refuses rather than trusting the view.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn a_stale_claude_code_message_starts_nothing() {
-        let mut app = app_in(Mode::Craft);
-        app.claude_available = true;
-        app.intent = "do the thing".to_string();
-
-        let _ = app.update(Message::RunClaudeCode);
-
-        assert!(app.session.is_none(), "no run may be spawned in Craft mode");
-    }
-
-    /// The fourth leg of the zero-construction contract: remote attach.
-    ///
-    /// `SC_REMOTE` starts a server that carries agent output to a phone and accepts chat and
-    /// approvals back — a model surface arriving through a side door, and the one leg the spec
-    /// names that had no test. Asserted through the predicate rather than `run()`, which would
-    /// bind a real socket.
-    ///
-    /// Ordinary build only: it asserts the Assistant side too, and a craft-only build has no
-    /// Assistant mode to compare against.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn craft_mode_refuses_the_remote_mirror() {
-        assert!(
-            !app_in(Mode::Craft).should_start_mirror(),
-            "the mirror is an agent surface, so Craft mode must refuse it"
-        );
-        // The complement, so this can't pass by never starting the mirror in any mode.
-        assert!(
-            app_in(Mode::Assistant).should_start_mirror(),
-            "Assistant mode still attaches"
-        );
-    }
-
-    /// A line comment still SAVES in Craft mode; only the auto-fix stops.
-    ///
-    /// The distinction matters: line comments are a review annotation, not an AI feature — they
-    /// are also how Send back harvests revision notes. A naive "hide the AI bits" pass would
-    /// break the annotation along with the model call.
-    #[test]
-    fn craft_mode_keeps_line_comments_but_never_triages_them() {
-        let mut app = app_in(Mode::Craft);
-        app.panes.focused_mut().code = Some(sc_win::codeview::CodeView {
-            rel: "src/main.rs".to_string(),
-            lines: vec![(1, "fn main() {}".to_string())],
-            truncated: false,
-            note: None,
-        });
-        app.panes.focused_mut().comment_range = Some((1, 1));
-        app.panes.focused_mut().comment_draft = "this allocates twice".to_string();
-
-        app.submit_line_comment();
-
-        assert!(app.triage.is_none(), "no triage call may be spawned");
-        assert!(app.working.is_none(), "and no agent-working range is set");
-        assert!(
-            app.comments
-                .on_file("src/main.rs")
-                .any(|(_, c)| c.text == "this allocates twice"),
-            "but the comment itself is kept"
-        );
-        assert!(
-            app.panes.focused_mut().comment_range.is_none(),
-            "and the box closes"
-        );
     }
 
     /// Clicking a diagnostic opens its file and queues the scroll to its line.
@@ -612,42 +419,31 @@ mod tests {
         dir
     }
 
-    /// Switching modes swaps the layout, and each mode keeps its own arrangement.
+    /// The panel arrangement survives a save/load round trip.
     ///
-    /// A shared tree would mean entering Craft mode silently rearranged the Assistant one — the
-    /// user would come back to find their panels moved by a setting that was supposed to be
-    /// reversible.
-    // A craft-only build has one mode, so there is no switch to exercise.
-    #[cfg(not(feature = "craft-only"))]
+    /// This used to assert that Craft and Assistant each kept their OWN arrangement across a
+    /// mode switch. There is no switch now — the two products are separate executables with
+    /// separate state directories (spec 21) — so what is left to protect is the half that can
+    /// still regress: a hidden panel must stay hidden after a reload, rather than the stored
+    /// tree being discarded and the default rebuilt.
     #[test]
-    fn each_mode_keeps_its_own_panel_arrangement() {
+    fn the_panel_arrangement_survives_a_reload() {
         use sc_win::layout::{EditorId, PanelKind};
-        let dir = redirect_layout_state("modes");
-        let mut app = app_in(Mode::Assistant);
+        let dir = redirect_layout_state("arrangement");
+        let mut app = App::default();
         app.layout = sc_win::layout::Layout::assistant_default();
 
-        // Rearrange Assistant: drop the git panel.
         let _ = app.update(Message::TogglePanel(PanelKind::Git));
         assert!(!app.layout.contains(PanelKind::Git), "hidden");
-        assert!(app.layout.contains(PanelKind::Chat), "still Assistant");
 
-        // Into Craft: chat is gone, and this is a DIFFERENT arrangement.
-        let _ = app.update(Message::ToggleCraftMode(true));
+        let reloaded = sc_win::layout::LayoutStore::load().get();
         assert!(
-            !app.layout.contains(PanelKind::Chat),
-            "no chat without a model"
+            !reloaded.contains(PanelKind::Git),
+            "the hidden panel must stay hidden across a reload"
         );
         assert!(
-            app.layout.contains(PanelKind::Editor(EditorId::FIRST)),
-            "editor survives"
-        );
-
-        // Back to Assistant: the arrangement we left is restored, git still hidden.
-        let _ = app.update(Message::ToggleCraftMode(false));
-        assert!(app.layout.contains(PanelKind::Chat), "chat is back");
-        assert!(
-            !app.layout.contains(PanelKind::Git),
-            "and OUR arrangement survived the round trip"
+            reloaded.contains(PanelKind::Editor(EditorId::FIRST)),
+            "and the editor must survive"
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -958,7 +754,7 @@ mod tests {
     #[test]
     fn splitting_with_no_file_open_does_nothing() {
         let dir = redirect_layout_state("split-empty");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = sc_win::layout::Layout::craft_default();
 
         let _ = app.update(Message::SplitEditor);
@@ -1186,7 +982,7 @@ mod tests {
     fn dropping_a_panel_on_another_rearranges_and_persists() {
         use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("panel-drop");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = sc_win::layout::Layout::craft_default();
         let before = app.layout.clone();
 
@@ -1239,7 +1035,7 @@ mod tests {
     fn dropping_at_the_bottom_edge_docks_across_the_full_width() {
         use sc_win::layout::{Axis, EditorId, Layout, PanelKind, Side};
         let dir = redirect_layout_state("panel-bottom-drop");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = Layout::craft_default();
 
         // A 1000x800 window with a 34px menu bar → the tree is 1000x766, well short of the
@@ -1292,7 +1088,7 @@ mod tests {
     fn dropping_on_the_window_dock_frame_spans_the_layout() {
         use sc_win::layout::{Axis, Layout, PanelKind, Side};
         let dir = redirect_layout_state("dock-frame");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = Layout::craft_default();
 
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
@@ -1322,7 +1118,7 @@ mod tests {
     fn the_dock_frame_supersedes_a_per_panel_target() {
         use sc_win::layout::{EditorId, Layout, PanelKind, Side};
         let dir = redirect_layout_state("dock-priority");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = Layout::craft_default();
 
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
@@ -1357,7 +1153,7 @@ mod tests {
     fn releasing_outside_a_drop_target_cancels_the_drag() {
         use sc_win::layout::PanelKind;
         let dir = redirect_layout_state("panel-cancel");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = sc_win::layout::Layout::craft_default();
         let before = app.layout.clone();
 
@@ -1379,7 +1175,7 @@ mod tests {
     fn the_editor_panel_cannot_be_hidden() {
         use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("no-hide-editor");
-        let mut app = app_in(Mode::Craft);
+        let mut app = App::default();
         app.layout = sc_win::layout::Layout::craft_default();
 
         let _ = app.update(Message::TogglePanel(PanelKind::Editor(EditorId::FIRST)));
@@ -1390,68 +1186,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// The first-run question shows only while no mode has been chosen.
-    ///
-    /// The tri-state is the point: "never asked" is a different state from "chose Assistant",
-    /// and collapsing them would either nag someone who already answered or never ask at all.
-    // A craft-only build has one mode, so there is no switch to exercise.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn the_first_run_question_shows_once_and_only_when_unanswered() {
-        let mut app = App::default();
-
-        app.cfg.mode = None;
-        assert!(
-            app.view_first_run().is_some(),
-            "unanswered → the question is asked"
-        );
-
-        for m in [Mode::Craft, Mode::Assistant] {
-            app.cfg.mode = Some(m);
-            assert!(
-                app.view_first_run().is_none(),
-                "{} was chosen → never asked again",
-                m.slug()
-            );
-        }
-    }
-
-    /// Answering the question records the mode.
-    // A craft-only build has one mode, so there is no switch to exercise.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn choosing_a_mode_answers_the_question_for_good() {
-        for (craft, expected) in [(true, Mode::Craft), (false, Mode::Assistant)] {
-            let mut app = App::default();
-            app.cfg.mode = None;
-
-            let _ = app.update(Message::ChooseMode(craft));
-
-            assert_eq!(app.cfg.mode, Some(expected));
-            assert!(app.cfg.mode_chosen(), "and it counts as answered");
-            assert!(app.view_first_run().is_none(), "so the prompt is gone");
-        }
-    }
-
-    /// Escape only means anything while the question is open.
-    ///
-    /// It declines (and so quits) rather than picking — being chosen for is precisely what this
-    /// feature avoids. Once a mode exists, Escape must not be repurposed silently.
-    #[test]
-    fn escape_declines_the_question_but_is_inert_afterwards() {
-        let mut app = App::default();
-        app.cfg.mode = Some(Mode::Assistant);
-        let _ = app.update(Message::EscapePressed);
-        assert_eq!(app.cfg.mode, Some(Mode::Assistant), "nothing changed");
-
-        // Unanswered: Escape must NOT write a mode. Declining is not an answer, so the question
-        // returns on the next launch.
-        let mut app = App::default();
-        app.cfg.mode = None;
-        let _ = app.update(Message::EscapePressed);
-        assert_eq!(app.cfg.mode, None, "declining never picks a mode");
     }
 
     /// A scratch workspace with one file in it, and an `App` pointed at it.
@@ -1695,20 +1429,6 @@ mod tests {
         assert!(app.panes.focused_mut().tabs[0].dirty);
 
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// Toggling back restores Assistant, and is exactly one message either way.
-    ///
-    /// Spec 21 requires the return trip to be as easy as the outbound one — no confirmation, no
-    /// extra step. If this ever needs two messages, that requirement has been broken.
-    // A craft-only build has one mode, so there is no switch to exercise.
-    #[cfg(not(feature = "craft-only"))]
-    #[test]
-    fn craft_mode_toggles_back_off() {
-        let mut app = app_in(Mode::Craft);
-        let _ = app.update(Message::ToggleCraftMode(false));
-        assert!(!app.cfg.craft());
-        assert_eq!(app.cfg.mode, Some(Mode::Assistant), "chosen, not unchosen");
     }
 
     /// The dialog opens with no model selected.

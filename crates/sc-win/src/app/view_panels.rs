@@ -40,32 +40,6 @@ impl App {
     /// verify output, no build result — so planning gets the full height. During a swarm
     /// build the coder prompt/output panel takes the whole strip.
     pub(crate) fn view_bottom_strip(&self) -> Option<Element<'_, Message>> {
-        // Craft mode: the Terminal only. Verification and Build report on an AGENT run — its
-        // verify output, its outcome, its "build this plan" actions — so both are empty shells
-        // without a model. The strip itself stays: a terminal is core to "just code".
-        if self.cfg.craft() {
-            return self.picked_workspace.is_some().then(|| {
-                // Problems FIRST: with no agent, "does it compile?" is the question this strip
-                // exists to answer.
-                let tabs = row![
-                    self.bottom_tab_button("Problems", BottomTab::Problems),
-                    self.bottom_tab_button("Terminal", BottomTab::Terminal),
-                ]
-                .spacing(4);
-                let content = match self.bottom_tab {
-                    BottomTab::Terminal => self.view_terminal_tab(),
-                    // Verification/Build are Assistant-only; a stale selection lands on
-                    // Problems rather than rendering an empty panel.
-                    _ => self.view_problems_tab(),
-                };
-                container(column![tabs, content].spacing(6))
-                    .width(Fill)
-                    .height(Length::Fixed(180.0))
-                    .padding(10)
-                    .style(card_style)
-                    .into()
-            });
-        }
         if self.is_swarm() {
             return Some(self.view_coder_io());
         }
@@ -399,13 +373,7 @@ impl App {
         let status = text(self.workspace_status())
             .size(11)
             .color(iced::Color::from_rgb(0.55, 0.58, 0.70));
-        // No badge in Craft mode: it reports a MODEL endpoint's state, and there is no model to
-        // report on. Leaving it would also be a lie — the probe that feeds it never runs.
-        let health: Element<'_, Message> = if self.cfg.craft() {
-            Space::new().into()
-        } else {
-            self.view_backend_badge()
-        };
+        let health: Element<'_, Message> = self.view_backend_badge();
         let bar = row![
             file,
             view_m,
@@ -563,19 +531,14 @@ impl App {
                     },
                     Message::ToggleSettings,
                 )];
-                // Show/hide each panel (spec 21). A tick marks what's on screen. Chat is omitted
-                // in Craft mode — it can't be shown there, and offering a toggle that silently
-                // does nothing is worse than not offering it.
+                // Show/hide each panel (spec 21). A tick marks what's on screen.
                 v.push(("— Panels —".to_string(), Message::NoOp));
                 // Derived from the LAYOUT, not a fixed list: how many editor panes exist is the
                 // user's arrangement, not a property of the type. `menu_label` numbers them.
                 for kind in sc_win::layout::menu_panels(&self.layout) {
-                    if self.cfg.craft() && kind.needs_model() {
-                        continue;
-                    }
                     // The Claude panel is only offered when the CLI is actually installed
                     // (spec 22) — a toggle that reveals a panel saying "not installed" is a
-                    // worse answer than not offering it. Same rule as the Craft filter above.
+                    // worse answer than not offering it.
                     if kind == sc_win::layout::PanelKind::Claude && !self.claude_available {
                         continue;
                     }
@@ -740,87 +703,6 @@ impl App {
         }
 
         col.into()
-    }
-
-    /// The first-run question: how do you want to work? (spec 21)
-    ///
-    /// Shown once, on the first launch where no mode has ever been chosen, and never again.
-    /// `None` once [`UiConfig::mode_chosen`] is true.
-    ///
-    /// **No persuasion.** The two cards are the same size, the same weight, and in neither order
-    /// is one marked "recommended"; nothing is pre-selected and there is no default-on-Enter.
-    /// The person this setting exists for came here distrusting AI products — a nudge would read
-    /// as confirmation, and they would be right. There is also no ✕: dismissing quits
-    /// ([`Message::DeclineToChoose`]) rather than picking for them.
-    pub(crate) fn view_first_run(&self) -> Option<Element<'_, Message>> {
-        if self.cfg.mode_chosen() {
-            return None;
-        }
-
-        // Opaque, not the usual 55% scrim: there is nothing behind this worth looking at yet,
-        // and a half-visible UI invites clicking past the question.
-        let backdrop =
-            iced::widget::mouse_area(container(Space::new()).width(Fill).height(Fill).style(
-                |_t: &Theme| container::Style {
-                    background: Some(Background::Color(Color {
-                        a: 0.92,
-                        ..Color::BLACK
-                    })),
-                    ..container::Style::default()
-                },
-            ))
-            .on_press(Message::DeclineToChoose);
-
-        // One card per mode. Identical construction — same width, same padding, same style — so
-        // neither can read as the favoured one.
-        let card = |title: &str, body: &str, msg: Message| {
-            button(
-                column![
-                    text(title.to_string()).size(15).color(FG),
-                    text(body.to_string()).size(11).color(FG_MUTED),
-                ]
-                .spacing(8),
-            )
-            .on_press(msg)
-            .width(Length::Fixed(230.0))
-            .padding(16)
-            .style(menu_item_style)
-        };
-
-        let choices = row![
-            card(
-                "Just code",
-                "Editor, files, git and terminal.\nNo language model is ever contacted.",
-                Message::ChooseMode(true),
-            ),
-            card(
-                "Code with AI",
-                "Everything in Just code, plus the\nagent, chat and review gates.",
-                Message::ChooseMode(false),
-            ),
-        ]
-        .spacing(14);
-
-        let body = container(
-            column![
-                text("How do you want to work?").size(20).color(FG),
-                choices,
-                text("You can change this any time in Settings ▸ General.")
-                    .size(11)
-                    .color(FG_MUTED),
-            ]
-            .spacing(18)
-            .align_x(iced::Alignment::Center),
-        )
-        .padding(28)
-        .style(dropdown_style);
-
-        Some(
-            iced::widget::stack![backdrop, iced::widget::center(iced::widget::opaque(body))]
-                .width(Fill)
-                .height(Fill)
-                .into(),
-        )
     }
 
     /// "You have unsaved changes" — shown instead of quitting (spec 21).

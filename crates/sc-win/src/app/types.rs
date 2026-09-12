@@ -492,10 +492,10 @@ impl Default for App {
         // Restore saved divider positions (one id-keyed store), so each split comes back where the
         // user left it. Defaults match the historical hardcoded fractions.
         let splits = sc_win::splits::SplitStore::load();
-        // The panel arrangement for whichever mode we're in. An unusable stored tree (no editor,
-        // too deep, corrupt) falls back to the default rather than wedging the window.
+        // The panel arrangement. An unusable stored tree (no editor, too deep, corrupt) falls
+        // back to the default rather than wedging the window.
         let layouts = sc_win::layout::LayoutStore::load();
-        let layout = layouts.get(cfg.craft());
+        let layout = layouts.get();
         // Re-open the last project the user worked in (if it still exists on disk), so the
         // app comes back to where they left off instead of the empty scratch base.
         let picked_workspace = sc_win::persist::load().last_project;
@@ -643,12 +643,9 @@ impl Default for App {
     }
 }
 
-/// Which tab of the settings modal is showing. **General** carries the Craft/Assistant mode
-/// switch (spec 21); **Connections** edits the two endpoints + keys; **Routing** picks which
-/// connection + model each pipeline stage uses.
-///
-/// General is the default because it is the only tab that means anything in Craft mode — the
-/// other two configure a model that Craft mode never contacts.
+/// Which tab of the settings modal is showing. **Connections** edits the two endpoints + keys;
+/// **Routing** picks which connection + model each pipeline stage uses; **General** carries
+/// everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsTab {
     #[default]
@@ -723,23 +720,6 @@ pub(crate) enum Message {
     DiscardAndQuit,
     /// Dismiss the quit prompt and stay open.
     CancelQuit,
-    /// Switch between Craft (no model) and Assistant (spec 21). `true` ⇒ Craft.
-    ///
-    /// Takes effect immediately and persists: entering Craft cancels any in-flight run, because
-    /// a session outliving the switch would contradict the mode's whole promise.
-    ToggleCraftMode(bool),
-    /// The answer to the first-run question (spec 21). `true` ⇒ Craft.
-    ///
-    /// Distinct from [`Message::ToggleCraftMode`] because this one also completes the boot the
-    /// prompt was holding up — opening the remembered project once a mode exists to open it in.
-    ChooseMode(bool),
-    /// Dismissing the first-run prompt without answering — quits.
-    ///
-    /// Choosing is cheap; being chosen for is the thing this whole feature avoids. Someone who
-    /// closes the question rather than answering it has not consented to either mode.
-    DeclineToChoose,
-    /// Escape. Declines the first-run question if it's open; otherwise does nothing.
-    EscapePressed,
     /// The Claude panel's task input changed (spec 22).
     ClaudeInputChanged(String),
     /// Open/close the Claude panel's ⚙ options menu.

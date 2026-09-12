@@ -194,7 +194,6 @@ impl App {
         // and we can simply drop the pane — no half-done split, no tab stranded somewhere
         // nothing renders.
         let new_id = self.panes.insert();
-        let craft = self.cfg.craft();
         // `insert_at`, not `with`: `with` descends to the first leaf it finds, which on the
         // default tree is the git panel — it would split the explorer instead of the editor.
         // The new pane belongs beside the editor that spawned it.
@@ -206,13 +205,13 @@ impl App {
                 sc_win::layout::Side::Right,
                 &format!("split:{from}|{new_id}"),
             )
-            .and_then(|l| l.sanitize(craft))
+            .and_then(|l| l.sanitize())
         else {
             self.panes.remove(new_id);
             return;
         };
         self.layout = next.clone();
-        self.layouts.set(craft, next);
+        self.layouts.set(next);
         self.layouts.save();
 
         if move_tab {
@@ -327,7 +326,6 @@ impl App {
         }
 
         let new_id = self.panes.insert();
-        let craft = self.cfg.craft();
         // A window-edge drop spans the whole layout; a panel-edge drop splits that panel.
         let placed = match target {
             Some(t) => self.layout.insert_at(
@@ -341,13 +339,13 @@ impl App {
                     .with_at_edge(PanelKind::Editor(new_id), side, &format!("edge:{new_id}"))
             }
         };
-        let Some(next) = placed.and_then(|l| l.sanitize(craft)) else {
+        let Some(next) = placed.and_then(|l| l.sanitize()) else {
             // Nothing moved yet, so dropping the pane leaves no half-done state.
             self.panes.remove(new_id);
             return;
         };
         self.layout = next.clone();
-        self.layouts.set(craft, next);
+        self.layouts.set(next);
         self.layouts.save();
 
         self.move_tab_between_panes(&path, from, new_id);
@@ -388,7 +386,6 @@ impl App {
         if empties.len() >= self.panes.len() {
             return;
         }
-        let craft = self.cfg.craft();
         for id in empties {
             if !self.panes.remove(id) {
                 continue; // the last pane stays
@@ -396,10 +393,10 @@ impl App {
             if let Some(next) = self
                 .layout
                 .without(sc_win::layout::PanelKind::Editor(id))
-                .and_then(|l| l.sanitize(craft))
+                .and_then(|l| l.sanitize())
             {
                 self.layout = next.clone();
-                self.layouts.set(craft, next);
+                self.layouts.set(next);
                 self.layouts.save();
             }
         }

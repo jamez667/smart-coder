@@ -2,7 +2,7 @@
 //!
 //! Rendering glue only. Every decision that can be *wrong* — which rectangle goes where, what
 //! a frame's share of the run is, which frames match a search — is computed by the pure
-//! functions in [`sc_win::flame`] and tested there without a window. What lives here is the
+//! functions in [`crate::flame`] and tested there without a window. What lives here is the
 //! part that needs a renderer: colours, text elision, and hit-testing.
 //!
 //! # Why a canvas and not a pile of widgets
@@ -15,7 +15,7 @@
 use ::iced::widget::canvas::{self as iced_canvas, Canvas, Frame, Geometry, Path, Stroke, Text};
 use ::iced::{mouse, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
-use sc_win::flame::{self, Placed};
+use crate::flame::{self, Placed};
 
 /// Height of one frame row, in pixels. Tuned so an 11px label sits comfortably inside.
 pub const ROW: f32 = 17.0;
@@ -89,13 +89,36 @@ impl<'a> FlameCanvas<'a> {
 
     /// Build the element. Height is the tree's depth in rows, so the graph scrolls
     /// inside its container rather than being squashed to fit.
-    pub fn view(self) -> Element<'a, crate::app::Message> {
+    ///
+    /// `on_zoom` and `on_hover` turn a frame path and a hovered frame into the caller's
+    /// own messages. The widget is generic over the message type because the two products
+    /// have two different `Message` enums (spec 21) and this crate is shared by both — it
+    /// cannot name either. Each passes its own constructors, e.g. `Message::FlameZoom`
+    /// and `Message::FlameHover`.
+    pub fn view<M: 'static>(
+        self,
+        on_zoom: fn(Vec<String>) -> M,
+        on_hover: fn(Option<Box<Placed>>) -> M,
+    ) -> Element<'a, M> {
         let rows = self.root.depth().max(1) as f32;
-        Canvas::new(self)
-            .width(Length::Fill)
-            .height(Length::Fixed(rows * ROW))
-            .into()
+        Canvas::new(WithMsgs {
+            inner: self,
+            on_zoom,
+            on_hover,
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(rows * ROW))
+        .into()
     }
+}
+
+/// The flame graph paired with its message constructors — what actually implements iced's
+/// `Program`, so [`FlameCanvas`] itself stays a plain view model the caller can build and
+/// test without naming a message type.
+struct WithMsgs<'a, M> {
+    inner: FlameCanvas<'a>,
+    on_zoom: fn(Vec<String>) -> M,
+    on_hover: fn(Option<Box<Placed>>) -> M,
 }
 
 /// Which placed frame is under a point, if any.
@@ -111,7 +134,7 @@ fn hit(placed: &[Placed], pos: Point, width: f32) -> Option<&Placed> {
     })
 }
 
-impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
+impl<M> iced_canvas::Program<M> for WithMsgs<'_, M> {
     type State = ();
 
     fn update(
@@ -120,9 +143,9 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
         event: &iced_canvas::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> Option<iced_canvas::Action<crate::app::Message>> {
+    ) -> Option<iced_canvas::Action<M>> {
         use ::iced::widget::canvas::Event;
-        let placed = flame::layout(self.root, MIN_WIDTH);
+        let placed = flame::layout(self.inner.root, MIN_WIDTH);
         match event {
             // Click a frame to zoom into it. Clicking the frame already at the top is the
             // natural "zoom out one" gesture, so it publishes the parent's path instead.
@@ -133,23 +156,23 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
                 if f.depth == 0 {
                     path.pop();
                 }
-                Some(iced_canvas::Action::publish(
-                    crate::app::Message::FlameZoom(path),
-                ))
+                Some(iced_canvas::Action::publish((self.on_zoom)(path)))
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 // Off the canvas entirely ⇒ clear the detail line, so it never reports a frame
                 // the cursor has left.
                 let Some(pos) = cursor.position_in(bounds) else {
-                    return self.hovered.is_some().then(|| {
-                        iced_canvas::Action::publish(crate::app::Message::FlameHover(None))
-                    });
+                    return self
+                        .inner
+                        .hovered
+                        .is_some()
+                        .then(|| iced_canvas::Action::publish((self.on_hover)(None)));
                 };
                 let found = hit(&placed, pos, bounds.width);
                 // Only publish on a CHANGE. A cursor move within one frame fires this event
                 // continuously, and redrawing the whole panel per pixel is how a profiler
                 // viewer ends up slower than the code it is profiling.
-                let same = match (found, self.hovered) {
+                let same = match (found, self.inner.hovered) {
                     (Some(a), Some(b)) => a.path == b.path,
                     (None, None) => true,
                     _ => false,
@@ -157,9 +180,9 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
                 if same {
                     return None;
                 }
-                Some(iced_canvas::Action::publish(
-                    crate::app::Message::FlameHover(found.cloned().map(Box::new)),
-                ))
+                Some(iced_canvas::Action::publish((self.on_hover)(
+                    found.cloned().map(Box::new),
+                )))
             }
             _ => None,
         }
@@ -175,14 +198,18 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let w = bounds.width;
-        let placed = flame::layout(self.root, MIN_WIDTH);
+        let placed = flame::layout(self.inner.root, MIN_WIDTH);
 
         for p in &placed {
             let x = p.x * w;
             let y = p.depth as f32 * ROW;
             let fw = (p.width * w).max(1.0);
-            let matched = flame::matches(&p.name, self.search);
-            let hovered = self.hovered.map(|h| h.path == p.path).unwrap_or(false);
+            let matched = flame::matches(&p.name, self.inner.search);
+            let hovered = self
+                .inner
+                .hovered
+                .map(|h| h.path == p.path)
+                .unwrap_or(false);
 
             // A 1px inset gives the classic separated-brick look without drawing borders, which
             // would double the geometry for no gain.
@@ -221,7 +248,7 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
 
         // Nothing to draw at all: say so rather than showing a blank rectangle that reads as a
         // broken panel.
-        if placed.len() <= 1 && self.root.total == 0 {
+        if placed.len() <= 1 && self.inner.root.total == 0 {
             frame.fill_text(Text {
                 content: "— no samples —".to_string(),
                 position: Point::new(w / 2.0, ROW),
@@ -235,7 +262,7 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
 
         // A hairline under the hovered row helps the eye tie the rectangle to the detail line
         // below the graph.
-        if let Some(h) = self.hovered {
+        if let Some(h) = self.inner.hovered {
             let y = (h.depth as f32 + 1.0) * ROW - 1.0;
             frame.stroke(
                 &Path::line(Point::new(h.x * w, y), Point::new((h.x + h.width) * w, y)),
@@ -245,7 +272,7 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
             );
         }
 
-        let _ = self.profile_total;
+        let _ = self.inner.profile_total;
         vec![frame.into_geometry()]
     }
 
@@ -257,7 +284,7 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
     ) -> mouse::Interaction {
         // A pointer over a frame is the affordance that says "this zooms".
         if let Some(pos) = cursor.position_in(bounds) {
-            let placed = flame::layout(self.root, MIN_WIDTH);
+            let placed = flame::layout(self.inner.root, MIN_WIDTH);
             if hit(&placed, pos, bounds.width).is_some() {
                 return mouse::Interaction::Pointer;
             }
@@ -269,7 +296,7 @@ impl iced_canvas::Program<crate::app::Message> for FlameCanvas<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_win::flame::parse_folded;
+    use crate::flame::parse_folded;
 
     #[test]
     fn hit_testing_finds_the_frame_under_the_cursor() {

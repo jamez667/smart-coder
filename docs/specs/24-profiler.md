@@ -41,7 +41,7 @@ load-bearing part, and it is pure.
 `flame/tool.rs` is a **separate module the viewer must not depend on**. It knows
 how to find a sampler and build a command; it is allowed to find nothing.
 
-<!--@ crates/sc-win/src/flame/tool.rs -->
+<!--@ crates/sc-craft-ui/src/flame/tool.rs -->
 
 Absence is a **state, not an error** — the same shape `project::UnityMissing`
 already uses for a missing editor. `Missing::reason()` returns a sentence
@@ -148,7 +148,7 @@ running with nobody waiting on it. Cancel therefore goes through
 `proc::kill_tree` — `taskkill /T` on Windows, the negative pid (the process
 group) elsewhere.
 
-<!--@ crates/sc-win/src/proc.rs -->
+<!--@ crates/sc-craft-ui/src/proc.rs -->
 
 Every spawn goes through `proc::command`, per [22](22-claude-code.md)'s rule, so
 no console window flashes.
@@ -218,7 +218,7 @@ A real profile is thousands of frames. A widget tree that deep re-lays-out every
 frame and makes hover a per-widget concern; a canvas draws the same picture in
 one pass and hit-tests by walking the same vector.
 
-<!--@ crates/sc-win/src/flamecanvas.rs -->
+<!--@ crates/sc-craft-ui/src/flamecanvas.rs -->
 
 Three rules the rendering owes the reader:
 

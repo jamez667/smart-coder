@@ -72,15 +72,7 @@ impl App {
         // ~10s; the 3s tick just gives the 10s gate resolution and adopts a finished probe
         // promptly). Runs even when the app is otherwise idle — that's the whole point: know
         // the backend is down BEFORE you try to use it.
-        // NOT registered in Craft mode (spec 21). The probe constructs an `OpenAiBackend`
-        // directly rather than going through `UiConfig::backend()`, so making the builders
-        // mode-aware would MISS the one caller that dials out on a timer. The switch has to
-        // happen here, at the subscription.
-        let health = if self.cfg.craft() {
-            Subscription::none()
-        } else {
-            iced::time::every(Duration::from_secs(3)).map(|_| Message::HealthTick)
-        };
+        let health = iced::time::every(Duration::from_secs(3)).map(|_| Message::HealthTick);
         // Track the window-absolute cursor position so a right-click in the git tab can pop its
         // context menu exactly at the pointer. `mouse_area::on_move` reports widget-relative
         // coordinates (useless for placing a window overlay); this window event is absolute.
@@ -118,12 +110,6 @@ impl App {
             }) if modifiers.command() && c.as_str().eq_ignore_ascii_case("s") => {
                 Some(Message::SaveFile)
             }
-            // Escape while the first-run question is open declines it (and so quits) — the
-            // handler no-ops once a mode is chosen, so this can't dismiss anything else.
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                ..
-            }) => Some(Message::EscapePressed),
             // The ✕, Alt+F4, or a taskbar close. Paired with `exit_on_close_request(false)` in
             // `run()`: iced hands us the request instead of obeying it, so unsaved buffers get
             // a prompt rather than being discarded. Without BOTH halves the window just closes.
@@ -217,14 +203,6 @@ impl App {
     }
 
     pub(crate) fn start(&mut self, kind: RunKind) {
-        // Craft mode contacts no model (spec 21). Belt AND braces, deliberately: the builders
-        // return `None` so a run physically cannot reach a backend, but that refusal happens on
-        // a worker thread and would surface as a run that starts and immediately fails. Refusing
-        // here means nothing visibly starts at all. The builders are the guarantee; this is the
-        // manners.
-        if self.cfg.craft() {
-            return;
-        }
         if self.intent.trim().is_empty() || self.session.is_some() {
             return;
         }
@@ -401,28 +379,13 @@ impl App {
 
     /// Whether the Claude Code run kind may be offered (spec 22).
     ///
-    /// Two independent conditions, and both are refusals rather than degradations:
+    /// **The CLI may not be installed.** A menu item that always fails is worse than no menu
+    /// item, so absence hides it rather than offering a dead control.
     ///
-    /// * **Craft mode contacts no model**, and Claude Code is unambiguously a model surface —
-    ///   the same reasoning that refuses the remote mirror. Goes through `cfg.craft()`, the one
-    ///   predicate every model surface consults, so the `craft-only` build gets this free.
-    /// * **The CLI may not be installed.** A menu item that always fails is worse than no menu
-    ///   item, so absence hides it rather than offering a dead control.
-    ///
-    /// There is no per-`RunKind` predicate to reuse here: every other kind needs a model, so
-    /// the question has never been asked before. This is the first one that must be gated.
+    /// This used to also refuse in Craft mode, alongside every other model surface. That half is
+    /// gone: the editor is its own executable now (spec 21), and it does not have this code.
     pub(crate) fn claude_code_available(&self) -> bool {
-        !self.cfg.craft() && self.claude_available
-    }
-
-    /// Whether the remote mirror may start (spec 21).
-    ///
-    /// A predicate rather than an inline check in `run()`, so the zero-construction contract can
-    /// be *tested*: the mirror is an agent surface — it carries agent output to a phone and takes
-    /// chat and approvals back — so starting it in Craft mode would be a model arriving through a
-    /// side door. Calling `run()` in a test would bind a real socket; this cannot.
-    pub(crate) fn should_start_mirror(&self) -> bool {
-        !self.cfg.craft()
+        self.claude_available
     }
 
     /// Push the current workspace name + recents list to the remote mirror, so the phone's
@@ -507,11 +470,6 @@ impl App {
     /// Send the composer text as a chat turn to the planning agent (worker thread). No-op
     /// when there's no conversation, no text, or a turn is already in flight.
     pub(crate) fn send_chat(&mut self) {
-        // Craft mode contacts no model (spec 21) — the composer is hidden, and this is the
-        // refusal behind it. See `start` for why hiding the control is not sufficient.
-        if self.cfg.craft() {
-            return;
-        }
         let text = self.intent.trim().to_string();
         if text.is_empty() || self.chat_session.is_some() || self.conversation.is_none() {
             return;
@@ -658,15 +616,6 @@ impl App {
             lc.comment.clone(),
         ));
         sc_win::comments::save(&self.workspace_root(), &self.comments);
-        // Craft mode: the comment is SAVED and stays visible — line comments are a review
-        // annotation, not an AI feature (they're also how Send back harvests revision notes).
-        // What stops here is the auto-fix: no triage call, so nothing is classified or spliced
-        // by a model. The user keeps a durable note on the line and nothing dials out.
-        if self.cfg.craft() {
-            self.panes.focused_mut().comment_range = None;
-            self.panes.focused_mut().comment_draft.clear();
-            return;
-        }
         // Commit connection settings so the triage/edit use the current backend.
         self.commit_settings();
         // Keep the commented lines highlighted (pulsing amber) while the agent works on them,

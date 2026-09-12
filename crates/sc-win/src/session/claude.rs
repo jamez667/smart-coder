@@ -30,17 +30,6 @@ pub(super) fn run_claude_code(
     _pending: Sender<Pending>,
     cancel: Arc<AtomicBool>,
 ) {
-    // Craft mode contacts no model, and Claude Code is unambiguously a model surface — the
-    // same reasoning that refuses the remote mirror. Belt and braces: the run kind is not
-    // offered in the UI, but a queued Task or a stale message can arrive after a mode switch.
-    if cfg.craft() {
-        let _ = tx.send(UiEvent::Failed(
-            "Craft mode contacts no model, so Claude Code is not available (Settings ▸ General)."
-                .to_string(),
-        ));
-        return;
-    }
-
     let mut child = match crate::proc::command("claude")
         .args(claudecode::args(&task, &cfg.claude))
         .current_dir(&workspace)

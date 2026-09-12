@@ -22,8 +22,8 @@ description = "A crate with every shape of dependency (spec 23)."
 
 [features]
 # A comment inside the features table.
-craft-only = []
-extra = ["craft-only"]
+base = []
+extra = ["base"]
 
 [dependencies]
 sc-proto = { path = "../sc-proto" }
@@ -122,7 +122,7 @@ fn an_inline_features_array_is_not_read_as_a_dependency() {
 
 #[test]
 fn features_are_the_table_keys_only() {
-    assert_eq!(awkward().features, vec!["craft-only", "extra"]);
+    assert_eq!(awkward().features, vec!["base", "extra"]);
 }
 
 #[test]
@@ -287,7 +287,11 @@ fn a_view_of_a_real_crate_stays_small() {
     let out = crate_view(&g, "sc-win");
     assert!(out.contains("sc-win"), "{out}");
     assert!(out.contains("workspace deps"), "{out}");
-    assert!(out.contains("craft-only"), "features are shown: {out}");
+    // A features section is NOT asserted here: no crate in the workspace declares one
+    // any more (`craft-only` was the last, removed when the Crafter became its own
+    // product -- spec 21). `features_are_the_table_keys_only` covers the rendering
+    // against a synthetic manifest, which is where it belongs anyway.
+    assert!(out.contains("external deps"), "{out}");
     assert!(
         out.lines().count() < 30,
         "a view must stay readable in a small context, got {} lines:\n{out}",

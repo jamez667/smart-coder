@@ -210,13 +210,13 @@ impl App {
             );
         }
 
-        let graph = crate::flamecanvas::FlameCanvas::new(
+        let graph = sc_win::flamecanvas::FlameCanvas::new(
             root,
             p.total(),
             &self.flame_search,
             self.flame_hover.as_ref(),
         )
-        .view();
+        .view(Message::FlameZoom, Message::FlameHover);
 
         let mut left = column![
             // The graph scrolls: a deep profile is taller than any panel.

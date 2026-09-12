@@ -148,11 +148,14 @@ impl PanelKind {
         }
     }
 
-    /// Whether this panel needs the agent. Craft mode prunes these.
+    /// Whether this panel is an agent surface, and so exists only in Smart Coder.
     ///
-    /// `Claude` counts: Craft mode's promise is that no language model is contacted, and Claude
-    /// Code is unambiguously a model surface (spec 22). This is the existing predicate doing
-    /// exactly what it was built for, so the refusal is one variant rather than new machinery.
+    /// A `layout.json` is per-product now (each writes to its own state dir, spec 21), so this
+    /// is no longer a live mode filter — it is what [`Layout::sanitize`] uses to drop a panel
+    /// the running product cannot render, which happens when a file is hand-edited or copied
+    /// between the two installs.
+    ///
+    /// `Claude` counts: Claude Code is unambiguously a model surface (spec 22).
     pub fn needs_model(self) -> bool {
         matches!(self, PanelKind::Chat | PanelKind::Claude)
     }
@@ -423,12 +426,12 @@ impl Layout {
         )
     }
 
-    /// The default for a mode.
-    pub fn default_for(craft: bool) -> Self {
-        if craft {
-            Self::craft_default()
-        } else {
-            Self::assistant_default()
+    /// The default layout for the running product: the editor arrangement for the Crafter,
+    /// the agent arrangement (chat beside the code) for Smart Coder.
+    pub fn default_for_product() -> Self {
+        match crate::config::product() {
+            crate::config::Product::Crafter => Self::craft_default(),
+            crate::config::Product::SmartCoder => Self::assistant_default(),
         }
     }
 
@@ -765,19 +768,19 @@ impl Layout {
     /// rules, all "fall back, never wedge":
     ///   * too deep ⇒ reject (a hand-edited file must not blow the stack)
     ///   * duplicates ⇒ keep the first
-    ///   * Assistant panels in Craft mode ⇒ pruned and rebalanced
+    ///   * agent panels in the Crafter ⇒ pruned and rebalanced (a hand-edited or copied
+    ///     `layout.json` is the only way one gets there)
     ///   * no editor PANE at all ⇒ reject; an IDE with nowhere to open a file is worse than a
     ///     reset layout. Note this counts panes, not "the editor": closing one of several is
     ///     fine, closing the last is not.
-    pub fn sanitize(self, craft: bool) -> Option<Layout> {
+    pub fn sanitize(self) -> Option<Layout> {
         if self.depth() > MAX_DEPTH {
             return None;
         }
         let tree = self.dedup()?;
-        let tree = if craft {
-            tree.prune(&|k| !k.needs_model())?
-        } else {
-            tree
+        let tree = match crate::config::product() {
+            crate::config::Product::Crafter => tree.prune(&|k| !k.needs_model())?,
+            crate::config::Product::SmartCoder => tree,
         };
         tree.has_editor().then_some(tree)
     }
@@ -824,51 +827,40 @@ impl Layout {
     }
 }
 
-/// `%APPDATA%\smart-coder\layout.json` — the per-mode trees, beside the other state files.
+/// `<state_dir>/layout.json` — beside the other state files, in the RUNNING PRODUCT's
+/// directory (spec 21): `%APPDATA%\smart-coder\` or `%APPDATA%\smart-coder-crafter\`.
 ///
 /// `SC_STATE_DIR` redirects it. That exists for tests: `App::default()` reads real machine state,
 /// so a test that toggles a panel would otherwise rewrite the developer's actual layout — which
 /// it did, once, before this override was added.
 fn layout_file() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("SC_STATE_DIR") {
-        return std::path::PathBuf::from(dir).join("layout.json");
-    }
-    let base = std::env::var_os("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("smart-coder").join("layout.json")
+    crate::config::state_dir().join("layout.json")
 }
 
-/// The saved layouts, one per mode.
+/// The saved layout.
 ///
-/// Per-mode so toggling back and forth finds each arrangement as it was left — a shared tree
-/// would mean entering Craft mode silently rearranged the Assistant one.
+/// This held one tree per mode when Craft and Assistant were one binary and you could toggle
+/// between them — a shared tree would have meant entering Craft silently rearranged the
+/// Assistant one. They are two products now (spec 21), each with its own state directory, so
+/// one tree per file is the whole story. A `craft` key left by an older install is read for
+/// migration and then dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LayoutStore {
-    pub craft: Option<Layout>,
-    pub assistant: Option<Layout>,
+    pub layout: Option<Layout>,
 }
 
 impl LayoutStore {
-    /// The stored tree for a mode, or the default when absent/unusable.
-    pub fn get(&self, craft: bool) -> Layout {
-        let stored = if craft {
-            self.craft.clone()
-        } else {
-            self.assistant.clone()
-        };
-        stored
-            .and_then(|l| l.sanitize(craft))
-            .unwrap_or_else(|| Layout::default_for(craft))
+    /// The stored tree, or the product's default when absent/unusable.
+    pub fn get(&self) -> Layout {
+        self.layout
+            .clone()
+            .and_then(|l| l.sanitize())
+            .unwrap_or_else(Layout::default_for_product)
     }
 
-    /// Record the tree for a mode (in memory — call [`Self::save`] to persist).
-    pub fn set(&mut self, craft: bool, layout: Layout) {
-        if craft {
-            self.craft = Some(layout);
-        } else {
-            self.assistant = Some(layout);
-        }
+    /// Record the tree (in memory — call [`Self::save`] to persist).
+    pub fn set(&mut self, layout: Layout) {
+        self.layout = Some(layout);
     }
 
     /// Load, or an empty store when the file is missing/unreadable/corrupt.
@@ -880,25 +872,35 @@ impl LayoutStore {
     }
 
     /// Parse the file's text. Pure, so the round trip is testable.
+    ///
+    /// **Migrates a pre-split file.** Older versions stored two trees, `craft` and
+    /// `assistant`, because one binary could switch between them. Each product now keeps its
+    /// own `layout.json` in its own state directory (spec 21), so a `layout` key is read
+    /// first and the old pair is a fallback: whichever tree matches the running product is
+    /// adopted, and the next save writes the new shape. Without this, everyone's saved
+    /// arrangement would silently reset on first launch after the upgrade.
     pub fn parse(text: &str) -> Self {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
             return Self::default();
         };
+        let migrated = || {
+            let key = match crate::config::product() {
+                crate::config::Product::Crafter => "craft",
+                crate::config::Product::SmartCoder => "assistant",
+            };
+            v.get(key).and_then(Layout::parse)
+        };
         Self {
-            craft: v.get("craft").and_then(Layout::parse),
-            assistant: v.get("assistant").and_then(Layout::parse),
+            layout: v.get("layout").and_then(Layout::parse).or_else(migrated),
         }
     }
 
     /// Serialize. Pure.
     pub fn serialize(&self) -> String {
         let mut obj = serde_json::Map::new();
-        obj.insert("version".to_string(), serde_json::json!(1));
-        if let Some(l) = &self.craft {
-            obj.insert("craft".to_string(), l.to_json());
-        }
-        if let Some(l) = &self.assistant {
-            obj.insert("assistant".to_string(), l.to_json());
+        obj.insert("version".to_string(), serde_json::json!(2));
+        if let Some(l) = &self.layout {
+            obj.insert("layout".to_string(), l.to_json());
         }
         serde_json::Value::Object(obj).to_string()
     }
@@ -917,6 +919,39 @@ impl LayoutStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{set_product, Product};
+
+    /// Serializes the tests that depend on which product is running.
+    ///
+    /// [`crate::config::product()`] is process-global — one atomic, set once in `main` — so a
+    /// test that flips it would otherwise race every other test in this binary, which cargo
+    /// runs on several threads. Holding this lock for the duration makes the flip safe, and
+    /// restoring the previous value on drop keeps a panicking test from leaking its setting
+    /// into whatever runs next.
+    fn product_guard(p: Product) -> ProductGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // A poisoned lock means some other test panicked while holding it. The stored product
+        // is restored on drop regardless, so recovering is correct here — failing every
+        // subsequent test would just bury the real failure.
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = crate::config::product();
+        set_product(p);
+        ProductGuard {
+            previous,
+            _lock: guard,
+        }
+    }
+
+    struct ProductGuard {
+        previous: Product,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for ProductGuard {
+        fn drop(&mut self) {
+            set_product(self.previous);
+        }
+    }
 
     #[test]
     fn the_defaults_carry_every_panel_a_mode_should_have() {
@@ -983,16 +1018,51 @@ mod tests {
         assert_eq!(without_chat, Layout::craft_default());
     }
 
+    /// A layout naming an agent panel is pruned, not rejected, when the Crafter loads it.
+    ///
+    /// It gets there by being hand-edited or copied from a Smart Coder install. Rendering a
+    /// panel this product does not have is impossible; refusing to start would be worse than
+    /// dropping it. Prune and rebalance.
+    ///
+    /// Serialized against the other product-sensitive tests: [`product()`] is process-global,
+    /// so these cannot run concurrently with one that expects the default product.
     #[test]
-    fn a_craft_layout_that_still_lists_chat_is_pruned_not_rejected() {
-        // Carried across a mode switch, or hand-edited. Rendering an Assistant panel in a mode
-        // that contacts no model would break the mode's promise; refusing to start would be
-        // worse. Prune and rebalance.
+    fn a_crafter_layout_that_still_lists_chat_is_pruned_not_rejected() {
+        let _guard = product_guard(Product::Crafter);
         let sane = Layout::assistant_default()
-            .sanitize(true)
+            .sanitize()
             .expect("still usable");
         assert!(!sane.contains(PanelKind::Chat));
         assert!(sane.contains(PanelKind::Editor(EditorId::FIRST)));
+    }
+
+    /// A pre-split `layout.json` held `craft` + `assistant`. Each product adopts its own half,
+    /// so nobody's saved arrangement resets on the first launch after the upgrade.
+    #[test]
+    fn a_pre_split_layout_file_migrates_to_the_running_product() {
+        let old = serde_json::json!({
+            "version": 1,
+            "craft": Layout::craft_default().to_json(),
+            "assistant": Layout::assistant_default().to_json(),
+        })
+        .to_string();
+
+        {
+            let _guard = product_guard(Product::SmartCoder);
+            assert_eq!(
+                LayoutStore::parse(&old).get(),
+                Layout::assistant_default(),
+                "Smart Coder adopts the old `assistant` tree"
+            );
+        }
+        {
+            let _guard = product_guard(Product::Crafter);
+            assert_eq!(
+                LayoutStore::parse(&old).get(),
+                Layout::craft_default(),
+                "the Crafter adopts the old `craft` tree"
+            );
+        }
     }
 
     #[test]
@@ -1004,15 +1074,14 @@ mod tests {
             Layout::Leaf(PanelKind::Files),
             Layout::Leaf(PanelKind::Git),
         );
-        assert_eq!(no_editor.clone().sanitize(false), None);
+        assert_eq!(no_editor.clone().sanitize(), None);
 
         let store = LayoutStore {
-            assistant: Some(no_editor),
-            craft: None,
+            layout: Some(no_editor),
         };
         assert_eq!(
-            store.get(false),
-            Layout::assistant_default(),
+            store.get(),
+            Layout::default_for_product(),
             "falls back rather than rendering something unusable"
         );
     }
@@ -1027,21 +1096,23 @@ mod tests {
         assert_eq!(PanelKind::Flame.label(), "Profiler");
         assert_eq!(PanelKind::Flame.menu_label(), "Profiler");
 
-        // Craft mode must KEEP it: reading a profile contacts no model, and Craft mode is
+        // The Crafter must KEEP it: reading a profile contacts no model, and the Crafter is
         // exactly where a user has no agent to ask about performance.
         assert!(!PanelKind::Flame.needs_model());
         assert!(!PanelKind::Flame.is_editor());
     }
 
     #[test]
-    fn the_view_menu_offers_the_profiler_in_both_modes() {
+    fn the_view_menu_offers_the_profiler_in_both_products() {
         // Silent-bug guard: a panel missing from `menu_panels` can be hidden and then never
         // brought back, because this menu is the only way to restore one.
-        for craft in [false, true] {
-            let l = Layout::default_for(craft);
+        for (name, l) in [
+            ("crafter", Layout::craft_default()),
+            ("smart-coder", Layout::assistant_default()),
+        ] {
             assert!(
                 menu_panels(&l).contains(&PanelKind::Flame),
-                "craft={craft}: the profiler must be offered"
+                "{name}: the profiler must be offered"
             );
         }
     }
@@ -1129,7 +1200,7 @@ mod tests {
             Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
             Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
         );
-        let fixed = same_pane.sanitize(false).expect("usable after dedup");
+        let fixed = same_pane.sanitize().expect("usable after dedup");
         assert_eq!(fixed, Layout::Leaf(PanelKind::Editor(EditorId::FIRST)));
     }
 
@@ -1144,7 +1215,7 @@ mod tests {
             Layout::Leaf(PanelKind::Editor(EditorId::FIRST)),
             Layout::Leaf(PanelKind::Editor(EditorId(1))),
         );
-        let kept = two.clone().sanitize(false).expect("two panes are valid");
+        let kept = two.clone().sanitize().expect("two panes are valid");
         assert_eq!(kept, two, "neither pane was pruned");
         assert_eq!(
             kept.editor_ids(),
@@ -1166,37 +1237,23 @@ mod tests {
             );
         }
         assert!(l.depth() > MAX_DEPTH);
-        assert_eq!(l.sanitize(false), None, "rejected, so the default is used");
+        assert_eq!(l.sanitize(), None, "rejected, so the default is used");
     }
 
     #[test]
     fn a_layout_round_trips_through_json() {
         let store = LayoutStore {
-            craft: Some(Layout::craft_default()),
-            assistant: Some(Layout::assistant_default()),
+            layout: Some(Layout::assistant_default()),
         };
         let back = LayoutStore::parse(&store.serialize());
         assert_eq!(back, store);
-        // And each mode keeps its own arrangement — a shared tree would mean entering Craft
-        // silently rearranged the Assistant one.
-        assert_ne!(back.get(true), back.get(false));
     }
 
     #[test]
     fn a_corrupt_layout_file_falls_back_to_the_defaults() {
-        for junk in [
-            "",
-            "not json",
-            "[1,2,3]",
-            r#"{"assistant":{"leaf":"nope"}}"#,
-        ] {
+        for junk in ["", "not json", "[1,2,3]", r#"{"layout":{"leaf":"nope"}}"#] {
             let store = LayoutStore::parse(junk);
-            assert_eq!(
-                store.get(false),
-                Layout::assistant_default(),
-                "junk: {junk:?}"
-            );
-            assert_eq!(store.get(true), Layout::craft_default());
+            assert_eq!(store.get(), Layout::default_for_product(), "junk: {junk:?}");
         }
     }
 
@@ -1431,10 +1488,9 @@ mod tests {
             )
             .unwrap();
         let store = LayoutStore {
-            assistant: Some(moved.clone()),
-            craft: None,
+            layout: Some(moved.clone()),
         };
-        assert_eq!(LayoutStore::parse(&store.serialize()).get(false), moved);
+        assert_eq!(LayoutStore::parse(&store.serialize()).get(), moved);
     }
 
     #[test]
@@ -1541,7 +1597,7 @@ mod disk_repro {
             return;
         }
         let store = LayoutStore::parse(&text);
-        let got = store.get(false);
+        let got = store.get();
         assert!(
             got.contains(PanelKind::Claude),
             "the stored assistant layout lost its Claude panel on load:\n{}",

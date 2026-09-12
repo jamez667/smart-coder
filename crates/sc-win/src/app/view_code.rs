@@ -427,13 +427,13 @@ impl App {
                     })
                     .unwrap_or_default();
                 if overflows {
-                    let minimap = crate::minimap::Minimap::new(
+                    let minimap = sc_win::minimap::Minimap::new(
                         line_lens,
                         self.panes.or_focused(pane).changed_lines.clone(),
                         commented,
                         self.panes.or_focused(pane).code_viewport,
                     )
-                    .view();
+                    .view(Message::MinimapJump);
                     // VS-Code style: the code fills the whole width and the minimap floats
                     // semi-transparently on top of the right edge, so text runs behind it.
                     let floating = container(minimap)
@@ -469,15 +469,12 @@ impl App {
         // When the active file is a feature plan (PLAN-<slug>.md) and no session is running, the
         // strip's right end carries an "⚒ Execute plan" button — the same one-click build the
         // proposal card offers, acting on the active file.
-        // "This is a feature plan, offer Breakdown/Build" — an agent action, so never in Craft
-        // mode. A spec markdown file is just a file to read and edit there.
-        let is_open_plan = !self.cfg.craft()
-            && self
-                .panes
-                .focused()
-                .selected_file
-                .as_deref()
-                .is_some_and(is_feature_plan);
+        let is_open_plan = self
+            .panes
+            .focused()
+            .selected_file
+            .as_deref()
+            .is_some_and(is_feature_plan);
         let header_bar: Element<'_, Message> = if self.panes.or_focused(pane).tabs.is_empty() {
             // No files open → the old "CODE" placeholder (matches the former (None, _) header).
             text("CODE").size(12).color(FG_MUTED).into()
@@ -553,14 +550,10 @@ impl App {
             // PINNED to the right while the tab strip scrolls in the remaining space — VS Code
             // style. Without this, the scroller expanded to fit every tab and pushed the buttons
             // off the panel's right edge (the bug: Build/Breakdown vanished with many tabs open).
-            // Every action in this row drives the agent — approving a phase, sending it back,
-            // or starting a build. None of them exist in Craft mode (spec 21), so the row stays
-            // empty and the tab strip gets the full width.
-            let viewing_gated_phase = !self.cfg.craft()
-                && self.gating_phase().is_some_and(|p| {
-                    self.plan.path_for(p).as_deref()
-                        == self.panes.or_focused(pane).selected_file.as_deref()
-                });
+            let viewing_gated_phase = self.gating_phase().is_some_and(|p| {
+                self.plan.path_for(p).as_deref()
+                    == self.panes.or_focused(pane).selected_file.as_deref()
+            });
             let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
             // Review|Edit, on every editable tab. One control, both directions — reading a diff
             // and typing are separate surfaces (see `view_code`), and this is how you move
