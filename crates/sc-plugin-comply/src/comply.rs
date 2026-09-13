@@ -28,12 +28,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Provider, UiConfig};
+// This plugin's own three settings, not the editor's thirty-one-field `UiConfig`.
+// See `config.rs` for why the prose path lives here at all.
+use crate::config::{ComplyConfig, Provider};
 
 /// Which model writes the summary and guidance, if any.
 ///
 /// Deliberately a separate choice from the coder/planner/advisor routing in
-/// [`UiConfig`]: a user may well want a local model driving their code and a
+/// [`ComplyConfig`]: a user may well want a local model driving their code and a
 /// hosted one writing an audit document, or — most often — no model here at all
 /// while still using one to write code.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -163,7 +165,7 @@ pub struct ComplyReport {
 /// a missing key is worth stopping for, because silently downgrading to "no
 /// summary" would look like the feature is broken.
 pub fn backend_for(
-    cfg: &UiConfig,
+    cfg: &ComplyConfig,
     choice: ComplyModel,
 ) -> Result<Option<sc_model::OpenAiBackend>, ComplyError> {
     let Some(provider) = choice.provider() else {
@@ -193,7 +195,7 @@ pub fn backend_for(
 /// typically a small fast model, and the summary is the one place in this
 /// feature where writing quality is the whole point. For Local there is only one
 /// model served, so the configured one is the only sensible choice.
-fn model_for(cfg: &UiConfig, provider: Provider) -> String {
+fn model_for(cfg: &ComplyConfig, provider: Provider) -> String {
     match provider {
         Provider::Gemini => std::env::var("SC_NARRATIVE_MODEL")
             .ok()
@@ -217,7 +219,7 @@ pub fn run(
     workspace: &Path,
     out_dir: &Path,
     choice: ComplyModel,
-    cfg: &UiConfig,
+    cfg: &ComplyConfig,
 ) -> Result<ComplyReport, ComplyError> {
     if !workspace.is_dir() {
         return Err(ComplyError::NoWorkspace);
@@ -340,8 +342,8 @@ fn narrative_for(
 mod tests {
     use super::*;
 
-    fn cfg_with(local: &str, gemini_key: Option<&str>) -> UiConfig {
-        let mut cfg = UiConfig::default();
+    fn cfg_with(local: &str, gemini_key: Option<&str>) -> ComplyConfig {
+        let mut cfg = ComplyConfig::default();
         cfg.local_conn.base_url = local.to_string();
         cfg.gemini_conn.key = gemini_key.map(str::to_string);
         cfg

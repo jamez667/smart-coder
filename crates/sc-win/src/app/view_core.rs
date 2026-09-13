@@ -21,22 +21,14 @@ impl App {
         // columns. Craft mode simply gets a tree without a Chat leaf in it.
         let body = self.view_layout();
 
-        let gate = self.view_gatebar();
-
         // The body content below the (flush, full-width) menu bar — this part is padded.
         // The run outcome now lives in the BUILD panel of the bottom strip (not a top
         // banner), so it no longer shoves the three columns down.
         let mut body_col = column![].spacing(GAP);
-        if self.plan.started() {
-            body_col = body_col.push(self.view_step_flow());
-        }
         // The bottom strip is a PANEL now (`PanelKind::Bottom`), sized by the tree's
         // `body|bottom` split — so it's resizable and hideable rather than a fixed 180px band
         // appended here.
         body_col = body_col.push(body);
-        if let Some(g) = gate {
-            body_col = body_col.push(g);
-        }
 
         // Base layer: the menu bar flush at the very top (no padding around it, full width),
         // then the padded body beneath it.
@@ -61,9 +53,6 @@ impl App {
         }
         if self.plugins_modal {
             layers = layers.push(self.view_plugins_modal());
-        }
-        if self.comply_open {
-            layers = layers.push(self.view_comply_modal());
         }
         if let Some(prompt) = self.view_close_confirm() {
             layers = layers.push(prompt);

@@ -48,7 +48,6 @@ pub(crate) struct EditorPane {
 
     // --- the in-flight line comment, which is a gesture inside ONE pane ---
     pub(crate) comment_range: Option<(usize, usize)>,
-    pub(crate) comment_draft: String,
     /// The active drag-select over line numbers: `(anchor, current)`.
     pub(crate) drag: Option<(usize, usize)>,
 }
@@ -69,7 +68,6 @@ impl Default for EditorPane {
             code_viewport: None,
             pending_scroll_line: None,
             comment_range: None,
-            comment_draft: String::new(),
             drag: None,
         }
     }

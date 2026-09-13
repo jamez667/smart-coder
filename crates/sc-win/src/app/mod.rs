@@ -1,113 +1,17 @@
 //! The iced application — thin rendering glue over the tested `sc_win` library.
 //!
-//! All "what to show / what to run" logic lives in [`crate::view`], [`crate::config`],
-//! [`crate::session`], and [`crate::bridge`]; this file only lays those out as
-//! widgets, pumps the worker channels on a timer tick, and routes button clicks back
-//! to the blocking decision seams. Keep it thin.
+//! The four modules this header used to name — `view`, `config`, `session`, `bridge` —
+//! were the agent's, and left for `sc-plugin-agent` (spec 25). What remains is the editor:
+//! this file lays the panes out as widgets, pumps the terminal and the plugin hosts on a
+//! timer tick, and routes button clicks. Keep it thin.
 
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, checkbox, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, container, scrollable, text, text_input, Space};
 use iced::{Background, Border, Color, Element, Fill, Length, Subscription, Task, Theme};
-
-use sc_core::Confirmation;
-use sc_win::bridge::Pending;
-use sc_win::config::ToolCalling;
-use sc_win::session::{RunKind, Session, UiEvent};
-use sc_win::view::{agent_rows, swarm_rows, Row};
-use sc_win::UiConfig;
-use sc_workflow::{Decision, Phase};
 
 mod styles;
 pub(crate) use styles::*;
-/// Launch the desktop app.
-/// Start the remote-mirror server on a background thread and return the shared handle the
-/// `App` tees events into / drains commands from. Prints the connection URL + Tailscale hint.
-/// The port is `SC_REMOTE_PORT` (default 8178).
-fn start_mirror() -> sc_web::RemoteMirror {
-    let mirror = sc_web::RemoteMirror::new();
-    let token = sc_web::mint_token();
-    let port: u16 = std::env::var("SC_REMOTE_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8178);
-    let addr = format!("127.0.0.1:{port}");
-    // Prefer the Tailscale HTTPS URL (what the phone actually uses); fall back to loopback.
-    let phone_url = match tailnet_host() {
-        Some(host) => format!("https://{host}:{port}/?k={token}"),
-        None => format!("http://127.0.0.1:{port}/?k={token}"),
-    };
-    // Record this session so the user can find the current url later (the token rotates each
-    // launch) and see recent/active sessions.
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    sc_win::persist::record_session(&phone_url, port, std::process::id(), started);
-
-    let server_mirror = mirror.clone();
-    let tok = token.clone();
-    let printed_url = phone_url.clone();
-    std::thread::spawn(move || {
-        let _ = sc_web::serve_mirror(server_mirror, &addr, &tok, move |_url| {
-            println!("smart-coder remote mirror live — phone URL:");
-            println!("  {printed_url}");
-            println!(
-                "(if you haven't yet: run `tailscale serve {port}` once so the https URL works)"
-            );
-        });
-    });
-    mirror
-}
-
-/// Print the remote-mirror session history (newest first), flagging which are still ACTIVE
-/// (their process is alive). Used by `sc-win --remote-history`.
-pub fn print_remote_history() {
-    let sessions = sc_win::persist::load_sessions();
-    if sessions.is_empty() {
-        println!("No remote-mirror sessions recorded yet.");
-        println!("(Launch with SC_REMOTE=1 to start one.)");
-        return;
-    }
-    println!("Remote-mirror sessions (newest first):\n");
-    for s in &sessions {
-        let active = pid_alive(s.pid);
-        let flag = if active { "● ACTIVE " } else { "  ended  " };
-        let when = fmt_unix(s.started);
-        println!("{flag} port {}  pid {}  {when}", s.port, s.pid);
-        println!("           {}", s.url);
-    }
-    let active_count = sessions.iter().filter(|s| pid_alive(s.pid)).count();
-    println!("\n{active_count} active. Paste an ACTIVE url into the phone.");
-}
-
-/// Whether a process with `pid` is currently running (Windows: `tasklist`).
-fn pid_alive(pid: u32) -> bool {
-    #[cfg(windows)]
-    {
-        let out = sc_win::proc::command("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output();
-        if let Ok(o) = out {
-            return String::from_utf8_lossy(&o.stdout).contains(&pid.to_string());
-        }
-        false
-    }
-    #[cfg(not(windows))]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-}
-
-/// Format a unix timestamp as a local-ish `YYYY-MM-DD HH:MM` (via chrono, already a dep).
-fn fmt_unix(secs: u64) -> String {
-    use chrono::{Local, TimeZone};
-    match Local.timestamp_opt(secs as i64, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
-        _ => format!("t={secs}"),
-    }
-}
 
 /// The inclusive Shift-range selection over an ordered path list: every path between `anchor` and
 /// `target` (found by position in `order`), regardless of which comes first. If either isn't in
@@ -139,22 +43,6 @@ fn tab_after_close(closed_idx: usize, len_after: usize) -> Option<usize> {
     } else {
         Some(closed_idx.min(len_after - 1))
     }
-}
-
-/// The Tailscale MagicDNS hostname of this machine (e.g. `my-pc.tailXXXXXX.ts.net`),
-/// via the `tailscale` CLI. `None` if Tailscale isn't installed/logged in.
-fn tailnet_host() -> Option<String> {
-    let out = sc_win::proc::command("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let name = v.get("Self")?.get("DNSName")?.as_str()?;
-    // DNSName has a trailing dot; strip it.
-    Some(name.trim_end_matches('.').to_string())
 }
 
 /// Discover, start and hand-shake every plugin, and install the panel registry.
@@ -201,8 +89,10 @@ pub fn run() -> iced::Result {
             // layout on every launch — and it would look like the layout not persisting,
             // not like a startup ordering bug.
             let plugins = start_plugins();
-            let mut app = App::default();
-            app.plugins = Some(plugins);
+            let mut app = App {
+                plugins: Some(plugins),
+                ..Default::default()
+            };
             // The restored project needs detecting, or the Compile button stays dead until the
             // user re-picks the folder (spec 21).
             app.refresh_project_kind();
@@ -216,20 +106,6 @@ pub fn run() -> iced::Result {
             // they want would mean undoing it the moment they answer "Just code".
             if app.picked_workspace.is_some() {
                 app.show_welcome();
-                app.open_conversation();
-            }
-            // Remote-mirror mode (Claude-Code-remote style): when SC_REMOTE is set, start a
-            // mirror server so a phone can attach to THIS live session — see the chat + agent
-            // activity, send chat, approve/deny, stop. Bound to 127.0.0.1 (front it with
-            // `tailscale serve`); every request needs the printed per-run token.
-            //
-            // This used to be refused in Craft mode, the mirror being an agent surface. The
-            // editor is now its own executable (spec 21) and carries none of this code, so
-            // there is nothing left to refuse.
-            if std::env::var("SC_REMOTE").is_ok() {
-                app.remote = Some(start_mirror());
-                // Publish the initially-open project so the phone shows it on first connect.
-                app.publish_workspace_to_remote();
             }
             (app, Task::none())
         },
@@ -270,7 +146,6 @@ mod plugin_requests;
 mod update;
 mod view_claude;
 mod view_code;
-mod view_comply;
 mod view_core;
 mod view_flame;
 mod view_layout;
@@ -292,20 +167,6 @@ pub(crate) use tabs::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_win::comply::ComplyModel;
-
-    /// The same tick DOES probe in Assistant mode — otherwise the test above would pass for the
-    /// wrong reason (e.g. a probe that never fires in either mode).
-    #[test]
-    fn assistant_mode_still_spawns_the_health_probe() {
-        let mut app = App::default();
-        app.health_rx = None;
-        app.last_health_probe = None;
-
-        app.tick_health_probe();
-
-        assert!(app.health_rx.is_some(), "Assistant mode probes as before");
-    }
 
     /// Clicking a diagnostic opens its file and queues the scroll to its line.
     ///
@@ -339,7 +200,6 @@ mod tests {
             Some(2),
             "and queued the jump"
         );
-        assert!(!app.follow_agent, "clicking a problem pins the view");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -486,8 +346,10 @@ mod tests {
     fn the_panel_arrangement_survives_a_reload() {
         use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("arrangement");
-        let mut app = App::default();
-        app.layout = sc_win::layout::Layout::assistant_default();
+        let mut app = App {
+            layout: sc_win::layout::Layout::assistant_default(),
+            ..Default::default()
+        };
 
         let _ = app.update(Message::TogglePanel(PanelKind::Git));
         assert!(!app.layout.contains(PanelKind::Git), "hidden");
@@ -810,8 +672,10 @@ mod tests {
     #[test]
     fn splitting_with_no_file_open_does_nothing() {
         let dir = redirect_layout_state("split-empty");
-        let mut app = App::default();
-        app.layout = sc_win::layout::Layout::craft_default();
+        let mut app = App {
+            layout: sc_win::layout::Layout::craft_default(),
+            ..Default::default()
+        };
 
         let _ = app.update(Message::SplitEditor);
 
@@ -1038,8 +902,10 @@ mod tests {
     fn dropping_a_panel_on_another_rearranges_and_persists() {
         use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("panel-drop");
-        let mut app = App::default();
-        app.layout = sc_win::layout::Layout::craft_default();
+        let mut app = App {
+            layout: sc_win::layout::Layout::craft_default(),
+            ..Default::default()
+        };
         let before = app.layout.clone();
 
         // Grab Git's header, hover the right edge of the editor, release.
@@ -1091,8 +957,10 @@ mod tests {
     fn dropping_at_the_bottom_edge_docks_across_the_full_width() {
         use sc_win::layout::{Axis, EditorId, Layout, PanelKind, Side};
         let dir = redirect_layout_state("panel-bottom-drop");
-        let mut app = App::default();
-        app.layout = Layout::craft_default();
+        let mut app = App {
+            layout: Layout::craft_default(),
+            ..Default::default()
+        };
 
         // A 1000x800 window with a 34px menu bar → the tree is 1000x766, well short of the
         // window's height. That gap is what the old window-relative test could never bridge.
@@ -1144,8 +1012,10 @@ mod tests {
     fn dropping_on_the_window_dock_frame_spans_the_layout() {
         use sc_win::layout::{Axis, Layout, PanelKind, Side};
         let dir = redirect_layout_state("dock-frame");
-        let mut app = App::default();
-        app.layout = Layout::craft_default();
+        let mut app = App {
+            layout: Layout::craft_default(),
+            ..Default::default()
+        };
 
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
         let _ = app.update(Message::DockHover(Some(Side::Bottom)));
@@ -1174,8 +1044,10 @@ mod tests {
     fn the_dock_frame_supersedes_a_per_panel_target() {
         use sc_win::layout::{EditorId, Layout, PanelKind, Side};
         let dir = redirect_layout_state("dock-priority");
-        let mut app = App::default();
-        app.layout = Layout::craft_default();
+        let mut app = App {
+            layout: Layout::craft_default(),
+            ..Default::default()
+        };
 
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
         // A per-panel target first…
@@ -1209,8 +1081,10 @@ mod tests {
     fn releasing_outside_a_drop_target_cancels_the_drag() {
         use sc_win::layout::PanelKind;
         let dir = redirect_layout_state("panel-cancel");
-        let mut app = App::default();
-        app.layout = sc_win::layout::Layout::craft_default();
+        let mut app = App {
+            layout: sc_win::layout::Layout::craft_default(),
+            ..Default::default()
+        };
         let before = app.layout.clone();
 
         let _ = app.update(Message::PanelGrab(PanelKind::Git));
@@ -1231,8 +1105,10 @@ mod tests {
     fn the_editor_panel_cannot_be_hidden() {
         use sc_win::layout::{EditorId, PanelKind};
         let dir = redirect_layout_state("no-hide-editor");
-        let mut app = App::default();
-        app.layout = sc_win::layout::Layout::craft_default();
+        let mut app = App {
+            layout: sc_win::layout::Layout::craft_default(),
+            ..Default::default()
+        };
 
         let _ = app.update(Message::TogglePanel(PanelKind::Editor(EditorId::FIRST)));
 
@@ -1252,8 +1128,10 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join(name), body).unwrap();
-        let mut app = App::default();
-        app.picked_workspace = Some(dir.clone());
+        let app = App {
+            picked_workspace: Some(dir.clone()),
+            ..Default::default()
+        };
         (app, dir)
     }
 
@@ -1489,60 +1367,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The dialog opens with no model selected.
-    ///
-    /// The whole reason "None" is the default: a menu click must not silently
-    /// spend API credits, and the report is complete without prose.
-    #[test]
-    fn the_compliance_dialog_defaults_to_no_model() {
-        let app = App::default();
-        assert_eq!(app.comply_model, ComplyModel::None);
-        assert!(!app.comply_open);
-        assert!(!app.comply_running);
-    }
-
-    /// Opening the dialog clears the previous run's outcome.
-    ///
-    /// Showing last run's totals beside a fresh dialog invites reading them as
-    /// current — on a compliance report that is a real misread.
-    #[test]
-    fn reopening_the_dialog_drops_the_previous_result() {
-        let mut app = App::default();
-        app.comply_result = Some(Err("stale".to_string()));
-        let _ = app.update(Message::OpenComplyDialog);
-        assert!(app.comply_open);
-        assert!(app.comply_result.is_none());
-    }
-
-    /// A second Run while one is in flight is ignored.
-    #[test]
-    fn a_second_audit_cannot_be_started_while_one_runs() {
-        let mut app = App::default();
-        app.comply_running = true;
-        app.comply_result = Some(Err("previous".to_string()));
-        let _ = app.update(Message::RunComply);
-        // Untouched: the guard returned before resetting anything.
-        assert!(app.comply_running);
-        assert!(app.comply_result.is_some());
-    }
-
-    /// A finished audit clears the running flag and records the outcome.
-    #[test]
-    fn a_failed_audit_reports_its_reason_rather_than_failing_silently() {
-        let mut app = App::default();
-        app.comply_running = true;
-        let _ = app.update(Message::ComplyDone(Err("no workspace".to_string())));
-        assert!(!app.comply_running);
-        assert!(matches!(app.comply_result, Some(Err(ref e)) if e.contains("no workspace")));
-    }
-
-    #[test]
-    fn picking_a_model_updates_the_choice() {
-        let mut app = App::default();
-        let _ = app.update(Message::ComplyModelChanged(ComplyModel::Gemini));
-        assert_eq!(app.comply_model, ComplyModel::Gemini);
-    }
-
     #[test]
     fn git_range_selects_inclusive_span_in_display_order() {
         let order: Vec<String> = ["a", "b", "c", "d", "e"]
@@ -1575,94 +1399,5 @@ mod tests {
         assert_eq!(tab_after_close(3, 3), Some(2));
         // Close the ONLY tab → nothing remains.
         assert_eq!(tab_after_close(0, 0), None);
-    }
-
-    #[test]
-    fn feature_plans_are_buildable_but_readme_and_todo_are_not() {
-        // The Execute-plan button gates on this: only a PLAN-<slug>.md is buildable.
-        assert!(is_feature_plan("PLAN-lakes.md"));
-        assert!(is_feature_plan("plan-auth-flow.md")); // case-insensitive
-        assert!(!is_feature_plan("README.md"));
-        assert!(!is_feature_plan("TODO.md"));
-        assert!(!is_feature_plan("PLAN-lakes.txt")); // must be markdown
-        assert!(!is_feature_plan("MYPLAN-x.md")); // must start with the PLAN- prefix
-    }
-
-    #[test]
-    fn feature_spec_of_normalizes_any_artifact_to_spec_md() {
-        // Any phase file of a feature folder → that feature's spec.md, so Build targets the
-        // feature (and reuses its approved design) whichever artifact is open.
-        assert_eq!(
-            feature_spec_of("specs/seat-types/decomposition.md"),
-            "specs/seat-types/spec.md"
-        );
-        assert_eq!(
-            feature_spec_of("specs/seat-types/architecture.md"),
-            "specs/seat-types/spec.md"
-        );
-        assert_eq!(
-            feature_spec_of("specs/seat-types/spec.md"),
-            "specs/seat-types/spec.md"
-        );
-        // Windows backslashes are normalized.
-        assert_eq!(
-            feature_spec_of("specs\\seat-types\\breakdown.md"),
-            "specs/seat-types/spec.md"
-        );
-        // A flat specs/<slug>.md (no feature folder) and a legacy PLAN-*.md are returned as-is.
-        assert_eq!(feature_spec_of("specs/lakes.md"), "specs/lakes.md");
-        assert_eq!(feature_spec_of("PLAN-lakes.md"), "PLAN-lakes.md");
-    }
-
-    #[test]
-    fn plan_task_names_the_plan_and_frames_a_design_pass() {
-        // The workflow pins the plan via its filename, so the task must name it; and plan-only
-        // stops at the breakdown, so it must frame a design pass (not "write the code").
-        let t = plan_task("PLAN-lakes.md");
-        assert!(
-            t.contains("PLAN-lakes.md"),
-            "names the plan so referenced_plan pins it"
-        );
-        assert!(t.to_lowercase().contains("design"));
-        assert!(t.contains("do not write source code yet"));
-    }
-
-    #[test]
-    fn fix_feed_line_surfaces_model_narration() {
-        // The execute/iterate feed shows the model's thinking, not just file touches.
-        let line = fix_feed_line(&sc_core::AgentEvent::model_turn(
-            1,
-            10,
-            "I'll add the water module and wire it in.\n{\"tool\":\"write_file\",\"path\":\"w.rs\"}",
-        ));
-        let line = line.expect("narration surfaced");
-        assert!(line.starts_with("💭"));
-        assert!(line.contains("water module"));
-    }
-
-    #[test]
-    fn fix_feed_line_surfaces_every_tool_action() {
-        // The coder spends most turns searching/reading and often emits a BARE tool call with no
-        // prose — so every tool must produce a feed line, or the run "feels dead" (the reported bug).
-        let tc = |tool: &str, arg: &str| {
-            fix_feed_line(&sc_core::AgentEvent::ToolCall {
-                tool: tool.to_string(),
-                arg: arg.to_string(),
-            })
-        };
-        assert_eq!(tc("edit_file", "a.rs").as_deref(), Some("✎ editing a.rs"));
-        assert_eq!(tc("create_file", "b.rs").as_deref(), Some("✎ writing b.rs"));
-        assert_eq!(
-            tc("search_code", "SeatType").as_deref(),
-            Some("🔍 searching for SeatType")
-        );
-        assert_eq!(
-            tc("find_symbol", "ShipLayout").as_deref(),
-            Some("🔍 locating ShipLayout")
-        );
-        assert_eq!(tc("read_file", "c.rs").as_deref(), Some("· reading c.rs"));
-        assert_eq!(tc("finish", "").as_deref(), Some("✓ done with this step"));
-        // An unknown tool still produces a line (never runs invisibly).
-        assert!(tc("weird_tool", "x").is_some());
     }
 }

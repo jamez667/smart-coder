@@ -232,17 +232,21 @@ fn reverse_deps_find_the_blast_radius() {
 
 #[test]
 fn the_transitive_closure_exceeds_the_direct_deps() {
-    // sc-win names 12 workspace crates and reaches more: sc-context and
+    // sc-cli names 15 workspace crates and reaches more: sc-context and
     // sc-review arrive only through sc-core. A reader cannot get that from one
     // manifest, which is why the closure is rendered.
+    //
+    // This used to ask sc-win the same question. Spec 21 made it the wrong crate to
+    // ask: the editor now names six near-leaves and reaches nothing beyond them
+    // (6 vs 6), which is the guarantee, not a regression.
     let g = Graph::load(&repo_root());
     let direct = g
-        .get("sc-win")
-        .expect("sc-win is a member")
+        .get("sc-cli")
+        .expect("sc-cli is a member")
         .deps_of(DepKind::Normal)
         .filter(|d| d.internal)
         .count();
-    let all = g.transitive("sc-win");
+    let all = g.transitive("sc-cli");
     assert!(all.len() > direct, "{} vs {direct}", all.len());
     assert!(all.contains(&"sc-context"), "{all:?}");
 }

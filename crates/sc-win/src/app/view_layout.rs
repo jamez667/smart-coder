@@ -185,10 +185,8 @@ impl App {
             PanelKind::Bottom => match self.bottom_tab {
                 BottomTab::Problems => "Problems".to_string(),
                 BottomTab::Terminal => "Terminal".to_string(),
-                BottomTab::Verification => "Verification".to_string(),
-                BottomTab::Build => "Build".to_string(),
             },
-            PanelKind::Chat => format!("{} messages", self.chat_turns.len()),
+            PanelKind::Chat => "moved to a plugin".to_string(),
             PanelKind::Flame => match &self.flame_profile {
                 Some(p) => format!("{} samples", p.total()),
                 None => "no profile".to_string(),
@@ -504,15 +502,19 @@ impl App {
             PanelKind::Git => self.view_git_panel(),
             PanelKind::Editor(id) => self.view_code_panel(id),
             PanelKind::Bottom => self.view_bottom_panel(),
-            // A swarm build in flight: the live topology IS the story, so it takes the chat
-            // panel's place for the duration — the same swap the fixed layout used to do.
-            PanelKind::Chat => {
-                if self.plan.started() && self.is_swarm() {
-                    self.view_topology()
-                } else {
-                    self.view_center()
-                }
-            }
+            // Chat is a plugin now (spec 25). A layout written before that migration can
+            // still name this panel, so it renders a note rather than nothing — a blank
+            // panel would read as a bug, and `sanitize` only prunes leaves it cannot
+            // resolve, which this one still is.
+            PanelKind::Chat => container(
+                text("Chat moved to a plugin. Install the agent plugin to use it.")
+                    .size(12)
+                    .color(FG_MUTED),
+            )
+            .padding(10)
+            .width(Fill)
+            .height(Fill)
+            .into(),
             PanelKind::Flame => self.view_flame_panel(),
             PanelKind::Plugin(id) => self.view_plugin_panel(id),
         }

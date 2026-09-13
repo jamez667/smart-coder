@@ -1,0 +1,24 @@
+[package]
+name = "sc-plugin-comply"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compliance evidence as a plugin (spec 13/25): the deterministic audit, plus optional model-written prose."
+
+[[bin]]
+name = "sc-plugin-comply"
+path = "src/main.rs"
+
+[dependencies]
+sc-plugin-proto = { path = "../sc-plugin-proto" }
+# The evidence engine. Model-free by construction — its own tree is sc-index, sc-proto
+# and sc-verify — which is why the audit is deterministic and why the report stands on
+# its own without a word of prose.
+sc-comply = { path = "../sc-comply" }
+# The OPTIONAL prose: the executive summary and auditor guidance. This is what drags
+# sc-model in, and it is the whole reason compliance is a plugin rather than an editor
+# feature — the editor keeps no path to a model, and the prose keeps working.
+sc-comply-author = { path = "../sc-comply-author" }
+sc-model = { path = "../sc-model" }
+serde_json = { workspace = true }

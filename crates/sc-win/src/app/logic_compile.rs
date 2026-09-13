@@ -29,6 +29,17 @@ impl App {
         self.compile_report = None;
     }
 
+    /// Fold the settings inputs back into [`Self::cfg`] and persist them (save-on-close).
+    ///
+    /// The compile path deliberately reads the LIVE input box so a compile uses what is typed
+    /// right now; this is what makes that same value survive a restart. Without it the Unity
+    /// path was seeded from disk at boot, edited, used once, and silently lost on exit.
+    pub(crate) fn commit_settings(&mut self) {
+        let typed = self.unity_path_input.trim();
+        self.cfg.unity_path = (!typed.is_empty()).then(|| typed.to_string());
+        self.cfg.save();
+    }
+
     /// Start a compile, unless one is already running.
     pub(crate) fn start_compile(&mut self) -> Task<Message> {
         if self.compiling {
@@ -105,7 +116,6 @@ impl App {
         if !self.workspace_root().join(&file).is_file() {
             return Task::none();
         }
-        self.follow_agent = false;
         self.select_file_for_review(file);
         // Deferred, like the git-tab jump: the scroll has to run against the newly laid-out
         // content, not the previous file's.

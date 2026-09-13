@@ -1,0 +1,29 @@
+[package]
+name = "sc-plugin-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The agent as a plugin (spec 25): chat, runs, the swarm and review gates, in their own process."
+
+[[bin]]
+name = "sc-plugin-agent"
+path = "src/main.rs"
+
+[dependencies]
+# The wire protocol, and nothing from the editor.
+sc-plugin-proto = { path = "../sc-plugin-proto" }
+# THE AGENT. Every crate here is one `sc-win` sheds when this plugin replaces its
+# built-in chat panel — which is the whole point of the migration: the editor stops
+# compiling the agent.
+sc-core = { path = "../sc-core" }
+sc-model = { path = "../sc-model" }
+sc-swarm = { path = "../sc-swarm" }
+sc-workflow = { path = "../sc-workflow" }
+sc-iterate = { path = "../sc-iterate" }
+sc-tools = { path = "../sc-tools" }
+sc-verify = { path = "../sc-verify" }
+sc-index = { path = "../sc-index" }
+sc-fsutil = { path = "../sc-fsutil" }
+sc-proto = { path = "../sc-proto" }
+serde_json = { workspace = true }

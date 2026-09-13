@@ -128,15 +128,9 @@ impl App {
                 // wrapping ONE no-wrap monospace string; selected lines get an accent wash.
                 // The comment box renders after the last line of the committed range.
                 let sel = self.selected_line_range(); // active drag OR committed range
-                                                      // The amber "working" range applies only when the shown file is the one being
-                                                      // worked on. A pulsing alpha (sine on the animation clock) reads as "in progress".
-                let working_here = self
-                    .working
-                    .as_ref()
-                    .filter(|(f, _, _)| {
-                        Some(f.as_str()) == self.panes.or_focused(pane).selected_file.as_deref()
-                    })
-                    .map(|(_, lo, hi)| (*lo, *hi));
+                                                      // The amber "working" pulse tracked the agent's live edit range; it left with
+                                                      // the agent (spec 25), so nothing animates here now.
+                let working_here: Option<(usize, usize)> = None;
                 let pulse = 0.10 + 0.10 * (0.5 + 0.5 * (self.now() * 3.0).sin());
 
                 // Always window to the visible lines (fast on big files). Inline comments and the
@@ -152,50 +146,6 @@ impl App {
                     .focused()
                     .code_viewport
                     .is_some_and(|(_, height)| height < 0.999);
-                // Width for the comment / revert bars: the VIEWPORT width (not the horizontally-
-                // scrollable content width), minus the minimap gutter when it's floating, so a bar
-                // spans the visible area and ends just before the minimap — with round edges. It
-                // scales with the window and expands when the minimap is hidden. `None` (→ Fill)
-                // before the first scroll gives us a real viewport width.
-                let bar_width: Option<f32> =
-                    (self.panes.or_focused(pane).code_view_w > 1.0).then(|| {
-                        let gutter = if minimap_overflows { 76.0 } else { 8.0 };
-                        (self.panes.or_focused(pane).code_view_w - gutter).max(120.0)
-                    });
-
-                // Diff blocks (VS-Code-style). Two derived maps:
-                //  • `block_bar_after`: last green line of a block → its cur_start (where to render
-                //    the standalone "↩ revert block" bar).
-                //  • `line_to_block`: every green line → its block's cur_start (so a comment ON a
-                //    changed block can offer the same revert inline).
-                let hunks = self.panes.or_focused(pane).file_diff.hunks();
-                let block_bar_after: std::collections::BTreeMap<usize, usize> = hunks
-                    .iter()
-                    .filter(|h| h.cur_start <= h.cur_end) // has a current (green) line
-                    .map(|h| (h.cur_end, h.cur_start))
-                    .collect();
-                let line_to_block: std::collections::BTreeMap<usize, usize> = hunks
-                    .iter()
-                    .filter(|h| h.cur_start <= h.cur_end)
-                    .flat_map(|h| (h.cur_start..=h.cur_end).map(move |l| (l, h.cur_start)))
-                    .collect();
-                // Blocks that already have a comment on them — those revert from the comment row,
-                // so we skip the standalone bar to avoid a duplicate button.
-                let blocks_with_comment: std::collections::BTreeSet<usize> = self
-                    .panes
-                    .focused()
-                    .selected_file
-                    .as_deref()
-                    .map(|f| {
-                        self.comments
-                            .on_file(f)
-                            .filter_map(|(_, c)| {
-                                (c.start..=c.end).find_map(|l| line_to_block.get(&l).copied())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
                 let total = cv.lines.len();
                 let (first_idx, last_idx) = {
                     const OVERSCAN: usize = 12;
@@ -290,48 +240,7 @@ impl App {
                     .style(move |_t: &Theme| {
                         code_line_container(in_sel, changed, working.then_some(pulse))
                     });
-                    let row_ma = iced::widget::mouse_area(line_el)
-                        .on_press(Message::LineDragStart(*n))
-                        .on_enter(Message::LineDragTo(*n))
-                        .on_release(Message::LineDragEnd);
-                    col = col.push(row_ma);
-                    // After the LAST green line of a changed block, render a "↩ revert block" bar —
-                    // its own comment-shaped row (no comment text) carrying only the revert button,
-                    // so the control lives on a dedicated line instead of floating over code. Skip
-                    // it when a comment already sits on this block (it offers revert inline).
-                    if let Some(&cur_start) = block_bar_after.get(n) {
-                        if !blocks_with_comment.contains(&cur_start) {
-                            col = col.push(view_revert_block_bar(cur_start, bar_width));
-                        }
-                    }
-                    // Stored inline comments whose range ENDS on this line — render them (PR
-                    // style), struck-through + ✓ once resolved. Only the in-window lines are
-                    // iterated, so a comment scrolled off-screen simply isn't drawn (its state
-                    // persists); the box/comment adds height inside the window, not the spacers.
-                    if let Some(file) = self.panes.or_focused(pane).selected_file.clone() {
-                        let here: Vec<(usize, sc_win::comments::Comment)> = self
-                            .comments
-                            .on_file(&file)
-                            .filter(|(_, c)| c.end == *n)
-                            .map(|(i, c)| (i, c.clone()))
-                            .collect();
-                        for (i, c) in here {
-                            // If the comment sits on a changed block, offer to revert that block
-                            // from the comment row (look up by any line the comment covers).
-                            let block =
-                                (c.start..=c.end).find_map(|l| line_to_block.get(&l).copied());
-                            col = col.push(view_inline_comment(i, c, bar_width, block));
-                        }
-                    }
-                    // The (new) comment box after the last line of the committed range.
-                    if self
-                        .panes
-                        .focused()
-                        .comment_range
-                        .is_some_and(|(_, hi)| hi == *n)
-                    {
-                        col = col.push(self.view_comment_box());
-                    }
+                    col = col.push(iced::widget::mouse_area(line_el));
                 }
                 // Bottom spacer for the hidden lines below the window — plus any removed-lines that
                 // anchor below the last visible line (they'd add height when scrolled into view).
@@ -466,15 +375,6 @@ impl App {
         // Header stays fixed; the code area is the single scrollable (no outer scroll wrap,
         // which is what previously collapsed the inner one). The header is now a TAB STRIP — one
         // tab per open file, the ACTIVE tab (=== `selected_file`) highlighted, each closeable.
-        // When the active file is a feature plan (PLAN-<slug>.md) and no session is running, the
-        // strip's right end carries an "⚒ Execute plan" button — the same one-click build the
-        // proposal card offers, acting on the active file.
-        let is_open_plan = self
-            .panes
-            .focused()
-            .selected_file
-            .as_deref()
-            .is_some_and(is_feature_plan);
         let header_bar: Element<'_, Message> = if self.panes.or_focused(pane).tabs.is_empty() {
             // No files open → the old "CODE" placeholder (matches the former (None, _) header).
             text("CODE").size(12).color(FG_MUTED).into()
@@ -550,10 +450,6 @@ impl App {
             // PINNED to the right while the tab strip scrolls in the remaining space — VS Code
             // style. Without this, the scroller expanded to fit every tab and pushed the buttons
             // off the panel's right edge (the bug: Build/Breakdown vanished with many tabs open).
-            let viewing_gated_phase = self.gating_phase().is_some_and(|p| {
-                self.plan.path_for(p).as_deref()
-                    == self.panes.or_focused(pane).selected_file.as_deref()
-            });
             let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
             // Review|Edit, on every editable tab. One control, both directions — reading a diff
             // and typing are separate surfaces (see `view_code`), and this is how you move
@@ -583,45 +479,6 @@ impl App {
                             .style(primary_button),
                     );
                 }
-            }
-            if viewing_gated_phase {
-                // The file being viewed IS the phase at a gate: its Approve / Send back / Abort
-                // controls sit here so you review the artifact and act in the same place (Send back
-                // harvests this file's line-comments as the revision notes).
-                actions = actions.push(
-                    button(text("✓ Approve").size(12))
-                        .on_press(Message::GateApprove)
-                        .padding([3, 10])
-                        .style(primary_button),
-                );
-                actions = actions.push(
-                    button(text("↩ Send back").size(12))
-                        .on_press(Message::GateSendBack)
-                        .padding([3, 10])
-                        .style(menu_item_style),
-                );
-                actions = actions.push(
-                    button(text("■ Abort").size(12))
-                        .on_press(Message::GateAbort)
-                        .padding([3, 10])
-                        .style(menu_item_style),
-                );
-            } else if is_open_plan && self.session.is_none() {
-                // Two actions on an open plan: Breakdown runs the staged DESIGN pipeline and stops
-                // for review (no code written); Build runs the whole thing through to a green
-                // compile. Breakdown first — it's the review-then-build path.
-                actions = actions.push(
-                    button(text("☷ Breakdown").size(12))
-                        .on_press(Message::ExecuteOpenPlan)
-                        .padding([3, 10])
-                        .style(menu_item_style),
-                );
-                actions = actions.push(
-                    button(text("⚒ Build").size(12))
-                        .on_press(Message::BuildOpenPlan)
-                        .padding([3, 10])
-                        .style(primary_button),
-                );
             }
             // The strip scrolls horizontally in the space LEFT OF the pinned actions: `width(Fill)`
             // makes the scroller take the remaining width (not grow to fit every tab), so overflow

@@ -27,18 +27,6 @@ impl App {
 
     pub(crate) fn __update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::IntentChanged(s) => self.intent = s,
-            Message::ModelChanged(s) => self.model_input = s,
-            Message::OrchModelChanged(s) => self.orch_model_input = s,
-            Message::AdvisorChanged(s) => self.advisor_input = s,
-            Message::LocalUrlChanged(s) => self.local_url_input = s,
-            Message::LocalKeyChanged(s) => self.local_key_input = s,
-            Message::GeminiUrlChanged(s) => self.gemini_url_input = s,
-            Message::GeminiKeyChanged(s) => self.gemini_key_input = s,
-            Message::CoderProviderChanged(p) => self.cfg.coder_provider = p,
-            Message::PlannerProviderChanged(p) => self.cfg.planner_provider = p,
-            Message::AdvisorProviderChanged(p) => self.cfg.advisor_provider = p,
-            Message::SettingsTabChanged(t) => self.settings_tab = t,
             Message::EditorEvent(pane, ev) => {
                 // Forward to THAT pane's active buffer — not the focused one — and adopt the
                 // widget's own modified flag, so the dirty dot can't drift from the buffer.
@@ -130,8 +118,6 @@ impl App {
                     return self.scroll_code_to_line(self.panes.focused_id(), line);
                 }
             }
-            Message::VerifyChanged(s) => self.verify_input = s,
-            Message::SuffixChanged(s) => self.suffix_input = s,
             Message::ToggleSettings => {
                 self.open_menu = None;
                 // Closing the modal COMMITS + persists the edits (save-on-close), so a user can
@@ -142,63 +128,6 @@ impl App {
                     self.commit_settings();
                 }
             }
-            Message::OpenComplyDialog => {
-                self.open_menu = None;
-                self.comply_open = true;
-                // Drop the previous run's outcome: showing last time's totals
-                // beside a fresh dialog invites reading them as current.
-                self.comply_result = None;
-            }
-            Message::CloseComplyDialog => self.comply_open = false,
-            Message::ComplyModelChanged(m) => self.comply_model = m,
-            Message::RunComply => {
-                if self.comply_running {
-                    return Task::none(); // never stack two audits
-                }
-                // Fold the settings inputs into cfg first, so a key the user
-                // just typed into Connections is actually used by this run.
-                self.commit_settings();
-                self.comply_running = true;
-                self.comply_result = None;
-
-                let workspace = self.workspace_root();
-                let out_dir = sc_win::comply::output_dir(&workspace);
-                let choice = self.comply_model;
-                let cfg = self.cfg.clone();
-                return Task::perform(
-                    async move {
-                        // Blocking: a ten-framework audit walks the workspace
-                        // once per pack, and with a model chosen also makes
-                        // network calls. Never on the UI thread.
-                        tokio::task::spawn_blocking(move || {
-                            sc_win::comply::run(&workspace, &out_dir, choice, &cfg)
-                                .map_err(|e| e.to_string())
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(format!("the audit thread panicked: {e}")))
-                    },
-                    Message::ComplyDone,
-                );
-            }
-            Message::ComplyDone(result) => {
-                self.comply_running = false;
-                self.comply_result = Some(result);
-            }
-            Message::OpenComplyReport => {
-                if let Some(Ok(r)) = &self.comply_result {
-                    // Best-effort: failing to launch a viewer is no reason to
-                    // disturb the report that was successfully written.
-                    let _ = sc_win::proc::open_path(&r.index);
-                }
-            }
-            Message::ToggleYolo(v) => self.cfg.yolo = v,
-            Message::ToggleDryRun(v) => self.cfg.dry_run = v,
-            Message::RunTdd => self.start(RunKind::Tdd),
-            // The composer's main run now goes through the DISCIPLINED path: staged plan →
-            // architecture → decompose → compiler-driven build (tiny compiler-verified steps),
-            // instead of the bare single-agent iterate loop. The line-comment small-fix path
-            // (`start_iterate_with`) still uses iterate — it's a tiny scoped edit, not a feature.
-            Message::RunIterate => self.start(RunKind::StagedBuild),
             // --- Plugins (spec 25) ---
             //
             // Every arm here is fire-and-forget: the plugin is told what happened and
@@ -253,20 +182,14 @@ impl App {
                 }
             }
             Message::Tick => {
-                self.pump();
+                self.pump_terminal();
                 self.pump_plugins();
                 // Drive the live code-view refresh OFF the UI thread (returns Task::none unless a
                 // reload is due). This is the fix for the Execute-plan freeze.
                 // Also keep the chat pinned to the bottom as content streams in (unless the user
                 // scrolled up) — batched so both run this tick.
-                return Task::batch([
-                    self.live_reload_task(),
-                    self.chat_autoscroll_task(),
-                    self.plugin_autoscroll_task(),
-                    self.diff_task(),
-                ]);
+                return Task::batch([self.plugin_autoscroll_task(), self.diff_task()]);
             }
-            Message::HealthTick => self.tick_health_probe(),
             Message::FileDiffReady(rel, diff) => {
                 if self.diff_pending.as_deref() == Some(rel.as_str()) {
                     self.diff_pending = None;
@@ -279,12 +202,6 @@ impl App {
                     let pane = self.panes.focused_mut();
                     pane.changed_lines = diff.added.clone();
                     pane.file_diff = *diff;
-                }
-            }
-            Message::LiveViewReloaded(result) => {
-                if let Some((code, added)) = result {
-                    self.panes.focused_mut().code = Some(code);
-                    self.panes.focused_mut().changed_lines = added;
                 }
             }
             Message::SyncWorkspace => {
@@ -311,9 +228,6 @@ impl App {
                 }
             }
             Message::SelectFile(rel) => {
-                // Click-to-pin: show this file and stop auto-following the agent until
-                // the next run re-arms follow.
-                self.follow_agent = false;
                 self.select_file(rel);
             }
             Message::CloseTab(path) => self.close_tab(&path),
@@ -356,12 +270,6 @@ impl App {
                     self.git_selection.insert(rel.clone());
                     self.git_select_anchor = Some(rel.clone());
                 }
-                // Open the file, then jump the code view to its first changed line (git-tab
-                // click → land you on the change, VS-Code-diff style). The scroll is DEFERRED a
-                // beat so it runs against the newly-laid-out content, not the previous file's
-                // tree — a same-frame scroll_to misses on large files (the new lines don't exist
-                // in the layout yet).
-                self.follow_agent = false;
                 // From the GIT panel → the review view: the intent is to see what changed, and
                 // only that surface has the diff wash and the jump-to-change affordance.
                 self.select_file_for_review(rel);
@@ -391,57 +299,6 @@ impl App {
                     Some(m)
                 };
             }
-            Message::ChatSend => self.send_chat(),
-            Message::CopyTurn(t) => return iced::clipboard::write(t),
-            Message::RunProposedCommand => {
-                if let Some(cmd) = self.proposed_command.take() {
-                    // Show the Terminal tab and run there, ON THE HOST: the user clicked
-                    // this, in their own project. See `user_exec_mode` -- running it in
-                    // the agent's sandbox is why clicking Run on a game launcher
-                    // produced a terminal and nothing else.
-                    self.bottom_tab = BottomTab::Terminal;
-                    if !self.terminal.running {
-                        let mode = self.user_exec_mode();
-                        self.term_rx = self.terminal.run(&cmd, &mode);
-                    }
-                }
-            }
-            Message::DismissProposedCommand => self.proposed_command = None,
-            Message::ImplementProposedFix => {
-                if let Some(instruction) = self.proposed_fix.take() {
-                    // `start_iterate_with` has existed since the line-comment fix path and
-                    // was never reachable from chat -- the capability was there, the route
-                    // was not. Iterate runs with write tools under a git safety net: files
-                    // it touches are reverted if the run does not end green.
-                    self.start_iterate_with(instruction);
-                }
-            }
-            Message::DismissProposedFix => self.proposed_fix = None,
-            Message::ChatEditorAction(i, action) => {
-                // Read-only: apply selection/cursor/scroll actions so drag-select + Ctrl+C
-                // work, but never edits — the message text is immutable.
-                if !action.is_edit() {
-                    if let Some(content) = self.chat_editors.get_mut(i) {
-                        content.perform(action);
-                    }
-                }
-            }
-            Message::ApplyFile(i) => self.apply_proposed_file(i),
-            Message::ExecutePlan(i) => self.execute_plan(i),
-            Message::BreakdownPlan(i) => self.breakdown_plan(i),
-            Message::ExecuteOpenPlan => self.execute_open_plan(),
-            Message::BuildOpenPlan => self.build_open_plan(),
-            Message::BuildLastPlan => self.build_last_plan(),
-            Message::CommitPlan => self.commit_plan(),
-            Message::ToggleThink(v) => self.think = v,
-            Message::ToggleDebug(v) => self.debug = v,
-            Message::UndoLastChange => self.undo_last_change(),
-            Message::DismissComment(i) => {
-                self.comments.remove(i);
-                sc_win::comments::save(&self.workspace_root(), &self.comments);
-            }
-            Message::RevertComment(i) => self.revert_comment(i),
-            Message::RevertBlock(cur_start) => self.revert_block(cur_start),
             Message::MinimapJump(line) => {
                 return self.scroll_code_to_line(self.panes.focused_id(), line);
             }
@@ -457,30 +314,6 @@ impl App {
                 self.panes.focused_mut().code_scroll_y = vp.absolute_offset().y;
                 let height = (view_h / content_h).clamp(0.0, 1.0);
                 self.panes.focused_mut().code_viewport = Some((top * (1.0 - height), height));
-            }
-            Message::ChatScrolled(vp) => {
-                // Arm auto-scroll only when the user is at (or within a line of) the bottom; scrolling
-                // UP disarms it so a streaming reply doesn't yank them back down while they read. The
-                // last few px of tolerance keeps it "stuck" through the tiny jitter as content grows.
-                let content_h = vp.content_bounds().height;
-                let view_h = vp.bounds().height;
-                let bottom = (content_h - view_h).max(0.0);
-                let at_bottom = bottom - vp.absolute_offset().y <= 8.0;
-                self.chat_stuck_to_bottom = at_bottom;
-            }
-            Message::CancelRun => {
-                if let Some(s) = &self.session {
-                    s.cancel();
-                    self.chat_turns.push(sc_win::chat::Turn {
-                        role: sc_win::chat::Speaker::Agent,
-                        text: "⏹ cancelling — stopping at the next step…".to_string(),
-                    });
-                }
-            }
-            Message::CancelChat => {
-                if let Some(s) = &self.chat_session {
-                    s.cancel();
-                }
             }
             Message::SelectBottomTab(t) => self.bottom_tab = t,
             Message::TermInput(s) => self.terminal.input = s,
@@ -620,10 +453,6 @@ impl App {
                 let was_click = matches!(&self.drag, Some(DragSubject::Tab { armed: false, .. }));
                 if was_click {
                     self.drag = None;
-                    // Switching tabs pins the view and re-selects the file. `select_file` is
-                    // idempotent for an already-open tab (it reloads + re-selects), and the
-                    // active tab === `selected_file`, so the body just follows.
-                    self.follow_agent = false;
                     self.select_file(path);
                 }
             }
@@ -854,100 +683,6 @@ impl App {
                 self.run_git_net("fetch", &["fetch"]);
                 self.refresh_git_view();
             }
-            Message::LineDragStart(n) => {
-                // Begin a drag-selection anchored at line n. Clear any open comment box.
-                self.panes.focused_mut().drag = Some((n, n));
-                self.panes.focused_mut().comment_range = None;
-            }
-            Message::LineDragTo(n) => {
-                // Extend the drag to line n (only while a drag is active).
-                if let Some((anchor, _)) = self.panes.focused().drag {
-                    self.panes.focused_mut().drag = Some((anchor, n));
-                }
-            }
-            Message::LineDragEnd => {
-                // Commit the drag into a comment range (normalized so start ≤ end) and open
-                // the comment box. A no-drag (just a click) yields a single-line range.
-                if let Some((a, b)) = self.panes.focused_mut().drag.take() {
-                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    self.panes.focused_mut().comment_range = Some((lo, hi));
-                    self.panes.focused_mut().comment_draft.clear();
-                }
-            }
-            Message::CommentDraftChanged(s) => self.panes.focused_mut().comment_draft = s,
-            Message::CommentSubmit => self.submit_line_comment(),
-            Message::CommentCancel => {
-                self.panes.focused_mut().comment_range = None;
-                self.panes.focused_mut().drag = None;
-                self.panes.focused_mut().comment_draft.clear();
-            }
-            Message::ConfirmAllow => self.answer_confirm(Confirmation::AllowOnce),
-            Message::ConfirmDeny => {
-                self.answer_confirm(Confirmation::Deny("denied by user".to_string()))
-            }
-            Message::ConfirmRemember => {
-                // Remember the command's first token as the approved prefix.
-                let prefix = match self.gatebar.first() {
-                    Some(Gatebar::Confirm { command, .. }) => remember_prefix(command),
-                    _ => String::new(),
-                };
-                self.answer_confirm(Confirmation::AllowRemember { prefix });
-            }
-            Message::NotesChanged(s) => self.sendback_notes = s,
-            Message::GateApprove => self.answer_gate(Decision::Approve),
-            // (Revise dropped from the UI — send-back-with-comments supersedes it. `Decision::Revise`
-            //  stays in the workflow enum for the CLI; the GUI no longer surfaces a button for it.)
-            Message::GateSendBack => {
-                // Feedback comes from CODE-REVIEW line comments: the user reads a phase's `.md`
-                // in the code view, drops comments where they want changes, and clicks Send back.
-                //
-                // Comments are harvested across EVERY phase artifact, not just the gating one —
-                // the file a comment sits on says which phase it's about, so noticing while
-                // reading the layout that the ARCHITECTURE is wrong is expressible: comment on
-                // architecture.md and the send-back targets Architecture (dropping layout, which
-                // regenerates from the correction). `resolve_sendback` owns that rule; without
-                // comments we fall back to the free-text box and bounce the gating phase to itself.
-                let Some(gating) = self.gating_phase() else {
-                    return Task::none();
-                };
-                let files: Vec<(sc_workflow::Phase, Option<String>)> = sc_workflow::Phase::ALL
-                    .iter()
-                    .map(|&p| (p, self.plan.path_for(p)))
-                    .collect();
-                let rows: Vec<sc_win::sendback::PhaseComments<'_>> = files
-                    .iter()
-                    .filter_map(|(phase, file)| {
-                        let file = file.as_deref()?;
-                        Some(sc_win::sendback::PhaseComments {
-                            phase: *phase,
-                            file,
-                            notes: self.comments.on_file(file).map(|(_, c)| c).collect(),
-                        })
-                    })
-                    .collect();
-
-                let resolved = sc_win::sendback::resolve_sendback(&rows);
-                let commented: Vec<String> = rows
-                    .iter()
-                    .filter(|r| !r.notes.is_empty())
-                    .map(|r| r.file.to_string())
-                    .collect();
-                let (target, notes) = match resolved {
-                    Some((target, notes)) => (target, notes),
-                    None => (gating, non_empty(&self.sendback_notes)),
-                };
-                self.answer_gate(Decision::SendBack { target, notes });
-                // Every harvested comment has been DELIVERED as part of the notes — drop them
-                // all (and persist) so none re-delivers at a later gate, anchored to text that
-                // has since been regenerated.
-                if !commented.is_empty() {
-                    self.comments.items.retain(|c| !commented.contains(&c.file));
-                    sc_win::comments::save(&self.workspace_root(), &self.comments);
-                }
-            }
-            Message::GateAbort => self.answer_gate(Decision::Abort),
-            Message::SelectCoder(id) => self.selected_coder = Some(id),
-            Message::ClearSelection => self.selected_coder = None,
             Message::PickWorkspace => {
                 self.open_menu = None;
                 // Native folder dialog (blocking — fine for a button click). When a
@@ -983,23 +718,8 @@ impl App {
                 let mut state = sc_win::persist::load();
                 state.last_project = None;
                 sc_win::persist::save(&state);
-                self.publish_workspace_to_remote();
-            }
-            Message::OpenOutputFolder => {
-                if let Some(dir) = self.result.as_ref().and_then(|r| r.dir.clone()) {
-                    // Open in the system file manager (Explorer on Windows).
-                    #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-                    #[cfg(target_os = "macos")]
-                    let _ = std::process::Command::new("open").arg(&dir).spawn();
-                    #[cfg(all(unix, not(target_os = "macos")))]
-                    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
-                }
             }
         }
-        // Keep the per-turn selectable editors in step with the chat thread (no-op unless the
-        // thread changed). Runs after every message so streamed/appended turns are covered.
-        self.sync_chat_editors();
         #[cfg(debug_assertions)]
         self.assert_panes_consistent();
         Task::none()

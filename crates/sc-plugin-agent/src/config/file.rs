@@ -29,7 +29,15 @@ pub fn log_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    Some(base.join("smart-coder").join("logs"))
+    // The PLUGIN's own directory, not the host's (spec 25). These are model-call
+    // transcripts — they belong to the thing that made the calls, and the editor has no
+    // business holding them now that it makes none.
+    Some(
+        base.join("smart-coder")
+            .join("plugins")
+            .join("agent")
+            .join("logs"),
+    )
 }
 
 /// Gemini's OpenAI-compatible endpoint. Pointing the orchestrator (planner) or coder

@@ -49,14 +49,16 @@ steps:
         > /etc/apt/sources.list.d/github-cli.list
       - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh
 
-      # Build BOTH products and strip them (44MB unstripped -> ~34MB each).
+      # Build the desktop app and the plugins that ship with it.
       #
-      # `smart-coder` is the agent app; `smart-coder-crafter` is the editor, which links
-      # no model code at all (spec 21). They are separate crates, so this is two builds --
-      # but they share `sc-craft-ui`, so the second is mostly cache hits.
-      - cargo build --release -p sc-win -p sc-crafter
+      # There is ONE product today: `smart-coder`. An editor-only binary was planned as a
+      # second crate (`sc-crafter`) and this step named it before it existed, so every tag
+      # push failed here -- unnoticed, because releases only fire on `v*` tags. It waits on
+      # the agent becoming a plugin (spec 25): until then the editor still links the model
+      # crates, so a "no model code" binary cannot be built by omitting a feature.
+      - cargo build --release -p sc-win -p sc-plugin-claude
       - strip target/release/smart-coder
-      - strip target/release/smart-coder-crafter
+      - strip target/release/sc-plugin-claude
 
       # Package + publish + prune in ONE shell entry (each `commands:` entry is a
       # fresh shell, so the vars must all live together). CI_COMMIT_TAG, CI_REPO
@@ -77,21 +79,27 @@ steps:
         if [ -z "$$GITHUB_TOKEN" ]; then echo "github_token secret is not set in Woodpecker" >&2; exit 1; fi
         export GH_TOKEN="$$GITHUB_TOKEN"
 
-        # The shared-library note is the same for both: both are the same iced GUI.
+        # The shared-library note applies to the GUI. The plugin is headless and needs
+        # none of it, but carrying one note is simpler than branching for an artifact
+        # nobody installs on its own.
         SO1='Needs these shared libraries installed (Debian/Ubuntu names):'
         SO2='  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0'
         SO3='  libwayland-client0 libwayland-cursor0 libwayland-egl1'
         SO4='  libfontconfig1 libfreetype6'
 
-        # Two products, two tarballs (spec 21). Packaged in a loop so they cannot
-        # drift -- the only per-product values are the binary name and one line of
-        # description.
+        # The app and the plugin that ships with it, two tarballs. Packaged in a loop
+        # so they cannot drift -- the only per-artifact values are the binary name and
+        # one line of description.
+        #
+        # Not "two products": there is one desktop product today. The editor-only build
+        # spec 21 describes waits on the agent becoming a plugin (spec 25), because until
+        # then the editor still links the model crates.
         ASSETS=""
-        for BIN in smart-coder smart-coder-crafter; do
+        for BIN in smart-coder sc-plugin-claude; do
           if [ "$$BIN" = "smart-coder" ]; then
             WHAT='Smart Coder desktop client -- the editor plus the agent.'
           else
-            WHAT='Smart Coder Crafter -- the editor. Contacts no language model.'
+            WHAT='Claude Code plugin for Smart Coder. Install under plugins/claude-code/.'
           fi
           PKG="$$BIN-$$TAG-linux-x86_64"
           mkdir -p "dist/$$PKG"

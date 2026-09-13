@@ -21,6 +21,8 @@ members = [
     "crates/sc-plugin-proto",
     "crates/sc-editor",
     "crates/sc-plugin-claude",
+    "crates/sc-plugin-agent",
+    "crates/sc-plugin-comply",
     "crates/sc-android",
     "crates/sc-core",
     "crates/sc-comply-author",

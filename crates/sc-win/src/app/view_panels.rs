@@ -4,65 +4,22 @@ use super::*;
 use iced::widget::{column, row};
 
 impl App {
-    /// The inline comment box shown under the selected range (PR-style): a text input +
-    /// Comment / Cancel. Submitting triages small (fix now) vs. big (plan first).
-    pub(crate) fn view_comment_box(&self) -> Element<'_, Message> {
-        let placeholder = match self.panes.focused().comment_range {
-            Some((lo, hi)) if lo != hi => format!("comment on lines {lo}–{hi}…"),
-            _ => "comment on this line…".to_string(),
-        };
-        let input = text_input(&placeholder, &self.panes.focused().comment_draft)
-            .on_input(Message::CommentDraftChanged)
-            .on_submit(Message::CommentSubmit)
-            .padding(8)
-            .style(input_style)
-            .width(Fill);
-        let submit = button(text("Comment").size(13))
-            .on_press(Message::CommentSubmit)
-            .padding([4, 12])
-            .style(primary_button);
-        let cancel = button(text("Cancel").size(13))
-            .on_press(Message::CommentCancel)
-            .padding([4, 12])
-            .style(menu_item_style);
-        let hint = text("small fix → done inline · bigger → we'll plan it")
-            .size(10)
-            .color(FG_MUTED);
-        container(column![input, row![submit, cancel].spacing(6), hint].spacing(6))
-            .width(Fill)
-            .padding(8)
-            .style(dropdown_style)
-            .into()
-    }
-
     /// The bottom panel — a tabbed strip of **Verification** (verify output) and **Build**
     /// (last run outcome). It auto-hides when there's nothing to show — no run in flight, no
     /// verify output, no build result — so planning gets the full height. During a swarm
     /// build the coder prompt/output panel takes the whole strip.
     pub(crate) fn view_bottom_strip(&self) -> Option<Element<'_, Message>> {
-        if self.is_swarm() {
-            return Some(self.view_coder_io());
-        }
-        // Show the strip when there's build/verify content OR a project is open (so the
-        // integrated Terminal is always available while working in a project).
-        let has_content = self.session.is_some()
-            || self.verify_text.is_some()
-            || self.result.is_some()
-            || self.picked_workspace.is_some();
-        if !has_content {
-            return None;
-        }
+        // A project being open is the whole condition now. The build and verify content
+        // that used to open this strip left with the agent (spec 25); what remains —
+        // Problems and the Terminal — is only meaningful with a project anyway.
+        self.picked_workspace.as_ref()?;
         let tabs = row![
             self.bottom_tab_button("Problems", BottomTab::Problems),
-            self.bottom_tab_button("Verification", BottomTab::Verification),
-            self.bottom_tab_button("Build", BottomTab::Build),
             self.bottom_tab_button("Terminal", BottomTab::Terminal),
         ]
         .spacing(4);
         let content = match self.bottom_tab {
             BottomTab::Problems => self.view_problems_tab(),
-            BottomTab::Verification => self.view_verification_tab(),
-            BottomTab::Build => self.view_build_tab(),
             BottomTab::Terminal => self.view_terminal_tab(),
         };
         Some(
@@ -89,142 +46,23 @@ impl App {
         .into()
     }
 
-    /// The Verification tab: the verify command's captured output (failure-first).
-    pub(crate) fn view_verification_tab(&self) -> Element<'_, Message> {
-        let inner: Element<'_, Message> = match &self.verify_text {
-            Some(v) => text(v.clone()).size(12).into(),
-            None => text("cargo check / test output shows here after the agent verifies")
-                .size(12)
-                .color(FG_MUTED)
-                .into(),
-        };
-        scrollable(inner).height(Fill).into()
-    }
-
-    /// The Build tab: the last run's outcome — ✓/✗ headline, reason, changed/built files,
-    /// and (from-scratch only) an open-folder button.
-    pub(crate) fn view_build_tab(&self) -> Element<'_, Message> {
-        let Some(r) = self.result.as_ref() else {
-            return text("no build yet — describe a change and run it")
-                .size(12)
-                .color(FG_MUTED)
-                .into();
-        };
-        let (mark, color) = if r.ok { ("✓", GOOD) } else { ("✗", BAD) };
-        let mut col = column![text(format!("{mark}  {}", r.headline))
-            .size(15)
-            .color(color)]
-        .spacing(4);
-        if !r.reason.is_empty() {
-            col = col.push(text(&r.reason).size(12).color(FG_MUTED));
-        }
-        let label = if self.iterating { "changed" } else { "built" };
-        if !r.files.is_empty() {
-            col = col.push(text(format!("files {label}:")).size(11).color(FG_MUTED));
-        }
-        for f in r.files.iter().take(10) {
-            col = col.push(text(format!("  • {f}")).size(12));
-        }
-        if r.files.len() > 10 {
-            col = col.push(
-                text(format!("  … and {} more", r.files.len() - 10))
-                    .size(12)
-                    .color(FG_MUTED),
-            );
-        }
-        if r.dir.is_some() {
-            col = col.push(Space::new().height(Length::Fixed(4.0)));
-            col = col.push(
-                button(text("📂 open output folder"))
-                    .on_press(Message::OpenOutputFolder)
-                    .style(menu_item_style),
-            );
-        }
-        // A finished Breakdown: make the next step unmissable. Breakdown is design-only, so offer
-        // the follow-ons right here — build the plan, or commit it to the repo — instead of leaving
-        // the user with a passive "plan ready" line and no obvious action.
-        if r.plan_ready {
-            col = col.push(Space::new().height(Length::Fixed(8.0)));
-            col = col.push(
-                text("Review the breakdown above, then:")
-                    .size(12)
-                    .color(FG_MUTED),
-            );
-            col = col.push(Space::new().height(Length::Fixed(4.0)));
-            let mut build = button(text("⚒  Build this plan").size(14).color(FG)).padding([6, 16]);
-            // Only enable Build when we still have the plan task and no run is in flight.
-            if self.last_plan_task.is_some() && self.session.is_none() {
-                build = build.on_press(Message::BuildLastPlan).style(primary_button);
-            } else {
-                build = build.style(stage_toggle_button);
-            }
-            let commit = button(text("✓  Commit the plan").size(14).color(FG))
-                .on_press(Message::CommitPlan)
-                .padding([6, 16])
-                .style(stage_toggle_button);
-            col = col.push(row![build, commit].spacing(8));
-        }
-        // "I don't like this change" — undo an in-place fix's edits (git-revert its files).
-        // Only for iterate runs that changed files (from-scratch builds have no committed base).
-        if self.iterating && !r.files.is_empty() {
-            col = col.push(Space::new().height(Length::Fixed(6.0)));
-            col = col.push(
-                button(text("↩ Undo this change").size(13))
-                    .on_press(Message::UndoLastChange)
-                    .padding([4, 12])
-                    .style(|_t: &Theme, status| {
-                        let hov = matches!(status, button::Status::Hovered);
-                        button::Style {
-                            background: Some(Background::Color(Color {
-                                a: if hov { 0.22 } else { 0.14 },
-                                ..BAD
-                            })),
-                            text_color: FG,
-                            border: Border {
-                                radius: RADIUS.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }
-                    }),
-            );
-        }
-        scrollable(col).height(Fill).into()
-    }
-
-    /// The Terminal tab: a VS-Code-style command runner. Scrollback (stderr in red, the
-    /// `$ cmd`/`[exit]` meta lines dimmed) above an input row; Run becomes Kill while a
-    /// command is in flight. Commands run in the open workspace via [`sc_win::terminal`].
-    /// A persistent one-line badge describing where terminal commands run right now, so
-    /// containment is never ambiguous: `(text, colour)`.
+    /// A one-line badge describing where terminal commands run, so containment is never
+    /// ambiguous.
+    ///
+    /// Always the host now. The container modes read `sc_verify::Sandbox`, which left with
+    /// the agent (spec 25) — and `user_exec_mode` already hard-coded the host for anything
+    /// the user clicked, so the badge is simply telling the truth it always should have:
+    /// a command you typed runs on your machine, in your project.
     pub(crate) fn term_status_badge(&self) -> (String, iced::Color) {
-        // `cfg.sandbox()` only yields Host/Docker; Session is a runtime-only state, folded in
-        // here for exhaustiveness (rendered like Docker).
-        let image = match self.cfg.sandbox() {
-            sc_verify::Sandbox::Host => {
-                return (
-                    "⚠ HOST — commands run on this machine (sandbox off)".to_string(),
-                    BAD,
-                );
-            }
-            sc_verify::Sandbox::Docker { image } => image,
-            sc_verify::Sandbox::Session(c) => c.name().to_string(),
-        };
-        if self.picked_workspace.is_none() {
-            (
-                "🔒 sandbox on — open a project to enable the terminal".to_string(),
+        match &self.picked_workspace {
+            Some(_) => (
+                "commands run on this machine, in this project".to_string(),
                 FG_MUTED,
-            )
-        } else if self.term_container_started {
-            (
-                format!("🔒 sandboxed — running in container ({image})"),
-                GOOD,
-            )
-        } else {
-            (
-                format!("🔒 sandboxed — container starts on first command ({image})"),
+            ),
+            None => (
+                "open a project to enable the terminal".to_string(),
                 FG_MUTED,
-            )
+            ),
         }
     }
 
@@ -305,62 +143,6 @@ impl App {
             .into()
     }
 
-    /// The horizontal step-flow at the top: each phase with arrows between, the current
-    /// phase highlighted, done phases checked, plus a final "Build" step that lights up
-    /// once planning is complete and implementation begins.
-    pub(crate) fn view_step_flow(&self) -> Element<'_, Message> {
-        let current = self.plan.current_phase();
-        let done_color = iced::Color::from_rgb(0.45, 0.78, 0.55); // green
-        let now_color = iced::Color::from_rgb(0.48, 0.65, 0.98); // blue
-        let dim_color = iced::Color::from_rgb(0.4, 0.43, 0.55);
-        let arrow_color = iced::Color::from_rgb(0.35, 0.38, 0.5);
-
-        let mut flow = row![].spacing(6).align_y(iced::Alignment::Center);
-        let steps = self.plan.steps();
-        for (i, step) in steps.iter().enumerate() {
-            let is_current = current == Some(step.phase);
-            let (mark, color, size) = if step.done {
-                ("✓", done_color, 13)
-            } else if is_current {
-                ("▶", now_color, 15)
-            } else {
-                ("·", dim_color, 13)
-            };
-            let label = text(format!("{mark} {}", step.phase.title()))
-                .size(size)
-                .color(color);
-            flow = flow.push(label);
-            flow = flow.push(text("→").size(13).color(arrow_color));
-            let _ = i;
-        }
-        // The final "Build" step: active once planning is complete (no current phase
-        // left) and a swarm is running; done when source files were built.
-        let built = self.result.as_ref().is_some_and(|r| r.ok);
-        let building = current.is_none() && self.is_swarm();
-        let (bmark, bcolor) = if built {
-            ("✓", done_color)
-        } else if building {
-            ("▶", now_color)
-        } else {
-            ("·", dim_color)
-        };
-        flow = flow.push(
-            text(format!("{bmark} Build"))
-                .size(if building { 15 } else { 13 })
-                .color(bcolor),
-        );
-
-        container(
-            scrollable(flow).direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(2).scroller_width(2),
-            )),
-        )
-        .width(Fill)
-        .padding(10)
-        .style(card_style)
-        .into()
-    }
-
     /// The top menu bar: the app title, the dropdown menu buttons (File / View), and —
     /// pushed to the right — the workspace/status line (what folder we're working in, and
     /// how). Clicking a title toggles its dropdown; items live in [`Self::view_menu_dropdown`].
@@ -373,14 +155,12 @@ impl App {
         let status = text(self.workspace_status())
             .size(11)
             .color(iced::Color::from_rgb(0.55, 0.58, 0.70));
-        let health: Element<'_, Message> = self.view_backend_badge();
         let bar = row![
             file,
             view_m,
             Space::new().width(Fill), // left spacer
             status,
             Space::new().width(Fill), // right spacer → status sits centered
-            health,
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
@@ -391,72 +171,15 @@ impl App {
             .into()
     }
 
-    /// A human reason the backend is known-unusable, or `None` if it's `Ready` or not yet
-    /// probed. Used to preflight-gate runs so a bad backend fails loudly up front instead of
-    /// mid-stream. A `None` (unprobed) health is allowed through — we don't block the first
-    /// few seconds after launch before the first probe lands.
-    pub(crate) fn backend_unready_reason(&self) -> Option<String> {
-        use sc_model::BackendHealth::*;
-        match &self.backend_health {
-            Some(NoModel { .. }) => Some("backend is up but no model is loaded".to_string()),
-            Some(Unreachable { .. }) => {
-                Some(format!("backend unreachable at {}", self.cfg.base_url))
-            }
-            None | Some(Ready) => None,
-        }
-    }
-
-    /// The backend health badge in the top bar (after File/View): a coloured dot + short
-    /// label from the periodic probe. Green = a real completion succeeded (model serving);
-    /// amber = endpoint reachable but no model loaded; red = unreachable; grey = probing.
-    pub(crate) fn view_backend_badge(&self) -> Element<'_, Message> {
-        use sc_model::BackendHealth::*;
-        let (dot, label, color) = match &self.backend_health {
-            None => ("●", "checking backend…".to_string(), FG_MUTED),
-            Some(Ready) => ("●", format!("{} ready", self.cfg.model), GOOD),
-            // Name the ENDPOINT and the MODEL, not just the symptom.
-            //
-            // This said only "backend up — no model loaded", which is true of three very
-            // different situations: nothing is loaded, the model NAME is wrong, or the URL
-            // points at something that is not a model server at all. Observed: the config
-            // still pointed at :8080, which by then served an unrelated website — nginx
-            // answered the reachability probe, the completion failed, and the badge reported
-            // a modelless backend while the real server sat on another port. `Unreachable`
-            // already names its URL; this arm discarding both was the reason the state was
-            // undiagnosable from the UI.
-            Some(NoModel { .. }) => (
-                "●",
-                format!(
-                    "no model at {} (asked for {})",
-                    self.cfg.base_url, self.cfg.model
-                ),
-                Color::from_rgb(0.95, 0.72, 0.30), // amber
-            ),
-            Some(Unreachable { .. }) => (
-                "●",
-                format!("backend unreachable ({})", self.cfg.base_url),
-                BAD,
-            ),
-        };
-        row![
-            text(dot).size(12).color(color),
-            text(label).size(11).color(color),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center)
-        .into()
-    }
-
     /// The one-line workspace status shown at the right of the top bar: where the app is
     /// working and in which mode.
     pub(crate) fn workspace_status(&self) -> String {
-        match (&self.picked_workspace, &self.run_dir) {
-            (Some(dir), _) => {
-                let stack = sc_workflow::ProjectStack::detect(dir).label();
-                format!("iterating in  {}  ·  {stack}", dir.display())
-            }
-            (None, Some(d)) => format!("output  {}", d.display()),
-            (None, None) => "no project — File ▸ Open folder".to_string(),
+        // The stack label came from `sc_workflow::ProjectStack`, which left with the
+        // agent (spec 25). `project_kind` is the editor's own detection and already
+        // drives the Compile button, so it is the honest source here.
+        match &self.picked_workspace {
+            Some(dir) => format!("{}  ·  {}", dir.display(), self.project_kind.label()),
+            None => "no project — File ▸ Open folder".to_string(),
         }
     }
 
@@ -493,14 +216,8 @@ impl App {
                 } else {
                     vec![("📁  Open folder…".to_string(), Message::PickWorkspace)]
                 };
-                // Only offered with a project open — the audit reads the
-                // workspace, and an entry that can only fail is worse than none.
-                if self.picked_workspace.is_some() {
-                    v.push((
-                        "🛡  Compliance report…".to_string(),
-                        Message::OpenComplyDialog,
-                    ));
-                }
+                // The compliance audit is a plugin now (spec 25); it contributes its own
+                // menu entry when installed, so the host no longer names it here.
                 // Recent projects (most-recent first), excluding the currently-open one.
                 let recents = sc_win::persist::load().recents;
                 let current = self.picked_workspace.clone();

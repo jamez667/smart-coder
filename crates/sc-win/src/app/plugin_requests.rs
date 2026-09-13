@@ -442,8 +442,10 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join(name), body).unwrap();
-        let mut app = App::default();
-        app.picked_workspace = Some(dir);
+        let mut app = App {
+            picked_workspace: Some(dir),
+            ..Default::default()
+        };
         app.select_file(name.to_string());
         app
     }
