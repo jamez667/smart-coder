@@ -76,7 +76,27 @@ pub use manifest::{Capability, Manifest, PanelDecl};
 /// unchanged and this is additive rather than breaking. The version is bumped anyway,
 /// because a v2 plugin on a v1 host would silently lose Enter — and silently is the
 /// problem.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// # v3
+///
+/// The agent asked for three things, and unlike v2 these are not conveniences: without
+/// them the agent cannot be a plugin at all.
+///
+/// * **[`PluginMessage::Ask`]** — a question put to the USER, answered later by
+///   [`HostMessage::Answered`]. The agent blocks a worker thread on a typed reply, and
+///   v1/v2 have no way to express that. Note the direction: the plugin still asks and the
+///   host still answers, so the one request/response channel already in the protocol is
+///   reused rather than a second one opened in reverse.
+/// * **[`HostMessage::LineComment`]** — a line RANGE plus what the user wrote about it.
+///   `SelectionChanged` carries a point and no text, so the PR-review workflow — the most
+///   important agent/editor interaction in the application — could not reach a plugin.
+/// * **[`PluginMessage::Preview`]** — an ephemeral overlay on a buffer. `BufferEdit` is
+///   atomic, version-checked and undoable, all of which is right for an edit and wrong
+///   for "watch it type": per-token edits would fail their own version check on the
+///   second token and push one undo entry per token.
+///
+/// Additive again — a v2 plugin runs unchanged.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A request id, correlating a request with its response.
 ///
@@ -203,6 +223,41 @@ pub enum HostMessage {
         id: RequestId,
         code: ErrorCode,
         message: String,
+    },
+
+    /// The user answered a [`PluginMessage::Ask`] (**v3**).
+    ///
+    /// `choice` indexes the `choices` the plugin offered, or `None` when the question was
+    /// dismissed. An index rather than the label, so a plugin never has to string-match
+    /// its own button text back.
+    ///
+    /// Separate from [`Response`](HostMessage::Response) because the two are answered on
+    /// completely different timescales — every other response is a lookup the host does in
+    /// microseconds, and this one waits for a person. Folding them together would invite a
+    /// plugin to treat them alike and time out a question the user was still reading.
+    Answered {
+        id: RequestId,
+        choice: Option<usize>,
+    },
+
+    /// The user commented on a range of lines (**v3**).
+    ///
+    /// The PR-review interaction: select lines, write what should change, submit. Carries
+    /// the range AND the prose, which is what `SelectionChanged` cannot do — it is a
+    /// point, and it has no text.
+    ///
+    /// `context` is the surrounding source the host already scopes for its own use, sent
+    /// with the comment so a plugin need not read the file back and re-derive it — and so
+    /// it sees the text as the user saw it rather than as the file is now.
+    LineComment {
+        path: String,
+        /// 1-based, inclusive.
+        start: usize,
+        end: usize,
+        /// What the user wrote.
+        text: String,
+        /// The lines themselves, as displayed.
+        context: String,
     },
 }
 
@@ -345,6 +400,57 @@ pub enum PluginMessage {
 
     /// Show a transient message to the user.
     Notify { level: NotifyLevel, message: String },
+
+    /// **Put a question to the user** and wait for the answer (**v3**).
+    ///
+    /// The host renders `prompt` with `choices` as buttons and replies
+    /// [`HostMessage::Answered`] carrying the same `id` when one is clicked. Unlike every
+    /// other request the host may take **minutes**: the answer is a person, not a lookup.
+    ///
+    /// # Why this exists
+    ///
+    /// The agent blocks a worker thread on a typed reply — `decide()` sends a request and
+    /// sits on `reply_rx.recv()` until a button is clicked. Rendering the question as
+    /// clickable rows and waiting for `CommandInvoked` nearly works, and fails on
+    /// **correlation**: approvals queue, a click carries no id, and a plugin with two
+    /// questions outstanding cannot tell which was answered. The `id` is the whole point.
+    ///
+    /// # The contract
+    ///
+    /// **Every `Ask` is answered.** A dismissed question replies `choice: None` rather
+    /// than staying silent, and a host that is shutting down replies before it goes. A
+    /// plugin blocked on an answer that never comes is a hung agent — and the existing
+    /// seam already knows what to do with a refusal, but only if it is told.
+    Ask {
+        id: RequestId,
+        /// What is being asked. Markdown, so a command or an artifact can be shown as
+        /// code rather than as a wall of prose.
+        prompt: String,
+        /// The buttons, in order, rendered left to right. Put the safe one first: that is
+        /// the one a hurried user clicks.
+        choices: Vec<String>,
+    },
+
+    /// **Show an ephemeral overlay on a buffer** (**v3**).
+    ///
+    /// Replaces lines `start..=end` (1-based, inclusive) with `text` *for display only*.
+    /// The buffer is untouched: nothing is saved, no version is bumped, and the undo stack
+    /// does not move. Empty `text` clears the overlay.
+    ///
+    /// This is how "watch it type" works. `BufferEdit` cannot do it — atomic,
+    /// version-checked and undoable by design, so a per-token edit would fail its own
+    /// version check on the second token and push one undo entry per token.
+    ///
+    /// The host clears the overlay when the user edits that buffer, when the file closes,
+    /// or when the plugin stops. A preview outliving its plugin would be text on screen
+    /// belonging to nothing and dismissible by no one.
+    Preview {
+        path: String,
+        /// 1-based, inclusive, matching every other line number the user sees.
+        start: usize,
+        end: usize,
+        text: String,
+    },
 
     /// Write to this plugin's log, shown in the Plugins panel.
     ///

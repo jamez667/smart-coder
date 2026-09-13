@@ -461,3 +461,130 @@ fn an_ordinary_row_writes_no_severity() {
     let json = serde_json::to_string(&ListItem::text("ok")).unwrap();
     assert_eq!(json, r#"{"text":"ok"}"#);
 }
+
+// ---------------------------------------------------------------------------
+// v3 - what the agent could not do without
+// ---------------------------------------------------------------------------
+
+/// **The correlation property `Ask` exists for.** Approvals queue, and a click on a
+/// clickable row carries no id - so a plugin with two questions outstanding could not tell
+/// which one was answered. That is why this is a request with an id and not a list row.
+#[test]
+fn two_asks_are_told_apart_by_their_ids() {
+    let first = to_line(&PluginMessage::Ask {
+        id: 1,
+        prompt: "Run `rm -rf build`?".to_string(),
+        choices: vec!["Allow once".into(), "Deny".into()],
+    });
+    let second = to_line(&PluginMessage::Ask {
+        id: 2,
+        prompt: "Approve the plan?".to_string(),
+        choices: vec!["Approve".into(), "Send back".into()],
+    });
+    assert!(first.contains(r#""id":1"#) && second.contains(r#""id":2"#));
+
+    let answer = r#"{"type":"answered","id":2,"choice":0}"#;
+    let Outgoing::Message(m) = parse_host_line(answer) else {
+        panic!("must parse");
+    };
+    assert_eq!(
+        *m,
+        HostMessage::Answered {
+            id: 2,
+            choice: Some(0)
+        }
+    );
+}
+
+/// A dismissed question still answers, with `None`. **A plugin blocked on an answer that
+/// never comes is a hung agent** - the seam knows how to deny, but only if it is told.
+#[test]
+fn a_dismissed_ask_is_answered_with_none() {
+    let Outgoing::Message(m) = parse_host_line(r#"{"type":"answered","id":7,"choice":null}"#)
+    else {
+        panic!("must parse");
+    };
+    assert_eq!(
+        *m,
+        HostMessage::Answered {
+            id: 7,
+            choice: None
+        }
+    );
+}
+
+/// The choice is an INDEX, so a plugin never string-matches its own button text back.
+#[test]
+fn an_answer_indexes_the_choices_rather_than_naming_one() {
+    let json = serde_json::to_string(&HostMessage::Answered {
+        id: 3,
+        choice: Some(1),
+    })
+    .unwrap();
+    assert!(json.contains(r#""choice":1"#), "{json}");
+    assert!(!json.contains("Deny"), "no label travels back: {json}");
+}
+
+/// A line comment carries the RANGE and the prose. `SelectionChanged` carries a point and
+/// no text, which is why the PR-review workflow could not reach a plugin at all.
+#[test]
+fn a_line_comment_carries_a_range_and_what_the_user_wrote() {
+    let line = r#"{"type":"line-comment","path":"src/main.rs","start":10,"end":14,
+        "text":"this allocates twice","context":"fn main() {"}"#;
+    let Outgoing::Message(m) = parse_host_line(line) else {
+        panic!("must parse");
+    };
+    let HostMessage::LineComment {
+        start, end, text, ..
+    } = *m
+    else {
+        panic!("wrong variant");
+    };
+    assert_eq!((start, end), (10, 14), "a range, not a point");
+    assert_eq!(text, "this allocates twice");
+}
+
+/// A preview is display-only: a range and replacement text, and no version - because it
+/// does not touch the buffer and so has nothing to check against.
+#[test]
+fn a_preview_carries_no_version_because_it_edits_nothing() {
+    let json = serde_json::to_string(&PluginMessage::Preview {
+        path: "a.rs".to_string(),
+        start: 3,
+        end: 5,
+        text: "fn replaced() {}".to_string(),
+    })
+    .unwrap();
+    assert!(
+        !json.contains("version"),
+        "a preview is not an edit: {json}"
+    );
+    assert!(json.contains(r#""start":3"#), "{json}");
+}
+
+/// An empty preview clears the overlay rather than blanking the lines.
+#[test]
+fn an_empty_preview_parses_as_a_clear() {
+    let line = r#"{"type":"preview","path":"a.rs","start":1,"end":1,"text":""}"#;
+    let Incoming::Message(m) = parse_plugin_line(line) else {
+        panic!("must parse");
+    };
+    let PluginMessage::Preview { text, .. } = *m else {
+        panic!("wrong variant");
+    };
+    assert!(text.is_empty());
+}
+
+/// **v1 and v2 plugins still run.** Every v3 addition is a new message type, and an
+/// unknown type is ignored rather than fatal - so an older plugin never sees one and a
+/// newer plugin on an older host degrades instead of dying.
+#[test]
+fn v3_additions_do_not_disturb_the_older_shapes() {
+    // `ask` is a PLUGIN message; a host parser must not accept it.
+    let ask = r#"{"type":"ask","id":1,"prompt":"?","choices":["y"]}"#;
+    assert_eq!(parse_host_line(ask), Outgoing::Unknown);
+
+    // And the v1 shapes still parse unchanged.
+    let v1 = r#"{"type":"panel-content","panel":"p","content":{"kind":"list","items":[]}}"#;
+    assert!(matches!(parse_plugin_line(v1), Incoming::Message(_)));
+}
