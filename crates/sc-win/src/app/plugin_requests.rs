@@ -29,6 +29,11 @@ impl App {
     ///
     /// Returns `None` for messages that are notifications rather than requests — they
     /// are handled by the caller and owe no answer.
+    ///
+    /// Most arms only *build* a reply. [`RunCommand`](PluginMessage::RunCommand) also
+    /// **sends**: dispatching a command means one message to the target plugin and a
+    /// separate acknowledgement to the requester — two destinations, which a single
+    /// return value cannot express.
     pub(crate) fn answer_plugin(&mut self, msg: &PluginMessage) -> Option<HostMessage> {
         match msg {
             PluginMessage::BufferRead { id, path } => Some(self.reply_buffer_read(*id, path)),
@@ -48,14 +53,9 @@ impl App {
             PluginMessage::EditorOpen { id, path, line } => {
                 Some(self.reply_editor_open(*id, path, *line))
             }
-            // `RunCommand` lets a plugin invoke another's command. Answered as
-            // unsupported rather than silently ignored: a plugin waiting on the reply
-            // would otherwise hang, and "not yet" is a fact it can act on.
-            PluginMessage::RunCommand { id, .. } => Some(HostMessage::ErrorResponse {
-                id: *id,
-                code: ErrorCode::Unsupported,
-                message: "running commands across plugins is not implemented yet".to_string(),
-            }),
+            PluginMessage::RunCommand { id, command, args } => {
+                Some(self.reply_run_command(*id, command, args))
+            }
             _ => None,
         }
     }
@@ -244,6 +244,56 @@ impl App {
             },
         }
     }
+
+    /// Dispatch a command a plugin asked for, and acknowledge it.
+    ///
+    /// **The capability is an API mechanism, not a security boundary** (spec 25). A
+    /// plugin is already a subprocess with the user's full privileges, so invoking a
+    /// declared command grants it nothing it could not do directly. What this buys is
+    /// that the advertised capability is real rather than a promise.
+    ///
+    /// An id nothing declares is [`NotFound`](ErrorCode::NotFound), not `Unsupported`:
+    /// the host owns no commands of its own, so "nothing owns this" is the honest
+    /// answer, and it lets a plugin tell a missing peer from a host that cannot serve
+    /// the request at all.
+    fn reply_run_command(&mut self, id: RequestId, command: &str, args: &[String]) -> HostMessage {
+        let missing = || format!("no plugin declares {command}");
+        let Some(plugins) = self.plugins.as_mut() else {
+            return err(id, ErrorCode::NotFound, missing());
+        };
+        let Some(i) = owner_of(command, plugins.running.iter().map(|p| p.manifest.as_ref())) else {
+            return err(id, ErrorCode::NotFound, missing());
+        };
+        plugins.running[i].send(&HostMessage::CommandInvoked {
+            command: command.to_string(),
+            args: args.to_vec(),
+        });
+        HostMessage::Response {
+            id,
+            payload: ResponsePayload::Ok,
+        }
+    }
+}
+
+/// The index of the plugin that owns `command`, if any.
+///
+/// **First declaration wins**, which is not arbitrary: `Plugins::start` claims commands
+/// in load order and records every later claim in `command_collisions` for the Plugins
+/// panel to show. Resolving any other way would dispatch to a plugin the user has been
+/// told did *not* get the command.
+///
+/// Takes the manifests rather than the plugins, which is what makes it testable: a
+/// `Plugin` owns a live child process, so one cannot be constructed in a unit test.
+/// `None` is a plugin whose handshake has not landed — it has declared nothing yet, so
+/// it owns nothing.
+fn owner_of<'a>(
+    command: &str,
+    manifests: impl Iterator<Item = Option<&'a sc_plugin_proto::Manifest>>,
+) -> Option<usize> {
+    manifests
+        .enumerate()
+        .find(|(_, m)| m.is_some_and(|m| m.commands.iter().any(|c| c.id == command)))
+        .map(|(i, _)| i)
 }
 
 /// Build an error reply.
@@ -572,10 +622,13 @@ mod tests {
         );
     }
 
-    /// Every request gets a reply, including the ones this version cannot serve. A
-    /// dropped reply is a plugin waiting forever.
+    /// Every request gets a reply, including the ones that cannot be served. A dropped
+    /// reply is a plugin waiting forever.
+    ///
+    /// With no plugins loaded nothing declares the command, so this is `NotFound` — the
+    /// same answer a real host gives for an id no manifest claims.
     #[test]
-    fn an_unimplemented_request_still_gets_an_answer() {
+    fn a_command_nothing_declares_still_gets_an_answer() {
         let mut app = app_with_open_file(
             "a.rs", "x
 ",
@@ -589,7 +642,54 @@ mod tests {
             panic!("expected an error reply, got {reply:?}");
         };
         assert_eq!(id, 6, "the reply carries the request's id");
-        assert_eq!(code, ErrorCode::Unsupported);
+        assert_eq!(code, ErrorCode::NotFound);
+    }
+
+    /// A manifest declaring `command`, for the resolver tests.
+    fn manifest_with(id: &str, commands: &[&str]) -> sc_plugin_proto::Manifest {
+        sc_plugin_proto::Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0".to_string(),
+            protocol_version: sc_plugin_proto::PROTOCOL_VERSION,
+            panels: Vec::new(),
+            commands: commands
+                .iter()
+                .map(|c| sc_plugin_proto::manifest::CommandDecl {
+                    id: c.to_string(),
+                    title: c.to_string(),
+                })
+                .collect(),
+            capabilities: Vec::new(),
+            subscriptions: Vec::new(),
+        }
+    }
+
+    /// **First declaration wins.** `Plugins::start` claims commands in load order and
+    /// reports every later claim as a collision, so resolving to the second one would
+    /// dispatch to the plugin the user was told did NOT get it.
+    #[test]
+    fn the_first_plugin_to_declare_a_command_owns_it() {
+        let a = manifest_with("a", &["shared.cmd"]);
+        let b = manifest_with("b", &["shared.cmd"]);
+        let all = [Some(&a), Some(&b)];
+        assert_eq!(owner_of("shared.cmd", all.into_iter()), Some(0));
+    }
+
+    #[test]
+    fn a_command_no_manifest_declares_has_no_owner() {
+        let a = manifest_with("a", &["a.one"]);
+        let all = [Some(&a)];
+        assert_eq!(owner_of("b.two", all.into_iter()), None);
+    }
+
+    /// A plugin whose handshake has not landed has declared nothing, so it owns nothing
+    /// — and must not shadow a later plugin that did declare the command.
+    #[test]
+    fn a_plugin_without_a_manifest_is_skipped() {
+        let b = manifest_with("b", &["b.go"]);
+        let all = [None, Some(&b)];
+        assert_eq!(owner_of("b.go", all.into_iter()), Some(1));
     }
 
     /// A notification is not a request and owes no answer — replying to one would leave

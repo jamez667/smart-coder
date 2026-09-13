@@ -196,18 +196,21 @@ command invocations — the two things every plugin gets for free — and everyt
 else it does, it does to Docker. **The whole feature fits inside v1 with no
 protocol change**, which is the bar [25](25-plugins.md) set for calling v1 done.
 
-Two host gaps are visible from here, and neither blocks v1.
+One host gap is visible from here, and it does not block v1. The other was a gap
+when this spec was written and is not one now.
 
-**`RunCommand` is declared but not implemented.** The host answers it
-`Unsupported`:
+**`RunCommand` is implemented, and this spec is why.** It was declared in
+`host_capabilities` and answered `Unsupported`, which made the capability a
+promise rather than an API. Writing this spec found the first real consumer, so
+the host now resolves a command id against every loaded plugin's manifest —
+first declaration wins, matching the claim order `command_collisions` already
+reports — dispatches `CommandInvoked`, and acknowledges the requester:
 
 <!--@ crates/sc-win/src/app/plugin_requests.rs -->
 
-`container.open-terminal` is the first real consumer — it wants to hand the host
-an `ExecMode::Container { name }` and have the terminal adopt it. Until then the
-command is present and reports honestly that this host cannot yet do it, which is
-exactly the degradation path `Unsupported` exists to support: *declared in
-`host_capabilities`, so a plugin can know before asking.*
+An id nothing declares is `NotFound` rather than `Unsupported`: the host owns no
+commands of its own, so "nothing owns this" is the honest answer, and it lets a
+plugin tell a missing peer from a host that cannot serve the request at all.
 
 **Nothing lets a plugin set the terminal's exec mode.** That is a new capability
 (`TerminalExec`, one string), and it should be designed against this plugin
