@@ -208,12 +208,8 @@ pub fn run() -> iced::Result {
             app.refresh_project_kind();
             // The restored layout is the authority on how many panes the user had.
             app.sync_panes_to_layout();
-            // Probe for the `claude` CLI ONCE (spec 22). Spawning a process per menu rebuild
-            // would be absurd, and the answer cannot change without the user installing
-            // something — which is a restart-shaped event anyway.
-            app.claude_available = sc_win::claudecode::detect();
-            // The sampling profiler, for the same reason and at the same cost: one `--version`
-            // spawn at boot rather than one per frame the Profiler panel is visible.
+            // Probe for the sampling profiler ONCE: one `--version` spawn at boot rather than
+            // one per frame the Profiler panel is visible.
             app.probe_flame_tool();
             // Boot is deferred while the first-run question is open (spec 21): opening a
             // conversation is Assistant-shaped, and doing it before the user has said which mode
@@ -309,32 +305,6 @@ mod tests {
         app.tick_health_probe();
 
         assert!(app.health_rx.is_some(), "Assistant mode probes as before");
-    }
-
-    /// A Claude Code run says approvals are delegated, rather than showing an empty bar.
-    ///
-    /// The distinction spec 22 draws: "explicitly dark, not merely unused". An empty approval
-    /// surface during a run that is editing files reads as "nothing needed approving", which
-    /// would be a lie by omission — Claude Code asks its own questions elsewhere.
-    /// The notice belongs to a LIVE Claude Code run, and to nothing else.
-    ///
-    /// Its positive case needs a real subprocess, so what is asserted here is the half that
-    /// can go wrong silently: a finished run must not leave the notice on screen claiming
-    /// smart-coder is not gating, when the next run through the normal path would be.
-    #[test]
-    fn the_delegated_approvals_notice_does_not_outlive_its_run() {
-        let mut app = App::default();
-        app.claude_run = true;
-        app.session = None; // the run ended
-        assert!(
-            app.view_gatebar().is_none(),
-            "a stale notice would claim we are not gating a run that isn't happening"
-        );
-
-        // And Craft mode shows nothing at all, whatever the flags say.
-        let mut craft = App::default();
-        craft.claude_run = true;
-        assert!(craft.view_gatebar().is_none());
     }
 
     /// Clicking a diagnostic opens its file and queues the scroll to its line.

@@ -1,0 +1,17 @@
+[package]
+name = "sc-plugin-claude"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Claude Code as a plugin (spec 25): its own task input, its own run feed, in its own process."
+
+[[bin]]
+name = "sc-plugin-claude"
+path = "src/main.rs"
+
+[dependencies]
+# The wire protocol, and NOTHING from the editor. A plugin talks to the host over a
+# pipe; linking the host would be both impossible and the wrong shape.
+sc-plugin-proto = { path = "../sc-plugin-proto" }
+serde_json = { workspace = true }

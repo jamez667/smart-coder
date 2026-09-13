@@ -58,13 +58,6 @@ pub enum PanelKind {
     Bottom,
     /// The chat thread and composer. **Assistant only.**
     Chat,
-    /// Claude Code: its own task input and its own run feed (spec 22). **Assistant only.**
-    ///
-    /// A panel rather than a button on another panel's composer. Claude Code is a peer of the
-    /// agent, not a mode of it, and a surface with its own input needs its own output beside
-    /// it — the first attempt hung a button off the Chat composer, which both buried it inside
-    /// an Assistant-only panel and left the run with nowhere to appear.
-    Claude,
     /// A panel contributed by a plugin (spec 25).
     ///
     /// Carries an interned handle rather than the plugin and panel names, so this enum
@@ -101,7 +94,6 @@ impl PanelKind {
             PanelKind::Editor(EditorId(n)) => Cow::Owned(format!("editor:{n}")),
             PanelKind::Bottom => Cow::Borrowed("bottom"),
             PanelKind::Chat => Cow::Borrowed("chat"),
-            PanelKind::Claude => Cow::Borrowed("claude"),
             PanelKind::Flame => Cow::Borrowed("flame"),
             // `plugin:<plugin>:<panel>`. The prefix is what guarantees no collision with
             // the host's own slugs, and this string seeds the `splits.json` divider keys
@@ -127,7 +119,6 @@ impl PanelKind {
             "editor" => Some(PanelKind::Editor(EditorId::FIRST)),
             "bottom" => Some(PanelKind::Bottom),
             "chat" => Some(PanelKind::Chat),
-            "claude" => Some(PanelKind::Claude),
             "flame" => Some(PanelKind::Flame),
             rest if rest.starts_with("plugin:") => {
                 // `None` when the plugin is not loaded, which is the WHOLE mechanism by
@@ -160,7 +151,6 @@ impl PanelKind {
             PanelKind::Editor(_) => Cow::Borrowed("Editor"),
             PanelKind::Bottom => Cow::Borrowed("Panel"),
             PanelKind::Chat => Cow::Borrowed("Chat"),
-            PanelKind::Claude => Cow::Borrowed("Claude Code"),
             PanelKind::Flame => Cow::Borrowed("Profiler"),
             PanelKind::Plugin(id) => crate::plugin::registry::registry()
                 .get(id)
@@ -186,10 +176,8 @@ impl PanelKind {
     /// is no longer a live mode filter — it is what [`Layout::sanitize`] uses to drop a panel
     /// the running product cannot render, which happens when a file is hand-edited or copied
     /// between the two installs.
-    ///
-    /// `Claude` counts: Claude Code is unambiguously a model surface (spec 22).
     pub fn needs_model(self) -> bool {
-        matches!(self, PanelKind::Chat | PanelKind::Claude)
+        matches!(self, PanelKind::Chat)
     }
 
     /// Whether this is an editor pane, whichever one.
@@ -214,7 +202,6 @@ pub fn menu_panels(layout: &Layout) -> Vec<PanelKind> {
     }
     out.push(PanelKind::Bottom);
     out.push(PanelKind::Chat);
-    out.push(PanelKind::Claude);
     out.push(PanelKind::Flame);
     // Every registered plugin panel, whether or not it is currently shown. Offering
     // them is not decoration: this menu is the ONLY way to bring a hidden panel back, so
@@ -1874,29 +1861,30 @@ mod tests {
 mod disk_repro {
     use super::*;
 
-    /// **The Claude panel vanished from a real, freshly-launched client.**
+    /// **A `claude` leaf in a real layout file no longer resolves, and must not wedge.**
     ///
-    /// Screenshotted: no Claude panel and only Problems|Terminal in the bottom bar,
-    /// while `config.json` said `assistant` and `layout.json` contained a `claude`
-    /// leaf. This drives the USER'S ACTUAL FILE through the real load path, so the
-    /// test fails for the same reason the app does.
+    /// The panel was built in until Claude Code became a plugin (spec 25), so any layout
+    /// written before that migration names it. This drives the USER'S ACTUAL FILE through
+    /// the real load path: the leaf now resolves to `None`, the split collapses onto its
+    /// sibling, and the window still opens.
+    ///
+    /// It replaces a regression test that asserted the opposite — that the panel SURVIVED
+    /// the load — which defended a real screenshotted bug for as long as the panel was
+    /// the host's to draw. The bug it guarded is now impossible for a different reason:
+    /// there is no built-in Claude panel to lose.
     #[test]
-    fn the_users_own_layout_file_keeps_its_claude_panel() {
+    fn a_pre_plugin_layout_with_a_claude_leaf_still_opens() {
         let Ok(text) = std::fs::read_to_string(layout_file()) else {
             return; // not this machine
         };
-        // The repro is "the file HAS a claude leaf and the load loses it". A layout
-        // the user has since closed the panel out of has nothing to lose, and this
-        // test failed on exactly that file -- a regression test for a load bug must
-        // not fail because the developer's own workspace changed shape.
         if !text.contains("\"claude\"") {
-            return;
+            return; // nothing to migrate on this machine
         }
-        let store = LayoutStore::parse(&text);
-        let got = store.get();
+        let got = LayoutStore::parse(&text).get();
         assert!(
-            got.contains(PanelKind::Claude),
-            "the stored assistant layout lost its Claude panel on load:\n{}",
+            got.has_editor(),
+            "a pre-plugin layout must still yield a usable window:
+{}",
             got.to_json()
         );
     }

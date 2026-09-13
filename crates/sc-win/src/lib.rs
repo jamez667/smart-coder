@@ -36,8 +36,6 @@ pub mod board;
 pub mod bridge;
 pub mod chat;
 pub mod chat_session;
-pub mod claudecode;
-pub mod claudesessions;
 pub mod comply;
 pub mod config;
 pub mod follow;

@@ -215,17 +215,7 @@ impl App {
 
         // Preflight: don't launch a run against a known-bad backend — surface the reason in the
         // activity stream instead of failing several turns in.
-        //
-        // EXEMPT for Claude Code (spec 22): that run kind never touches our backend, so an
-        // unreachable local endpoint says nothing about whether it can work. Blocking on it
-        // would make the one run kind that needs no local model the one a missing local model
-        // prevents.
-        let preflight = if matches!(kind, RunKind::ClaudeCode) {
-            None
-        } else {
-            self.backend_unready_reason()
-        };
-        if let Some(reason) = preflight {
+        if let Some(reason) = self.backend_unready_reason() {
             self.rows.push(Row::ok(
                 "⚠",
                 format!("{reason} — check the backend badge (top bar)"),
@@ -254,7 +244,6 @@ impl App {
         self.follow_agent = true;
         // Track this run's mode + which files it edits (for the honest iterate banner).
         self.iterating = matches!(kind, RunKind::Iterate | RunKind::StagedBuild);
-        self.claude_run = matches!(kind, RunKind::ClaudeCode);
         self.planning_only = matches!(kind, RunKind::Plan);
         self.edited_files.clear();
         // Jump to the Verification tab so the run's checks are visible as it works.
@@ -379,17 +368,6 @@ impl App {
         // Greet: show the README/roadmap in Activity, and open the planning conversation.
         self.show_welcome();
         self.open_conversation();
-    }
-
-    /// Whether the Claude Code run kind may be offered (spec 22).
-    ///
-    /// **The CLI may not be installed.** A menu item that always fails is worse than no menu
-    /// item, so absence hides it rather than offering a dead control.
-    ///
-    /// This used to also refuse in Craft mode, alongside every other model surface. That half is
-    /// gone: the editor is its own executable now (spec 21), and it does not have this code.
-    pub(crate) fn claude_code_available(&self) -> bool {
-        self.claude_available
     }
 
     /// Push the current workspace name + recents list to the remote mirror, so the phone's

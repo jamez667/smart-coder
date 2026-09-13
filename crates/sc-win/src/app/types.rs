@@ -131,12 +131,6 @@ pub(crate) struct App {
     /// banner reports "N files changed" from what the agent actually edited — never a
     /// whole-repo "files built" scan (which would count thousands in an existing project).
     pub(crate) iterating: bool,
-    /// True while the current/last run is a CLAUDE CODE run (spec 22).
-    ///
-    /// Drives the "approvals are delegated" notice: v1 lets Claude Code handle its own
-    /// permission prompts, and the spec asks for that to be **visibly** so rather than merely
-    /// an empty gate bar — an absent prompt must not be misread as "nothing needed approving".
-    pub(crate) claude_run: bool,
     /// True while the current/last run is PLAN-ONLY (Execute-plan design pass): it produces
     /// reviewable artifacts, not a build, so its outcome banner must NOT report "N files built"
     /// (a whole-repo scan counted every source file — the bogus "13730 files built").
@@ -238,8 +232,8 @@ pub(crate) struct App {
     pub(crate) flame_search: String,
     /// The frame under the cursor, for the detail line.
     pub(crate) flame_hover: Option<sc_win::flame::Placed>,
-    /// Which sampling profiler was found on PATH. Probed ONCE at startup, like
-    /// [`Self::claude_available`] — a `--version` spawn per frame would be absurd.
+    /// Which sampling profiler was found on PATH. Probed ONCE at startup — a `--version`
+    /// spawn per frame would be absurd.
     pub(crate) flame_tool: Option<sc_win::flame::tool::Profiler>,
     /// What a recorded run should profile.
     pub(crate) flame_target: sc_win::flame::tool::Target,
@@ -251,32 +245,6 @@ pub(crate) struct App {
     pub(crate) flame_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The last run's or load's failure, if it failed.
     pub(crate) flame_error: Option<String>,
-
-    /// Whether the `claude` CLI is on PATH (spec 22). Probed ONCE at startup, because probing
-    /// spawns a process and the menu is rebuilt every frame. `false` ⇒ the run kind is not
-    /// offered at all, rather than offered-and-failing.
-    pub(crate) claude_available: bool,
-    /// The Claude panel's own task input (spec 22) — deliberately NOT the chat composer's.
-    /// They address different agents, so one text box would mean two buttons reading the same
-    /// words and meaning different things.
-    pub(crate) claude_input: String,
-    /// The Claude panel's ⚙ options menu is open.
-    pub(crate) claude_menu: bool,
-    /// The options menu's filter box — types-to-narrow, like the CLI's own action list.
-    pub(crate) claude_filter: String,
-    /// The Claude panel's own run feed: what the current/last run did, newest last.
-    ///
-    /// Its own rather than the shared activity stream because `Session` holds exactly one run
-    /// and `start()` refuses while one is live — a Claude run and an agent run can never happen
-    /// together, so a shared feed would only mean each showing the other's history.
-    pub(crate) claude_feed: Vec<sc_win::view::Row>,
-    /// The past conversation the next run resumes, if one was picked.
-    ///
-    /// `Some(id)` passes `--resume <id>`; `None` leaves the run to `--continue` or
-    /// a cold start. Not persisted: a session id is a property of THIS panel right
-    /// now, and reopening the app onto a conversation you last touched days ago is
-    /// surprising in a way "carry on from the most recent" is not.
-    pub(crate) claude_session: Option<String>,
     /// The Unity editor path override (Settings ▸ General). Blank ⇒ search the Hub convention.
     pub(crate) unity_path_input: String,
     /// Set to cancel an in-flight compile. The worker checks it between reads and kills the
@@ -595,7 +563,6 @@ impl Default for App {
             run_dir: None,
             picked_workspace,
             iterating: false,
-            claude_run: false,
             planning_only: false,
             last_plan_task: None,
             edited_files: Vec::new(),
@@ -615,8 +582,8 @@ impl Default for App {
             flame_zoom: Vec::new(),
             flame_search: String::new(),
             flame_hover: None,
-            // Probed at boot for the same reason `claude_available` is: constructing an App in
-            // a test must not spawn processes.
+            // Probed at boot rather than here: constructing an App in a test must not spawn
+            // processes.
             flame_tool: None,
             flame_target: sc_win::flame::tool::Target::Bin(None),
             flame_args: String::new(),
@@ -625,12 +592,6 @@ impl Default for App {
             flame_error: None,
             // Probed at boot rather than here: `App::default()` runs in tests, and spawning a
             // process per constructed App would make the suite slow and machine-dependent.
-            claude_available: false,
-            claude_input: String::new(),
-            claude_menu: false,
-            claude_filter: String::new(),
-            claude_feed: Vec::new(),
-            claude_session: None,
             compile_cancel: None,
             unity_path_input: unity_path_seed,
             confirm_close: None,
@@ -771,10 +732,6 @@ pub(crate) enum Message {
     DiscardAndQuit,
     /// Dismiss the quit prompt and stay open.
     CancelQuit,
-    /// The Claude panel's task input changed (spec 22).
-    ClaudeInputChanged(String),
-    /// Open/close the Claude panel's ⚙ options menu.
-    ToggleClaudeMenu,
 
     // --- Plugins (spec 25) ---
     /// A clickable row in a plugin panel was pressed: run its command.
@@ -787,33 +744,6 @@ pub(crate) enum Message {
     TogglePluginsModal,
     /// Enable or disable a plugin by its directory name. Applies at the next launch.
     SetPluginEnabled(String, bool),
-    /// The options menu's filter text changed.
-    ClaudeFilterChanged(String),
-    /// Step the model selector to the next choice (Default → Opus → Sonnet → Haiku → …).
-    CycleClaudeModel,
-    /// Step the permission-mode selector. `bypassPermissions` is deliberately not in the cycle.
-    CycleClaudePermission,
-    /// Toggle `--continue`: carry the previous run's context instead of starting cold.
-    ToggleClaudeContinue,
-    /// Resume a specific past conversation, by session id.
-    ///
-    /// `--continue` takes the most recent silently; this is the picker, so the
-    /// panel can reopen any of them and show what was said.
-    ResumeClaudeSession(String),
-    /// Attach the file currently open in the editor to the next prompt.
-    AttachActiveFile,
-    /// Add a directory (folder picker) the run may touch beyond the workspace.
-    AddClaudeDir,
-    /// Drop the Nth extra directory.
-    RemoveClaudeDir(usize),
-    /// The allowed/disallowed tool lists changed (raw text, parsed on commit).
-    ClaudeAllowedChanged(String),
-    ClaudeDisallowedChanged(String),
-    /// Clear the panel's feed and input — the menu's "Clear conversation".
-    ClearClaudeRun,
-    /// Run the Claude panel's task through **Claude Code** (spec 22). Reachable only from that
-    /// panel, which exists only when the CLI is present and the mode allows a model.
-    RunClaudeCode,
     // --- Compile & check (spec 21) ---
     /// Run the project's compile command and parse its diagnostics.
     RunCompile,

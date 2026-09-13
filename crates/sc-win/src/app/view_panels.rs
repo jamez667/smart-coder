@@ -548,12 +548,6 @@ impl App {
                 // Derived from the LAYOUT, not a fixed list: how many editor panes exist is the
                 // user's arrangement, not a property of the type. `menu_label` numbers them.
                 for kind in sc_win::layout::menu_panels(&self.layout) {
-                    // The Claude panel is only offered when the CLI is actually installed
-                    // (spec 22) — a toggle that reveals a panel saying "not installed" is a
-                    // worse answer than not offering it.
-                    if kind == sc_win::layout::PanelKind::Claude && !self.claude_available {
-                        continue;
-                    }
                     let on = self.layout.contains(kind);
                     v.push((
                         format!("{}  {}", if on { "✓" } else { "  " }, kind.menu_label()),

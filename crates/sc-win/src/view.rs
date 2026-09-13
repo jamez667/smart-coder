@@ -23,8 +23,8 @@ impl Row {
             is_error: false,
         }
     }
-    /// An error/failure row — rendered in the bad colour. Public because the Claude panel
-    /// builds its own closing row (spec 22) rather than going through `agent_rows`.
+    /// An error/failure row — rendered in the bad colour. Public because callers outside this
+    /// module build their own closing rows rather than going through `agent_rows`.
     pub fn err(icon: &'static str, text: impl Into<String>) -> Self {
         Self {
             icon,

@@ -20,7 +20,7 @@ use sc_win::flame::tool;
 const MAX_FOLDED: u64 = 256 * 1024 * 1024;
 
 impl App {
-    /// Probe for a sampling profiler. Called at startup, beside the `claude` probe.
+    /// Probe for a sampling profiler. Called once at startup.
     ///
     /// Also called from the panel's "Check again" button. The boot probe alone was a bug: a
     /// user who reads "install one of these", installs it, and comes back to a panel still

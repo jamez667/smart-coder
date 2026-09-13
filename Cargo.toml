@@ -20,6 +20,7 @@ members = [
     "crates/sc-craft-ui",
     "crates/sc-plugin-proto",
     "crates/sc-editor",
+    "crates/sc-plugin-claude",
     "crates/sc-android",
     "crates/sc-core",
     "crates/sc-comply-author",

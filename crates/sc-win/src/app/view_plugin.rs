@@ -290,7 +290,7 @@ impl App {
                 }
             }
 
-            // Through the app's OWN markdown renderer — the one the Claude panel uses —
+            // Through the app's OWN markdown renderer — the one the chat panel uses —
             // so a plugin's prose looks exactly like the agent's. This reuse is the
             // reason `text` is a v1 content kind rather than a deferred one.
             Row::Markdown { source, depth } => {
@@ -307,8 +307,8 @@ impl App {
                 .padding(6)
                 .style(input_style);
                 // Enter sends (v2). Without this a composer needs a mouse trip to the
-                // button for every message, which is why the host's own chat and Claude
-                // inputs have bound Enter since they were written.
+                // button for every message, which is why the host's own chat input has
+                // bound Enter since it was written.
                 if field.submit_on_enter {
                     input = input.on_submit(Message::PluginFormSubmit(id));
                 }
@@ -343,8 +343,8 @@ impl App {
 /// The scrollable id for a plugin panel.
 ///
 /// Stable per panel, so a scroll-to-bottom Task issued after a content push finds the
-/// right one when several plugins are streaming at once. Mirrors `code_scroll_id` and
-/// `claude_feed_id`, which exist for the same reason.
+/// right one when several plugins are streaming at once. Mirrors `code_scroll_id`, which
+/// exists for the same reason.
 pub(crate) fn plugin_scroll_id(id: PluginPanelId) -> iced::advanced::widget::Id {
     // PER PANEL, not a singleton — `scroll_to` addresses a widget by id, so two plugin
     // panels sharing one would mean a push to either scrolling BOTH. The same bug

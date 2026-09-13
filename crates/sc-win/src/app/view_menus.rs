@@ -204,7 +204,7 @@ impl App {
         // `on_action` handler drops edits (see `Message::ChatEditorAction`), so it's immutable.
         // Falls back to plain text if the editor buffer isn't synced yet (shouldn't happen).
         // An AGENT turn goes through the markdown renderer: headings, bullets, code boxes and
-        // pipe tables, the same treatment the Claude panel gets. Without it a model's answer
+        // pipe tables, the same treatment a plugin's prose gets. Without it a model's answer
         // arrives as one undifferentiated wall with `|---|---|` and ``` shown literally.
         //
         // A YOUR turn stays a `text_editor`. The formatter renders, it does not select, and
@@ -450,9 +450,10 @@ impl App {
         };
         // Send button is full composer height, sitting flush against the input.
         let mut bar = row![input, btn].spacing(0);
-        // NOTE: no Claude button here. Claude Code has its own panel (spec 22) — a button on
-        // this composer buried a peer surface inside an Assistant-only panel, and gave its run
-        // nowhere to appear, since this panel renders `chat_turns` and a run writes elsewhere.
+        // NOTE: no per-agent buttons here. An external agent gets its own panel (spec 25) — a
+        // button on this composer buried a peer surface inside an Assistant-only panel, and gave
+        // its run nowhere to appear, since this panel renders `chat_turns` and a run writes
+        // elsewhere.
         // The think/debug toggles stack vertically to the right of the send button. They're kept
         // small (14px box, 11px label, tight gap) so both fit within the one-input-tall composer.
         let mut toggles = column![]
@@ -570,9 +571,6 @@ impl App {
     /// buttons sit inline on its row, beside the file you review in CODE. A `Gate` at the front of
     /// the queue therefore renders nothing here (the master list owns it).
     pub(crate) fn view_gatebar(&self) -> Option<Element<'_, Message>> {
-        // A Claude Code run handles its own permission prompts (spec 22), so this bar stays
-        // empty for its duration. The notice saying so lives in the Claude PANEL, beside the
-        // run it describes — a notice in a bar the user may not have on screen defeats itself.
         match self.gatebar.first()? {
             // Workflow gate → handled by the master list, not this bottom card.
             Gatebar::Gate { .. } => None,

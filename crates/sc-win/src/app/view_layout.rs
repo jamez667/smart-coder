@@ -193,15 +193,6 @@ impl App {
                 Some(p) => format!("{} samples", p.total()),
                 None => "no profile".to_string(),
             },
-            PanelKind::Claude => {
-                if self.claude_run && self.session.is_some() {
-                    "running…".to_string()
-                } else if self.claude_feed.is_empty() {
-                    "idle".to_string()
-                } else {
-                    format!("{} events", self.claude_feed.len())
-                }
-            }
             // A plugin's own summary would need a round trip, and this is built while
             // dragging — so it reports what the host knows: how much the panel is
             // showing. A plugin that wants to say more says it in the panel.
@@ -522,7 +513,6 @@ impl App {
                     self.view_center()
                 }
             }
-            PanelKind::Claude => self.view_claude_panel(),
             PanelKind::Flame => self.view_flame_panel(),
             PanelKind::Plugin(id) => self.view_plugin_panel(id),
         }
