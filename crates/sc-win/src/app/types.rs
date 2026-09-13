@@ -484,6 +484,13 @@ pub(crate) enum BottomTab {
     /// modes — in Craft mode it is the ONLY way to find out whether the code builds, since there
     /// is no agent to ask.
     Problems,
+    /// What loaded, what did not, and why (spec 25).
+    ///
+    /// Deliberately not conditional on a plugin being installed. "No plugins installed",
+    /// stated plainly next to the directory they load from, is the answer to the question
+    /// someone opens this tab with; hiding the tab until a plugin works would hide it
+    /// exactly when it is needed.
+    Plugins,
 }
 
 /// The top menu-bar dropdowns.

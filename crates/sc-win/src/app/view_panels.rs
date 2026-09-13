@@ -57,6 +57,7 @@ impl App {
             self.bottom_tab_button("Verification", BottomTab::Verification),
             self.bottom_tab_button("Build", BottomTab::Build),
             self.bottom_tab_button("Terminal", BottomTab::Terminal),
+            self.bottom_tab_button("Plugins", BottomTab::Plugins),
         ]
         .spacing(4);
         let content = match self.bottom_tab {
@@ -64,6 +65,7 @@ impl App {
             BottomTab::Verification => self.view_verification_tab(),
             BottomTab::Build => self.view_build_tab(),
             BottomTab::Terminal => self.view_terminal_tab(),
+            BottomTab::Plugins => self.view_plugins_tab(),
         };
         Some(
             container(column![tabs, content].spacing(6))

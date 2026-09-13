@@ -175,8 +175,16 @@ fn start_plugins() -> sc_craft_ui::plugin::Plugins {
         return sc_craft_ui::plugin::Plugins::default();
     }
     let workspace = sc_win::persist::load().last_project;
-    let (plugins, registry) = sc_craft_ui::plugin::Plugins::start(scan, workspace.as_deref());
+    let (mut plugins, registry) = sc_craft_ui::plugin::Plugins::start(scan, workspace.as_deref());
     sc_craft_ui::plugin::registry::install(registry);
+    // Counted AFTER the registry is installed and BEFORE `App::default()` reads the
+    // layout — the number is "panels this launch will drop", and it is only knowable in
+    // that window. Read from the file rather than from the parsed tree, because by the
+    // time the tree exists the dropped leaves are gone.
+    plugins.dropped_layout_panels =
+        std::fs::read_to_string(sc_craft_ui::config::state_dir().join("layout.json"))
+            .map(|text| sc_craft_ui::layout::LayoutStore::dropped_plugin_panels(&text))
+            .unwrap_or(0);
     plugins
 }
 
@@ -271,6 +279,7 @@ mod view_core;
 mod view_flame;
 mod view_layout;
 mod view_plugin;
+mod view_plugins_panel;
 pub(crate) use view_layout::{Drag, DragSubject};
 mod view_menus;
 mod view_panels;

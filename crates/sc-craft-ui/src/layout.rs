@@ -879,6 +879,24 @@ fn layout_file() -> std::path::PathBuf {
     crate::config::state_dir().join("layout.json")
 }
 
+/// Walk a layout's JSON, counting leaves whose slug is a plugin panel that does not
+/// resolve. Recursive over the same shape [`Layout::parse`] walks.
+fn count_unresolved(v: &serde_json::Value, n: &mut usize) {
+    if let Some(slug) = v.get("leaf").and_then(|l| l.as_str()) {
+        if slug.starts_with("plugin:") && PanelKind::from_slug(slug).is_none() {
+            *n += 1;
+        }
+        return;
+    }
+    if let Some(split) = v.get("split") {
+        for side in ["a", "b"] {
+            if let Some(child) = split.get(side) {
+                count_unresolved(child, n);
+            }
+        }
+    }
+}
+
 /// The saved layout.
 ///
 /// This held one tree per mode when Craft and Assistant were one binary and you could toggle
@@ -935,6 +953,35 @@ impl LayoutStore {
         Self {
             layout: v.get("layout").and_then(Layout::parse).or_else(migrated),
         }
+    }
+
+    /// How many plugin-panel leaves in `text` name a plugin that is not loaded.
+    ///
+    /// The panels [`Layout::parse`] silently pruned. Counted separately rather than
+    /// returned from `parse`, because `parse` is called from several places that do not
+    /// care and threading a count through all of them would be noise.
+    ///
+    /// **Why count at all:** a panel disappearing without explanation is the "silently
+    /// halves the feed" failure the Claude driver counts skipped lines to avoid. The user
+    /// sees a rearranged window and no reason for it. One sentence in the Plugins panel
+    /// turns that mystery into a fact, and this is the number in it.
+    pub fn dropped_plugin_panels(text: &str) -> usize {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+            return 0;
+        };
+        // Enter the tree the way `parse` does: `layout`, or the pre-split key for the
+        // running product. Walking from the file root finds nothing, because the root
+        // holds `version` and `layout` rather than a `leaf` or a `split`.
+        let migration_key = match crate::config::product() {
+            crate::config::Product::Crafter => "craft",
+            crate::config::Product::SmartCoder => "assistant",
+        };
+        let Some(tree) = v.get("layout").or_else(|| v.get(migration_key)) else {
+            return 0;
+        };
+        let mut n = 0;
+        count_unresolved(tree, &mut n);
+        n
     }
 
     /// Serialize. Pure.
@@ -1207,6 +1254,57 @@ mod tests {
                 "must not reuse a host split id: {json}"
             );
         }
+    }
+
+    /// The count behind the Plugins panel's "N panels were removed" line.
+    #[test]
+    fn dropped_plugin_panels_counts_the_unresolvable_leaves() {
+        install_test_registry();
+        let text = serde_json::json!({
+            "version": 2,
+            "layout": {"split": {"id": "body|bottom", "axis": "v",
+                "a": {"leaf": "editor"},
+                "b": {"split": {"id": "x", "axis": "h",
+                    "a": {"leaf": "plugin:gone:one"},
+                    "b": {"leaf": "plugin:also-gone:two"}}}}}
+        })
+        .to_string();
+        assert_eq!(LayoutStore::dropped_plugin_panels(&text), 2);
+    }
+
+    /// A panel whose plugin IS loaded is not a drop — the count must not fire on the
+    /// normal case, or the warning becomes noise nobody reads.
+    #[test]
+    fn a_loaded_plugins_panel_is_not_counted_as_dropped() {
+        install_test_registry();
+        let text = serde_json::json!({
+            "version": 2,
+            "layout": {"split": {"id": "body|bottom", "axis": "v",
+                "a": {"leaf": "editor"},
+                "b": {"leaf": "plugin:test-plug:main"}}}
+        })
+        .to_string();
+        assert_eq!(LayoutStore::dropped_plugin_panels(&text), 0);
+    }
+
+    /// Host panels are never counted, whatever else is in the file.
+    #[test]
+    fn host_panels_are_never_counted_as_dropped() {
+        let text = serde_json::json!({
+            "version": 2,
+            "layout": {"split": {"id": "body|bottom", "axis": "v",
+                "a": {"leaf": "editor"}, "b": {"leaf": "chat"}}}
+        })
+        .to_string();
+        assert_eq!(LayoutStore::dropped_plugin_panels(&text), 0);
+    }
+
+    /// A corrupt file drops nothing, because nothing in it was a panel. Reporting a
+    /// count here would blame plugins for a bad file.
+    #[test]
+    fn a_corrupt_file_drops_nothing() {
+        assert_eq!(LayoutStore::dropped_plugin_panels("not json"), 0);
+        assert_eq!(LayoutStore::dropped_plugin_panels(""), 0);
     }
 
     /// Installs a one-panel registry and returns its handle.
