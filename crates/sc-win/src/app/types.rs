@@ -446,6 +446,19 @@ pub(crate) struct App {
         sc_craft_ui::plugin::PluginPanelId,
         Vec<sc_craft_ui::plugin::view::Row>,
     >,
+    /// Whether the plugin manager is open.
+    pub(crate) plugins_modal: bool,
+    /// A toggle changed something that only a restart will apply.
+    ///
+    /// Set by a successful enable/disable, and never cleared: the restart is still
+    /// pending however many times the modal is reopened, and a notice that vanished when
+    /// you closed the window would be worse than none.
+    pub(crate) plugins_need_restart: bool,
+    /// Why the last enable/disable failed, if it did.
+    ///
+    /// Shown in the modal rather than swallowed — silently failing to disable a plugin
+    /// leaves the user certain they turned it off.
+    pub(crate) plugin_toggle_error: Option<String>,
     /// In-progress values for plugin form fields, keyed by `(panel, field)`.
     ///
     /// Held by the HOST rather than echoed to the plugin per keystroke: a round trip per
@@ -484,13 +497,6 @@ pub(crate) enum BottomTab {
     /// modes — in Craft mode it is the ONLY way to find out whether the code builds, since there
     /// is no agent to ask.
     Problems,
-    /// What loaded, what did not, and why (spec 25).
-    ///
-    /// Deliberately not conditional on a plugin being installed. "No plugins installed",
-    /// stated plainly next to the directory they load from, is the answer to the question
-    /// someone opens this tab with; hiding the tab until a plugin works would hide it
-    /// exactly when it is needed.
-    Plugins,
 }
 
 /// The top menu-bar dropdowns.
@@ -668,6 +674,9 @@ impl Default for App {
             drop_target: None,
             panel_slots: std::collections::BTreeMap::new(),
             plugins: None,
+            plugins_modal: false,
+            plugins_need_restart: false,
+            plugin_toggle_error: None,
             plugin_panels: std::collections::BTreeMap::new(),
             plugin_fields: std::collections::BTreeMap::new(),
             window_w: 1040.0,
@@ -766,6 +775,10 @@ pub(crate) enum Message {
     PluginFieldChanged(sc_craft_ui::plugin::PluginPanelId, String, String),
     /// A plugin form's submit button was pressed.
     PluginFormSubmit(sc_craft_ui::plugin::PluginPanelId),
+    /// Open or close the plugin manager.
+    TogglePluginsModal,
+    /// Enable or disable a plugin by its directory name. Applies at the next launch.
+    SetPluginEnabled(String, bool),
     /// The options menu's filter text changed.
     ClaudeFilterChanged(String),
     /// Step the model selector to the next choice (Default → Opus → Sonnet → Haiku → …).

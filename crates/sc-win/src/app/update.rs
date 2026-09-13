@@ -234,6 +234,25 @@ impl App {
                     }
                 });
             }
+            Message::TogglePluginsModal => {
+                self.plugins_modal = !self.plugins_modal;
+                // Cleared on OPEN, not on close: an error from a previous visit is stale,
+                // but one raised while the modal is open must stay until it is read.
+                if self.plugins_modal {
+                    self.plugin_toggle_error = None;
+                }
+            }
+            Message::SetPluginEnabled(dir_name, enabled) => {
+                let dir = sc_craft_ui::plugin::plugins_dir().join(&dir_name);
+                match sc_craft_ui::plugin::discover::set_enabled(&dir, enabled) {
+                    Ok(()) => {
+                        self.plugin_toggle_error = None;
+                        // The switch is recorded, not applied — plugins load at startup.
+                        self.plugins_need_restart = true;
+                    }
+                    Err(why) => self.plugin_toggle_error = Some(why),
+                }
+            }
             Message::ToggleClaudeMenu => {
                 self.claude_menu = !self.claude_menu;
                 // A stale filter would hide most of the menu the next time it opens, which

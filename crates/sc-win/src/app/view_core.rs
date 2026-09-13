@@ -59,6 +59,9 @@ impl App {
         if self.settings_open {
             layers = layers.push(self.view_settings_modal());
         }
+        if self.plugins_modal {
+            layers = layers.push(self.view_plugins_modal());
+        }
         if self.comply_open {
             layers = layers.push(self.view_comply_modal());
         }

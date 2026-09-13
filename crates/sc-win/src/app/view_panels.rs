@@ -57,7 +57,6 @@ impl App {
             self.bottom_tab_button("Verification", BottomTab::Verification),
             self.bottom_tab_button("Build", BottomTab::Build),
             self.bottom_tab_button("Terminal", BottomTab::Terminal),
-            self.bottom_tab_button("Plugins", BottomTab::Plugins),
         ]
         .spacing(4);
         let content = match self.bottom_tab {
@@ -65,7 +64,6 @@ impl App {
             BottomTab::Verification => self.view_verification_tab(),
             BottomTab::Build => self.view_build_tab(),
             BottomTab::Terminal => self.view_terminal_tab(),
-            BottomTab::Plugins => self.view_plugins_tab(),
         };
         Some(
             container(column![tabs, content].spacing(6))
@@ -533,6 +531,18 @@ impl App {
                     },
                     Message::ToggleSettings,
                 )];
+                // Beside Settings, because that is where someone looks for it — and in
+                // the View menu rather than File because it is about the app, not the
+                // open project. Reachable with no project open, which is the whole reason
+                // it is a modal rather than a bottom-strip tab (spec 25).
+                v.push((
+                    if self.plugins_modal {
+                        "🧩  Hide plugins".to_string()
+                    } else {
+                        "🧩  Plugins…".to_string()
+                    },
+                    Message::TogglePluginsModal,
+                ));
                 // Show/hide each panel (spec 21). A tick marks what's on screen.
                 v.push(("— Panels —".to_string(), Message::NoOp));
                 // Derived from the LAYOUT, not a fixed list: how many editor panes exist is the

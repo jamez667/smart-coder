@@ -124,6 +124,35 @@ fn resolve(dir: &Path, command: &str) -> PathBuf {
     }
 }
 
+/// Turn a plugin on or off by writing `enabled` into its `plugin.json`.
+///
+/// **Takes effect on the next launch**, because plugins load at startup (spec 25). The
+/// caller says so; this only records the intent.
+///
+/// Rewrites the file rather than regenerating it: a `plugin.json` is hand-written and may
+/// carry keys this version does not know, and a plugin manager that silently dropped a
+/// future field while toggling a checkbox would be a genuinely nasty surprise. Only the
+/// one key changes.
+///
+/// Returns the reason on failure — a read-only file or a permissions problem is something
+/// the user has to be told about, not something to swallow.
+pub fn set_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
+    let path = dir.join("plugin.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| format!("{} is not valid JSON", path.display()))?;
+    let Some(obj) = v.as_object_mut() else {
+        return Err(format!("{} is not a JSON object", path.display()));
+    };
+    obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+    // Pretty-printed: this file is hand-edited, and collapsing it to one line while
+    // toggling a checkbox would be a hostile thing to do to someone's file.
+    let out = serde_json::to_string_pretty(&v)
+        .map_err(|e| format!("could not serialize {}: {e}", path.display()))?;
+    std::fs::write(&path, out).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
 /// Parse the launch fields out of `plugin.json`.
 ///
 /// Pure, so the file format is testable without a filesystem — the same reason
@@ -226,6 +255,69 @@ mod tests {
         assert_eq!(scan.rejected[0].dir_name, "broken");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Toggling writes only the one key, and a rescan sees it.
+    #[test]
+    fn set_enabled_round_trips_through_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-plug-toggle-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), r#"{"command":"x.exe"}"#).unwrap();
+
+        set_enabled(&dir, false).expect("writes");
+        let (_, _, enabled) =
+            parse_launch(&std::fs::read_to_string(dir.join("plugin.json")).unwrap()).unwrap();
+        assert!(!enabled);
+
+        set_enabled(&dir, true).expect("writes");
+        let (_, _, enabled) =
+            parse_launch(&std::fs::read_to_string(dir.join("plugin.json")).unwrap()).unwrap();
+        assert!(enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Keys this version does not know must survive a toggle.** A plugin manager that
+    /// dropped a future field while flipping a checkbox would silently break the plugin
+    /// it was managing.
+    #[test]
+    fn toggling_preserves_unknown_keys() {
+        let dir = std::env::temp_dir().join(format!(
+            "sc-plug-keep-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"command":"x.exe","args":["-u"],"future_field":{"nested":42}}"#,
+        )
+        .unwrap();
+
+        set_enabled(&dir, false).expect("writes");
+
+        let back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap())
+                .unwrap();
+        assert_eq!(back["future_field"]["nested"], 42, "unknown key survived");
+        assert_eq!(back["args"][0], "-u", "known keys survived too");
+        assert_eq!(back["enabled"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failure says which file and why — the message goes in front of the user.
+    #[test]
+    fn a_failed_toggle_explains_itself() {
+        let missing = std::env::temp_dir().join("sc-plug-nope-does-not-exist");
+        let err = set_enabled(&missing, false).unwrap_err();
+        assert!(err.contains("plugin.json"), "{err}");
     }
 
     /// A missing plugins directory is the fresh-install case, not a failure.

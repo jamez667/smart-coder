@@ -8,10 +8,14 @@ impl App {
         // the one signal visible when the window isn't focused. It warns *before* a close is
         // attempted; the close itself is intercepted (`Message::CloseRequested`), which this
         // comment used to claim was impossible.
+        // The PRODUCT's name, not the crate's. `Product::display_name` is the one place
+        // it is spelled, so the title cannot drift from the state directory and the About
+        // box the way "smart-coder — vibe coding" had already drifted from the binary.
+        let name = sc_craft_ui::config::product().display_name();
         if self.any_dirty() {
-            "● smart-coder — vibe coding".to_string()
+            format!("● {name}")
         } else {
-            "smart-coder — vibe coding".to_string()
+            name.to_string()
         }
     }
 

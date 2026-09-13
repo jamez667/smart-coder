@@ -279,7 +279,7 @@ mod view_core;
 mod view_flame;
 mod view_layout;
 mod view_plugin;
-mod view_plugins_panel;
+mod view_plugins_modal;
 pub(crate) use view_layout::{Drag, DragSubject};
 mod view_menus;
 mod view_panels;

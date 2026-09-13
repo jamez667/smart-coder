@@ -187,7 +187,6 @@ impl App {
                 BottomTab::Terminal => "Terminal".to_string(),
                 BottomTab::Verification => "Verification".to_string(),
                 BottomTab::Build => "Build".to_string(),
-                BottomTab::Plugins => "Plugins".to_string(),
             },
             PanelKind::Chat => format!("{} messages", self.chat_turns.len()),
             PanelKind::Flame => match &self.flame_profile {
