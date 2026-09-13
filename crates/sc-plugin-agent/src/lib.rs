@@ -27,12 +27,19 @@
 //! Everything else the moved files referenced was internal cross-traffic between the four
 //! of them.
 
+pub mod board;
 pub mod bridge;
 pub mod chat;
 pub mod chat_session;
 pub mod config;
+pub mod follow;
+pub mod linecomment;
+pub mod plan;
 pub mod proc;
+pub mod sendback;
 pub mod session;
+pub mod topology;
+pub mod view;
 
 pub use bridge::{ChannelConfirmer, ChannelGate, Pending};
 pub use config::{ToolCalling, UiConfig};

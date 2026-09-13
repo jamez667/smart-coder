@@ -13,6 +13,11 @@ path = "src/main.rs"
 [dependencies]
 # The wire protocol, and nothing from the editor.
 sc-plugin-proto = { path = "../sc-plugin-proto" }
+# The editor's DATA types only: `follow` reads `codeview::normalize` and `sendback` reads
+# `comments::Comment`, both of which were split out of sc-craft-ui when the editor became
+# its own crate (spec 21). The dependency edge that matters points the other way — the
+# editor must not reach a model — so this direction costs the guarantee nothing.
+sc-craft-ui = { path = "../sc-craft-ui" }
 # THE AGENT. Every crate here is one `sc-win` sheds when this plugin replaces its
 # built-in chat panel — which is the whole point of the migration: the editor stops
 # compiling the agent.
