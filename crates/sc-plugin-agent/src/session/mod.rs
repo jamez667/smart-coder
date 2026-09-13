@@ -68,6 +68,7 @@ pub enum UiEvent {
 }
 
 /// What kind of run to launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunKind {
     /// A single-agent run over one instruction.
     Agent,

@@ -39,6 +39,7 @@ pub mod proc;
 pub mod sendback;
 pub mod session;
 pub mod topology;
+pub mod ui;
 pub mod view;
 
 pub use bridge::{ChannelConfirmer, ChannelGate, Pending};

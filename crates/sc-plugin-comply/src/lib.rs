@@ -22,6 +22,8 @@
 
 pub mod comply;
 pub mod config;
+pub mod runner;
+pub mod ui;
 
 pub use comply::{output_dir, ComplyError, ComplyModel, ComplyReport};
 pub use config::{ComplyConfig, Connection, Provider};

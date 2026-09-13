@@ -56,9 +56,11 @@ steps:
       # push failed here -- unnoticed, because releases only fire on `v*` tags. It waits on
       # the agent becoming a plugin (spec 25): until then the editor still links the model
       # crates, so a "no model code" binary cannot be built by omitting a feature.
-      - cargo build --release -p sc-win -p sc-plugin-claude
+      - cargo build --release -p sc-win -p sc-plugin-claude -p sc-plugin-agent -p sc-plugin-comply
       - strip target/release/smart-coder
       - strip target/release/sc-plugin-claude
+      - strip target/release/sc-plugin-agent
+      - strip target/release/sc-plugin-comply
 
       # Package + publish + prune in ONE shell entry (each `commands:` entry is a
       # fresh shell, so the vars must all live together). CI_COMMIT_TAG, CI_REPO
@@ -95,17 +97,32 @@ steps:
         # spec 21 describes waits on the agent becoming a plugin (spec 25), because until
         # then the editor still links the model crates.
         ASSETS=""
-        for BIN in smart-coder sc-plugin-claude; do
-          if [ "$$BIN" = "smart-coder" ]; then
-            WHAT='Smart Coder desktop client -- the editor plus the agent.'
-          else
-            WHAT='Claude Code plugin for Smart Coder. Install under plugins/claude-code/.'
-          fi
+        for BIN in smart-coder sc-plugin-claude sc-plugin-agent sc-plugin-comply; do
+          case "$$BIN" in
+            smart-coder)
+              WHAT='Smart Coder desktop client -- the editor. The agent is a plugin.'
+              DIR='' ;;
+            sc-plugin-claude)
+              WHAT='Claude Code plugin for Smart Coder.'
+              DIR='claude-code' ;;
+            sc-plugin-agent)
+              WHAT='The agent plugin: chat, runs, the swarm, review gates.'
+              DIR='agent' ;;
+            sc-plugin-comply)
+              WHAT='The compliance plugin: the audit, and its optional prose.'
+              DIR='compliance' ;;
+          esac
           PKG="$$BIN-$$TAG-linux-x86_64"
           mkdir -p "dist/$$PKG"
           cp "target/release/$$BIN" "dist/$$PKG/"
           cp LICENSE "dist/$$PKG/"
-          printf '%s\n' "$$WHAT" 'Linux x86_64.' "Run: ./$$BIN" \
+          if [ -n "$$DIR" ]; then
+            { echo '{'; echo "  \"command\": \"$$BIN\""; echo '}'; } > "dist/$$PKG/plugin.json"
+            HOW="Install: copy plugin.json and $$BIN into <state dir>/plugins/$$DIR/"
+          else
+            HOW="Run: ./$$BIN"
+          fi
+          printf '%s\n' "$$WHAT" 'Linux x86_64.' "$$HOW" \
             "$$SO1" "$$SO2" "$$SO3" "$$SO4" > "dist/$$PKG/README.txt"
           tar -czf "dist/$$PKG.tar.gz" -C dist "$$PKG"
           ASSETS="$$ASSETS dist/$$PKG.tar.gz"
