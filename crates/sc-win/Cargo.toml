@@ -6,13 +6,26 @@ license.workspace = true
 repository.workspace = true
 description = "Native Windows vibe-coding desktop app: type intent, watch the agent/swarm work over the proven core (spec 12 / M9)."
 
-# The agent product. `smart-coder-crafter` is a separate crate (`sc-crafter`) rather than a
-# second `[[bin]]` here, because a bin target in this crate would link this crate's whole
-# dependency tree — including every model crate — and the Crafter's guarantee is that its
-# tree contains none of them (spec 21).
+# TWO binaries over one editor.
+#
+# This comment used to explain why the Crafter had to be a separate crate: a bin target
+# here would link this crate's whole dependency tree, "including every model crate".
+# That was true, and it stopped being true when the agent became a plugin (spec 25).
+# This crate's tree is now sc-craft-ui, sc-editor, sc-flame, sc-fsutil, sc-index and
+# sc-plugin-proto — six crates, none of which can reach a model, which `scripts/check.*`
+# asserts against both this crate and the crafter binary.
+#
+# So the difference between the two is no longer what they link. It is one call to
+# `set_product` at the top of main: which state directory, which default layout, which
+# plugin directory, which name in the title bar.
 [[bin]]
 name = "smart-coder"
 path = "src/main.rs"
+
+# The editor, and only the editor (spec 21). Same app, different product identity.
+[[bin]]
+name = "smart-coder-crafter"
+path = "src/crafter.rs"
 
 [lib]
 name = "sc_win"

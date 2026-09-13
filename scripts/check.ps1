@@ -45,12 +45,18 @@ Invoke-Step 'tests' { cargo test --workspace }
 $Forbidden = @('sc-core', 'sc-model', 'sc-swarm', 'sc-workflow', 'sc-iterate',
                'sc-verify', 'sc-web', 'sc-proto', 'sc-comply', 'sc-tools')
 Invoke-Step 'the crafter links no model code' {
-    # Asserted against `sc-craft-ui` rather than the Crafter binary: the binary is
-    # step 6 of spec 25's migration and does not exist yet, and the rule is really
-    # about this crate anyway -- it is the widest part of the editor's tree, and the
-    # one a model crate would most plausibly be added to.
+    # Asserted against BOTH `sc-craft-ui` and `sc-win`. It used to check only the
+    # former, because the Crafter binary was step 6 of spec 25's migration and did
+    # not exist yet. It exists now -- `smart-coder-crafter`, a second bin over the
+    # same editor -- and it lives in `sc-win`, so that package's tree is the
+    # binary's tree. `cargo tree` has no per-bin scope, which is fine: both bins
+    # share the package's dependencies, so proving the package clean proves the
+    # binary clean.
     $tree = cargo tree -p sc-craft-ui --prefix none --no-dedupe 2>$null
     if (-not $tree) { throw "cargo tree -p sc-craft-ui produced nothing" }
+    $winTree = cargo tree -p sc-win --prefix none --no-dedupe 2>$null
+    if (-not $winTree) { throw "cargo tree -p sc-win produced nothing" }
+    $tree = @($tree) + @($winTree)
     # Match the crate NAME at the start of a line, so a path containing the string
     # (or a crate that merely mentions one) cannot trip this.
     $names = $tree | ForEach-Object { ($_ -split ' ')[0] } | Where-Object { $_ }

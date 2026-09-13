@@ -63,12 +63,18 @@ cargo test --workspace   --exclude sc-eval --exclude sc-trace --exclude sc-compl
 # It fails the moment someone adds a model crate to `sc-crafter` or `sc-craft-ui`. That
 # mistake is otherwise SILENT: the Crafter would still compile, still run, still look
 # right, and no longer be what it says it is.
-# Asserted against `sc-craft-ui` rather than the Crafter binary: the binary is step 6
-# of spec 25's migration and does not exist yet, and the rule is really about this
-# crate anyway -- it is the widest part of the editor's tree, and the one a model crate
-# would most plausibly be added to.
+# Asserted against BOTH `sc-craft-ui` and `sc-win`. It used to check only the former,
+# because the Crafter binary was step 6 of spec 25's migration and did not exist yet.
+# It exists now -- `smart-coder-crafter`, a second bin over the same editor -- and it
+# lives in `sc-win`, so that package's tree is the binary's tree. `cargo tree` has no
+# per-bin scope, which is fine here: both bins share the package's dependencies, so
+# proving the package clean proves the binary clean.
+#
+# sc-craft-ui stays in the check as well: it is the widest part of the editor's tree and
+# the one a model crate would most plausibly be added to.
 echo "==> the crafter links no model code"
-CRAFTER_TREE="$(cargo tree -p sc-craft-ui --prefix none --no-dedupe)"
+CRAFTER_TREE="$(cargo tree -p sc-craft-ui --prefix none --no-dedupe
+                cargo tree -p sc-win --prefix none --no-dedupe)"
 # Match the crate NAME at the start of a line, so a path containing the string (or a
 # crate that merely mentions one) cannot trip this.
 FORBIDDEN="$(echo "$CRAFTER_TREE" | awk '{print $1}' | sort -u | grep -E     '^(sc-core|sc-model|sc-swarm|sc-workflow|sc-iterate|sc-verify|sc-web|sc-proto|sc-comply|sc-tools)$' || true)"

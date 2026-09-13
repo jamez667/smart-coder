@@ -51,13 +51,14 @@ steps:
 
       # Build the desktop app and the plugins that ship with it.
       #
-      # There is ONE product today: `smart-coder`. An editor-only binary was planned as a
-      # second crate (`sc-crafter`) and this step named it before it existed, so every tag
-      # push failed here -- unnoticed, because releases only fire on `v*` tags. It waits on
-      # the agent becoming a plugin (spec 25): until then the editor still links the model
-      # crates, so a "no model code" binary cannot be built by omitting a feature.
+      # TWO products now. This step once named an `sc-crafter` crate that never existed
+      # and failed every tag push -- unnoticed, because releases only fire on `v*` tags.
+      # The editor-only binary waited on the agent becoming a plugin (spec 25); that has
+      # happened, so `smart-coder-crafter` is a second bin in `sc-win` whose tree contains
+      # no crate that can reach a model. Both bins come from the one `-p sc-win`.
       - cargo build --release -p sc-win -p sc-plugin-claude -p sc-plugin-agent -p sc-plugin-comply
       - strip target/release/smart-coder
+      - strip target/release/smart-coder-crafter
       - strip target/release/sc-plugin-claude
       - strip target/release/sc-plugin-agent
       - strip target/release/sc-plugin-comply
@@ -93,14 +94,17 @@ steps:
         # so they cannot drift -- the only per-artifact values are the binary name and
         # one line of description.
         #
-        # Not "two products": there is one desktop product today. The editor-only build
-        # spec 21 describes waits on the agent becoming a plugin (spec 25), because until
-        # then the editor still links the model crates.
+        # Two products and three plugins. The editor-only build spec 21 describes waited
+        # on the agent becoming a plugin (spec 25); it has, so `smart-coder-crafter` ships
+        # here beside `smart-coder` -- same editor, different product identity.
         ASSETS=""
-        for BIN in smart-coder sc-plugin-claude sc-plugin-agent sc-plugin-comply; do
+        for BIN in smart-coder smart-coder-crafter sc-plugin-claude sc-plugin-agent sc-plugin-comply; do
           case "$$BIN" in
             smart-coder)
-              WHAT='Smart Coder desktop client -- the editor. The agent is a plugin.'
+              WHAT='Smart Coder desktop client -- the editor plus the agent plugins.'
+              DIR='' ;;
+            smart-coder-crafter)
+              WHAT='Smart Coder Crafter -- the editor alone. Links no model code (spec 21).'
               DIR='' ;;
             sc-plugin-claude)
               WHAT='Claude Code plugin for Smart Coder.'
