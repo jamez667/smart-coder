@@ -28,7 +28,7 @@ gates was always the design. This spec makes it survive the process exiting.
 No *workflow* execution runs detached today. Every path that drives the agent loop
 is thread-scoped and dies with its process: `Session::spawn` is one
 `std::thread::spawn` per run, owned by the GUI
-<!--@ crates/sc-win/src/session/mod.rs -->; `sc-web`'s `serve` exits its HTTP loop
+<!--@ crates/sc-plugin-agent/src/session/mod.rs -->; `sc-web`'s `serve` exits its HTTP loop
 the moment the run finishes and the browser drains the stream. The remote mirror
 is explicitly the opposite of detached — it attaches to a session another process
 already owns. (The workspace does spawn detached *child processes* — terminal
@@ -186,7 +186,7 @@ Three properties earned by building it:
 
 - **A lease identifies a run, not a program.** Keying on the pid alone was tried
   and is wrong: the GUI spawns one thread per run inside a single process
-  <!--@ crates/sc-win/src/session/mod.rs -->, so two runs on one directory shared
+  <!--@ crates/sc-plugin-agent/src/session/mod.rs -->, so two runs on one directory shared
   a pid, both acquired, and the first to finish deleted the lease out from under
   the second. Each run carries a token alongside the pid, and a guard may only
   ever refresh or release the lease it was actually granted.

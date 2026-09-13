@@ -64,7 +64,7 @@ check asks whether *our* local endpoint is reachable, which says nothing about
 Claude Code — blocking on it would make the one run kind that needs no local
 model the one a missing local model prevents.
 
-So the seam is `RunKind` <!--@ crates/sc-win/src/session/mod.rs -->, which
+So the seam is `RunKind` <!--@ crates/sc-plugin-agent/src/session/mod.rs -->, which
 already names seven strategies that each own their loop (`Agent`, `Swarm`,
 `Tdd`, `SequentialBuild`, `Iterate`, `Plan`, `StagedBuild`). Claude Code is an
 eighth. `Session` already spawns a run on a worker thread and streams `UiEvent`s
@@ -107,7 +107,7 @@ blocks forever writing to it — which presents as a *stuck* run rather than a
 failure, and is the worst shape a bug can take here.
 
 **Cancellation is a new obligation, not the existing path.** `Session::spawn`
-<!--@ crates/sc-win/src/session/mod.rs --> passes its shared cancel flag to
+<!--@ crates/sc-plugin-agent/src/session/mod.rs --> passes its shared cancel flag to
 `RunKind::Iterate` alone, and the flag is *cooperative*: it is checked at a turn
 boundary. A subprocess has no turn boundary. This run kind must therefore take
 the flag and translate it into **killing the child process** — and a cancel that
@@ -227,7 +227,7 @@ Two supported postures, chosen per run:
   It lives **in the Claude panel**, beside the run it describes — a notice in a
   bar the user has not got on screen defeats its own purpose.
 - **Routed (later).** Claude Code's permission requests are surfaced through the
-  existing `Pending::Confirm` <!--@ crates/sc-win/src/bridge.rs -->, which
+  existing `Pending::Confirm` <!--@ crates/sc-plugin-agent/src/bridge.rs -->, which
   already carries a command plus a one-shot reply channel — the same path the
   agent's shell confirmations use. This is the better experience and the more
   work; it is deliberately not v1, because getting the delegated case honest

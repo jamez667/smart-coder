@@ -86,7 +86,7 @@ Claude Code is already driven exactly this way, and got the important decisions
 right the first time. The plugin host generalizes it rather than inventing
 anything:
 
-<!--@ crates/sc-win/src/claudecode.rs -->
+<!--@ crates/sc-plugin-claude/src/stream.rs -->
 
 Two rules are lifted from it verbatim.
 
@@ -106,7 +106,7 @@ The one thing Claude Code does not do is listen. It streams out; nothing goes
 in. Plugins need requests *into* the host, and that is the genuinely new
 machinery in this spec.
 
-<!--@ crates/sc-win/src/session/claude.rs -->
+<!--@ crates/sc-plugin-claude/src/runner.rs -->
 
 ### One protocol definition, shared
 
@@ -391,7 +391,7 @@ the answering UI is gone: deny the confirmation, abort the gate, rather than
 hanging the worker. *"If the UI has gone away, deny rather than hang"* maps onto
 *"if the host disconnects, deny rather than hang"* without changing the rule.
 
-<!--@ crates/sc-win/src/bridge.rs -->
+<!--@ crates/sc-plugin-agent/src/bridge.rs -->
 
 **The agent already writes files as a foreign process.** `sc-iterate` writes to
 disk, and the editor already copes with a file changing under a dirty buffer.

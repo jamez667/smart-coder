@@ -927,7 +927,7 @@ planner and advisor stages — under a label:
 
 This is the tiered assignment of [02](02-model-backends.md) given names. *Not
 built:* named profiles do not exist — `UiConfig`
-<!--@ sc_win::config::types::UiConfig --> today holds a fixed `Local`/`Gemini`
+<!--@ sc_plugin_agent::config::types::UiConfig --> today holds a fixed `Local`/`Gemini`
 pair plus per-stage scalars, with no keyed list. The routing concept is
 established; the naming and the list are new work.
 

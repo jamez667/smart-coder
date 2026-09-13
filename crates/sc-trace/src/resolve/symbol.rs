@@ -473,7 +473,7 @@ mod tests {
         let ws = Workspace::load(&root);
         for text in [
             "<!--@ sc_web::mint_token -->",
-            "<!--@ sc_win::config::types::UiConfig -->",
+            "<!--@ sc_plugin_agent::config::types::UiConfig -->",
             "<!--@ sc_workflow::artifact_dirs -->",
             "<!--@ sc_workflow::Phase::ALL len=5 -->",
         ] {

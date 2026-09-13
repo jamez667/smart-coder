@@ -299,8 +299,8 @@ names.
      ...
    ```
 
-   at most 8 lines <!--@ crates/sc-win/src/session/agent.rs -->, additive, off by
-   default <!--@ sc_win::session::agent::leads_enabled -->. It ships default-on
+   at most 8 lines <!--@ crates/sc-plugin-agent/src/session/agent.rs -->, additive, off by
+   default <!--@ sc_plugin_agent::session::agent::leads_enabled -->. It ships default-on
    only if the probe says so — the acceptance bar is the investigate probe
    answering in **fewer steps** with leads than without, and the sorted-map
    regression (2/2) still holding. A retrieval feature that costs anchor tokens
@@ -331,11 +331,13 @@ names.
    flipped for one probe run and compared; a setting that persists in a config
    file is a setting somebody forgets is on while reading the numbers. It becomes
    a real field the day the measurement says it should be the default. The A/B
-   itself is `crates/sc-win/tests/leads_probe.rs`
-   <!--@ crates/sc-win/tests/leads_probe.rs -->, which runs both arms and writes a
-   verdict to `logs/leads-probe.md` — and deliberately asserts nothing about which
-   arm wins, because an assertion encoding the expected result would make the
-   measurement decorative.
+   itself was `crates/sc-win/tests/leads_probe.rs`, which ran both arms and wrote
+   a verdict to `logs/leads-probe.md` — and deliberately asserted nothing about
+   which arm won, because an assertion encoding the expected result would make the
+   measurement decorative. It was removed with the agent's extraction (spec 25):
+   it drove a live model, and the editor's crate can no longer reach one. The
+   probe belongs with the agent, and has to be rebuilt there before the switch can
+   be decided.
 
 ### The crate graph
 

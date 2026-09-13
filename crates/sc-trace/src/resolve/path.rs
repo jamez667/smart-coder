@@ -151,7 +151,7 @@ mod tests {
         let root = repo_root();
         for rel in [
             "crates/sc-web/src/mirror_server.rs",
-            "crates/sc-win/src/session/mod.rs",
+            "crates/sc-plugin-agent/src/session/mod.rs",
             "crates/sc-workflow/src/state.rs",
             "crates/sc-workflow/src/gate.rs",
         ] {
