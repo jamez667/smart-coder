@@ -400,6 +400,7 @@ impl App {
                 return Task::batch([
                     self.live_reload_task(),
                     self.chat_autoscroll_task(),
+                    self.plugin_autoscroll_task(),
                     self.diff_task(),
                 ]);
             }

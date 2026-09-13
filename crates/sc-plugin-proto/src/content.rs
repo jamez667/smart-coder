@@ -120,6 +120,19 @@ pub struct ListItem {
     /// Arguments passed with `command`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+
+    /// How the row should read (**v2**). Absent ⇒ ordinary.
+    ///
+    /// The one concession to appearance in the whole model, and it is a *meaning*
+    /// rather than a colour: the host decides what an error looks like, exactly as it
+    /// does in the Problems panel. Added because a failed tool call rendering
+    /// identically to a successful one is not a style preference, it is a feed that
+    /// hides its own failures.
+    ///
+    /// Reuses [`crate::Severity`], which diagnostics already use, rather than
+    /// introducing a second vocabulary for the same three states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<crate::Severity>,
 }
 
 impl ListItem {
@@ -130,6 +143,7 @@ impl ListItem {
             detail: None,
             command: None,
             args: Vec::new(),
+            severity: None,
         }
     }
 
@@ -143,6 +157,12 @@ impl ListItem {
     pub fn with_command(mut self, command: impl Into<String>, args: Vec<String>) -> Self {
         self.command = Some(command.into());
         self.args = args;
+        self
+    }
+
+    /// Mark the row's severity (**v2**).
+    pub fn with_severity(mut self, severity: crate::Severity) -> Self {
+        self.severity = Some(severity);
         self
     }
 }
@@ -168,4 +188,17 @@ pub struct FormField {
     /// not left legible on a shared screen.
     #[serde(default)]
     pub secret: bool,
+
+    /// Enter in this field submits the form (**v2**).
+    ///
+    /// Added because the Claude Code panel could not be expressed without it: a
+    /// composer where Enter does not send is a materially worse composer, and the
+    /// host's own version has bound Enter since it was written. Defaults to `false`,
+    /// so a v1 plugin's forms behave exactly as they did.
+    ///
+    /// Deliberately a field on the input rather than a form-level setting: a form with
+    /// two fields has to say WHICH one sends, and "the last one" is a rule nobody can
+    /// remember.
+    #[serde(default)]
+    pub submit_on_enter: bool,
 }

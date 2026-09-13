@@ -459,6 +459,13 @@ pub(crate) struct App {
     /// Shown in the modal rather than swallowed — silently failing to disable a plugin
     /// leaves the user certain they turned it off.
     pub(crate) plugin_toggle_error: Option<String>,
+    /// Panels whose plugin asked to be pinned to the bottom on the next paint.
+    ///
+    /// A set rather than a flag, because two plugins can stream at once. Drained when
+    /// the scroll Task is issued — a request that stayed set would fight the user every
+    /// time they scrolled up to read something.
+    pub(crate) plugin_scroll_to_bottom:
+        std::collections::BTreeSet<sc_craft_ui::plugin::PluginPanelId>,
     /// In-progress values for plugin form fields, keyed by `(panel, field)`.
     ///
     /// Held by the HOST rather than echoed to the plugin per keystroke: a round trip per
@@ -678,6 +685,7 @@ impl Default for App {
             plugins_need_restart: false,
             plugin_toggle_error: None,
             plugin_panels: std::collections::BTreeMap::new(),
+            plugin_scroll_to_bottom: std::collections::BTreeSet::new(),
             plugin_fields: std::collections::BTreeMap::new(),
             window_w: 1040.0,
             window_h: 800.0,

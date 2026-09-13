@@ -56,7 +56,27 @@ pub use manifest::{Capability, Manifest, PanelDecl};
 /// A plugin declares the version it speaks in its [`manifest::Manifest`]; the host
 /// refuses a version it does not know, by name, rather than failing on the first
 /// message it cannot parse.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// # v2
+///
+/// The Claude Code panel could not be expressed in v1, and spec 25 said what to do when
+/// that happened: version the model deliberately rather than leaking renderer types.
+/// Four additions, each a closed set and none of them layout:
+///
+/// * [`FormField::submit_on_enter`] — a composer where Enter does not send is worse
+///   than the one it replaces.
+/// * [`PluginMessage::PanelContent::scroll`] — a streaming feed that does not follow
+///   its own tail is unusable, which is why the host already autoscrolls its own.
+/// * [`PluginMessage::ClearFields`] — after sending, the box must empty; without this a
+///   plugin cannot clear what the host is holding, and the next Enter re-sends.
+/// * [`ListItem::severity`] — a failed tool call rendering identically to a successful
+///   one is a feed that hides its failures.
+///
+/// **Every one defaults to the v1 behaviour**, so a v1 plugin runs on a v2 host
+/// unchanged and this is additive rather than breaking. The version is bumped anyway,
+/// because a v2 plugin on a v1 host would silently lose Enter — and silently is the
+/// problem.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A request id, correlating a request with its response.
 ///
@@ -186,6 +206,21 @@ pub enum HostMessage {
     },
 }
 
+/// Where to leave a panel's scroll position after a content push (**v2**).
+///
+/// Deliberately not a pixel offset: a plugin does not know how tall the host rendered
+/// its rows, and an offset would be wrong the moment the panel is resized. "Follow the
+/// tail" is the intent, and the host knows how to express it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scroll {
+    /// Pin to the end — for a feed that streams.
+    Bottom,
+    /// A hint this host does not know. Ignored, leaving the position alone.
+    #[serde(other)]
+    Other,
+}
+
 /// What happened to a buffer. See [`HostMessage::BufferEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -234,7 +269,21 @@ pub enum PluginMessage {
     /// caches the last content and repaints from cache; a synchronous round trip on
     /// the render path is the mistake the file-tree cache and the sync-interval
     /// change both exist to avoid.
-    PanelContent { panel: String, content: Content },
+    PanelContent {
+        panel: String,
+        content: Content,
+        /// Where to leave the scroll position (**v2**). Absent ⇒ leave it alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scroll: Option<Scroll>,
+    },
+
+    /// Drop the host's in-progress values for a panel's form fields (**v2**).
+    ///
+    /// The host holds what the user has typed, keyed by `(panel, field)`, so a content
+    /// push does not wipe a half-written message. That is right until the plugin has
+    /// *accepted* the input: after a send the box must empty, and without this the
+    /// plugin has no way to say so. The user then presses Enter on text already sent.
+    ClearFields { panel: String },
 
     /// Replace this plugin's diagnostics for one file.
     ///

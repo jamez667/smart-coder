@@ -358,3 +358,106 @@ fn a_form_field_needs_only_id_and_label() {
     assert_eq!(f.placeholder, None);
     assert!(!f.secret);
 }
+
+// ---------------------------------------------------------------------------
+// v2, and the promise that v1 still works
+// ---------------------------------------------------------------------------
+
+/// **A v1 plugin runs unchanged on a v2 host.** Every v2 addition defaults to the v1
+/// behaviour, which is what makes this additive rather than breaking — and is why a v1
+/// message with none of the new keys still parses into exactly the old meaning.
+#[test]
+fn a_v1_message_still_parses_with_v1_meaning() {
+    let v1 = r#"{"type":"panel-content","panel":"feed","content":{"kind":"list","items":[{"text":"a"}]}}"#;
+    let Incoming::Message(m) = parse_plugin_line(v1) else {
+        panic!("must parse");
+    };
+    let PluginMessage::PanelContent {
+        scroll, content, ..
+    } = *m
+    else {
+        panic!("wrong variant");
+    };
+    assert_eq!(scroll, None, "no scroll hint means leave it alone");
+    let Content::List { items } = content else {
+        panic!("wrong kind");
+    };
+    assert_eq!(items[0].severity, None, "no severity means ordinary");
+}
+
+/// A v1 form field is not submit-on-enter, so a v1 plugin's forms behave as they did.
+#[test]
+fn a_v1_form_field_does_not_submit_on_enter() {
+    let f: FormField = serde_json::from_str(r#"{"id":"q","label":"Query"}"#).unwrap();
+    assert!(!f.submit_on_enter);
+}
+
+/// The composer the Claude panel needs: Enter sends.
+#[test]
+fn submit_on_enter_survives_the_wire() {
+    let json = r#"{"id":"task","label":"Task","submit_on_enter":true}"#;
+    let f: FormField = serde_json::from_str(json).unwrap();
+    assert!(f.submit_on_enter);
+}
+
+/// A streaming feed asks to stay pinned to its tail.
+#[test]
+fn a_scroll_hint_survives_the_wire() {
+    let line = r#"{"type":"panel-content","panel":"feed",
+        "content":{"kind":"list","items":[]},"scroll":"bottom"}"#;
+    let Incoming::Message(m) = parse_plugin_line(line) else {
+        panic!("must parse");
+    };
+    let PluginMessage::PanelContent { scroll, .. } = *m else {
+        panic!("wrong variant");
+    };
+    assert_eq!(scroll, Some(Scroll::Bottom));
+}
+
+/// A scroll hint from a future version is ignored rather than fatal — the same
+/// forward-compatibility rule the rest of the protocol follows.
+#[test]
+fn an_unknown_scroll_hint_is_ignored_not_fatal() {
+    let line = r#"{"type":"panel-content","panel":"f",
+        "content":{"kind":"list","items":[]},"scroll":"centre-on-cursor"}"#;
+    let Incoming::Message(m) = parse_plugin_line(line) else {
+        panic!("must parse rather than fail");
+    };
+    let PluginMessage::PanelContent { scroll, .. } = *m else {
+        panic!("wrong variant");
+    };
+    assert_eq!(scroll, Some(Scroll::Other));
+}
+
+/// After a send, the plugin tells the host to empty the box. Without this the user
+/// presses Enter on text that has already gone.
+#[test]
+fn clear_fields_parses() {
+    let line = r#"{"type":"clear-fields","panel":"composer"}"#;
+    let Incoming::Message(m) = parse_plugin_line(line) else {
+        panic!("must parse");
+    };
+    assert_eq!(
+        *m,
+        PluginMessage::ClearFields {
+            panel: "composer".to_string()
+        }
+    );
+}
+
+/// Severity reuses the diagnostics vocabulary rather than inventing a second one.
+#[test]
+fn a_row_severity_survives_the_wire() {
+    let item = ListItem::text("write_file failed").with_severity(Severity::Error);
+    let json = serde_json::to_string(&item).unwrap();
+    assert!(json.contains(r#""severity":"error""#), "{json}");
+    let back: ListItem = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.severity, Some(Severity::Error));
+}
+
+/// An ordinary row writes no severity key, so the common case stays small on the wire.
+#[test]
+fn an_ordinary_row_writes_no_severity() {
+    let json = serde_json::to_string(&ListItem::text("ok")).unwrap();
+    assert_eq!(json, r#"{"text":"ok"}"#);
+}

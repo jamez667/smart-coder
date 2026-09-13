@@ -28,6 +28,8 @@ pub enum Row {
         detail: Option<String>,
         command: Option<String>,
         args: Vec<String>,
+        /// How the row reads (v2). `None` ⇒ ordinary.
+        severity: Option<sc_plugin_proto::Severity>,
         /// Nesting depth, for indentation. 0 at the top level.
         depth: usize,
     },
@@ -77,6 +79,7 @@ fn walk(content: &Content, depth: usize, out: &mut Vec<Row>) -> bool {
                     detail: item.detail.clone(),
                     command: item.command.clone(),
                     args: item.args.clone(),
+                    severity: item.severity,
                     depth,
                 });
             }
@@ -161,6 +164,7 @@ mod tests {
                 detail: Some("1".to_string()),
                 command: None,
                 args: Vec::new(),
+                severity: None,
                 depth: 0,
             }
         );
@@ -230,6 +234,7 @@ mod tests {
                 value: String::new(),
                 placeholder: None,
                 secret: false,
+                submit_on_enter: false,
             }],
             submit: Some("Go".to_string()),
         };
@@ -266,5 +271,50 @@ mod tests {
         let got = encode_form(&[("a".to_string(), "one\nb=evil".to_string())]);
         assert_eq!(got, "a=one b=evil");
         assert_eq!(got.lines().count(), 1);
+    }
+
+    /// Severity travels through the flatten so the host can colour the row (v2).
+    #[test]
+    fn severity_reaches_the_drawable_row() {
+        let c = Content::List {
+            items: vec![
+                ListItem::text("ok"),
+                ListItem::text("boom").with_severity(sc_plugin_proto::Severity::Error),
+            ],
+        };
+        let rows = flatten(&c);
+        let severities: Vec<_> = rows
+            .iter()
+            .map(|r| match r {
+                Row::Item { severity, .. } => *severity,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            severities,
+            vec![None, Some(sc_plugin_proto::Severity::Error)]
+        );
+    }
+
+    /// A submit-on-enter field survives the flatten, or Enter would do nothing however
+    /// the plugin declared it.
+    #[test]
+    fn submit_on_enter_reaches_the_drawable_field() {
+        let c = Content::Form {
+            fields: vec![FormField {
+                id: "task".to_string(),
+                label: "Task".to_string(),
+                value: String::new(),
+                placeholder: None,
+                secret: false,
+                submit_on_enter: true,
+            }],
+            submit: Some("Run".to_string()),
+        };
+        let rows = flatten(&c);
+        let Row::Field { field, .. } = &rows[0] else {
+            panic!("expected a field, got {rows:?}");
+        };
+        assert!(field.submit_on_enter);
     }
 }

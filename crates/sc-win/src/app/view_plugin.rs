@@ -49,7 +49,13 @@ impl App {
         };
         // Collected first, then applied, because applying needs `&mut self` while
         // draining holds `&mut self.plugins`.
-        let mut pushed: Vec<(String, String, sc_plugin_proto::Content)> = Vec::new();
+        let mut pushed: Vec<(
+            String,
+            String,
+            sc_plugin_proto::Content,
+            Option<sc_plugin_proto::Scroll>,
+        )> = Vec::new();
+        let mut cleared: Vec<(String, String)> = Vec::new();
         let mut stopped: Vec<(String, String)> = Vec::new();
         let mut requests: Vec<(String, PluginMessage)> = Vec::new();
 
@@ -58,9 +64,18 @@ impl App {
             for ev in p.drain() {
                 match ev {
                     PluginEvent::Message(m) => match *m {
-                        PluginMessage::PanelContent { panel, content } => {
+                        PluginMessage::PanelContent {
+                            panel,
+                            content,
+                            scroll,
+                        } => {
                             if let Some(id) = plugin_id.clone() {
-                                pushed.push((id, panel, content));
+                                pushed.push((id, panel, content, scroll));
+                            }
+                        }
+                        PluginMessage::ClearFields { panel } => {
+                            if let Some(id) = plugin_id.clone() {
+                                cleared.push((id, panel));
                             }
                         }
                         // A request. Answered below, outside this loop, because
@@ -100,7 +115,17 @@ impl App {
             }
         }
 
-        for (plugin_id, panel_id, content) in pushed {
+        // Field clears BEFORE content pushes, so a plugin that empties the composer and
+        // pushes the sent message in the same breath does not have the clear undone by
+        // its own push carrying the old value.
+        for (plugin_id, panel_id) in cleared {
+            let slug = format!("plugin:{plugin_id}:{panel_id}");
+            if let Some(handle) = sc_craft_ui::plugin::registry::registry().from_slug(&slug) {
+                self.plugin_fields.retain(|(p, _), _| *p != handle);
+            }
+        }
+
+        for (plugin_id, panel_id, content, scroll) in pushed {
             let slug = format!("plugin:{plugin_id}:{panel_id}");
             if let Some(handle) = sc_craft_ui::plugin::registry::registry().from_slug(&slug) {
                 // Flattened HERE, on arrival, not on paint: the limits and the nesting
@@ -108,6 +133,11 @@ impl App {
                 // plugin's content size on the render path.
                 self.plugin_panels
                     .insert(handle, sc_craft_ui::plugin::flatten(&content));
+                // A feed that streams asks to stay pinned to its tail. Recorded rather
+                // than acted on here: the scroll is a Task, and this runs mid-drain.
+                if scroll == Some(sc_plugin_proto::Scroll::Bottom) {
+                    self.plugin_scroll_to_bottom.insert(handle);
+                }
             }
         }
         if !stopped.is_empty() {
@@ -126,6 +156,28 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Pin any panel whose plugin asked to be scrolled to the bottom.
+    ///
+    /// Drains the set: a request that stayed set would re-snap on every tick and fight
+    /// the user the moment they scrolled up to read something. One push, one scroll.
+    ///
+    /// Batched, because two plugins can stream at once and each owns its own scrollable.
+    pub(crate) fn plugin_autoscroll_task(&mut self) -> Task<Message> {
+        if self.plugin_scroll_to_bottom.is_empty() {
+            return Task::none();
+        }
+        let tasks: Vec<Task<Message>> = std::mem::take(&mut self.plugin_scroll_to_bottom)
+            .into_iter()
+            .map(|id| {
+                iced::widget::operation::snap_to(
+                    plugin_scroll_id(id),
+                    iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+                )
+            })
+            .collect();
+        Task::batch(tasks)
     }
 
     /// Send a message to whichever plugin owns `panel`.
@@ -191,7 +243,7 @@ impl App {
         for r in rows {
             col = col.push(self.view_plugin_row(id, r));
         }
-        container(scrollable(col).height(Fill))
+        container(scrollable(col).id(plugin_scroll_id(id)).height(Fill))
             .width(Fill)
             .height(Fill)
             .into()
@@ -205,9 +257,18 @@ impl App {
                 detail,
                 command,
                 args,
+                severity,
                 depth,
             } => {
-                let mut line = row![text(label).size(12).color(FG)].spacing(8);
+                // The host decides what a severity LOOKS like — the plugin said what it
+                // means. Same colours the Problems panel uses, so an error from a plugin
+                // reads the same as one from the compiler.
+                let colour = match severity {
+                    Some(sc_plugin_proto::Severity::Error) => BAD,
+                    Some(sc_plugin_proto::Severity::Warning) => AMBER,
+                    Some(sc_plugin_proto::Severity::Info) | None => FG,
+                };
+                let mut line = row![text(label).size(12).color(colour)].spacing(8);
                 if let Some(d) = detail {
                     line = line.push(Space::new().width(Fill));
                     line = line.push(text(d).size(11).color(FG_MUTED));
@@ -245,6 +306,12 @@ impl App {
                 .on_input(move |v| Message::PluginFieldChanged(id, field.id.clone(), v))
                 .padding(6)
                 .style(input_style);
+                // Enter sends (v2). Without this a composer needs a mouse trip to the
+                // button for every message, which is why the host's own chat and Claude
+                // inputs have bound Enter since they were written.
+                if field.submit_on_enter {
+                    input = input.on_submit(Message::PluginFormSubmit(id));
+                }
                 if field.secret {
                     input = input.secure(true);
                 }
@@ -271,6 +338,21 @@ impl App {
                 .into(),
         }
     }
+}
+
+/// The scrollable id for a plugin panel.
+///
+/// Stable per panel, so a scroll-to-bottom Task issued after a content push finds the
+/// right one when several plugins are streaming at once. Mirrors `code_scroll_id` and
+/// `claude_feed_id`, which exist for the same reason.
+pub(crate) fn plugin_scroll_id(id: PluginPanelId) -> iced::advanced::widget::Id {
+    // PER PANEL, not a singleton — `scroll_to` addresses a widget by id, so two plugin
+    // panels sharing one would mean a push to either scrolling BOTH. The same bug
+    // `code_scroll_id` documents, avoided the same way.
+    //
+    // `Id::new` takes `&'static str`; this is built at runtime, so go through
+    // `From<String>`, which stores an owned `Cow`.
+    iced::advanced::widget::Id::from(format!("plugin-panel:{}", id.0))
 }
 
 /// Indent a row by its nesting depth.

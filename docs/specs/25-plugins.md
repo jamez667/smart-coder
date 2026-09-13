@@ -153,6 +153,37 @@ This will not be enough for someone. When that happens the answer is to version
 the content model deliberately, **not** to leak renderer types. Stating that
 here is cheaper than defending it under pressure later.
 
+### v2: what Claude Code asked for
+
+The someone arrived immediately, and it was the right one — the most demanding
+consumer of the API, which is exactly who should find its limits first. Surveying
+the Claude Code panel for migration turned up four things v1 could not express,
+and each was a real loss rather than a preference:
+
+| Addition | Without it |
+|---|---|
+| `FormField::submit_on_enter` | A composer where Enter does not send. The host's own chat and Claude inputs have bound Enter since they were written. |
+| `PanelContent::scroll` | A streaming feed that does not follow its own tail — which is why the host already autoscrolls its own. |
+| `PluginMessage::ClearFields` | After sending, the box stays full. The host holds in-progress values so a push cannot wipe a half-typed message, and a plugin had no way to say "I accepted that" — so the next Enter re-sends. |
+| `ListItem::severity` | A failed tool call renders identically to a successful one: a feed that hides its own failures. |
+
+**None of them is layout.** `severity` is the one concession to appearance and it
+is a *meaning* rather than a colour — the host decides what an error looks like,
+exactly as it does in the Problems panel, and it reuses the `Severity` that
+diagnostics already carry rather than inventing a second vocabulary. `scroll` is
+an intent, not a pixel offset, because a plugin does not know how tall the host
+drew its rows.
+
+**Every one defaults to the v1 behaviour**, so a v1 plugin runs unchanged on a v2
+host. The version is bumped anyway, because a v2 plugin on a v1 host would
+silently lose Enter — and silently is the problem.
+
+What was *refused*: a `Row` or `Overlay` kind, which would have let the ⚙ options
+menu port as a floating card exactly as it renders today. That is the widget-tree
+road by degrees, and the options menu becomes a second declared panel instead.
+This section said the pressure would be to leak renderer types "just this once";
+this was the once, and the answer was no.
+
 Content is **pushed** when the plugin's state changes; the host caches the last
 content and repaints from cache. A pull-per-frame model would put a synchronous
 round trip on the render path, which is the mistake this codebase has already
