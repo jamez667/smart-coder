@@ -663,26 +663,30 @@ impl App {
                 self.refresh_git_view();
                 self.reload_selected();
             }
+            // The three network ops return a Task and refresh in `GitNetDone` — they do NOT
+            // refresh here, because at this point the op has not run yet.
             Message::GitPush => {
                 // No upstream yet → set it on push so a fresh branch publishes cleanly.
-                if self.upstream.upstream.is_none() {
-                    if let Some(b) = self.branch.clone() {
-                        self.run_git_net("push", &["push", "-u", "origin", &b]);
+                return if self.upstream.upstream.is_none() {
+                    match self.branch.clone() {
+                        Some(b) => self.start_git_net("push", &["push", "-u", "origin", &b]),
+                        None => Task::none(),
                     }
                 } else {
-                    self.run_git_net("push", &["push"]);
+                    self.start_git_net("push", &["push"])
+                };
+            }
+            Message::GitPull => return self.start_git_net("pull", &["pull", "--ff-only"]),
+            Message::GitFetch => return self.start_git_net("fetch", &["fetch"]),
+            Message::CancelGitNet => self.cancel_git_net(),
+            Message::GitNetDone(label, ok, gist) => {
+                let task = self.finish_git_net(&label, ok, &gist);
+                // A pull can rewrite the file under the cursor, so re-read it — but only for the
+                // ops that touch the working tree. A fetch never does.
+                if label != "fetch" {
+                    self.reload_selected();
                 }
-                self.refresh_git_view();
-                self.reload_selected();
-            }
-            Message::GitPull => {
-                self.run_git_net("pull", &["pull", "--ff-only"]);
-                self.refresh_git_view();
-                self.reload_selected();
-            }
-            Message::GitFetch => {
-                self.run_git_net("fetch", &["fetch"]);
-                self.refresh_git_view();
+                return task;
             }
             Message::PickWorkspace => {
                 self.open_menu = None;

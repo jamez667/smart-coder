@@ -21,6 +21,20 @@ pub(crate) struct App {
     /// True while a background `compute_snapshot` is in flight, so the heartbeat doesn't stack up
     /// overlapping walks if one runs long.
     pub(crate) sync_pending: bool,
+    /// The network git op in flight (`"pull"` / `"push"` / `"fetch"`), if any.
+    ///
+    /// These are the one git path that can take *seconds* — a network round trip, possibly an auth
+    /// prompt — so they run off-thread and the sync bar says which one is running. Holding the
+    /// LABEL rather than a bool is what lets the bar mark the button that was actually pressed, and
+    /// it doubles as the re-entrancy guard: a second click while one is in flight does nothing.
+    pub(crate) git_net: Option<String>,
+    /// Set to cancel the in-flight network git op, mirroring the compile and profiler flows.
+    ///
+    /// A pull blocked on a credential prompt is the case that makes this non-optional: without it
+    /// the only way out is killing the window. The worker polls this between `try_wait` calls and
+    /// kills the process TREE — `git` shells out to a credential helper and possibly `ssh`, so
+    /// killing only the process we spawned would leave those holding the terminal.
+    pub(crate) git_net_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Cached `git diff` per workspace-relative path, so clicking a file paints from
     /// memory instead of waiting on a subprocess.
     ///
@@ -314,6 +328,8 @@ impl Default for App {
             file_filter: String::new(),
             tree_cache,
             sync_pending: false,
+            git_net: None,
+            git_net_cancel: None,
             diff_cache: std::collections::HashMap::new(),
             diff_pending: None,
             diff_wanted: None,
@@ -559,6 +575,14 @@ pub(crate) enum Message {
     GitPull,
     /// Fetch from the remote (`git fetch`) to refresh the behind-count without changing the tree.
     GitFetch,
+    /// A network git op finished: the op's label, whether it succeeded, and the gist of its output.
+    ///
+    /// Carries the label so the completion arm can report *which* op finished — by the time this
+    /// lands the user may have switched panels, and "git pull failed" is only useful if it names
+    /// the op.
+    GitNetDone(String, bool, String),
+    /// Cancel the in-flight network git op — the ✕ beside the running button.
+    CancelGitNet,
     // Workspace folder.
     PickWorkspace,
     /// Open a specific recent project (from the File ▸ Recent list).

@@ -134,22 +134,60 @@ impl App {
         } else {
             "↓ Pull".to_string()
         };
-        let btn = |label: String, msg: Message| {
-            button(text(label).size(11).color(FG))
-                .on_press(msg)
+        // While a network op is in flight, the button that started it says so in amber and NO
+        // button is pressable. A pull is seconds of network with nothing else on screen to show
+        // it — a button that looks idle while it works is indistinguishable from a broken one,
+        // and one that stays pressable invites a second pull on top of the first.
+        let busy = self.git_net.as_deref();
+        let btn = move |label: String, running: &str, msg: Message| {
+            let (label, color) = match busy {
+                Some(op) if op == running => (format!("{label}…"), AMBER),
+                Some(_) => (label, FG_MUTED),
+                None => (label, FG),
+            };
+            let b = button(text(label).size(11).color(color))
                 .padding([1, 8])
-                .style(stage_toggle_button)
+                .style(stage_toggle_button);
+            if busy.is_some() {
+                b
+            } else {
+                b.on_press(msg)
+            }
         };
-        row![
-            btn(push_label, Message::GitPush),
-            btn(pull_label, Message::GitPull),
-            button(text("⟳").size(12).color(FG))
-                .on_press(Message::GitFetch)
-                .padding([1, 8])
-                .style(stage_toggle_button),
+        let mut bar = row![
+            btn(
+                match busy {
+                    Some("push") if up.upstream.is_none() => "↑ Publishing".to_string(),
+                    Some("push") => "↑ Pushing".to_string(),
+                    _ => push_label,
+                },
+                "push",
+                Message::GitPush
+            ),
+            btn(
+                match busy {
+                    Some("pull") => "↓ Pulling".to_string(),
+                    _ => pull_label,
+                },
+                "pull",
+                Message::GitPull
+            ),
+            // The refresh glyph needs no in-flight wording — the amber already says it.
+            btn("⟳".to_string(), "fetch", Message::GitFetch),
         ]
-        .spacing(4)
-        .into()
+        .spacing(4);
+        // The cancel ✕ sits immediately right of the running button, because that is the thing it
+        // cancels — a network op can block on auth and would otherwise only be escapable by
+        // killing the window.
+        if busy.is_some() {
+            bar = bar.push(
+                button(text("✕").size(11).color(BAD))
+                    .on_press(Message::CancelGitNet)
+                    .padding([1, 6])
+                    .style(stage_toggle_button),
+            );
+        }
+        bar.into()
     }
 
     /// The **Files** tab: the workspace file tree, dirs-first, click a file to pin it in the
