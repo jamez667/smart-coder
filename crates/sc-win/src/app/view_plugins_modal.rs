@@ -221,10 +221,12 @@ impl App {
         let mut col = column![
             text("Optional add-ons").size(16).color(FG),
             text(
-                "Smart Coder ships with these, switched off. None of them runs until you                  turn it on here, and you can change any of this later in View ▸ Plugins."
+                "Smart Coder ships with these, switched off. None of them runs until you \
+                 turn it on here, and you can change any of this later in View ▸ Plugins."
             )
             .size(12)
-            .color(FG_MUTED),
+            .color(FG_MUTED)
+            .width(Fill),
         ]
         .spacing(10);
 
@@ -369,11 +371,18 @@ fn first_run_row(dir_name: String, what: &'static str, on: bool) -> Element<'sta
     ]
     .align_y(iced::Alignment::Center);
 
-    container(column![head, text(what).size(11).color(FG_MUTED)].spacing(4))
-        .padding(8)
-        .width(Fill)
-        .style(dropdown_style)
-        .into()
+    // `.width(Fill)` on the TEXT, not just the container: without it the paragraph sizes
+    // to its natural width and runs under the On/Off button instead of wrapping inside
+    // the card, which is fixed at 520px.
+    container(
+        column![head, text(what).size(11).color(FG_MUTED).width(Fill)]
+            .spacing(4)
+            .width(Fill),
+    )
+    .padding(8)
+    .width(Fill)
+    .style(dropdown_style)
+    .into()
 }
 
 /// A human title for a plugin directory, before its manifest has been read.

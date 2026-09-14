@@ -424,9 +424,18 @@ fn indent<'a>(depth: usize, el: Element<'a, Message>) -> Element<'a, Message> {
 /// an unanswered plugin has never run.
 fn describes(dir_name: &str) -> &'static str {
     match dir_name {
-        "agent" => "Chat, automated runs and code review. Sends your code to a language                     model — local or hosted, whichever you configure.",
-        "claude-code" => "Runs Anthropic's Claude Code CLI in this project. Sends your                           code to Anthropic over the internet.",
-        "compliance" => "Audits the project against compliance frameworks. Offline and                          deterministic; a model writes the summary only if you pick one.",
+        "agent" => {
+            "Chat, automated runs and code review. Sends your code to a language model — \
+             local or hosted, whichever you configure."
+        }
+        "claude-code" => {
+            "Runs Anthropic's Claude Code CLI in this project. Sends your code to \
+             Anthropic over the internet."
+        }
+        "compliance" => {
+            "Audits the project against compliance frameworks. Offline and deterministic; \
+             a model writes the summary only if you pick one."
+        }
         _ => "A plugin installed in your plugins folder.",
     }
 }
