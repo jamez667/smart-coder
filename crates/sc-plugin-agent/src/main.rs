@@ -32,6 +32,7 @@ use sc_plugin_proto::{
 };
 
 use sc_core::Confirmation;
+use sc_plugin_agent::board::SwarmBoard;
 use sc_plugin_agent::plan::Plan;
 use sc_plugin_agent::view::{agent_rows, swarm_rows, Row};
 use sc_plugin_agent::{ui, Pending, RunKind, Session, UiConfig, UiEvent};
@@ -40,6 +41,7 @@ use sc_workflow::Decision;
 const RUN: &str = "run";
 const APPROVALS: &str = "approvals";
 const PLAN: &str = "plan";
+const BOARD: &str = "board";
 
 /// One decision a blocked worker is waiting on.
 struct Ask {
@@ -73,6 +75,9 @@ struct State {
     asks: Vec<Option<Ask>>,
     /// The staged workflow's artifacts, when a run produces them.
     plan: Plan,
+    /// The swarm's per-subtask board. A swarm's workers interleave in the feed; this
+    /// is the same events folded by subtask id so each one has a current status.
+    board: SwarmBoard,
 }
 
 fn main() {
@@ -84,6 +89,7 @@ fn main() {
         kind: RunKind::Iterate,
         asks: Vec::new(),
         plan: Plan::default(),
+        board: SwarmBoard::default(),
     };
 
     // The host writes one message per line and waits for nothing, so a blocking read is
@@ -133,6 +139,7 @@ fn handle(state: &mut State, msg: HostMessage) -> bool {
             }
             state.asks.clear();
             state.plan = Plan::default();
+            state.board = SwarmBoard::default();
             push_all(state);
         }
 
@@ -251,6 +258,7 @@ fn start(state: &mut State, task: String) {
 
     state.rows.push(Row::ok("❯", task.clone()));
     state.plan = Plan::default();
+    state.board = SwarmBoard::default();
     state.session = Some(Session::spawn(state.kind, cfg, task, ws));
 
     // Clear the composer FIRST, or the task stays in the box and the next Enter sends it
@@ -286,7 +294,13 @@ fn drain(state: &mut State) {
     for ev in events {
         match ev {
             UiEvent::Agent(e) => state.rows.extend(agent_rows(&e)),
-            UiEvent::Swarm(e) => state.rows.extend(swarm_rows(&e)),
+            UiEvent::Swarm(e) => {
+                // Both, deliberately: the feed narrates what happened in order, the
+                // board answers "where is each subtask now". Neither replaces the
+                // other, and the fold is cheap.
+                state.board.apply(&e);
+                state.rows.extend(swarm_rows(&e));
+            }
             UiEvent::Phase {
                 phase,
                 content,
@@ -347,6 +361,7 @@ fn push_all(state: &State) {
     push_run(state);
     push_approvals(state);
     push_plan(state);
+    push_board(state);
 }
 
 fn push_run(state: &State) {
@@ -404,6 +419,14 @@ fn push_plan(state: &State) {
     send(&PluginMessage::PanelContent {
         panel: PLAN.to_string(),
         content: ui::plan_panel(&steps),
+        scroll: None,
+    });
+}
+
+fn push_board(state: &State) {
+    send(&PluginMessage::PanelContent {
+        panel: BOARD.to_string(),
+        content: ui::board_panel(state.board.rows(), state.session.is_some()),
         scroll: None,
     });
 }
@@ -476,6 +499,10 @@ fn manifest() -> Manifest {
             PanelDecl {
                 id: PLAN.to_string(),
                 title: "Plan".to_string(),
+            },
+            PanelDecl {
+                id: BOARD.to_string(),
+                title: "Swarm board".to_string(),
             },
         ],
         commands: vec![

@@ -10,13 +10,22 @@
 //!   an inline card, because **the worker thread is blocked** while one is outstanding:
 //!   burying that in a scrolling feed is how a run appears to hang.
 //! * **`plan`** — the staged workflow's artifacts, when a run produces them.
+//! * **`board`** — one row per swarm subtask, showing its *current* status.
 //!
-//! The one thing that did not survive the port is the swarm topology canvas: it is a
-//! drawing, and the content model has no canvas. `topology.rs` still folds the event
-//! stream into data, so the board is shown as rows instead.
+//! The board is the one panel that shows something the run feed structurally cannot.
+//! A swarm runs several workers at once and they all emit into one stream, so a
+//! subtask's updates arrive scattered between other subtasks'. [`crate::board`] folds
+//! that stream by subtask id; this renders the fold. "What is each coder doing right
+//! now" is a question the interleaved log cannot answer at a glance.
+//!
+//! The swarm *topology* — the same events as a diagram, with edges that glow as
+//! messages flow — did not survive the port: it is a drawing, and the content model has
+//! no canvas. `topology.rs` still folds the data and `canvas.rs.pending` still holds the
+//! rendering, against a content kind that does not exist yet.
 
 use sc_plugin_proto::{Content, FormField, ListItem, Severity};
 
+use crate::board::BoardRow;
 use crate::view::Row;
 
 /// A decision the run is blocked on, waiting for an answer.
@@ -188,6 +197,51 @@ pub fn plan_panel(steps: &[(String, bool)]) -> Content {
     }
 }
 
+/// The swarm board: one row per subtask, in first-seen order.
+///
+/// Every part of a row comes from [`crate::board`], which already decided all of it:
+/// the glyph from [`SubtaskStatus::icon`], the one-line description from
+/// [`BoardRow::detail`] (retry counts, integrated file lists), and whether it reads as
+/// a problem from [`SubtaskStatus::is_bad`]. This function chooses nothing — it maps a
+/// fold that is already tested onto `ListItem`, which is why it is this short.
+pub fn board_panel(rows: &[BoardRow], running: bool) -> Content {
+    if rows.is_empty() {
+        return Content::Text {
+            markdown: if running {
+                "No subtasks yet.\n\nThe orchestrator is still decomposing the task.".to_string()
+            } else {
+                "No swarm run.\n\nThe Swarm, TDD and Sequential build run kinds \
+                 decompose a task across workers, and each one appears here."
+                    .to_string()
+            },
+        };
+    }
+
+    Content::List {
+        items: rows
+            .iter()
+            .map(|r| {
+                // The goal can be empty: `set_status` creates a bare row when a status
+                // event arrives before its `WorkerStarted`, so the event is not lost.
+                // Such a row would otherwise render as a lone glyph. The subtask id is
+                // what it does have, and it is what the later events key on.
+                let label = if r.goal.trim().is_empty() {
+                    r.subtask.clone()
+                } else {
+                    r.goal.clone()
+                };
+                let item =
+                    ListItem::text(format!("{} {label}", r.status.icon())).with_detail(r.detail());
+                if r.status.is_bad() {
+                    item.with_severity(Severity::Error)
+                } else {
+                    item
+                }
+            })
+            .collect(),
+    }
+}
+
 /// The command prefix an "allow and remember" covers: up to and including the first
 /// space, or the whole command when it has none.
 fn prefix_of(command: &str) -> String {
@@ -330,6 +384,103 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(items[0].severity.is_none());
         assert_eq!(items[1].severity, Some(Severity::Error));
+    }
+
+    fn board_row(goal: &str, status: crate::board::SubtaskStatus) -> BoardRow {
+        BoardRow {
+            subtask: goal.to_string(),
+            goal: goal.to_string(),
+            status,
+            proposal: None,
+        }
+    }
+
+    /// The empty board explains which run kinds fill it, rather than sitting blank —
+    /// an empty panel is indistinguishable from a broken one.
+    #[test]
+    fn an_empty_board_says_what_would_fill_it() {
+        let Content::Text { markdown } = board_panel(&[], false) else {
+            panic!("expected prose");
+        };
+        assert!(markdown.contains("decompose"));
+    }
+
+    /// Mid-run emptiness is a different state from no-run emptiness: the orchestrator
+    /// has not produced subtasks yet, which is progress, not absence.
+    #[test]
+    fn an_empty_board_mid_run_says_it_is_still_decomposing() {
+        let Content::Text { markdown } = board_panel(&[], true) else {
+            panic!("expected prose");
+        };
+        assert!(markdown.contains("decomposing"));
+    }
+
+    /// **The reason this panel exists.** Concurrent workers interleave in the feed;
+    /// here each subtask is one row carrying its own current status.
+    #[test]
+    fn each_subtask_is_one_row_carrying_its_own_status() {
+        use crate::board::SubtaskStatus;
+        let rows = [
+            board_row("build the parser", SubtaskStatus::Running),
+            board_row("wire the CLI", SubtaskStatus::Finished),
+        ];
+        let items = rows_of(&board_panel(&rows, true));
+        assert_eq!(items.len(), 2);
+        assert!(items[0].text.contains("build the parser"));
+        assert!(items[1].text.contains("wire the CLI"));
+        assert!(items.iter().all(|i| i.severity.is_none()));
+    }
+
+    /// A retry or a revert reads as a problem — the same rule the feed follows, and
+    /// the whole point of scanning a board rather than a log.
+    #[test]
+    fn a_retrying_subtask_reads_as_a_problem_and_shows_why() {
+        use crate::board::SubtaskStatus;
+        let rows = [board_row(
+            "build the parser",
+            SubtaskStatus::Retrying {
+                attempt: 1,
+                max: 2,
+                red: 3,
+            },
+        )];
+        let items = rows_of(&board_panel(&rows, true));
+        assert_eq!(items[0].severity, Some(Severity::Error));
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("retry 1/2 — 3 tests red"),
+            "the detail comes from BoardRow::detail, not from this module"
+        );
+    }
+
+    /// A status event can arrive before its `WorkerStarted` — the board keeps the
+    /// event rather than dropping it, leaving a row with no goal text. It must not
+    /// render as a bare glyph with nothing beside it.
+    #[test]
+    fn a_row_with_no_goal_yet_falls_back_to_the_subtask_id() {
+        use crate::board::SubtaskStatus;
+        let mut row = board_row("", SubtaskStatus::Running);
+        row.subtask = "t7".to_string();
+        let items = rows_of(&board_panel(&[row], true));
+        assert!(items[0].text.contains("t7"), "{}", items[0].text);
+    }
+
+    #[test]
+    fn an_integrated_subtask_names_the_files_it_changed() {
+        use crate::board::SubtaskStatus;
+        let rows = [board_row(
+            "build the parser",
+            SubtaskStatus::Integrated {
+                files: vec!["src/parser.rs".to_string()],
+            },
+        )];
+        let items = rows_of(&board_panel(&rows, false));
+        assert!(items[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("src/parser.rs"));
+        assert!(items[0].severity.is_none(), "integrated is not a problem");
     }
 
     #[test]
