@@ -25,6 +25,49 @@ OpenAI-compatible server) — see [Running the backends](README.md#running-the-b
 The tests do **not** require a live backend; they use a `MockBackend` and are
 fully deterministic.
 
+## The desktop app, and its plugins
+
+Two binaries come out of `sc-win`, sharing one editor. The difference is one call
+to `set_product` at the top of `main`: which state directory, which default
+layout, which plugin directory, which name in the title bar.
+
+| Binary | State dir |
+| --- | --- |
+| `smart-coder` | `%APPDATA%\smart-coder\` |
+| `smart-coder-crafter` | `%APPDATA%\smart-coder-crafter\` |
+
+`smart-coder-crafter` is the editor alone (spec 21). Its dependency tree contains
+no crate that can reach a model, and `scripts/check.*` asserts that with
+`cargo tree` — that assertion *is* the guarantee, which is why it is a gate and
+not a comment.
+
+The agent, Claude Code and compliance are **plugins** (spec 25): child processes
+speaking line-delimited JSON, not code either binary links. A plugin is a
+directory under `<state dir>\plugins\` holding `plugin.json` and its binary.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-plugins.ps1
+# -Product crafter | both     which state dir(s)
+# -NoBuild                    install what is already in target/release
+# -WhatIf                     say what would happen, change nothing
+```
+
+Two things that script is careful about, because both are easy to get wrong by
+hand:
+
+* **It never changes a plugin's `enabled` flag.** The Plugins panel writes that
+  when you toggle one off; a reinstall that recreated the manifest would silently
+  turn it back on, and that would look like the toggle not persisting.
+* **It writes `plugin.json` without a UTF-8 BOM.** `parse_launch` hands the file
+  to `serde_json::from_str`, which rejects one — the plugin then shows up as
+  "plugin.json is not valid JSON". Windows PowerShell 5.1's
+  `Set-Content -Encoding UTF8` writes a BOM, so the script uses
+  `[System.IO.File]::WriteAllText` instead.
+
+Plugins are discovered at startup, so installing or toggling one needs a restart.
+There is no hot-swap, for the reason spec 25 gives: the panel registry is built
+once, before any layout is read.
+
 ## Before you open a PR
 
 Run the same checks a review will expect. There's a script that runs all of them:
