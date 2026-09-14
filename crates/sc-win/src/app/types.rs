@@ -223,6 +223,12 @@ pub(crate) struct App {
     >,
     /// Whether the plugin manager is open.
     pub(crate) plugins_modal: bool,
+    /// Whether the first-run plugin question is up.
+    ///
+    /// Set at boot when any installed plugin has never been answered for, and cleared
+    /// only by answering. It blocks the window: the point is consent before anything
+    /// runs, and a question you can dismiss is one the app answered for you.
+    pub(crate) first_run_plugins: bool,
     /// A toggle changed something that only a restart will apply.
     ///
     /// Set by a successful enable/disable, and never cleared: the restart is still
@@ -365,6 +371,7 @@ impl Default for App {
             panel_slots: std::collections::BTreeMap::new(),
             plugins: None,
             plugins_modal: false,
+            first_run_plugins: false,
             plugins_need_restart: false,
             plugin_toggle_error: None,
             plugin_panels: std::collections::BTreeMap::new(),
@@ -429,6 +436,12 @@ pub(crate) enum Message {
     TogglePluginsModal,
     /// Enable or disable a plugin by its directory name. Applies at the next launch.
     SetPluginEnabled(String, bool),
+    /// Answer the first-run plugin question: every plugin still unanswered is recorded
+    /// as a `false`, and the modal closes.
+    ///
+    /// Writing the "no"s explicitly is the point. Leaving them absent would mean asking
+    /// again on the next launch, which turns a declined question into nagging.
+    FinishFirstRunPlugins,
     // --- Compile & check (spec 21) ---
     /// Run the project's compile command and parse its diagnostics.
     RunCompile,

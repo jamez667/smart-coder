@@ -80,6 +80,13 @@ pub enum Failure {
     ProtocolMismatch { theirs: u32, ours: u32 },
     /// The user disabled it.
     Disabled,
+    /// Nobody has been asked about it yet.
+    ///
+    /// Distinct from [`Disabled`](Failure::Disabled) because the two are different facts:
+    /// one is a decision, the other is the absence of one. A plugin that ships installed
+    /// has made no claim on the user's consent until they answer, and reporting it as
+    /// "disabled" would describe a choice they never made.
+    NotChosen,
     /// It exited or crashed.
     Stopped(String),
 }
@@ -98,6 +105,7 @@ impl Failure {
                 format!("speaks protocol {theirs}; this build understands {ours}")
             }
             Failure::Disabled => "disabled".to_string(),
+            Failure::NotChosen => "not enabled yet".to_string(),
             Failure::Stopped(why) => why.clone(),
         }
     }
@@ -145,9 +153,19 @@ impl Plugins {
         let mut claimed_commands: Vec<String> = Vec::new();
 
         for found in scan.found {
-            if !found.enabled {
-                plugins.failed.push((found.dir_name, Failure::Disabled));
-                continue;
+            // Only an explicit yes starts a process. `None` — shipped but never asked
+            // about — is held back exactly like a `false`, because the alternative is
+            // spawning something the user has not consented to and asking afterwards.
+            match found.enabled {
+                Some(true) => {}
+                Some(false) => {
+                    plugins.failed.push((found.dir_name, Failure::Disabled));
+                    continue;
+                }
+                None => {
+                    plugins.failed.push((found.dir_name, Failure::NotChosen));
+                    continue;
+                }
             }
             let mut plugin = match Plugin::spawn(&found) {
                 Ok(p) => p,
@@ -292,7 +310,7 @@ mod tests {
                 dir: std::env::temp_dir(),
                 command: std::path::PathBuf::from("does-not-matter"),
                 args: Vec::new(),
-                enabled: false,
+                enabled: Some(false),
             }],
             rejected: Vec::new(),
         };
@@ -300,6 +318,45 @@ mod tests {
         assert!(plugins.running.is_empty(), "nothing was spawned");
         assert_eq!(plugins.failed, vec![("off".to_string(), Failure::Disabled)]);
         assert!(registry.is_empty());
+    }
+
+    /// **Consent before execution.** A plugin that shipped installed and has never been
+    /// answered for is held back exactly like a disabled one — it is listed, so the
+    /// first-run question can offer it, but nothing is spawned.
+    ///
+    /// This is the property the whole tri-state exists for. `enabled` used to default to
+    /// `true` when absent, which is defensible for a plugin someone sought out and copied
+    /// in, and indefensible for three that arrive with the product — one of which starts a
+    /// process that talks to a language model.
+    #[test]
+    fn a_plugin_nobody_has_been_asked_about_is_not_started() {
+        let scan = Scan {
+            found: vec![Discovered {
+                dir_name: "unasked".to_string(),
+                dir: std::env::temp_dir(),
+                command: std::path::PathBuf::from("does-not-matter"),
+                args: Vec::new(),
+                enabled: None,
+            }],
+            rejected: Vec::new(),
+        };
+        let (plugins, registry) = Plugins::start(scan, None);
+        assert!(plugins.running.is_empty(), "consent was never given");
+        assert_eq!(
+            plugins.failed,
+            vec![("unasked".to_string(), Failure::NotChosen)],
+            "listed, so it can be offered — not silently dropped"
+        );
+        assert!(registry.is_empty());
+    }
+
+    /// `NotChosen` and `Disabled` are different facts and must not describe themselves
+    /// the same way: one is a decision, the other is the absence of one.
+    #[test]
+    fn not_chosen_does_not_describe_itself_as_disabled() {
+        let d = Failure::NotChosen.describe();
+        assert!(!d.is_empty());
+        assert_ne!(d, Failure::Disabled.describe());
     }
 
     /// A plugin whose program is missing is recorded, and the others still load. One
@@ -312,7 +369,7 @@ mod tests {
                 dir: std::env::temp_dir(),
                 command: std::path::PathBuf::from("sc-definitely-not-a-real-program"),
                 args: Vec::new(),
-                enabled: true,
+                enabled: Some(true),
             }],
             rejected: vec![discover::Rejected {
                 dir_name: "broken".to_string(),

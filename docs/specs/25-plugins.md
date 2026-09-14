@@ -53,6 +53,48 @@ It is also the decision that makes the rest tractable. `App` is one struct and
 cleanly. With startup loading the plugin set is known before `App::default()`
 runs, so the app is built once for that configuration and never mutates.
 
+## Shipped is not installed, and installed is not consented to
+
+The product ships with three plugins in the box — the agent, Claude Code, and
+compliance. Shipping them is convenient; **starting them because they were
+shipped is not a decision the user made.**
+
+> **`enabled` is a tri-state, and only an explicit yes starts a process.**
+> `Some(true)` and `Some(false)` are answers. Absent is the *absence* of one, and
+> it is held back exactly like a `false`.
+
+<!--@ crates/sc-craft-ui/src/plugin/discover.rs -->
+
+This inverts the earlier rule, which read an absent flag as enabled on the
+reasoning that "a plugin someone installed is one they wanted". That holds for a
+plugin somebody sought out and copied into the directory. It does not hold for
+one that arrived with the application — and one of these three spawns a process
+that sends the user's code to a language model over the internet.
+
+Startup ordering is what forces the tri-state rather than a settings toggle.
+Plugins start *before* `App::default()` reads the layout, because a saved layout
+naming a plugin panel can only resolve once that plugin has handshaken. A
+question asked after boot would be asked after the process had already run.
+
+So on first launch the host holds every unanswered plugin back and asks, once,
+in a modal that follows the rules [21](21-craft-mode.md) wrote for the mode
+question it has since removed:
+
+- **Nothing is pre-ticked, recommended, or visually favoured.** A user who came
+  here because they distrust this kind of software will read a nudge as
+  confirmation, and they will be right.
+- **It does not dismiss.** No backdrop click, no ✕. Escape and the window close
+  button *quit* instead — choosing is cheap; being chosen for is the thing being
+  avoided.
+- **Declining is recorded**, not left absent, so a "no" is not re-asked on every
+  launch. A question that returns is a nag.
+- **The Crafter never asks.** It is the editor alone; a question about add-ons is
+  noise in the one product whose claim is that it has none.
+
+The answer cannot take effect until a restart, and the modal says so rather than
+implying the switch took — plugins load at startup, and pretending otherwise is
+the one lie a plugin manager cannot afford.
+
 ## Transport: a subprocess, not a dynamic library
 
 A plugin is **a child process** speaking line-delimited JSON over stdin/stdout.

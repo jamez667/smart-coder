@@ -93,6 +93,14 @@ pub fn run() -> iced::Result {
                 plugins: Some(plugins),
                 ..Default::default()
             };
+            // Ask about plugins that shipped installed and have never been answered for.
+            //
+            // The Crafter never asks: it is the editor alone, and a question about
+            // add-ons it does not use would be noise in the one product whose whole
+            // claim is that it has none.
+            app.first_run_plugins = sc_craft_ui::config::product()
+                != sc_craft_ui::config::Product::Crafter
+                && !app.unanswered_plugins().is_empty();
             // The restored project needs detecting, or the Compile button stays dead until the
             // user re-picks the folder (spec 21).
             app.refresh_project_kind();

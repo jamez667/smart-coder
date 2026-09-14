@@ -62,6 +62,11 @@ impl App {
         if let Some(prompt) = self.view_quit_confirm() {
             layers = layers.push(prompt);
         }
+        // LAST, and deliberately above the quit prompt: this one blocks the window
+        // until it is answered, so nothing may float over it.
+        if self.first_run_plugins {
+            layers = layers.push(self.view_first_run_plugins());
+        }
         layers.width(Fill).height(Fill).into()
     }
 

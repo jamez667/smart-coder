@@ -64,9 +64,12 @@ foreach ($state in $StateDirs) {
         $dest = Join-Path $root $p.Dir
         $manifest = Join-Path $dest 'plugin.json'
 
-        # Read the existing flag BEFORE touching anything. Absent means enabled --
-        # the same default `parse_launch` applies, so a fresh install needs no flag
-        # written at all.
+        # Read the existing flag BEFORE touching anything, and carry it through.
+        #
+        # Absent means UNANSWERED, not enabled: `parse_launch` returns `None` and the
+        # host holds the plugin back and asks on first launch. So a fresh install
+        # deliberately writes no flag -- that is what makes the question appear, and
+        # what stops a shipped plugin running before anyone consented to it.
         $keptEnabled = $null
         if (Test-Path $manifest) {
             try {

@@ -170,6 +170,7 @@ impl App {
                     self.plugin_toggle_error = None;
                 }
             }
+            Message::FinishFirstRunPlugins => self.finish_first_run_plugins(),
             Message::SetPluginEnabled(dir_name, enabled) => {
                 let dir = sc_craft_ui::plugin::plugins_dir().join(&dir_name);
                 match sc_craft_ui::plugin::discover::set_enabled(&dir, enabled) {

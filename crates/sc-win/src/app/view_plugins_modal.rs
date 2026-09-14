@@ -179,6 +179,90 @@ impl App {
             .into()
     }
 
+    /// The first-run plugin question.
+    ///
+    /// # Why this blocks
+    ///
+    /// It is the only modal here with no backdrop-dismiss and no ✕. Spec 21 argued this for
+    /// the mode question it has since removed, and the reasoning outlives the occasion:
+    /// *choosing is cheap; being chosen for is the thing being avoided.* A question you can
+    /// click away is one the application answered on your behalf, and the person most likely
+    /// to click away is exactly the person who would have said no.
+    ///
+    /// Escape and the window close button quit instead, through the ordinary
+    /// [`Message::CloseRequested`] path — so the app never starts a plugin because someone
+    /// pressed Escape.
+    ///
+    /// # Why nothing is pre-ticked
+    ///
+    /// Every plugin here is off. There is no "recommended", no pre-checked row, no greyed
+    /// alternative and no persuasion, for the reason spec 21 gave: a user who came here
+    /// because they distrust this kind of software will read a nudge as confirmation, and
+    /// they will be right.
+    ///
+    /// # Why it says restart
+    ///
+    /// Plugins load at startup and there is no hot-swap (spec 25), so enabling one here
+    /// cannot start it in this session. The modal says so rather than implying the switch
+    /// took — the same rule the plugin manager follows, and the one lie a plugin manager
+    /// cannot afford.
+    pub(crate) fn view_first_run_plugins(&self) -> Element<'_, Message> {
+        let backdrop = container(Space::new())
+            .width(Fill)
+            .height(Fill)
+            .style(|_t: &Theme| container::Style {
+                background: Some(Background::Color(Color {
+                    a: 0.55,
+                    ..Color::BLACK
+                })),
+                ..container::Style::default()
+            });
+
+        let mut col = column![
+            text("Optional add-ons").size(16).color(FG),
+            text(
+                "Smart Coder ships with these, switched off. None of them runs until you                  turn it on here, and you can change any of this later in View ▸ Plugins."
+            )
+            .size(12)
+            .color(FG_MUTED),
+        ]
+        .spacing(10);
+
+        // Only the unanswered ones. A plugin already decided about is not a question.
+        for (dir_name, what) in self.unanswered_plugins() {
+            let on = self.plugin_enabled_now(&dir_name);
+            col = col.push(first_run_row(dir_name, what, on));
+        }
+
+        if let Some(err) = &self.plugin_toggle_error {
+            col = col.push(text(err).size(11).color(BAD));
+        }
+
+        col = col.push(
+            text("Anything left off stays off, and you will not be asked again.")
+                .size(11)
+                .color(FG_MUTED),
+        );
+        col = col.push(
+            button(text("Continue").size(13).color(FG))
+                .on_press(Message::FinishFirstRunPlugins)
+                .padding([6, 16])
+                .style(primary_button),
+        );
+
+        let card = container(col.padding(4))
+            .width(Length::Fixed(520.0))
+            .max_width(560.0)
+            .padding(18)
+            .style(dropdown_style);
+
+        // No `mouse_area` on the backdrop: clicking away must not answer for them.
+        iced::widget::stack![backdrop, iced::widget::center(iced::widget::opaque(card))]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
     /// One running plugin.
     fn view_running_plugin<'a>(
         &'a self,
@@ -273,15 +357,50 @@ impl App {
 }
 
 /// One plugin that is not running, and the sentence saying why.
+/// One row of the first-run question: what it is, and a switch that is off.
+fn first_run_row(dir_name: String, what: &'static str, on: bool) -> Element<'static, Message> {
+    let head = row![
+        text(title_for(&dir_name)).size(12).color(FG),
+        Space::new().width(Fill),
+        button(text(if on { "On" } else { "Off" }).size(11))
+            .on_press(Message::SetPluginEnabled(dir_name, !on))
+            .padding([2, 10])
+            .style(if on { primary_button } else { menu_item_style }),
+    ]
+    .align_y(iced::Alignment::Center);
+
+    container(column![head, text(what).size(11).color(FG_MUTED)].spacing(4))
+        .padding(8)
+        .width(Fill)
+        .style(dropdown_style)
+        .into()
+}
+
+/// A human title for a plugin directory, before its manifest has been read.
+///
+/// The manifest carries the real name, but an unanswered plugin has never handshaken —
+/// that is the whole point — so the directory name is all there is. These three ship with
+/// the product; anything else falls back to its directory.
+fn title_for(dir_name: &str) -> String {
+    match dir_name {
+        "agent" => "The agent".to_string(),
+        "claude-code" => "Claude Code".to_string(),
+        "compliance" => "Compliance".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn view_failed_plugin<'a>(name: &'a str, failure: &'a Failure) -> Element<'a, Message> {
     // Disabled is not a fault, so it is muted; everything else is. A disabled plugin in
     // red would train the user to ignore red.
     let colour = match failure {
-        Failure::Disabled => FG_MUTED,
+        Failure::Disabled | Failure::NotChosen => FG_MUTED,
         _ => BAD,
     };
     let status = match failure {
         Failure::Disabled => "disabled",
+        // Not a fault and not a decision — the user has simply not been asked yet.
+        Failure::NotChosen => "not enabled",
         _ => "not running",
     };
 
@@ -294,7 +413,7 @@ fn view_failed_plugin<'a>(name: &'a str, failure: &'a Failure) -> Element<'a, Me
     // Only a DISABLED plugin gets an Enable button. Offering one on a plugin whose
     // program is missing or whose manifest is broken would be a button that changes a
     // key and fixes nothing — the failure is not the switch.
-    if matches!(failure, Failure::Disabled) {
+    if matches!(failure, Failure::Disabled | Failure::NotChosen) {
         head = head.push(
             button(text("Enable").size(11))
                 .on_press(Message::SetPluginEnabled(name.to_string(), true))

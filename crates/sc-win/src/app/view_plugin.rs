@@ -189,6 +189,59 @@ impl App {
     /// behaviour rather than an oversight: a click on a panel whose plugin has just
     /// crashed should do nothing, not raise an error the user cannot act on — the
     /// Plugins panel is where a dead plugin is reported.
+    /// Installed plugins nobody has been asked about, as `(dir_name, what it does)`.
+    ///
+    /// Read from the live scan rather than the disk: `Plugins::start` has already
+    /// classified every directory, and a plugin held back as
+    /// [`Failure::NotChosen`](sc_craft_ui::plugin::Failure::NotChosen) is precisely one
+    /// that shipped installed and has never been answered for.
+    pub(crate) fn unanswered_plugins(&self) -> Vec<(String, &'static str)> {
+        let Some(plugins) = self.plugins.as_ref() else {
+            return Vec::new();
+        };
+        plugins
+            .failed
+            .iter()
+            .filter(|(_, f)| matches!(f, sc_craft_ui::plugin::Failure::NotChosen))
+            .map(|(name, _)| (name.clone(), describes(name)))
+            .collect()
+    }
+
+    /// Whether `dir_name` is switched on **on disk right now**.
+    ///
+    /// Re-read rather than cached: the first-run modal writes each answer through
+    /// `set_enabled` as it is clicked, so the file is the truth and a cached copy would
+    /// show the opposite of what the last click did.
+    pub(crate) fn plugin_enabled_now(&self, dir_name: &str) -> bool {
+        let manifest = sc_craft_ui::plugin::plugins_dir()
+            .join(dir_name)
+            .join("plugin.json");
+        std::fs::read_to_string(manifest)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("enabled").and_then(|e| e.as_bool()))
+            .unwrap_or(false)
+    }
+
+    /// Record a `false` for every plugin still unanswered, and close the question.
+    ///
+    /// The "no"s are written explicitly rather than left absent. Absent means unanswered,
+    /// so leaving them would ask again on the next launch — which turns a declined
+    /// question into nagging, and is exactly the pattern this modal exists to avoid.
+    pub(crate) fn finish_first_run_plugins(&mut self) {
+        for (dir_name, _) in self.unanswered_plugins() {
+            if self.plugin_enabled_now(&dir_name) {
+                continue; // already answered yes by a click in the modal
+            }
+            let dir = sc_craft_ui::plugin::plugins_dir().join(&dir_name);
+            if let Err(why) = sc_craft_ui::plugin::discover::set_enabled(&dir, false) {
+                self.plugin_toggle_error = Some(why);
+                return; // leave the modal up: an unrecorded answer must not be lost
+            }
+        }
+        self.first_run_plugins = false;
+    }
+
     pub(crate) fn send_to_plugin_of(
         &mut self,
         panel: PluginPanelId,
@@ -361,4 +414,19 @@ fn indent<'a>(depth: usize, el: Element<'a, Message>) -> Element<'a, Message> {
         return el;
     }
     row![Space::new().width(Length::Fixed(depth as f32 * INDENT)), el].into()
+}
+
+/// A one-line description of what a shipped plugin does, for the first-run question.
+///
+/// Plain about the part that matters to someone deciding: whether it talks to a language
+/// model, and whether that reaches the network. Someone who does not want either is
+/// entitled to know which is which before answering, and the manifest cannot tell them —
+/// an unanswered plugin has never run.
+fn describes(dir_name: &str) -> &'static str {
+    match dir_name {
+        "agent" => "Chat, automated runs and code review. Sends your code to a language                     model — local or hosted, whichever you configure.",
+        "claude-code" => "Runs Anthropic's Claude Code CLI in this project. Sends your                           code to Anthropic over the internet.",
+        "compliance" => "Audits the project against compliance frameworks. Offline and                          deterministic; a model writes the summary only if you pick one.",
+        _ => "A plugin installed in your plugins folder.",
+    }
 }

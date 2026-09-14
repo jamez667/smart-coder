@@ -28,9 +28,14 @@ pub struct Discovered {
     pub command: PathBuf,
     /// Arguments.
     pub args: Vec<String>,
-    /// Whether the user has disabled it. Disabled plugins are listed but not started,
-    /// so the Plugins panel can offer to re-enable one.
-    pub enabled: bool,
+    /// What the user has decided about this plugin.
+    ///
+    /// **Three states, not two.** `Some(true)` and `Some(false)` are answers; `None` is
+    /// the absence of one — a plugin that shipped installed and has never been asked
+    /// about. Only an explicit `Some(true)` is ever started, so a plugin the user has not
+    /// consented to does not run, and the host can tell "turned off" from "not yet asked"
+    /// well enough to ask exactly once.
+    pub enabled: Option<bool>,
 }
 
 /// Why a directory that looked like a plugin could not be used.
@@ -157,7 +162,7 @@ pub fn set_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
 ///
 /// Pure, so the file format is testable without a filesystem — the same reason
 /// `claudecode::parse_line` is a free function.
-fn parse_launch(text: &str) -> Result<(String, Vec<String>, bool), String> {
+fn parse_launch(text: &str) -> Result<(String, Vec<String>, Option<bool>), String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return Err("plugin.json is not valid JSON".to_string());
     };
@@ -177,9 +182,15 @@ fn parse_launch(text: &str) -> Result<(String, Vec<String>, bool), String> {
                 .collect()
         })
         .unwrap_or_default();
-    // Absent means enabled. A plugin someone installed is one they wanted; requiring
-    // an explicit `"enabled": true` would make every hand-written manifest wrong once.
-    let enabled = v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true);
+    // Absent means UNANSWERED, and unanswered does not run.
+    //
+    // This used to mean "enabled", on the reasoning that a plugin someone installed is
+    // one they wanted. That holds for a plugin someone sought out and copied in; it does
+    // not hold for the three this product ships with, which arrive without anyone asking
+    // for them. Since one of those spawns a process that talks to a language model, the
+    // honest default is to start nothing until the user has said so — and `None` is what
+    // lets the host know it still needs to ask.
+    let enabled = v.get("enabled").and_then(|e| e.as_bool());
     Ok((command.to_string(), args, enabled))
 }
 
@@ -192,7 +203,7 @@ mod tests {
         let (cmd, args, enabled) = parse_launch(r#"{"command":"blame.exe"}"#).unwrap();
         assert_eq!(cmd, "blame.exe");
         assert!(args.is_empty());
-        assert!(enabled, "absent means enabled");
+        assert_eq!(enabled, None, "absent is unanswered, not enabled");
     }
 
     #[test]
@@ -202,7 +213,7 @@ mod tests {
                 .unwrap();
         assert_eq!(cmd, "python");
         assert_eq!(args, vec!["-u", "main.py"]);
-        assert!(!enabled);
+        assert_eq!(enabled, Some(false));
     }
 
     /// A manifest that cannot be used says *why*, because the message is what the user
@@ -272,12 +283,16 @@ mod tests {
         set_enabled(&dir, false).expect("writes");
         let (_, _, enabled) =
             parse_launch(&std::fs::read_to_string(dir.join("plugin.json")).unwrap()).unwrap();
-        assert!(!enabled);
+        assert_eq!(enabled, Some(false));
 
         set_enabled(&dir, true).expect("writes");
         let (_, _, enabled) =
             parse_launch(&std::fs::read_to_string(dir.join("plugin.json")).unwrap()).unwrap();
-        assert!(enabled);
+        assert_eq!(
+            enabled,
+            Some(true),
+            "answering resolves the tri-state for good"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

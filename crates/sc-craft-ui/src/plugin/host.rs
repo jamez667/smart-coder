@@ -347,7 +347,7 @@ mod tests {
             dir: std::env::temp_dir(),
             command: std::path::PathBuf::from("sc-definitely-not-a-real-program"),
             args: Vec::new(),
-            enabled: true,
+            enabled: Some(true),
         })
         .unwrap_err();
         assert!(err.contains("sc-definitely-not-a-real-program"), "{err}");
