@@ -18,10 +18,15 @@
 //! that stream by subtask id; this renders the fold. "What is each coder doing right
 //! now" is a question the interleaved log cannot answer at a glance.
 //!
-//! The swarm *topology* — the same events as a diagram, with edges that glow as
-//! messages flow — did not survive the port: it is a drawing, and the content model has
-//! no canvas. `topology.rs` still folds the data and `canvas.rs.pending` still holds the
-//! rendering, against a content kind that does not exist yet.
+//! The swarm *topology* — the same events as a diagram, with edges that glow as messages
+//! flow — did not survive the port, and has now been deleted rather than left parked. It
+//! is a drawing, and the content model is `List`/`Text`/`Form`/`Stack` on purpose: adding
+//! a canvas kind to carry one panel is the "widget tree by degrees" spec 25 warns against.
+//!
+//! Its fold (`topology.rs`) and its renderer (`canvas.rs`) are in the history if the
+//! feature is ever wanted back. Keeping them compiled but unreachable would have meant
+//! carrying ~680 lines that nothing called and no test could reach through the plugin.
+//! The board above covers the question they were really for — which subtask is where.
 
 use sc_plugin_proto::{Content, FormField, ListItem, Severity};
 
