@@ -5,7 +5,8 @@
 //! give it an id, call [`SplitStore::get`]/[`SplitStore::set`] — no new fields, no bespoke
 //! persistence per divider.
 //!
-//! Backed by a small JSON map (`%APPDATA%\smart-coder\splits.json`) next to the other state files.
+//! Backed by a small JSON map (`splits.json`) in the running product's state directory,
+//! next to the other state files.
 //! Positions are fractions in `0.0..=1.0`. Kept separate from [`crate::persist::UiState`] because
 //! that type derives `Eq` (it can't hold an `f32`), and a dedicated store reads as exactly what it
 //! is: id → position.
@@ -71,13 +72,14 @@ impl SplitStore {
     }
 }
 
-/// The state directory: `%APPDATA%\smart-coder` (temp-dir fallback), shared with the other state
-/// files (see [`crate::persist`]).
+/// The state directory, shared with the other state files (see [`crate::persist`]).
+///
+/// Delegates rather than resolving its own path, which it used to do — and got wrong
+/// twice. It hardcoded `smart-coder`, so the Crafter wrote its divider positions into the
+/// AGENT product's directory (spec 21 gives each product its own), and it ignored
+/// `SC_STATE_DIR`, so any test that saved a split wrote the developer's real state.
 fn state_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("smart-coder")
+    crate::config::state_dir()
 }
 
 fn splits_file() -> PathBuf {
@@ -134,6 +136,75 @@ mod tests {
         let back = parse(&json);
         assert_eq!(back.get(id::CHAT_CODE).copied(), Some(0.62));
         assert_eq!(back.get(id::EXPLORER_GIT_FILES).copied(), Some(0.33));
+    }
+
+    /// Serializes the tests that flip the running product.
+    ///
+    /// `config::product()` is a process-global atomic set once in `main`, and cargo runs
+    /// tests on several threads, so a flip without this races every other test in the
+    /// binary. Restoring the previous value on drop keeps a panicking test from leaking
+    /// its setting into whatever runs next. Same pattern as `layout.rs`, for the same
+    /// reason.
+    fn product_guard(p: crate::config::Product) -> ProductGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = crate::config::product();
+        crate::config::set_product(p);
+        ProductGuard {
+            previous,
+            _lock: guard,
+        }
+    }
+
+    struct ProductGuard {
+        previous: crate::config::Product,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for ProductGuard {
+        fn drop(&mut self) {
+            crate::config::set_product(self.previous);
+        }
+    }
+
+    /// **The bug this file had.** `state_dir` here resolved its own path and hardcoded
+    /// `smart-coder`, so the Crafter wrote its divider positions into the AGENT product's
+    /// directory — spec 21 gives each product its own, and every other state file already
+    /// honoured that. Delegating to `config::state_dir` is what fixes it, and this is what
+    /// would catch a re-introduction.
+    #[test]
+    fn each_product_keeps_its_splits_in_its_own_directory() {
+        // `SC_STATE_DIR` deliberately unset: it short-circuits `config::state_dir` before
+        // the per-product join, so setting it here would assert nothing about the bug.
+        let agent = {
+            let _g = product_guard(crate::config::Product::SmartCoder);
+            splits_file()
+        };
+        let crafter = {
+            let _g = product_guard(crate::config::Product::Crafter);
+            splits_file()
+        };
+
+        assert_ne!(
+            agent, crafter,
+            "the two products must not share splits.json"
+        );
+
+        // Asserted on the parent's file name, not a path suffix: `Path::ends_with`
+        // matches whole components, so it would never match a separator-bearing string
+        // on either platform — and comparing components sidesteps `/` vs `\` entirely.
+        let dir_of = |p: &PathBuf| {
+            p.parent()
+                .and_then(|d| d.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+        };
+        assert_eq!(dir_of(&agent).as_deref(), Some("smart-coder"));
+        assert_eq!(dir_of(&crafter).as_deref(), Some("smart-coder-crafter"));
+        assert_eq!(
+            agent.file_name(),
+            crafter.file_name(),
+            "same file, different directory"
+        );
     }
 
     #[test]
