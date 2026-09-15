@@ -1,0 +1,153 @@
+# The gate: fmt, clippy, check, test — the same four scripts/check.sh runs.
+#
+# The workspace includes `sc-win`, an iced (winit/wgpu) GUI crate, so even a
+# `cargo check` of the whole workspace on Linux needs the X11/Wayland/font dev
+# libraries below. The rest of the stack is pure-Rust (ureq + rustls) — no
+# OpenSSL/libssl required.
+#
+# The browser tests in `web/e2e/` are NOT run here, deliberately. They hold 28
+# Playwright tests that take about six seconds; standing up something for them to
+# drive takes twenty-seven minutes, because the harness builds the release image
+# with no warm cache. Run them by hand before anything that matters:
+#
+#     cd web && npx playwright test
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A second push to the same ref makes the first one's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # System libraries the iced/winit/wgpu GUI crate links against on Linux.
+      # (No Python: full agent/interpreter integration tests are #[ignore]d and
+      # don't run in CI.)
+      - name: system libraries for the GUI crate
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxcb1-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev \
+            libfontconfig1-dev libfreetype6-dev
+
+      # rust-toolchain.toml pins the channel and its components; rustup reads it
+      # on the first cargo call, so local and CI run the identical compiler and
+      # lint set. Bump the file, deliberately, to move both.
+      - name: rustup components
+        run: rustup component add rustfmt clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+
+      # **The interface, built before any cargo command touches sc-server.**
+      # `include_str!` reads the bundle at compile time, so `cargo check` fails
+      # outright without it — this is not an optional extra step, it is a
+      # prerequisite of compiling at all. Nothing generated is committed, which
+      # is why this is here; the alternative was checking a 150 kB build artifact
+      # into the tree, where a stale one ships silently.
+      #
+      # `npm ci`, not `npm install`: the lockfile decides. A dependency resolved
+      # at build time is a dependency nobody chose, on the one component that
+      # faces the network.
+      - name: build the web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      # The gates, in the same order as scripts/check.sh.
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: check
+        run: cargo check --workspace
+
+      # The WHOLE workspace, including the four crates scripts/check.sh excludes
+      # for time (sc-eval, sc-trace, sc-comply-author, sc-cli). They are slow, not
+      # flaky — the local gate skips them so that it stays fast enough to actually
+      # get run, and this is where they are covered instead.
+      - name: test
+        run: cargo test --workspace
+
+  # The slow suites, and the reports worth reading: retrieval ranking (spec 23),
+  # the gateway routing benchmark, and spec-anchor drift (spec 17).
+  #
+  # **Deliberately not blocking.** These catch real regressions — a stale spec
+  # anchor, a query that stopped finding its function — but none of them is a
+  # reason to refuse a merge on its own, and a red build nobody can act on
+  # immediately is a red build people learn to ignore.
+  #
+  # No `needs:` — it runs beside `check` rather than after it, so a report is not
+  # withheld by a failing gate. It pays for its own web build for the same
+  # `include_str!` reason: `trace --check` compiles sc-server's tree.
+  reports:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: system libraries for the GUI crate
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxcb1-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev \
+            libfontconfig1-dev libfreetype6-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build the web interface
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      # QUOTED, and it must stay quoted. `retrieval::` ends in a colon, so the
+      # following space makes YAML read the rest as a mapping key rather than
+      # part of the command. Unquoted, this exact line took the self-hosted CI
+      # down for weeks: the whole pipeline set was rejected at parse time, so
+      # every push, PR and tag errored before a single step ran — invisible
+      # unless someone opened the CI list, because the local gate stayed green.
+      - name: retrieval ranking
+        run: "cargo test --quiet -p sc-eval retrieval:: -- --nocapture"
+
+      - name: gateway routing benchmark
+        run: cargo test --quiet -p sc-gateway --test bench -- --nocapture
+
+      - name: spec-anchor drift
+        run: cargo run --quiet -p sc-cli -- trace --check

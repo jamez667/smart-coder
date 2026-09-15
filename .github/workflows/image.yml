@@ -1,0 +1,192 @@
+# Builds the sc-server Docker image and publishes it to GHCR.
+#
+# Separate from release.yml on purpose: that workflow publishes the desktop
+# client as an archive for a human to download, this one publishes a container
+# for Portainer to pull. Coupling them would mean a failure in one blocks the
+# other.
+#
+# Fires on a version tag, and on a push to main (as `:main`, so a change can be
+# tried without cutting a release).
+#
+# **Path-filtered.** This is a monorepo, so a change to the desktop client must
+# not rebuild and republish the server's image — and vice versa. The filter is
+# what keeps living in one repository from meaning "every push runs everything".
+# GitHub's `paths` filter does not apply to tag pushes, which is what we want: a
+# release republishes the image regardless of what changed.
+#
+# The Dockerfile builds the Vite bundle itself in its own `node:22-alpine` stage,
+# so no Node is needed on the runner and no bundle is passed between jobs.
+
+name: image
+
+on:
+  push:
+    branches: [main]
+    # The filter must list every input the server's build actually reads. One
+    # narrower than that ships a *stale image* — which is silent, and worse than
+    # an extra rebuild.
+    paths:
+      - "crates/sc-server/**"
+      # **The browser interface is a compile-time input**, not an asset shipped
+      # beside the binary: Vite builds it and `include_str!` embeds it. A change
+      # here that did not rebuild the image would ship a server serving the
+      # previous interface — silently, and with every test still green.
+      - "web/**"
+      # The protocol crate: a wire change alters what the server accepts.
+      - "crates/sc-proto/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - ".github/workflows/image.yml"
+      # A workspace-level change can alter the build for any crate.
+      - "Cargo.toml"
+      # A dependency bump changes what the server *links* without touching a
+      # line of its source — a `ureq` or `tiny_http` patch, or a bare
+      # `cargo update`. Omitting this was a silent staleness bug.
+      - "Cargo.lock"
+      # The Dockerfile pins its own Rust image, so these two can drift apart.
+      # A toolchain change should rebuild and surface that.
+      - "rust-toolchain.toml"
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  # Replaces the classic PAT the self-hosted pipeline needed. GitHub Packages
+  # refused fine-grained tokens outright — package write is not among their
+  # repository permissions at all — and the failure read as a missing scope.
+  # The built-in token has no such split.
+  packages: write
+
+env:
+  IMAGE: ghcr.io/jamez667/sc-server
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A push to main publishes `:main` only. A `v*` tag publishes Major,
+      # Major.Minor, Major.Minor.Patch **and** `latest` from ONE build, so those
+      # tags cannot point at different bits — which two builds would allow.
+      #
+      # The `enable=` on `latest` is the whole guarantee that it never moves to a
+      # commit nobody chose to release. The self-hosted pipeline needed two
+      # separate steps to protect that invariant, and got it wrong once: setting
+      # both `auto-tag` and `tags` silently won for `tags`, so every build pushed
+      # `:main` and a tagged release published no `latest` at all. CI was green
+      # throughout — a successful push of the wrong tag looks exactly like a
+      # successful push of the right one.
+      - name: tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # Built locally first so the smoke test below can actually run it. kaniko
+      # could not: it has no daemon, which is why this check was lost when the
+      # self-hosted pipeline moved off the Docker socket.
+      - name: build (local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: sc-server:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # **The check that a correct binary can actually start.** sc-server refuses
+      # to run without SC_SERVER_DAEMON_KEY and exits 2 saying so. A unit test
+      # covers the refusal; what this covers is a *packaging* fault that leaves a
+      # correct binary unable to start at all.
+      #
+      # Exit 2 SPECIFICALLY, not merely non-zero: a crash, a missing interpreter
+      # or a bad entrypoint also exit non-zero and would sail through a sloppier
+      # check, which would make this worse than no test.
+      - name: smoke test — refuses to start without a daemon key
+        run: |
+          set +e
+          output=$(docker run --rm sc-server:smoke 2>&1)
+          code=$?
+          set -e
+          echo "$output"
+          if [ "$code" -ne 2 ]; then
+            echo "::error::expected exit 2 (refusal), got $code"
+            exit 1
+          fi
+
+      - name: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Tell Portainer the new `latest` exists, so a release deploys itself.
+  #
+  # Portainer's git polling cannot do this on its own: it redeploys when the
+  # *repo ref* moves, and cutting a tag does not move `refs/heads/main`. So a
+  # release with no file change on main is invisible to the poller — the stack
+  # sits on the previous image looking perfectly healthy. This job is what makes
+  # "cut a tag" and "the server runs it" the same event.
+  #
+  # OPTIONAL BY DESIGN. Without the secret set this logs why and exits 0, because
+  # the image is already pushed by the time it runs: failing here would mark a
+  # *successful publish* as a failed run, and the manual fallback is one click in
+  # Portainer. Absent automation should not look like a broken build.
+  #
+  # REQUIRED SECRET: `SC_SERVER_PORTAINER_WEBHOOK` — the full webhook URL from
+  # Portainer → Stacks → sc-server → Webhooks, which looks like:
+  #
+  #     https://portainer.example.com/api/stacks/webhooks/<uuid>
+  #
+  # **The URL is the credential.** It carries no token and no signature, so
+  # anyone who can reach it can trigger a redeploy. It runs only on `v*` tags,
+  # which you push, so it never runs on a contributor's branch — and a fork's
+  # pull request gets a read-only token that cannot read it at all.
+  #
+  # Redeploy pulls `latest` afresh only if the stack has **"Re-pull image"**
+  # enabled in its webhook/auto-update settings. Without that Portainer reuses
+  # the locally cached layers for the same tag and nothing changes — a silent
+  # no-op that looks exactly like success.
+  redeploy:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: trigger the Portainer stack
+        env:
+          WEBHOOK: ${{ secrets.SC_SERVER_PORTAINER_WEBHOOK }}
+        run: |
+          set -eu
+          if [ -z "$WEBHOOK" ]; then
+            echo "SC_SERVER_PORTAINER_WEBHOOK is not set - skipping redeploy."
+            echo "The image is published; redeploy the stack in Portainer by hand."
+            exit 0
+          fi
+          # --fail turns Portainer's 4xx/5xx into a non-zero exit. A 404 here
+          # means the webhook was deleted or the stack was recreated (the uuid
+          # changes), which is worth failing on: the image shipped and the
+          # deployment silently did not.
+          curl --fail --silent --show-error --retry 3 --retry-connrefused \
+            -X POST "$WEBHOOK"
+          echo "Portainer redeploy triggered for ${GITHUB_REF_NAME}."

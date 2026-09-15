@@ -1,0 +1,258 @@
+# Builds both desktop products and the three plugins for Linux AND Windows, and
+# publishes them to GitHub Releases. Fires only when a version tag is pushed:
+#
+#     git tag v0.1.0
+#     git push origin v0.1.0
+#
+# The Windows half is why this workflow exists on GitHub rather than the
+# self-hosted runner: the iced/wgpu GUI is impractical to cross-compile to
+# Windows from a Linux agent, and a public repository gets `windows-latest` free.
+#
+# The job graph exists to settle one race:
+#
+#     create ──┬── linux ──┬── prune
+#              └── windows ─┘
+#
+# Two parallel jobs both calling `gh release create` would both see "not found",
+# both create, and one would take an HTTP 422. Hoisting creation into its own job
+# removes that by construction; `gh release upload --clobber` is idempotent, so
+# the two uploaders cannot collide. Pruning runs once, after both, or it could
+# delete a release whose second platform was still uploading.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 for the tags. A shallow clone fetches none, and anything
+      # deriving a version from `git describe` then silently reports `unknown` —
+      # including on a tagged release, which is the one build that must be able
+      # to say what it is.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # No assets here — the platform jobs upload their own. `--verify-tag`
+      # refuses to invent a release for a tag that does not exist.
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists - leaving it alone."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag
+
+  linux:
+    needs: create
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: system libraries for the GUI crate
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxcb1-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev \
+            libfontconfig1-dev libfreetype6-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      # **Named packages, never `--workspace`.** `sc-cli` also declares a binary
+      # called `smart-coder`, so a workspace build writes target/release/smart-coder
+      # from whichever package finishes last — nondeterministically the wrong one.
+      # Both desktop bins come from the single `-p sc-win`.
+      - name: build
+        run: |
+          cargo build --release \
+            -p sc-win -p sc-plugin-claude -p sc-plugin-agent -p sc-plugin-comply
+          strip target/release/smart-coder
+          strip target/release/smart-coder-crafter
+          strip target/release/sc-plugin-claude
+          strip target/release/sc-plugin-agent
+          strip target/release/sc-plugin-comply
+
+      # Packaged in a loop so the five cannot drift — the only per-artifact
+      # values are the binary name and one line of description.
+      - name: package
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+
+          # The shared-library note applies to the GUI. The plugins are headless
+          # and need none of it, but carrying one note is simpler than branching
+          # for an artifact nobody installs on its own.
+          SO1='Needs these shared libraries installed (Debian/Ubuntu names):'
+          SO2='  libx11-6 libxcb1 libxrandr2 libxi6 libxkbcommon0'
+          SO3='  libwayland-client0 libwayland-cursor0 libwayland-egl1'
+          SO4='  libfontconfig1 libfreetype6'
+
+          for BIN in smart-coder smart-coder-crafter sc-plugin-claude sc-plugin-agent sc-plugin-comply; do
+            case "$BIN" in
+              smart-coder)
+                WHAT='Smart Coder desktop client -- the editor plus the agent plugins.'
+                DIR='' ;;
+              smart-coder-crafter)
+                WHAT='Smart Coder Crafter -- the editor alone. Links no model code (spec 21).'
+                DIR='' ;;
+              sc-plugin-claude)
+                WHAT='Claude Code plugin for Smart Coder.'
+                DIR='claude-code' ;;
+              sc-plugin-agent)
+                WHAT='The agent plugin: chat, runs, the swarm, review gates.'
+                DIR='agent' ;;
+              sc-plugin-comply)
+                WHAT='The compliance plugin: the audit, and its optional prose.'
+                DIR='compliance' ;;
+            esac
+            PKG="$BIN-$TAG-linux-x86_64"
+            mkdir -p "dist/$PKG"
+            cp "target/release/$BIN" "dist/$PKG/"
+            cp LICENSE "dist/$PKG/"
+            if [ -n "$DIR" ]; then
+              { echo '{'; echo "  \"command\": \"$BIN\""; echo '}'; } > "dist/$PKG/plugin.json"
+              HOW="Install: copy plugin.json and $BIN into <state dir>/plugins/$DIR/"
+            else
+              HOW="Run: ./$BIN"
+            fi
+            printf '%s\n' "$WHAT" 'Linux x86_64.' "$HOW" \
+              "$SO1" "$SO2" "$SO3" "$SO4" > "dist/$PKG/README.txt"
+            tar -czf "dist/$PKG.tar.gz" -C dist "$PKG"
+          done
+
+      - name: upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  windows:
+    needs: create
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # `C:\Program Files\Git\usr\bin` holds sh.exe and the rest of the MSYS
+      # utilities. Git for Windows is installed on the runner but only its `cmd`
+      # and `bin` directories are on PATH, so `sh` is absent by default — and the
+      # agent's verify path shells out to it. Same fix scripts/check.ps1 applies.
+      - name: put a POSIX sh on PATH
+        shell: pwsh
+        run: |
+          $gitSh = 'C:\Program Files\Git\usr\bin'
+          if (Test-Path (Join-Path $gitSh 'sh.exe')) {
+            $gitSh | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+            "added $gitSh"
+          } else {
+            "::warning::no sh.exe at $gitSh - POSIX-shell tests may fail"
+          }
+
+      - uses: Swatinem/rust-cache@v2
+
+      # NOTE: never set RUSTFLAGS in this workflow. Cargo REPLACES the config's
+      # `rustflags` with the environment variable rather than merging them, which
+      # would silently drop the `+crt-static` that .cargo/config.toml sets for
+      # this target — the one thing that file exists to guarantee.
+      #
+      # No `strip` afterwards either: it does not exist on Windows, and
+      # [profile.release] strip = true already handles it.
+      - name: build
+        shell: pwsh
+        run: |
+          cargo build --release `
+            -p sc-win -p sc-plugin-claude -p sc-plugin-agent -p sc-plugin-comply
+
+      - name: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          # No shared-library note on Windows: the MSVC target is built with
+          # +crt-static, so these binaries carry their runtime with them.
+          $artifacts = @(
+            @{ Bin = 'smart-coder';         Dir = '';            What = 'Smart Coder desktop client -- the editor plus the agent plugins.' }
+            @{ Bin = 'smart-coder-crafter'; Dir = '';            What = 'Smart Coder Crafter -- the editor alone. Links no model code (spec 21).' }
+            @{ Bin = 'sc-plugin-claude';    Dir = 'claude-code'; What = 'Claude Code plugin for Smart Coder.' }
+            @{ Bin = 'sc-plugin-agent';     Dir = 'agent';       What = 'The agent plugin: chat, runs, the swarm, review gates.' }
+            @{ Bin = 'sc-plugin-comply';    Dir = 'compliance';  What = 'The compliance plugin: the audit, and its optional prose.' }
+          )
+          New-Item -ItemType Directory -Force dist | Out-Null
+          foreach ($a in $artifacts) {
+            $pkg = "$($a.Bin)-$tag-windows-x86_64"
+            $out = Join-Path 'dist' $pkg
+            New-Item -ItemType Directory -Force $out | Out-Null
+            Copy-Item "target\release\$($a.Bin).exe" $out
+            Copy-Item 'LICENSE' $out
+            if ($a.Dir) {
+              # WITHOUT a BOM. Windows PowerShell's `Set-Content -Encoding UTF8`
+              # writes one, and the host hands plugin.json to serde_json, which
+              # rejects it -- surfacing in the Plugins panel as "plugin.json is
+              # not valid JSON". Same writer scripts/install-plugins.ps1 uses.
+              $json = "{`n  `"command`": `"$($a.Bin)`"`n}`n"
+              [System.IO.File]::WriteAllText(
+                (Join-Path $out 'plugin.json'), $json,
+                (New-Object System.Text.UTF8Encoding $false))
+              $how = "Install: copy plugin.json and $($a.Bin).exe into %APPDATA%\smart-coder\plugins\$($a.Dir)\"
+            } else {
+              $how = "Run: .\$($a.Bin).exe"
+            }
+            Set-Content -Path (Join-Path $out 'README.txt') `
+              -Value @($a.What, 'Windows x86_64.', $how)
+            Compress-Archive -Path $out -DestinationPath "dist\$pkg.zip" -Force
+          }
+
+      - name: upload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload $env:GITHUB_REF_NAME (Get-Item dist\*.zip) `
+            --repo $env:GITHUB_REPOSITORY --clobber
+
+  # Retention: keep only the 3 newest releases; delete older releases AND their
+  # tags (--cleanup-tag) so old assets don't accumulate and eat disk.
+  #
+  # Runs after BOTH platform jobs, exactly once. Run per-platform it could delete
+  # a release whose other half was still uploading.
+  prune:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: prune old releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
+            | while read -r old; do
+                [ -n "$old" ] || continue
+                echo "pruning old release $old"
+                gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              done
