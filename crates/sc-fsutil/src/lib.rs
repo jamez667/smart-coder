@@ -37,6 +37,24 @@ use std::path::{Component, Path, PathBuf};
 /// `a/../b` even though that stays inside, and refusing a path the caller could have
 /// spelled plainly costs nothing.
 pub fn safe_join(workspace: &Path, rel: &str) -> Option<PathBuf> {
+    // Checked on the STRING, before `Path` parses it, because component parsing is
+    // platform-dependent and this guard must not be.
+    //
+    // `C:\Windows\System32` becomes a `Prefix` component on Windows and is refused by the
+    // walk below. On Linux the same bytes contain nothing the parser treats as a
+    // separator, so they parse as ONE ordinary filename — no `..`, no root — and the walk
+    // accepts it, joining `/ws/C:\Windows\System32`. The guard would then refuse an input
+    // on one platform and accept it on the other, which for a function whose callers pass
+    // adversarial paths (a model's tool argument, a plugin's request) is not a difference
+    // worth having. A backslash or a drive letter is never legitimate input here.
+    if rel.contains('\\') {
+        return None;
+    }
+    let bytes = rel.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+
     let rp = Path::new(rel);
     if rp.is_absolute() {
         return None;
@@ -259,11 +277,35 @@ mod tests {
         }
     }
 
-    /// A Windows drive prefix escapes without being caught by `is_absolute` on every
-    /// platform, so the component walk has to reject it too.
+    /// A Windows drive prefix escapes without being caught by `is_absolute`, so it has to
+    /// be rejected separately.
+    ///
+    /// **This must hold on every platform, which is why the check is on the string.** The
+    /// component walk alone only catches it on Windows: on Linux these bytes carry no
+    /// separator, so they parse as one ordinary filename and sail through. This test used
+    /// to assert a Windows-only truth and duly passed on a desktop while failing in a Linux
+    /// container.
     #[test]
     fn a_windows_prefix_is_refused() {
         assert_eq!(safe_join(Path::new("/ws"), r"C:\Windows\System32"), None);
+        // Each half of the rule on its own, so a regression says which one broke.
+        assert_eq!(
+            safe_join(Path::new("/ws"), r"C:/Windows"),
+            None,
+            "drive letter"
+        );
+        assert_eq!(
+            safe_join(Path::new("/ws"), r"src\main.rs"),
+            None,
+            "backslash"
+        );
+        assert_eq!(safe_join(Path::new("/ws"), r"\\server\share"), None, "UNC");
+        // Not a drive letter: a single character before the colon is the rule, and an
+        // ordinary relative path must still join.
+        assert_eq!(
+            safe_join(Path::new("/ws"), "src/main.rs"),
+            Some(Path::new("/ws").join("src/main.rs"))
+        );
     }
 
     /// Refused lexically even though it stays inside, because the alternative is a
