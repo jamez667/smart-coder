@@ -103,16 +103,18 @@ jobs:
           free -h | tee -a "$GITHUB_STEP_SUMMARY"
           du -sh target 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
 
-      # Sampled in the background so there is evidence even when the runner dies
-      # mid-step and uploads no log: the summary file is written continuously.
+      # Streams into GITHUB_STEP_SUMMARY, NOT a file. The previous attempt
+      # buffered samples to disk and uploaded them in a later step — which never
+      # ran, because the runner died first, so the evidence died with it. The
+      # summary file is flushed to the server as it is written, so it survives.
       - name: sample resources during the test build
         run: |
           nohup bash -c 'while true; do
-            printf "%s disk_avail=%s mem_avail=%s target=%s\n" \
+            printf "%s disk_avail=%s mem_avail=%s load=%s\n" \
               "$(date -u +%H:%M:%S)" \
               "$(df -BG --output=avail / | tail -1 | tr -d " ")" \
               "$(free -g | awk "/^Mem:/{print \$7}")G" \
-              "$(du -sh target 2>/dev/null | cut -f1)" >> resource-samples.txt
+              "$(cut -d" " -f1-3 /proc/loadavg)" >> "$GITHUB_STEP_SUMMARY"
             sleep 30
           done' >/dev/null 2>&1 &
           echo "sampler started"
@@ -122,13 +124,34 @@ jobs:
       # flaky — the local gate skips them so that it stays fast enough to actually
       # get run, and this is where they are covered instead.
       #
-      # `--no-fail-fast` off and debug info stripped from test binaries: 71 link
-      # targets across 32 crates is where the disk goes, and debuginfo is most of
-      # each binary's size.
+      # The suite is NOT inherently slow: 168s locally, 241s on the old
+      # self-hosted runner, both for this same command. On a hosted runner it
+      # burns 47 minutes and the runner dies — twice, at 3003s and 3005s, two
+      # seconds apart. Starvation does not reproduce to the second; something
+      # blocks and a watchdog kills it.
+      #
+      # So this run is built to NAME the culprit rather than die anonymously:
+      #   --test-threads=1   the last line printed is the test that hung
+      #   timeout 25m        bounded, so the step fails and later steps still run
+      #   stdbuf -oL         line-buffered, or the pipe swallows output on kill
+      #   tee -a summary     server-side, so it survives the runner dying
       - name: test
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: cargo test --workspace
+        run: |
+          echo '### test progress' >> "$GITHUB_STEP_SUMMARY"
+          set -o pipefail
+          # `|| code=$?` because GitHub runs this under `bash -e`: without it the
+          # shell exits at the failing pipeline and the message below — the whole
+          # point of the step — never prints.
+          code=0
+          timeout --signal=INT --kill-after=60s 25m \
+            stdbuf -oL cargo test --workspace -- --test-threads=1 --nocapture \
+            2>&1 | stdbuf -oL tee -a "$GITHUB_STEP_SUMMARY" | tail -400 || code=$?
+          if [ "$code" -eq 124 ]; then
+            echo "::error::the suite passed 25 minutes and was stopped - the last test named above is the one that hung"
+          fi
+          exit $code
 
       # `always()` so this reports even when the test step fails — the failing
       # case is the one the numbers are for.
