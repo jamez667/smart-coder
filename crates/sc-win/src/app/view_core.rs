@@ -134,60 +134,39 @@ impl App {
         } else {
             "↓ Pull".to_string()
         };
-        // While a network op is in flight, the button that started it says so in amber and NO
-        // button is pressable. A pull is seconds of network with nothing else on screen to show
-        // it — a button that looks idle while it works is indistinguishable from a broken one,
-        // and one that stays pressable invites a second pull on top of the first.
+        // While a network op is in flight, the button that STARTED it becomes the button that
+        // stops it: red, reading "✕ Cancel pull". A separate ✕ chip beside it was two controls
+        // where there is only one decision, and no amount of padding stopped it reading as a
+        // seam. This is the profiler's rule — a button must not lie about what pressing it does.
+        //
+        // The other two grey out and stop responding, so a second click cannot stack a second op.
         let busy = self.git_net.as_deref();
         let btn = move |label: String, running: &str, msg: Message| {
-            let (label, color) = match busy {
-                Some(op) if op == running => (format!("{label}…"), AMBER),
-                Some(_) => (label, FG_MUTED),
-                None => (label, FG),
+            let (label, color, press) = match busy {
+                // The running one: it now cancels, so it says so and turns red.
+                Some(op) if op == running => {
+                    (format!("✕ Cancel {op}"), BAD, Some(Message::CancelGitNet))
+                }
+                Some(_) => (label, FG_MUTED, None),
+                None => (label, FG, Some(msg)),
             };
             let b = button(text(label).size(11).color(color))
                 .padding([1, 8])
                 .style(stage_toggle_button);
-            if busy.is_some() {
-                b
-            } else {
-                b.on_press(msg)
+            match press {
+                Some(m) => b.on_press(m),
+                None => b,
             }
         };
-        let mut bar = row![
-            btn(
-                match busy {
-                    Some("push") if up.upstream.is_none() => "↑ Publishing".to_string(),
-                    Some("push") => "↑ Pushing".to_string(),
-                    _ => push_label,
-                },
-                "push",
-                Message::GitPush
-            ),
-            btn(
-                match busy {
-                    Some("pull") => "↓ Pulling".to_string(),
-                    _ => pull_label,
-                },
-                "pull",
-                Message::GitPull
-            ),
-            // The refresh glyph needs no in-flight wording — the amber already says it.
+        // No in-flight wording is passed in: `btn` overrides the running button's label with
+        // "✕ Cancel <op>" regardless, so an "↑ Publishing" variant here would be unreachable.
+        row![
+            btn(push_label, "push", Message::GitPush),
+            btn(pull_label, "pull", Message::GitPull),
             btn("⟳".to_string(), "fetch", Message::GitFetch),
         ]
-        .spacing(4);
-        // The cancel ✕ sits immediately right of the running button, because that is the thing it
-        // cancels — a network op can block on auth and would otherwise only be escapable by
-        // killing the window.
-        if busy.is_some() {
-            bar = bar.push(
-                button(text("✕").size(11).color(BAD))
-                    .on_press(Message::CancelGitNet)
-                    .padding([1, 6])
-                    .style(stage_toggle_button),
-            );
-        }
-        bar.into()
+        .spacing(4)
+        .into()
     }
 
     /// The **Files** tab: the workspace file tree, dirs-first, click a file to pin it in the
