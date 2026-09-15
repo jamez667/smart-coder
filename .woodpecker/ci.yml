@@ -90,7 +90,12 @@ steps:
     environment:
       CARGO_TERM_COLOR: always
     commands:
-      - cargo test --quiet -p sc-eval retrieval:: -- --nocapture
+      # QUOTED, and it must stay quoted. `retrieval::` ends in a colon, so the
+      # following space makes YAML read `retrieval:: -- --nocapture` as a mapping
+      # key rather than part of the command string. Woodpecker then rejects the
+      # WHOLE repo's pipeline set at compile time — every push, PR and tag errors
+      # before a single step runs, which is silent unless someone reads the CI list.
+      - "cargo test --quiet -p sc-eval retrieval:: -- --nocapture"
       - cargo test --quiet -p sc-gateway --test bench -- --nocapture
       - cargo run --quiet -p sc-cli -- trace --check
 
