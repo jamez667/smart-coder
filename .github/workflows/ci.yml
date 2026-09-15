@@ -34,6 +34,11 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Enforced by GitHub OUTSIDE the runner, which is the point: a `timeout`
+    # wrapped around the command did not hold, because it signals `cargo` and
+    # not the stuck test binary beneath it. 30 minutes is generous against a
+    # suite that takes 168s locally and took 241s on the old self-hosted runner.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -132,26 +137,24 @@ jobs:
       #
       # So this run is built to NAME the culprit rather than die anonymously:
       #   --test-threads=1   the last line printed is the test that hung
-      #   timeout 25m        bounded, so the step fails and later steps still run
       #   stdbuf -oL         line-buffered, or the pipe swallows output on kill
       #   tee -a summary     server-side, so it survives the runner dying
+      #
+      # The BOUND is `timeout-minutes:` on the job, not `timeout` around the
+      # command. A previous attempt wrapped the command and the step still ran
+      # 38+ minutes past a 25-minute limit: `timeout` signals `cargo`, which does
+      # not pass it on to the stuck test binary underneath, and even
+      # `--kill-after` only kills the process we hold rather than the tree. The
+      # job-level bound is enforced by GitHub outside the runner, so nothing
+      # running inside can ignore it.
       - name: test
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           echo '### test progress' >> "$GITHUB_STEP_SUMMARY"
           set -o pipefail
-          # `|| code=$?` because GitHub runs this under `bash -e`: without it the
-          # shell exits at the failing pipeline and the message below — the whole
-          # point of the step — never prints.
-          code=0
-          timeout --signal=INT --kill-after=60s 25m \
-            stdbuf -oL cargo test --workspace -- --test-threads=1 --nocapture \
-            2>&1 | stdbuf -oL tee -a "$GITHUB_STEP_SUMMARY" | tail -400 || code=$?
-          if [ "$code" -eq 124 ]; then
-            echo "::error::the suite passed 25 minutes and was stopped - the last test named above is the one that hung"
-          fi
-          exit $code
+          stdbuf -oL cargo test --workspace -- --test-threads=1 --nocapture \
+            2>&1 | stdbuf -oL tee -a "$GITHUB_STEP_SUMMARY" | tail -400
 
       # `always()` so this reports even when the test step fails — the failing
       # case is the one the numbers are for.
