@@ -31,6 +31,13 @@ the diff someone has to re-apply when pulling upstream changes.
 
 - `Message::ApplyEdit` and its handler — apply a range edit from outside the
   widget, through `CommandHistory` so it joins the undo stack as one entry.
+- `test_measure_single_char_width` — upstream asserted that `汉` measures wider
+  than `a` (and at least 1.5× as wide), which is a claim about the host's
+  installed fonts rather than about this crate. It passes on a desktop and fails
+  in a bare `rust:bookworm` CI container, where the glyph has no coverage and
+  falls back to a notdef box. Now asserts what the measurement code owns: every
+  glyph measures positive, and more characters measure wider. **Do not restore
+  upstream's version on a merge** — it will go red in CI again.
 
 ## Pulling upstream changes
 

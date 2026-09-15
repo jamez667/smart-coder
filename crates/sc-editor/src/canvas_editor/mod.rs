@@ -3173,26 +3173,37 @@ mod tests {
         assert!((editor.char_width - CHAR_WIDTH).abs() < 0.5);
     }
 
+    /// FORK CHANGE. Upstream asserted that `汉` measures wider than `a`, and that it is at
+    /// least 1.5× as wide. That is a claim about the HOST'S INSTALLED FONTS, not about this
+    /// crate: it holds on a desktop with a CJK face available and fails in a bare
+    /// `rust:bookworm` CI container, where the glyph has no coverage and falls back to a
+    /// notdef box no wider than `a`. It passed locally and failed only in CI, which is the
+    /// most expensive shape a test can have.
+    ///
+    /// What the measurement code actually owns is asserted instead: every glyph measures
+    /// positive, and measuring more characters yields more width. Neither depends on which
+    /// fonts happen to be installed.
     #[test]
     fn test_measure_single_char_width() {
         let editor = CodeEditor::new("", "rs");
 
-        // Measure 'a'
+        // Every glyph measures positive, whether or not the host has a face covering it —
+        // a zero here means measurement is broken, which is the regression worth catching.
+        for s in ["a", "W", "汉", "→"] {
+            assert!(
+                editor.measure_single_char_width(s) > 0.0,
+                "width of {s:?} should be positive"
+            );
+        }
+
+        // Measurement is monotonic in the number of characters. This is the property the
+        // layout code relies on, and it holds in any font.
         let width_a = editor.measure_single_char_width("a");
-        assert!(width_a > 0.0, "Width of 'a' should be positive");
-
-        // Measure Chinese char
-        let width_cjk = editor.measure_single_char_width("汉");
-        assert!(width_cjk > 0.0, "Width of '汉' should be positive");
-
+        let width_aa = editor.measure_single_char_width("aa");
         assert!(
-            width_cjk > width_a,
-            "Width of '汉' should be greater than 'a'"
+            width_aa > width_a,
+            "two characters ({width_aa}) should measure wider than one ({width_a})"
         );
-
-        // Check that width_cjk is roughly double of width_a (common in terminal fonts)
-        // but we just check it is significantly larger
-        assert!(width_cjk >= width_a * 1.5);
     }
 
     #[test]
