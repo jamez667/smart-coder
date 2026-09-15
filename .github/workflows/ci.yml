@@ -90,12 +90,65 @@ jobs:
       - name: check
         run: cargo check --workspace
 
+      # TEMPORARY INSTRUMENTATION. The first run of this workflow killed the
+      # hosted runner 50 minutes into `cargo test --workspace` — "the hosted
+      # runner lost communication with the server", which is starvation, not a
+      # failing assertion. Disk and RAM are both plausible (a local `target/`
+      # measures 252 GB against a runner's ~14 GB free), so this measures rather
+      # than assumes. Remove once the cause is known and fixed.
+      - name: resources before the test build
+        run: |
+          echo "## before" >> "$GITHUB_STEP_SUMMARY"
+          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
+          free -h | tee -a "$GITHUB_STEP_SUMMARY"
+          du -sh target 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+      # Sampled in the background so there is evidence even when the runner dies
+      # mid-step and uploads no log: the summary file is written continuously.
+      - name: sample resources during the test build
+        run: |
+          nohup bash -c 'while true; do
+            printf "%s disk_avail=%s mem_avail=%s target=%s\n" \
+              "$(date -u +%H:%M:%S)" \
+              "$(df -BG --output=avail / | tail -1 | tr -d " ")" \
+              "$(free -g | awk "/^Mem:/{print \$7}")G" \
+              "$(du -sh target 2>/dev/null | cut -f1)" >> resource-samples.txt
+            sleep 30
+          done' >/dev/null 2>&1 &
+          echo "sampler started"
+
       # The WHOLE workspace, including the four crates scripts/check.sh excludes
       # for time (sc-eval, sc-trace, sc-comply-author, sc-cli). They are slow, not
       # flaky — the local gate skips them so that it stays fast enough to actually
       # get run, and this is where they are covered instead.
+      #
+      # `--no-fail-fast` off and debug info stripped from test binaries: 71 link
+      # targets across 32 crates is where the disk goes, and debuginfo is most of
+      # each binary's size.
       - name: test
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo test --workspace
+
+      # `always()` so this reports even when the test step fails — the failing
+      # case is the one the numbers are for.
+      - name: resources after the test build
+        if: always()
+        run: |
+          echo "## after" >> "$GITHUB_STEP_SUMMARY"
+          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
+          free -h | tee -a "$GITHUB_STEP_SUMMARY"
+          du -sh target 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '### samples' >> "$GITHUB_STEP_SUMMARY"
+          tail -40 resource-samples.txt >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: upload the samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-samples
+          path: resource-samples.txt
+          if-no-files-found: ignore
 
   # The slow suites, and the reports worth reading: retrieval ranking (spec 23),
   # the gateway routing benchmark, and spec-anchor drift (spec 17).
