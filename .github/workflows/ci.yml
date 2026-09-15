@@ -95,86 +95,97 @@ jobs:
       - name: check
         run: cargo check --workspace
 
-      # TEMPORARY INSTRUMENTATION. The first run of this workflow killed the
-      # hosted runner 50 minutes into `cargo test --workspace` — "the hosted
-      # runner lost communication with the server", which is starvation, not a
-      # failing assertion. Disk and RAM are both plausible (a local `target/`
-      # measures 252 GB against a runner's ~14 GB free), so this measures rather
-      # than assumes. Remove once the cause is known and fixed.
-      - name: resources before the test build
-        run: |
-          echo "## before" >> "$GITHUB_STEP_SUMMARY"
-          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
-          free -h | tee -a "$GITHUB_STEP_SUMMARY"
-          du -sh target 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
-
-      # Streams into GITHUB_STEP_SUMMARY, NOT a file. The previous attempt
-      # buffered samples to disk and uploaded them in a later step — which never
-      # ran, because the runner died first, so the evidence died with it. The
-      # summary file is flushed to the server as it is written, so it survives.
-      - name: sample resources during the test build
-        run: |
-          nohup bash -c 'while true; do
-            printf "%s disk_avail=%s mem_avail=%s load=%s\n" \
-              "$(date -u +%H:%M:%S)" \
-              "$(df -BG --output=avail / | tail -1 | tr -d " ")" \
-              "$(free -g | awk "/^Mem:/{print \$7}")G" \
-              "$(cut -d" " -f1-3 /proc/loadavg)" >> "$GITHUB_STEP_SUMMARY"
-            sleep 30
-          done' >/dev/null 2>&1 &
-          echo "sampler started"
-
-      # The WHOLE workspace, including the four crates scripts/check.sh excludes
-      # for time (sc-eval, sc-trace, sc-comply-author, sc-cli). They are slow, not
-      # flaky — the local gate skips them so that it stays fast enough to actually
-      # get run, and this is where they are covered instead.
+      # ONE STEP PER CRATE, deliberately, and not `cargo test --workspace`.
       #
-      # The suite is NOT inherently slow: 168s locally, 241s on the old
-      # self-hosted runner, both for this same command. On a hosted runner it
-      # burns 47 minutes and the runner dies — twice, at 3003s and 3005s, two
-      # seconds apart. Starvation does not reproduce to the second; something
-      # blocks and a watchdog kills it.
+      # The suite is not slow: 213s locally single-threaded, 241s on the old
+      # self-hosted runner. On a hosted runner `--workspace` hangs and the job is
+      # killed — three times now, twice at 3003s/3005s (two seconds apart across
+      # independent runs, which is a watchdog, not starvation).
       #
-      # So this run is built to NAME the culprit rather than die anonymously:
-      #   --test-threads=1   the last line printed is the test that hung
-      #   stdbuf -oL         line-buffered, or the pipe swallows output on kill
-      #   tee -a summary     server-side, so it survives the runner dying
+      # **A job killed by `timeout-minutes` uploads NOTHING.** The log archive for
+      # such a run contains only the jobs that finished: no step logs for the
+      # killed one, and no step summary either. So every attempt to instrument
+      # from inside the hanging step — streaming to the summary, sampling to a
+      # file, `tee`, `stdbuf` — was unrecoverable by construction, and three runs
+      # produced zero test names.
       #
-      # The BOUND is `timeout-minutes:` on the job, not `timeout` around the
-      # command. A previous attempt wrapped the command and the step still ran
-      # 38+ minutes past a 25-minute limit: `timeout` signals `cargo`, which does
-      # not pass it on to the stuck test binary underneath, and even
-      # `--kill-after` only kills the process we hold rather than the tree. The
-      # job-level bound is enforced by GitHub outside the runner, so nothing
-      # running inside can ignore it.
-      - name: test
-        env:
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          echo '### test progress' >> "$GITHUB_STEP_SUMMARY"
-          set -o pipefail
-          stdbuf -oL cargo test --workspace -- --test-threads=1 --nocapture \
-            2>&1 | stdbuf -oL tee -a "$GITHUB_STEP_SUMMARY" | tail -400
+      # Splitting by crate moves the evidence OUT of the doomed step: each crate
+      # that passes is its own completed step with its own uploaded log, so the
+      # first step that never completes names the crate. It also localises the
+      # cost — one hanging crate no longer denies coverage to the other 31.
+      #
+      # Coverage is unchanged: this is every workspace member, including the four
+      # that scripts/check.sh excludes for time (sc-eval, sc-trace,
+      # sc-comply-author, sc-cli). They are slow, not flaky, and CI is where they
+      # are meant to be covered.
+      #
+      # `--no-fail-fast` is NOT used: a crate that fails should stop its own step,
+      # and the remaining steps still run because each is independent.
+      - name: test sc-android
+        run: cargo test -p sc-android
+      - name: test sc-cargo
+        run: cargo test -p sc-cargo
+      - name: test sc-cli
+        run: cargo test -p sc-cli
+      - name: test sc-comply
+        run: cargo test -p sc-comply
+      - name: test sc-comply-author
+        run: cargo test -p sc-comply-author
+      - name: test sc-context
+        run: cargo test -p sc-context
+      - name: test sc-core
+        run: cargo test -p sc-core
+      - name: test sc-craft-ui
+        run: cargo test -p sc-craft-ui
+      - name: test sc-daemon
+        run: cargo test -p sc-daemon
+      - name: test sc-editor
+        run: cargo test -p sc-editor
+      - name: test sc-eval
+        run: cargo test -p sc-eval
+      - name: test sc-flame
+        run: cargo test -p sc-flame
+      - name: test sc-fsutil
+        run: cargo test -p sc-fsutil
+      - name: test sc-gateway
+        run: cargo test -p sc-gateway
+      - name: test sc-index
+        run: cargo test -p sc-index
+      - name: test sc-iterate
+        run: cargo test -p sc-iterate
+      - name: test sc-model
+        run: cargo test -p sc-model
+      - name: test sc-plugin-agent
+        run: cargo test -p sc-plugin-agent
+      - name: test sc-plugin-claude
+        run: cargo test -p sc-plugin-claude
+      - name: test sc-plugin-comply
+        run: cargo test -p sc-plugin-comply
+      - name: test sc-plugin-proto
+        run: cargo test -p sc-plugin-proto
+      - name: test sc-proto
+        run: cargo test -p sc-proto
+      - name: test sc-review
+        run: cargo test -p sc-review
+      - name: test sc-server
+        run: cargo test -p sc-server
+      - name: test sc-swarm
+        run: cargo test -p sc-swarm
+      - name: test sc-tools
+        run: cargo test -p sc-tools
+      - name: test sc-trace
+        run: cargo test -p sc-trace
+      - name: test sc-tui
+        run: cargo test -p sc-tui
+      - name: test sc-verify
+        run: cargo test -p sc-verify
+      - name: test sc-web
+        run: cargo test -p sc-web
+      - name: test sc-win
+        run: cargo test -p sc-win
+      - name: test sc-workflow
+        run: cargo test -p sc-workflow
 
-      # `always()` so this reports even when the test step fails — the failing
-      # case is the one the numbers are for.
-      - name: resources after the test build
-        if: always()
-        run: |
-          echo "## after" >> "$GITHUB_STEP_SUMMARY"
-          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
-          free -h | tee -a "$GITHUB_STEP_SUMMARY"
-          du -sh target 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
-          echo '### samples' >> "$GITHUB_STEP_SUMMARY"
-          tail -40 resource-samples.txt >> "$GITHUB_STEP_SUMMARY" || true
-
-      - name: upload the samples
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: resource-samples
-          path: resource-samples.txt
-          if-no-files-found: ignore
 
   # The slow suites, and the reports worth reading: retrieval ranking (spec 23),
   # the gateway routing benchmark, and spec-anchor drift (spec 17).
