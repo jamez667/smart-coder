@@ -354,6 +354,39 @@ pub struct Strings {
     pub landing_oss_body: &'static str,
     pub landing_oss_cta: &'static str,
 
+    // -- the two ways to run it ----------------------------------------------
+    //
+    // **Open core, and the split is the honest one.** The code is MIT and always
+    // will be; what a subscription buys is not a feature but the not-running-it.
+    // A page that blurred those into "free tier / pro tier" would be selling the
+    // software back to somebody who already has all of it.
+    //
+    // **The hosted service does not exist yet, and nothing here says it does.**
+    // The call to action registers interest; it does not sign anybody up, and no
+    // price appears anywhere — a number put on a page before the thing exists is
+    // one that has to be walked back.
+    pub landing_tiers_heading: &'static str,
+    pub landing_tiers_body: &'static str,
+    /// Self-hosting, as one of two options rather than as the only one.
+    pub landing_tier_self_title: &'static str,
+    pub landing_tier_self_tag: &'static str,
+    pub landing_tier_self_body: &'static str,
+    pub landing_tier_self_cta: &'static str,
+    /// The hosted service. **The tag says it is not available**, in the same
+    /// glance as the name — a reader who reads the description first and the
+    /// availability second has been misled for the length of a paragraph.
+    pub landing_tier_hosted_title: &'static str,
+    pub landing_tier_hosted_tag: &'static str,
+    pub landing_tier_hosted_body: &'static str,
+    pub landing_tier_hosted_cta: &'static str,
+    /// What is identical either way, said once under both.
+    ///
+    /// **The boundary does not move when somebody else runs the inbox.** The
+    /// daemon is on the customer's hardware in both tiers, so their code and
+    /// their model never travel in either — which is exactly why this can be
+    /// offered as a service without retracting the claim beside it.
+    pub landing_tiers_note: &'static str,
+
     // -- signing in ---------------------------------------------------------
     pub signin_title: &'static str,
     pub signin_intro: &'static str,
@@ -920,6 +953,17 @@ mod tests {
             s.landing_oss_heading,
             s.landing_oss_body,
             s.landing_oss_cta,
+            s.landing_tiers_heading,
+            s.landing_tiers_body,
+            s.landing_tier_self_title,
+            s.landing_tier_self_tag,
+            s.landing_tier_self_body,
+            s.landing_tier_self_cta,
+            s.landing_tier_hosted_title,
+            s.landing_tier_hosted_tag,
+            s.landing_tier_hosted_body,
+            s.landing_tier_hosted_cta,
+            s.landing_tiers_note,
             s.signin_title,
             s.signin_intro,
             s.signin_email_label,

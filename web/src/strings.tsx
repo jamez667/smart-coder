@@ -114,6 +114,20 @@ export interface Strings {
   landing_oss_heading: string;
   landing_oss_body: string;
   landing_oss_cta: string;
+  // Open core: the code is MIT either way, and a subscription buys the
+  // not-running-it rather than a feature. The hosted side does not exist yet,
+  // which its own tag says.
+  landing_tiers_heading: string;
+  landing_tiers_body: string;
+  landing_tier_self_title: string;
+  landing_tier_self_tag: string;
+  landing_tier_self_body: string;
+  landing_tier_self_cta: string;
+  landing_tier_hosted_title: string;
+  landing_tier_hosted_tag: string;
+  landing_tier_hosted_body: string;
+  landing_tier_hosted_cta: string;
+  landing_tiers_note: string;
 
   // signing in
   signin_title: string;

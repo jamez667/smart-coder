@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   api,
   ApiError,
@@ -369,20 +369,57 @@ function Landing({
       <section className="wide band">
         <h2 className="band-heading">{s.landing_oss_heading}</h2>
         <p className="band-lede">{s.landing_oss_body}</p>
-        <p className="cta-row">
-          {/* **A real navigation, so a real anchor** — this one leaves the site
-              entirely, which is exactly the case the routed links are not.
-              `rel="noreferrer"` because there is nothing the destination needs
-              to learn about where the reader came from. */}
-          <a
-            className="btn"
-            href={SOURCE_URL}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {s.landing_oss_cta}
-          </a>
-        </p>
+      </section>
+
+      {/* **The two ways to run it, and what separates them.** Open core: the
+          code is MIT in both, and what a subscription buys is not a feature but
+          the not-running-it. Presenting them as "free tier / pro tier" would be
+          selling the software back to somebody who already has all of it, so
+          the heading says *run* and the lede says so outright.
+
+          The note under both is the load-bearing line: the daemon is on the
+          customer's hardware either way, which is why a hosted inbox can be
+          offered without retracting the section above it. */}
+      <section className="wide band">
+        <h2 className="band-heading">{s.landing_tiers_heading}</h2>
+        <p className="band-lede">{s.landing_tiers_body}</p>
+        <div className="sides">
+          <Tier
+            title={s.landing_tier_self_title}
+            tag={s.landing_tier_self_tag}
+            body={s.landing_tier_self_body}
+            cta={
+              // **A real navigation, so a real anchor** — this one leaves the
+              // site entirely, which is exactly the case the routed links are
+              // not. `rel="noreferrer"` because there is nothing the
+              // destination needs to learn about where the reader came from.
+              <a className="btn" href={SOURCE_URL} target="_blank" rel="noreferrer">
+                {s.landing_tier_self_cta}
+              </a>
+            }
+          />
+          <Tier
+            title={s.landing_tier_hosted_title}
+            tag={s.landing_tier_hosted_tag}
+            // **Marked as not yet available, in the same glance as the name.**
+            // A reader who takes in the description first and the availability
+            // second has been misled for the length of a paragraph — so the tag
+            // is styled differently from the free one rather than identically.
+            pending
+            body={s.landing_tier_hosted_body}
+            cta={
+              // Registering interest is a GitHub issue, because that exists
+              // today. A form here would need an endpoint, a store and a
+              // mailer that this server deliberately does not have — and a
+              // button that silently drops what somebody typed is worse than
+              // one that hands them somewhere real.
+              <a className="btn" href={INTEREST_URL} target="_blank" rel="noreferrer">
+                {s.landing_tier_hosted_cta}
+              </a>
+            }
+          />
+        </div>
+        <p className="tiers-note">{s.landing_tiers_note}</p>
       </section>
 
       {/* **The demonstration, named as one.** This deployment collects for the
@@ -416,6 +453,16 @@ function Landing({
 /// edited the translation. The same reasoning already keeps repository names and
 /// email addresses out of it.
 const SOURCE_URL = "https://github.com/jamez667/smart-coder";
+
+/// Where "register interest" goes.
+///
+/// **A GitHub issue, because that exists today.** A form on this page would
+/// need an endpoint, somewhere to keep what it collected and a way to mail
+/// about it — none of which this server has, and adding them for a service that
+/// does not exist yet is building the wrong thing first. A button that silently
+/// drops what somebody typed is worse than one that hands them somewhere real.
+const INTEREST_URL =
+  "https://github.com/jamez667/smart-coder/issues/new?title=Hosted%20intake%3A%20interest&labels=hosted";
 
 /// The page's call to action, wherever it appears.
 ///
@@ -475,6 +522,39 @@ function Step({ n, title, body }: { n: number; title: string; body: string }) {
         <p>{body}</p>
       </div>
     </li>
+  );
+}
+
+/// One of the two ways to run it.
+///
+/// A card with a tag and an action. **`pending` is a separate prop rather than
+/// a second component** — the two tiers are the same shape and differ in one
+/// fact, and a copy of this whose only change is a class name is a copy that
+/// drifts.
+function Tier({
+  title,
+  tag,
+  body,
+  cta,
+  pending,
+}: {
+  title: string;
+  tag: string;
+  body: string;
+  cta: ReactNode;
+  /// Not available yet. Styles the tag as a caution rather than a fact, and is
+  /// the only difference between the two cards.
+  pending?: boolean;
+}) {
+  return (
+    <section className={pending ? "card tier pending" : "card tier"}>
+      <header className="tier-head">
+        <h3>{title}</h3>
+        <span className="tier-tag">{tag}</span>
+      </header>
+      <p>{body}</p>
+      <p className="cta-row">{cta}</p>
+    </section>
   );
 }
 

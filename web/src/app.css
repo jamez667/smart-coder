@@ -556,3 +556,28 @@ background:color-mix(in srgb,var(--surface) 70%,transparent)}
 .demo h2{margin:0 0 var(--s3);font-size:clamp(1.2rem,2.2vw,1.5rem)}
 .demo p{margin:0 auto;max-width:52ch;color:var(--dim);line-height:1.65}
 .demo .cta-note{margin-top:var(--s4)}
+
+/* The two ways to run it. A card with a tag and an action, in the `.sides`
+   two-column grid the audiences already use. */
+.tier{display:flex;flex-direction:column}
+.tier-head{display:flex;align-items:baseline;justify-content:space-between;
+gap:var(--s3);flex-wrap:wrap;margin-block-end:var(--s3)}
+.tier-head h3{margin:0}
+/* The tag. **Green-ish for the free one and cautionary for the planned one**,
+   from the same tokens rather than from new colours — the distinction that
+   matters is available versus not, and a reader must take it in at the same
+   glance as the name. */
+.tier-tag{flex:none;padding:.15rem .6rem;border-radius:var(--pill);
+font-size:.7rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+background:color-mix(in srgb,var(--link) 12%,transparent);color:var(--link)}
+.tier.pending .tier-tag{background:var(--surface-2);color:var(--faint)}
+/* The pending card is outlined rather than filled, so "not yet" is legible
+   before a word of it is read. */
+.tier.pending{background:transparent;border-style:dashed}
+.tier p{margin:0}
+/* The action sits at the foot of the card whatever the paragraph's length, so
+   two cards of unequal text still line their buttons up. */
+.tier .cta-row{justify-content:flex-start;margin-top:auto;padding-top:var(--s4)}
+/* The line that holds for both tiers, under both cards. */
+.tiers-note{max-width:60ch;margin:var(--s5) auto 0;text-align:center;
+font-size:.85rem;color:var(--faint);line-height:1.6}

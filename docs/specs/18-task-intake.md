@@ -1238,6 +1238,38 @@ their own infrastructure, so the licence is named in the hero beside the eyebrow
 rather than after the call to action, where it would arrive too late to remove
 it.
 
+**Two ways to run it, and the split is open core.** The code is MIT in both, and
+what a subscription would buy is not a feature but the not-running-it: a hosted
+inbox for somebody who does not want to deploy a container, apply upgrades and
+back up a volume. Presenting these as "free tier" and "pro tier" would be
+selling the software back to somebody who already has all of it, so the heading
+says *run* and the lede says so outright. No feature is ever held back for a
+paid edition; that promise is what makes the open half worth anything.
+
+**The hosted service does not exist, and the page says so in the same glance as
+its name.** Its tag reads "planned — not yet available" beside the heading, and
+its card is outlined rather than filled, because a reader who takes in the
+description first and the availability second has been misled for the length of
+a paragraph. The call to action registers interest and signs nobody up. **No
+price appears anywhere** — a number published before the thing exists is one
+that has to be walked back.
+
+**Hosting the inbox does not move the trust boundary**, which is what makes the
+offer possible without retracting the section above it. The daemon runs on the
+customer's hardware in either case, so the inbox holds request text, drafted
+specs, repository *names* and email addresses — never a repository, a path or a
+credential. That is a property of [the trust boundary](#the-trust-boundary)
+rather than a promise about how a service would be operated, which is why the
+page can state it plainly. The claim above it was reworded to match: "your code
+and your model stay with you" is true of both tiers, where "your code never
+leaves your infrastructure" was true only of one.
+
+**Registering interest is a link off-site, not a form.** A form here would need
+an endpoint, somewhere to keep what it collected and a way to mail about it —
+none of which this server has, and adding all three for a service that does not
+exist yet is building the wrong thing first. A button that silently drops what
+somebody typed is worse than one that hands them somewhere real.
+
 **This deployment is a demonstration, and says so.** It collects for the
 product's own repository, which makes it a working example and not how anybody
 else's requests would be handled. A reader who files here expecting support for
