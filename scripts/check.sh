@@ -44,8 +44,9 @@ cargo check --workspace
 # the ~40 everything else takes.
 #
 # None of them is flaky and none needs a model; they are excluded for TIME alone.
-# CI runs the full workspace on every push (.woodpecker/ci.yml), so nothing is
-# unwatched -- it is watched after the fact instead of before the commit.
+# CI covers every workspace member on every push (.github/workflows/ci.yml, one
+# step per crate), so nothing is unwatched -- it is watched after the fact
+# instead of before the commit.
 #
 # Run them yourself when you touch what they cover:
 #     cargo test -p sc-eval -p sc-trace -p sc-comply-author -p sc-cli

@@ -26,10 +26,20 @@
 #
 # The usual static-CRT hazard — allocating in one module and freeing in another
 # with a different heap — needs a DLL boundary to happen. `sc-win` is a `[[bin]]`
-# with no `LoadLibrary`, no `extern "C"` and no `no_mangle`, so it cannot arise.
-# (The workspace's one `cdylib` is `sc-android`, a different target entirely.)
+# with no `LoadLibrary`, no `extern "C"` and no `no_mangle`, so it cannot arise
+# *there*.
+#
+# It is not impossible workspace-wide, though, and an earlier version of this
+# comment said it was. `sc-android` is `crate-type = ["cdylib", "rlib"]` and is a
+# workspace member, so `cargo build --workspace` on a Windows host does build a
+# DLL with a static CRT — the combination this paragraph waves away. It links,
+# and nothing ships that DLL from a Windows build (it is an Android artifact
+# built for a different target in anger), so this is a latent hazard rather than
+# a live bug. Recorded because the previous claim that it "cannot arise" was
+# simply wrong, and a comment nobody can trust is worse than none.
 #
 # Scoped to the MSVC target on purpose: the tagged Linux release built by
-# `.woodpecker/release.yml` is unaffected.
+# `.github/workflows/release.yml` is unaffected. That workflow now also builds
+# the Windows archives, which is where this flag actually ships.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

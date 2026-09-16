@@ -29,13 +29,15 @@ services:
     #   2. Enable **"Re-pull image"** on it. Without that Portainer reuses the
     #      cached layers for `latest` and the redeploy changes nothing —
     #      silently, and looking just like success.
-    #   3. Add the URL to Woodpecker as the `sc_server_portainer_webhook` repo
-    #      secret.
+    #   3. Add the URL as the `SC_SERVER_PORTAINER_WEBHOOK` repo secret, under
+    #      Settings → Secrets and variables → Actions.
     #
-    # `.woodpecker/image.yml` then POSTs it after each `v*` tag push, and
+    # `.github/workflows/image.yml` then POSTs it after each `v*` tag push, and
     # `git push origin v0.1.0` becomes the whole deployment procedure. The
     # webhook URL is the credential — it carries no token, so anyone who can
-    # reach it can trigger a redeploy.
+    # reach it can trigger a redeploy. That step is gated on `v*` tags, and a
+    # fork's pull request gets a read-only token that cannot read the secret at
+    # all.
     #
     # A `manifest unknown` or `unauthorized` here means the package is PRIVATE.
     # GitHub Packages does not inherit repository visibility: a package linked to

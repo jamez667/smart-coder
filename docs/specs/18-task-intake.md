@@ -1455,7 +1455,7 @@ meant to run for weeks.
 <!--@ deploy/sc-server.stack.yml --> It shares a repository with the rest of this
 workspace and nothing else: no dependency on the desktop client, the daemon, or a
 model, and — because the image pipeline is **path-filtered**
-<!--@ .woodpecker/image.yml --> — no reason for a change to any of them to
+<!--@ .github/workflows/image.yml --> — no reason for a change to any of them to
 redeploy it.
 
 The filter must list every input the server's build actually reads: its crate

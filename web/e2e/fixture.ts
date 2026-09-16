@@ -68,9 +68,9 @@ export async function server(): Promise<Server> {
 
   const sibling = inContainer();
   // **Join the server to the network this container is already on**, rather than
-  // guessing what it is called. Woodpecker names it after the workflow, so it
-  // differs per run and there is nothing stable to hardcode — and a container
-  // name only resolves between containers that share a network.
+  // guessing what it is called. Every CI system names it differently and per
+  // run, so there is nothing stable to hardcode — and a container name only
+  // resolves between containers that share a network.
   //
   // Asking Docker which network we are on is the one reliable answer: if this is
   // a container, the daemon knows where it is attached.
@@ -114,7 +114,7 @@ export async function server(): Promise<Server> {
   // container will not boot without being told it. `startOnNetwork` breaks that
   // circle: start, read the address the daemon assigned, restart with it. Two
   // starts of something that boots in milliseconds, against either weakening the
-  // check or pre-allocating a subnet Woodpecker did not create.
+  // check or pre-allocating a subnet the CI runner did not create.
   const base = network
     ? `http://${startOnNetwork(network, env("http://127.0.0.1:8420"))}:8420`
     : "http://127.0.0.1:8799";

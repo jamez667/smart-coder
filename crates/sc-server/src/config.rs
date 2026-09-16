@@ -1536,11 +1536,18 @@ mod tests {
             }
         }
 
-        // Consumed by **Compose**, not by the server: it substitutes the image
-        // tag before the container exists. Named individually rather than
-        // matched by a pattern, so the next addition has to be a deliberate
-        // entry here instead of quietly slipping through a prefix rule.
-        const NOT_THE_SERVERS: [&str; 1] = ["SC_SERVER_TAG"];
+        // Not settings the server reads, despite the prefix. Named individually
+        // rather than matched by a pattern, so the next addition has to be a
+        // deliberate entry here instead of quietly slipping through a prefix rule.
+        //
+        //   SC_SERVER_TAG                — consumed by **Compose**, which
+        //     substitutes the image tag before the container exists.
+        //   SC_SERVER_PORTAINER_WEBHOOK  — a **CI secret**, read by
+        //     `.github/workflows/image.yml` to POST this stack's redeploy
+        //     webhook after a `v*` tag. It is named in the deploy file because
+        //     that is where an operator learns to create it; the server never
+        //     sees it, and it is not an environment variable of this container.
+        const NOT_THE_SERVERS: [&str; 2] = ["SC_SERVER_TAG", "SC_SERVER_PORTAINER_WEBHOOK"];
 
         // The reverse direction, by scanning each file for anything that looks
         // like one of ours.

@@ -91,27 +91,43 @@ blanket allow.
 The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), so your
 local `cargo clippy` uses the exact same compiler and lint set as CI — "passes
 locally" means "passes CI". CI runs the same four gates via
-[`.woodpecker/ci.yml`](.woodpecker/ci.yml) (self-hosted Woodpecker) on every push
-and PR to `main`.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push and PR to
+`main`, plus a second, non-blocking `reports` job for the slow suites: retrieval
+ranking, the gateway benchmark, and spec-anchor drift. Those catch real
+regressions but none is a reason to refuse a merge on its own.
 
 ## Cutting a release
 
-Releases are built and published by [`.woodpecker/release.yml`](.woodpecker/release.yml)
-when a version tag is pushed:
+Releases are built and published by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) when a version
+tag is pushed:
 
 ```sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-That builds the `sc-win` desktop client, packages it as
-`sc-win-<tag>-linux-x86_64.tar.gz`, and publishes it as a GitHub Release asset.
-Only the **3 newest** releases are kept — older ones (and their tags) are pruned
-automatically to save space. Currently Linux-only; the binary is dynamically
-linked, so its runtime library deps are listed in the release's `README.txt`.
+That builds **five binaries** — both desktop products (`smart-coder` and
+`smart-coder-crafter`, two `[[bin]]`s over one editor) and the three plugins —
+and publishes each as its own archive:
 
-The release pipeline needs a Woodpecker repo secret named `github_token` (a
-GitHub token with `contents: write` on this repo).
+| Platform | Asset |
+| --- | --- |
+| Linux | `<binary>-<tag>-linux-x86_64.tar.gz` |
+| Windows | `<binary>-<tag>-windows-x86_64.zip` |
+
+The Linux binaries are dynamically linked, so their runtime library deps are
+listed in the archive's `README.txt`. The Windows binaries are **statically**
+linked (see [`.cargo/config.toml`](.cargo/config.toml)) and need no such note.
+
+Only the **3 newest** releases are kept — older ones, and their tags, are pruned
+automatically to save space.
+
+No secret is needed for the release itself: the built-in `GITHUB_TOKEN` covers
+both GitHub Releases and the `sc-server` container push to GHCR. The one
+optional repo secret is `SC_SERVER_PORTAINER_WEBHOOK`, which redeploys the
+server stack after a tag; without it that step logs why and exits 0, because the
+image is already published by the time it runs.
 
 ## Guidelines
 
