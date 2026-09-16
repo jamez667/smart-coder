@@ -156,8 +156,11 @@ font-size:.7rem;line-height:1;transition:inset-inline-start .2s}
 :root:has(#theme-invert:checked) .to-dark .knob{
 inset-inline-start:calc(100% - 1.15rem - 2px)}
 .theme-in:focus-visible~.masthead .theme{outline:2px solid var(--link);outline-offset:2px}
-.masthead{display:flex;justify-content:space-between;align-items:center;
-gap:var(--s4);flex-wrap:wrap;padding-block:var(--s4)}
+/* `position:relative` so the centred `.nav` has something to be centred on —
+   without it the nav would position against the viewport, which is the same
+   place only until the bar gains a scrollbar or a margin. */
+.masthead{position:relative;display:flex;justify-content:space-between;
+align-items:center;gap:var(--s4);flex-wrap:wrap;padding-block:var(--s4)}
 .masthead .wordmark{font-family:"Fraunces",Georgia,"Times New Roman",serif;
 font-weight:600;font-size:1.25rem;letter-spacing:-.02em;
 text-decoration:none;color:var(--fg);display:inline-flex;align-items:center;
@@ -395,7 +398,17 @@ padding:var(--s3) var(--s4);margin:var(--s5) 0;box-shadow:var(--shadow)}
    right at every width and this takes what is between — which is what the
    masthead's `space-between` was already doing with two children and stops
    doing the moment there are three. */
-.nav{display:flex;align-items:center;gap:var(--s4);flex:1}
+/* **Centred on the bar, not on the space left over.** `flex:1` with
+   `justify-content:center` centres the nav inside the gap between the wordmark
+   and the controls — and those two are different widths, so the result sits
+   visibly off-centre against the page it is centred on. Absolute positioning
+   takes the nav out of the flex row entirely and centres it on the bar, which
+   is what "in the centre" means to somebody looking at it.
+   The row still reads wordmark / nav / controls, because the wordmark and the
+   controls keep their `space-between` ends and the nav is drawn over the gap
+   between them. */
+.nav{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+display:flex;align-items:center;gap:var(--s4)}
 .nav a{position:relative;padding-block:var(--s1);text-decoration:none;
 color:var(--dim);font-size:.85rem;font-weight:600;white-space:nowrap;
 transition:color .12s}
@@ -407,8 +420,16 @@ transition:color .12s}
 .nav a[aria-current="page"]::after{content:"";position:absolute;
 inset-inline:0;bottom:-2px;height:2px;border-radius:2px;background:var(--link)}
 /* On a phone the masthead wraps, and the nav takes its own full-width row
-   below the wordmark rather than squeezing between it and the controls. */
-@media(max-width:640px){.nav{flex-basis:100%;order:3;gap:var(--s5)}}
+   below the wordmark rather than squeezing between it and the controls.
+   **The centring is undone rather than adjusted.** An absolutely positioned
+   element does not participate in the flex row, so it cannot wrap onto a line
+   of its own — `order` and `flex-basis` are simply ignored while it is out of
+   flow, and the nav would sit on top of the controls. Returning it to `static`
+   puts those properties back in charge, and `justify-content` centres it on its
+   own row, where the row *is* the full width. */
+@media(max-width:640px){
+.nav{position:static;transform:none;flex-basis:100%;order:3;
+gap:var(--s5);justify-content:center}}
 
 /* ===== the marketing page ================================================
    **A wider column than the prose.** `main` is capped at 45rem, a measure

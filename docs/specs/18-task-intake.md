@@ -1224,14 +1224,27 @@ job is the whole argument is not that. The wider cap is taken by raising
 `main`'s own on this page rather than by letting a section escape it with
 negative margins, so the two widths stay declared once each.
 
-**A navigation bar, with the same two entries for everybody**
-<!--@ web/src/Masthead.tsx -->. The account menu is where a surface appears or
-disappears with a capability; the bar is the fixed frame around it, and a frame
-whose shape changes when you sign in is one a returning reader has to re-learn.
-That is only possible because `/requests` serves every caller. The current entry
-is marked with `aria-current="page"` and styled from that attribute rather than
-from a class, so a page cannot be underlined as current while being announced as
-ordinary.
+**A navigation bar, drawn only for a caller with a session**
+<!--@ web/src/Masthead.tsx -->. A stranger gets an empty bar, because both
+entries would lead somewhere that asks them to sign in first — `/requests`
+shows them the door and `/` is the page they are already on — so drawing them
+offers a choice between two ways of being told the same thing. The sign-in
+button beside them is the real next step, and an empty bar is what leaves it
+unambiguous.
+
+For everybody else the entries are the same two whatever they can do: which
+surface `/requests` resolves to is the server's business, and a bar that also
+changed shape by role would be one a reader re-learns on every account. The
+variation is binary and about having a session at all, never about
+capabilities — that distinction is the account menu's job.
+
+The bar is centred on the masthead rather than on the space between the wordmark
+and the controls. Those two are different widths, so a nav centred in the gap
+between them sits visibly off-centre against the page; it is taken out of the
+flex row and centred on the bar itself, and returned to the flow on a phone,
+where it wraps to a row of its own. The current entry is marked with
+`aria-current="page"` and styled from that attribute rather than from a class,
+so a page cannot be underlined as current while being announced as ordinary.
 
 **A language switcher, and the catalogue behind it**
 <!--@ sc_server::i18n::Strings -->.

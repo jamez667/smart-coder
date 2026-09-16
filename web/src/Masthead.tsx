@@ -39,7 +39,13 @@ export function Masthead({
             </span>
             <span>{s.brand}</span>
           </a>
-          <Nav path={path} onGo={onGo} />
+          {/* **Nothing in the bar for a stranger.** Both entries lead somewhere
+              that asks them to sign in first — `/requests` shows the door and
+              `/` is the page they are already on — so drawing them offers a
+              choice between two ways of being told the same thing. The sign-in
+              button beside them is the real next step, and an empty bar is what
+              leaves it unambiguous. */}
+          {me.role !== "anonymous" && <Nav path={path} onGo={onGo} />}
           <div className="controls">
             <label className="theme to-dark" htmlFor="theme-invert" title={s.theme_to_dark}>
               <span className="theme-in">{s.theme_to_dark}</span>
@@ -118,15 +124,15 @@ function Link({
 
 /// The navigation bar's own entries, between the wordmark and the controls.
 ///
-/// **Two entries, and the same two for everybody** — including a stranger. The
-/// account menu is where a surface appears or disappears with a capability;
-/// this bar is the fixed frame around it, and a frame whose shape changes when
-/// you sign in is one a returning reader has to re-learn.
+/// **Drawn only for somebody the server knows** — see the caller. The two
+/// entries are then the same two whatever that caller can do: which surface
+/// `/requests` resolves to is the server's business, and a bar that also
+/// changed shape by role would be one a reader re-learns on every account.
 ///
-/// That is safe because `/requests` serves everybody: it draws the reviewer's
-/// queue, the filer's own requests, or a prompt to sign in, and the server
-/// decides which by answering `/me`. A stranger following it is not refused —
-/// they are shown the door.
+/// So the variation is binary and it is about having a session at all, not
+/// about capabilities. A stranger gets an empty bar and the sign-in button
+/// beside it; `/requests` still serves them if they type it, and still shows
+/// them the door rather than refusing them.
 function Nav({ path, onGo }: { path: string; onGo: (to: string) => void }) {
   const s = useStrings();
   return (
