@@ -1158,6 +1158,21 @@ the JSON API behind them <!--@ crates/sc-server/src/routes.rs -->, which still
 404s a caller who may not see the data. So what a guesser learns is that an
 address is served, never whether it holds anything.
 
+**One address for the requests a caller may see.** `/requests`
+<!--@ sc_server::routes::public_route::REQUESTS --> serves its document to
+anybody and resolves in the client to the reviewer's queue, the filer's own
+list, or a prompt to sign in, chosen from what `/me` returned. `/public` and
+`/review` still answer directly and no bookmark to either is broken; this exists
+so the masthead can carry one link whose address does not change with the
+reader's role. An address that did change would mean a link shared between two
+colleagues lands one of them somewhere they cannot go.
+
+It is a `public_route` rather than a private one for the same reason the landing
+page is: a stranger follows it from the navigation bar on every page, so a 404
+there would read as the site's own bar being broken. Serving the document grants
+nothing — the data behind both surfaces still comes from endpoints that check
+the caller, which is the rule stated directly above.
+
 The tests that pinned this moved with it. They asserted a private *path* 404s;
 they now assert the *endpoint* behind it refuses. This section previously
 predicted they would move to a browser harness instead — retargeting them in
@@ -1185,6 +1200,38 @@ rather than two, because a radio cannot be un-checked: light/dark alone is a
 one-way door out of following the system. The choice does not survive a page
 load, which is the honest limit of doing this without a cookie, and the right
 trade on a surface a reader passes through two or three pages at a time.
+
+**`/` describes the product, and every caller gets it** <!--@ web/src/App.tsx -->.
+It used to be the fall-through for a caller with no capabilities — a reviewer or
+a filer who typed `/` got their own surface instead — which made it a page for
+strangers by accident rather than by design. The cost was that the person best
+placed to send a colleague a link to the product had never seen the page they
+were linking to, and nothing on it acknowledged a reader who was already signed
+in. The surfaces it used to stand in for moved to `/requests`, described above.
+
+**Only the call to action differs when signed in.** One argument, two next
+steps: a stranger is offered the sign-in dialog, a known caller the door to
+their own requests. Two versions of the argument would be two things to keep
+true, and the argument does not depend on who is reading it.
+
+The page is a hero, a numbered sequence of what happens after a request is
+filed, the three points as cards, and a close. The sequence is an ordered list
+because the order is the content — a screen reader gets the position from the
+element, and the numerals are drawn in CSS and hidden from it. The hero widens
+the column to the 60rem the masthead and footer already use: `main` is capped at
+45rem, a measure chosen for reading a specification, and a first screen whose
+job is the whole argument is not that. The wider cap is taken by raising
+`main`'s own on this page rather than by letting a section escape it with
+negative margins, so the two widths stay declared once each.
+
+**A navigation bar, with the same two entries for everybody**
+<!--@ web/src/Masthead.tsx -->. The account menu is where a surface appears or
+disappears with a capability; the bar is the fixed frame around it, and a frame
+whose shape changes when you sign in is one a returning reader has to re-learn.
+That is only possible because `/requests` serves every caller. The current entry
+is marked with `aria-current="page"` and styled from that attribute rather than
+from a class, so a page cannot be underlined as current while being announced as
+ordinary.
 
 **A language switcher, and the catalogue behind it**
 <!--@ sc_server::i18n::Strings -->.

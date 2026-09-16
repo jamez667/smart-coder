@@ -118,8 +118,9 @@ export function App() {
   // looks like it worked.
   //
   // Listed rather than inferred. A regex over `/request/...` would also match
-  // `/requests`, and a set that has to be updated when a route is added is the
-  // kind of omission a reader notices immediately.
+  // `/requests` — which is now a real address of its own, so that collision is
+  // no longer hypothetical: the `^\/(public\/)?request\/[^/]+$` below requires
+  // the slash and an id precisely so the two cannot be confused.
   //
   // **This must match `wants_document` on the server exactly.** The server
   // decides which addresses get this bundle at all; a path it serves and this
@@ -132,6 +133,12 @@ export function App() {
     path === "/" ||
     path === "/public" ||
     path === "/public/signin" ||
+    // **One address for "the requests I may see".** It resolves to the
+    // reviewer's queue, the filer's own list, or a prompt to sign in — chosen
+    // from what `/me` returned, exactly as `/` already was. The masthead can
+    // therefore carry one link for every caller instead of an address that
+    // changes with the reader's role.
+    path === "/requests" ||
     path === "/review" ||
     path === "/setup" ||
     path === "/settings" ||
@@ -158,7 +165,7 @@ export function App() {
   if (path === "/setup") {
     return (
       <>
-        <Masthead me={me ?? ANONYMOUS} onSignIn={() => setSigningIn(true)} onGo={go} />
+        <Masthead me={me ?? ANONYMOUS} onSignIn={() => setSigningIn(true)} onGo={go} path={path} />
         <main>
           <Setup
             onClaimed={() => {
@@ -181,7 +188,7 @@ export function App() {
 
   return (
     <>
-      <Masthead me={me} onSignIn={() => setSigningIn(true)} onGo={go} />
+      <Masthead me={me} onSignIn={() => setSigningIn(true)} onGo={go} path={path} />
       <main>
         {problem && <p className="note">{problem}</p>}
         {!known ? (
@@ -197,12 +204,25 @@ export function App() {
               load().catch(() => undefined);
             }}
           />
+        ) : /* **`/` is the marketing page for everybody now**, and that is the
+              change. It used to be the landing page *only* for a caller who
+              could do nothing — a reviewer who typed `/` got their queue, so
+              the page describing the product was unreachable the moment you
+              had an account, and the one person most likely to send somebody a
+              link to it could not see what they were sending.
+              The surfaces it used to stand in for moved to `/requests`, which
+              the masthead links to. */
+        path === "/" ? (
+          <Landing me={me} onGo={go} onSignIn={() => setSigningIn(true)} />
         ) : me.can.review ? (
           <ReviewList requests={review} onOpen={openRequest} />
         ) : me.can.file ? (
           <Filing mine={mine} me={me} onFiled={() => load().catch(() => undefined)} />
         ) : (
-          <Landing />
+          /* `/requests` reached by somebody who can neither file nor review.
+             Not a 404 — the address is real and what they are missing is a
+             session, which is one click away. */
+          <RequestsAnonymous onSignIn={() => setSigningIn(true)} />
         )}
       </main>
       <footer className="bar footer">
@@ -224,25 +244,167 @@ export function App() {
   );
 }
 
-/// What a stranger sees.
-function Landing() {
+/// The page that says what this is for — **now shown to everybody**.
+///
+/// It used to be what a caller with no capabilities fell through to, which made
+/// it a page for strangers by accident rather than by design: anybody with an
+/// account got their own surface at `/` and could not reach this at all. So the
+/// person best placed to send a colleague a link to the product had never seen
+/// the page they were linking to, and nothing on it acknowledged a reader who
+/// was already signed in.
+///
+/// **What differs when signed in is the call to action and nothing else.** Two
+/// versions of the argument would be two things to keep true; the argument is
+/// the same either way, and only the next step changes — a stranger needs to
+/// sign in, a filer needs the door to their own requests.
+function Landing({
+  me,
+  onGo,
+  onSignIn,
+}: {
+  me: Me;
+  onGo: (to: string) => void;
+  onSignIn: () => void;
+}) {
+  const s = useStrings();
+  const known = me.role !== "anonymous";
+  return (
+    <>
+      {/* **The hero breaks the text column.** `main` is capped at 45rem, which
+          is a measure chosen for reading prose — right for a spec, too narrow
+          for a page whose first screen is the whole argument. `.wide` widens to
+          the 60rem the masthead and footer already use, so the hero lines up
+          with the bar above it instead of sitting inside it. */}
+      <section className="hero wide">
+        <p className="eyebrow">{s.landing_eyebrow}</p>
+        <h1>{s.landing_headline}</h1>
+        <p className="lede">{s.landing_sub}</p>
+        <p className="cta-row">
+          {known ? (
+            <a
+              className="btn primary"
+              href="/requests"
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                e.preventDefault();
+                onGo("/requests");
+              }}
+            >
+              {s.landing_cta_signed_in}
+            </a>
+          ) : (
+            // **A button, not a link, and deliberately.** Signing in opens a
+            // `<dialog>` on this page rather than navigating anywhere, so an
+            // anchor would be announcing a destination that does not exist.
+            <button className="btn primary" type="button" onClick={onSignIn}>
+              {s.landing_cta}
+            </button>
+          )}
+        </p>
+        {/* The objection answered before it is raised — and only worth saying
+            to somebody who has not already signed in. */}
+        {!known && <p className="cta-note">{s.landing_cta_note}</p>}
+      </section>
+
+      <section className="wide">
+        <h2 className="band-heading">{s.landing_how_heading}</h2>
+        {/* **An ordered list, because the order is the content.** These are
+            three things that happen one after another; a screen reader gets
+            "1 of 3" from the element rather than from the numerals, which are
+            drawn by CSS and hidden from it. */}
+        <ol className="steps">
+          <Step n={1} title={s.landing_step_1_title} body={s.landing_step_1_body} />
+          <Step n={2} title={s.landing_step_2_title} body={s.landing_step_2_body} />
+          <Step n={3} title={s.landing_step_3_title} body={s.landing_step_3_body} />
+        </ol>
+      </section>
+
+      <section className="wide">
+        <h2 className="band-heading">{s.landing_points_heading}</h2>
+        {/* The three points as they were, in a grid rather than stacked. The
+            words are untouched — they were argued over once and the argument
+            still holds; what changed is that they now sit under a heading that
+            says why they are there. */}
+        <div className="cards">
+          <Card title={s.landing_point_1_title} body={s.landing_point_1_body} />
+          <Card title={s.landing_point_2_title} body={s.landing_point_2_body} />
+          <Card title={s.landing_point_3_title} body={s.landing_point_3_body} />
+        </div>
+      </section>
+
+      <section className="closer wide">
+        <h2>{s.landing_close_heading}</h2>
+        <p>{s.landing_close_body}</p>
+        <p className="cta-row">
+          {known ? (
+            <a
+              className="btn primary"
+              href="/requests"
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                e.preventDefault();
+                onGo("/requests");
+              }}
+            >
+              {s.landing_cta_signed_in}
+            </a>
+          ) : (
+            <button className="btn primary" type="button" onClick={onSignIn}>
+              {s.landing_cta}
+            </button>
+          )}
+        </p>
+      </section>
+    </>
+  );
+}
+
+/// One numbered step.
+///
+/// The numeral is an attribute rather than text in the markup: CSS draws it, so
+/// a screen reader hears the list's own position instead of hearing the number
+/// twice.
+function Step({ n, title, body }: { n: number; title: string; body: string }) {
+  return (
+    <li className="step">
+      <span className="step-n" aria-hidden="true">
+        {n}
+      </span>
+      <div>
+        <h3>{title}</h3>
+        <p>{body}</p>
+      </div>
+    </li>
+  );
+}
+
+/// One of the three points, as a card.
+function Card({ title, body }: { title: string; body: string }) {
+  return (
+    <section className="card">
+      <h3>{title}</h3>
+      <p>{body}</p>
+    </section>
+  );
+}
+
+/// `/requests`, reached by somebody the server does not know.
+///
+/// **Not a 404 and not a redirect.** The address is real, the masthead links to
+/// it from every page, and what is missing is a session — so it says which of
+/// those it is and puts the fix on the same screen. A 404 here would read as a
+/// broken link in the site's own navigation bar.
+function RequestsAnonymous({ onSignIn }: { onSignIn: () => void }) {
   const s = useStrings();
   return (
     <>
-      <h1>{s.landing_headline}</h1>
-      <p>{s.landing_sub}</p>
-      <section className="point">
-        <h2>{s.landing_point_1_title}</h2>
-        <p>{s.landing_point_1_body}</p>
-      </section>
-      <section className="point">
-        <h2>{s.landing_point_2_title}</h2>
-        <p>{s.landing_point_2_body}</p>
-      </section>
-      <section className="point">
-        <h2>{s.landing_point_3_title}</h2>
-        <p>{s.landing_point_3_body}</p>
-      </section>
+      <h1>{s.requests_anon_title}</h1>
+      <p>{s.requests_anon_body}</p>
+      <p>
+        <button className="btn primary" type="button" onClick={onSignIn}>
+          {s.nav_signin}
+        </button>
+      </p>
     </>
   );
 }

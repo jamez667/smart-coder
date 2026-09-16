@@ -45,6 +45,36 @@ pub static STRINGS: Strings = Strings {
     landing_point_3_body: "Rien n'est construit tant qu'une personne n'a pas approuvé la \
                            spécification. Le passage obligé est humain, et il le reste.",
 
+    // Shorter than a literal rendering of the English ("des demandes d'un côté,
+    // des spécifications de l'autre"), which set uppercase at this tracking ran
+    // wider than the headline beneath it and made the eyebrow the widest line on
+    // the page — the one thing an eyebrow must not be.
+    landing_eyebrow: "Des demandes, des spécifications",
+    landing_cta: "Déposer une demande",
+    landing_cta_signed_in: "Voir vos demandes",
+    landing_cta_note: "Aucun outil de suivi à apprendre, et pas de compte tant que vous \
+                       n'en voulez pas.",
+
+    landing_how_heading: "Comment ça marche",
+    landing_step_1_title: "Vous décrivez le changement",
+    landing_step_1_body: "Une ou deux phrases, dans les mots que vous emploieriez pour \
+                          l'expliquer à un collègue. Dites ce qui ne va pas, ou ce que le \
+                          logiciel devrait faire à la place.",
+    landing_step_2_title: "Elle est confrontée au code",
+    landing_step_2_body: "Votre demande devient une spécification qui nomme les fichiers, \
+                          le comportement attendu et les cas limites — ancrée dans le \
+                          dépôt tel qu'il est, et non dans ce que la demande supposait.",
+    landing_step_3_title: "Un développeur tranche",
+    landing_step_3_body: "La spécification est soumise à une personne, qui l'approuve, la \
+                          renvoie pour une nouvelle version, ou l'écarte. Vous suivez la \
+                          vôtre dès l'instant où vous la déposez.",
+
+    landing_points_heading: "Pourquoi c'est conçu ainsi",
+
+    landing_close_heading: "Commencez par une demande",
+    landing_close_body: "Rien à installer, rien à configurer. Décrivez une chose à faire \
+                         et lisez ce qui vous revient.",
+
     signin_title: "Se connecter",
     signin_intro: "Déposer une demande nécessite une adresse e-mail — c'est ce qui vous \
                    permet de retrouver ce que vous avez déposé, et cela évite que ce \
@@ -147,6 +177,11 @@ pub static STRINGS: Strings = Strings {
     nav_mine: "Vos demandes",
     nav_review: "Demandes à relire",
     nav_signout: "Se déconnecter",
+    nav_requests: "Demandes",
+    nav_overview: "Présentation",
+    requests_anon_title: "Connectez-vous pour voir vos demandes",
+    requests_anon_body: "Cette page montre ce que vous avez déposé et où cela en est. Se \
+                         connecter demande une adresse e-mail, et rien d'autre.",
     theme_to_light: "Clair",
     theme_to_dark: "Sombre",
     footer_tagline_app: " — demandez un changement, recevez une spécification.",

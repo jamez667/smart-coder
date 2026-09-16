@@ -46,6 +46,15 @@ export interface Strings {
   nav_mine: string;
   nav_review: string;
   nav_signout: string;
+  // The navigation bar, which is not the account menu: two fixed entries drawn
+  // for every caller, signed in or not. `nav_requests` is deliberately a third
+  // word for requests beside `nav_mine` and `nav_admin_review` — those name a
+  // specific surface in a list, this names the address that resolves to
+  // whichever of them the caller is entitled to, and it is read in a bar.
+  nav_requests: string;
+  nav_overview: string;
+  requests_anon_title: string;
+  requests_anon_body: string;
   nav_admin_heading: string;
   nav_admin_review: string;
   nav_admin_settings: string;
@@ -64,6 +73,23 @@ export interface Strings {
   landing_point_2_body: string;
   landing_point_3_title: string;
   landing_point_3_body: string;
+  // What a marketing page needs around those three points: a call to action, a
+  // sequence saying what happens after it is taken, and a close. The points
+  // themselves are unchanged.
+  landing_eyebrow: string;
+  landing_cta: string;
+  landing_cta_signed_in: string;
+  landing_cta_note: string;
+  landing_how_heading: string;
+  landing_step_1_title: string;
+  landing_step_1_body: string;
+  landing_step_2_title: string;
+  landing_step_2_body: string;
+  landing_step_3_title: string;
+  landing_step_3_body: string;
+  landing_points_heading: string;
+  landing_close_heading: string;
+  landing_close_body: string;
 
   // signing in
   signin_title: string;

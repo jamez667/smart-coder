@@ -147,6 +147,22 @@ pub mod public_route {
     // which is the part of that reasoning worth keeping.
     /// The landing page — what `/` is, and the first thing a stranger sees.
     pub const LANDING: &str = "/";
+    /// The one address for "the requests I am entitled to see".
+    ///
+    /// **Public rather than private, and that is the whole point of it.** The
+    /// two surfaces it stands in front of are not: `/public` is a filer's own
+    /// requests and `/review` is a reviewer's queue, and which of those a
+    /// person wants depends on what the server said they can do. A masthead
+    /// cannot link to "requests" without picking one, and picking one means the
+    /// bar changes address by role — so a link shared between two colleagues
+    /// lands one of them somewhere they cannot go.
+    ///
+    /// This address serves the document to anybody, including a stranger, and
+    /// the interface draws whichever surface `/me` entitles them to. **Serving
+    /// the document grants nothing**: the data behind both surfaces is still
+    /// fetched from endpoints that check the caller, so a stranger who types
+    /// this gets a sign-in prompt rather than anyone's requests.
+    pub const REQUESTS: &str = "/requests";
 }
 
 /// The developer's own paths.
@@ -1033,6 +1049,11 @@ fn is_public_path(path: &str) -> bool {
     // which is the fact the 404 exists to withhold.
     path == public_route::LANDING
         || path == public_route::FILE
+        // Public for the same reason the landing page is: a stranger reaches it
+        // from the masthead, so a method it does not serve must answer the
+        // public 404 rather than `unauthorized`, which would tell them the
+        // address is real and gated.
+        || path == public_route::REQUESTS
         || path == public_route::SIGNIN
         || path == public_route::SIGNOUT
         || path == public_route::LANGUAGE
@@ -2283,6 +2304,11 @@ fn api_admin(ctx: &mut Ctx<'_>, caller: &Option<Caller>, view: AdminView) -> Res
 fn wants_document(path: &str) -> bool {
     path == public_route::LANDING
         || path == public_route::FILE
+        // **Served to everybody, and it has to be.** A stranger who follows the
+        // masthead's link must reach a page that offers them a way in; a 404
+        // would make the bar's own link look broken. What they can *see* there
+        // is still decided by the API behind it, which knows who they are.
+        || path == public_route::REQUESTS
         || path == public_route::SIGNIN
         || path.starts_with(public_route::REQUEST_PREFIX)
         // The administrative addresses. **Answering the document here does not
@@ -4293,6 +4319,11 @@ mod tests {
         for path in [
             public_route::LANDING,
             public_route::FILE,
+            // The masthead links here from every page, for every caller
+            // including a stranger. A path the client did not claim would draw
+            // "Not found" from the site's own navigation bar, which is the most
+            // visible place this agreement can break.
+            public_route::REQUESTS,
             public_route::SIGNIN,
             private_route::REVIEW,
             private_route::SETTINGS,
@@ -6840,6 +6871,32 @@ mod tests {
         assert!(wants_document(private_route::SETTINGS));
         assert!(wants_document(private_route::REVIEW));
         assert!(wants_document("/request/r-1"));
+
+        // **`/requests` and `/request/<id>` are one character apart**, and both
+        // are served — so the thing worth pinning is that neither is reached by
+        // the rule meant for the other. The client matches the second with a
+        // regex requiring the slash and an id for exactly this reason; here the
+        // prefix constants carry their trailing slash, which is what keeps
+        // `starts_with` from swallowing the list page.
+        assert!(wants_document(public_route::REQUESTS));
+        assert!(!public_route::REQUESTS.starts_with(public_route::REQUEST_PREFIX));
+        assert!(!public_route::REQUESTS.starts_with("/request/"));
+        // The reverse, which is the direction that would actually bite: a
+        // trailing-slash prefix cannot swallow `/requests`, so adding the list
+        // page did not quietly reroute it through the detail rule.
+        assert!(!"/requests".starts_with("/request/"));
+        // `/requests/` is nobody's address and is not served.
+        assert!(!wants_document("/requests/"));
+
+        // **`/request/` with no id is served, and answers "Not found".** Not a
+        // new behaviour and not a bug worth a route for: `starts_with` on the
+        // prefix matches it here, and the client's regex demands an id, so the
+        // interface loads and says the address is unknown. Pinned rather than
+        // corrected because the two layers disagreeing is the interesting fact
+        // — if the client's regex is ever loosened to match this, a request
+        // detail page would try to render with no id, and this line is what
+        // would have to be edited to allow it.
+        assert!(wants_document("/request/"));
     }
 
     #[test]

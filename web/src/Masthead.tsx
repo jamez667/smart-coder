@@ -11,10 +11,18 @@ export function Masthead({
   me,
   onSignIn,
   onGo,
+  path,
 }: {
   me: Me;
   onSignIn: () => void;
   onGo: (to: string) => void;
+  /// The address being drawn, so the bar can mark its own entry as current.
+  ///
+  /// Passed in rather than read from `window.location` here: the application
+  /// routes with `pushState`, so the global updates without re-rendering
+  /// anything, and a bar reading it directly would highlight the previous page
+  /// until something else happened to redraw it.
+  path: string;
 }) {
   const s = useStrings();
   return (
@@ -31,6 +39,7 @@ export function Masthead({
             </span>
             <span>{s.brand}</span>
           </a>
+          <Nav path={path} onGo={onGo} />
           <div className="controls">
             <label className="theme to-dark" htmlFor="theme-invert" title={s.theme_to_dark}>
               <span className="theme-in">{s.theme_to_dark}</span>
@@ -61,6 +70,82 @@ export function Masthead({
         </div>
       </header>
     </>
+  );
+}
+
+/// A link that routes rather than reloads.
+///
+/// **A real `href`, with the click intercepted.** Middle-click, "open in new
+/// tab" and a screen reader announcing "link" all depend on the attribute being
+/// there; a `<span onClick>` looks identical and is none of those things.
+///
+/// Hoisted out of `AccountMenu`, which had this exact function inside it, when
+/// the navigation bar needed the same behaviour. Two copies of the modifier-key
+/// check is two places to get it wrong.
+function Link({
+  to,
+  onGo,
+  className,
+  current,
+  children,
+}: {
+  to: string;
+  onGo: (to: string) => void;
+  className?: string;
+  /// Marks this as the page being shown. Renders `aria-current="page"`, which is
+  /// what a screen reader announces — the visual underline alone says nothing to
+  /// somebody who cannot see it.
+  current?: boolean;
+  children: string;
+}) {
+  return (
+    <a
+      href={to}
+      className={className}
+      aria-current={current ? "page" : undefined}
+      onClick={(e) => {
+        // Let the browser handle anything that is not a plain left click, so
+        // opening in a new tab still works.
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        onGo(to);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+/// The navigation bar's own entries, between the wordmark and the controls.
+///
+/// **Two entries, and the same two for everybody** — including a stranger. The
+/// account menu is where a surface appears or disappears with a capability;
+/// this bar is the fixed frame around it, and a frame whose shape changes when
+/// you sign in is one a returning reader has to re-learn.
+///
+/// That is safe because `/requests` serves everybody: it draws the reviewer's
+/// queue, the filer's own requests, or a prompt to sign in, and the server
+/// decides which by answering `/me`. A stranger following it is not refused —
+/// they are shown the door.
+function Nav({ path, onGo }: { path: string; onGo: (to: string) => void }) {
+  const s = useStrings();
+  return (
+    <nav className="nav" aria-label={s.nav_requests}>
+      <Link to="/" onGo={onGo} current={path === "/"}>
+        {s.nav_overview}
+      </Link>
+      {/* `/public` and `/review` are the two surfaces this stands in front of,
+          and both still work — a bookmark to either is not broken by this. What
+          `current` covers is the reader arriving at one of them from somewhere
+          other than this bar, who should still see where they are. */}
+      <Link
+        to="/requests"
+        onGo={onGo}
+        current={path === "/requests" || path === "/public" || path === "/review"}
+      >
+        {s.nav_requests}
+      </Link>
+    </nav>
   );
 }
 
@@ -115,29 +200,16 @@ function LanguagePicker() {
 /// menu could not have.
 function AccountMenu({ me, onGo }: { me: Me; onGo: (to: string) => void }) {
   const s = useStrings();
-  // **A real `href`, with the click intercepted.** Middle-click, "open in new
-  // tab" and a screen reader announcing "link" all depend on the attribute being
-  // there; a `<span onClick>` looks identical and is none of those things.
-  const Link = ({ to, children }: { to: string; children: string }) => (
-    <a
-      href={to}
-      onClick={(e) => {
-        // Let the browser handle anything that is not a plain left click, so
-        // opening in a new tab still works.
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-        e.preventDefault();
-        onGo(to);
-      }}
-    >
-      {children}
-    </a>
-  );
+  // `Link` lives at module scope now — the navigation bar needed the same
+  // modifier-key handling, and it was declared inside this function, which also
+  // meant a fresh component type on every render.
+  const To = (p: { to: string; children: string }) => <Link {...p} onGo={onGo} />;
 
   return (
     <details className="acct">
       <summary className="btn">{s.nav_account}</summary>
       <div className="menu">
-        <Link to="/public">{s.nav_mine}</Link>
+        <To to="/public">{s.nav_mine}</To>
         {me.can.administer && (
           <>
             <hr />
@@ -146,18 +218,18 @@ function AccountMenu({ me, onGo }: { me: Me; onGo: (to: string) => void }) {
                 not read English, and a French menu whose every entry opens an
                 English page is worse than an English menu. */}
             <p className="grp">{s.nav_admin_heading}</p>
-            <Link to="/review">{s.nav_admin_review}</Link>
-            <Link to="/settings">{s.nav_admin_settings}</Link>
-            <Link to="/repos">{s.nav_admin_repos}</Link>
-            <Link to="/owners">{s.nav_admin_owners}</Link>
-            <Link to="/daemons">{s.nav_admin_daemons}</Link>
-            <Link to="/accounts">{s.nav_admin_accounts}</Link>
+            <To to="/review">{s.nav_admin_review}</To>
+            <To to="/settings">{s.nav_admin_settings}</To>
+            <To to="/repos">{s.nav_admin_repos}</To>
+            <To to="/owners">{s.nav_admin_owners}</To>
+            <To to="/daemons">{s.nav_admin_daemons}</To>
+            <To to="/accounts">{s.nav_admin_accounts}</To>
           </>
         )}
         {me.can.review && !me.can.administer && (
           <>
             <hr />
-            <Link to="/">{s.nav_review}</Link>
+            <To to="/">{s.nav_review}</To>
           </>
         )}
         <hr />

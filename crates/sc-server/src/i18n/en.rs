@@ -45,6 +45,31 @@ pub static STRINGS: Strings = Strings {
     landing_point_3_body: "Nothing is built until a person approves the spec. The gate is \
                            a human one, and it stays that way.",
 
+    landing_eyebrow: "Requests in, specifications out",
+    landing_cta: "File a request",
+    landing_cta_signed_in: "Go to your requests",
+    landing_cta_note: "No issue tracker to learn, and no account until you want one.",
+
+    landing_how_heading: "How it works",
+    landing_step_1_title: "You describe the change",
+    landing_step_1_body: "A sentence or two, in the words you would use to explain it to \
+                          a colleague. Say what is wrong, or what you wish the software \
+                          did instead.",
+    landing_step_2_title: "It is read against the code",
+    landing_step_2_body: "Your request is worked up into a specification that names the \
+                          files, the behaviour and the edge cases — grounded in the \
+                          repository as it actually is, not in what the request assumed.",
+    landing_step_3_title: "A developer decides",
+    landing_step_3_body: "The specification goes to a person, who approves it, sends it \
+                          back for another pass, or discards it. You can follow yours \
+                          from the moment you file it.",
+
+    landing_points_heading: "Why it is shaped this way",
+
+    landing_close_heading: "Start with one request",
+    landing_close_body: "There is nothing to install and nothing to configure. Describe \
+                         one thing that needs doing and read what comes back.",
+
     signin_title: "Sign in",
     signin_intro: "Filing a request needs an email address — it is how you find your way back \
                    to what you filed, and it keeps this form from being a free-for-all.",
@@ -143,6 +168,11 @@ pub static STRINGS: Strings = Strings {
     nav_mine: "What you have filed",
     nav_review: "Requests to review",
     nav_signout: "Sign out",
+    nav_requests: "Requests",
+    nav_overview: "Overview",
+    requests_anon_title: "Sign in to see your requests",
+    requests_anon_body: "This page shows what you have filed and how far along it is. \
+                         Signing in takes an email address and nothing else.",
     theme_to_light: "Light",
     theme_to_dark: "Dark",
     footer_tagline_app: " — ask for a change, get a spec back.",

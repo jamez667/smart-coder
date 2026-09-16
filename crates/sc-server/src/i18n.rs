@@ -256,6 +256,41 @@ pub struct Strings {
     pub landing_point_3_title: &'static str,
     pub landing_point_3_body: &'static str,
 
+    // -- the landing page, continued: what a marketing page has to add -------
+    //
+    // **The three points above answer "what is this", and stop there.** What
+    // they never answered is the two questions a stranger asks next — what do I
+    // *do*, and what happens after I do it — so the page said its piece and
+    // left the reader with no next step but the masthead's sign-in button.
+    //
+    // These fields are that next step and that sequence. They are separate
+    // fields rather than a rewrite of the three points because the points are
+    // good and were argued over; what was missing was around them.
+    /// The call to action under the headline, for somebody holding nothing.
+    pub landing_cta: &'static str,
+    /// The same spot once they are signed in. **A different word, deliberately**
+    /// — "Get started" said to somebody who already started is the kind of
+    /// detail that tells a reader the page has not noticed them.
+    pub landing_cta_signed_in: &'static str,
+    /// The line under the calls to action. Answers "what will this cost me"
+    /// before the reader has to ask, which is the objection that stops them.
+    pub landing_cta_note: &'static str,
+    /// The band above the fold naming what this is, in three words.
+    pub landing_eyebrow: &'static str,
+    /// The heading over the numbered sequence.
+    pub landing_how_heading: &'static str,
+    pub landing_step_1_title: &'static str,
+    pub landing_step_1_body: &'static str,
+    pub landing_step_2_title: &'static str,
+    pub landing_step_2_body: &'static str,
+    pub landing_step_3_title: &'static str,
+    pub landing_step_3_body: &'static str,
+    /// The heading over the three points, which had none — they simply began.
+    pub landing_points_heading: &'static str,
+    /// The closing band, after the argument has been made.
+    pub landing_close_heading: &'static str,
+    pub landing_close_body: &'static str,
+
     // -- signing in ---------------------------------------------------------
     pub signin_title: &'static str,
     pub signin_intro: &'static str,
@@ -411,6 +446,26 @@ pub struct Strings {
     /// The account menu's sign-out. Separate from `file_signout`, which was the
     /// rendered filing page's button — same words today, different callers.
     pub nav_signout: &'static str,
+    /// The masthead's link to `/requests`, beside the wordmark.
+    ///
+    /// **Distinct from `nav_mine` and `nav_admin_review`, which both point at
+    /// requests too**, and that is not an oversight. Those are account-menu
+    /// entries naming a *specific* surface — what I filed, what I review. This
+    /// names the one address that serves whichever of those the caller is
+    /// entitled to, and it is read in a bar rather than a list, so it is the
+    /// shortest of the three on purpose.
+    pub nav_requests: &'static str,
+    /// The masthead's link back to the marketing page.
+    ///
+    /// The wordmark already goes there. This is for a reader who does not know
+    /// that a wordmark is clickable, which is most of them.
+    pub nav_overview: &'static str,
+    /// What `/requests` says to somebody who is not signed in.
+    ///
+    /// Not a 404 and not a redirect: the address is real and the reason they
+    /// cannot see it is fixable in one click, so it says which of those it is.
+    pub requests_anon_title: &'static str,
+    pub requests_anon_body: &'static str,
     /// The theme toggle's `title`, and its screen-reader text. The glyphs beside
     /// it are decorative and hidden from one, so these carry the whole meaning.
     pub theme_to_light: &'static str,
@@ -766,6 +821,20 @@ mod tests {
             s.landing_point_2_body,
             s.landing_point_3_title,
             s.landing_point_3_body,
+            s.landing_cta,
+            s.landing_cta_signed_in,
+            s.landing_cta_note,
+            s.landing_eyebrow,
+            s.landing_how_heading,
+            s.landing_step_1_title,
+            s.landing_step_1_body,
+            s.landing_step_2_title,
+            s.landing_step_2_body,
+            s.landing_step_3_title,
+            s.landing_step_3_body,
+            s.landing_points_heading,
+            s.landing_close_heading,
+            s.landing_close_body,
             s.signin_title,
             s.signin_intro,
             s.signin_email_label,
@@ -839,6 +908,10 @@ mod tests {
             s.nav_mine,
             s.nav_review,
             s.nav_signout,
+            s.nav_requests,
+            s.nav_overview,
+            s.requests_anon_title,
+            s.requests_anon_body,
             s.theme_to_light,
             s.theme_to_dark,
             s.footer_tagline_app,

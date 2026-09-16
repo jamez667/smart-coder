@@ -388,3 +388,114 @@ font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .note{background:var(--surface);border:1px solid var(--line);
 border-inline-start:3px solid var(--link);border-radius:var(--radius);
 padding:var(--s3) var(--s4);margin:var(--s5) 0;box-shadow:var(--shadow)}
+
+/* ===== the navigation bar ================================================
+   Two entries between the wordmark and the controls. `flex:1` rather than a
+   fixed width, so the bar keeps the wordmark hard left and the controls hard
+   right at every width and this takes what is between — which is what the
+   masthead's `space-between` was already doing with two children and stops
+   doing the moment there are three. */
+.nav{display:flex;align-items:center;gap:var(--s4);flex:1}
+.nav a{position:relative;padding-block:var(--s1);text-decoration:none;
+color:var(--dim);font-size:.85rem;font-weight:600;white-space:nowrap;
+transition:color .12s}
+.nav a:hover{color:var(--fg)}
+/* The current page, marked by the same attribute a screen reader reads rather
+   than by a class — one source of truth for "you are here", and a state that
+   cannot be styled as current while being announced as ordinary. */
+.nav a[aria-current="page"]{color:var(--fg)}
+.nav a[aria-current="page"]::after{content:"";position:absolute;
+inset-inline:0;bottom:-2px;height:2px;border-radius:2px;background:var(--link)}
+/* On a phone the masthead wraps, and the nav takes its own full-width row
+   below the wordmark rather than squeezing between it and the controls. */
+@media(max-width:640px){.nav{flex-basis:100%;order:3;gap:var(--s5)}}
+
+/* ===== the marketing page ================================================
+   **A wider column than the prose.** `main` is capped at 45rem, a measure
+   chosen for reading a specification; the landing page's job is different and
+   its first screen is the whole argument.
+
+   Widened by **raising `main`'s own cap on this page** rather than by letting a
+   section escape it with negative margins. That was the first attempt, and it
+   encodes the 45rem and the 60rem and the padding in one expression that is
+   wrong the moment any of the three changes — in a file where those numbers are
+   already declared, once, elsewhere. `:has()` is what the theme toggle in this
+   same stylesheet already routes on, so it is not a new idea here.
+
+   The 60rem is the bar's width, so the hero lines up with the masthead above it
+   instead of sitting inset from it. */
+main:has(.wide){max-width:60rem}
+/* Sections still cap their own prose where a full 60rem line would be too wide
+   to read; what they gain is the room to be centred in, and the grids below
+   take the whole width. */
+.wide{width:100%}
+
+/* The hero. */
+.hero{padding-block:var(--s6) 3rem;text-align:center}
+.eyebrow{margin:0 0 var(--s4);font-size:.75rem;font-weight:700;
+letter-spacing:.09em;text-transform:uppercase;color:var(--link)}
+.hero h1{font-size:clamp(2rem,5.5vw,3.25rem);margin:0 auto var(--s5);
+max-width:18ch;line-height:1.1}
+/* Not `h1+p`: that rule is the spec pages' subtitle and carries a 3rem bottom
+   margin meant to clear a form. Named instead, so changing one never moves the
+   other. */
+.hero .lede{max-width:46ch;margin:0 auto;color:var(--dim);
+font-size:clamp(1rem,1.6vw,1.15rem);line-height:1.6}
+.cta-row{display:flex;justify-content:center;gap:var(--s3);
+flex-wrap:wrap;margin:var(--s5) 0 0}
+.cta-note{margin:var(--s3) 0 0;font-size:.82rem;color:var(--faint)}
+/* The call to action, at the size a first screen wants. The global `button`
+   rule gives every button 100% width and a 16px top margin — right in a form,
+   wrong here — so this resets both, exactly as `.controls` already does for the
+   masthead's own buttons. */
+.btn.primary{width:auto;margin:0;height:auto;padding:.7rem 1.4rem;
+font-size:.95rem;background:var(--link);color:var(--accent-ink);
+border-color:transparent}
+.btn.primary:hover{background:var(--link);filter:brightness(1.08);
+border-color:transparent}
+
+/* A band heading: centred and spaced away from what came before, unlike the
+   flush-left `h2` the spec pages use. */
+.band-heading{text-align:center;font-size:clamp(1.3rem,2.5vw,1.6rem);
+margin:3.5rem 0 var(--s5)}
+
+/* The numbered sequence. */
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:var(--s5)}
+@media(min-width:48rem){.steps{grid-template-columns:repeat(3,1fr);gap:var(--s5)}}
+.step{display:flex;gap:var(--s4);align-items:flex-start}
+@media(min-width:48rem){.step{flex-direction:column;gap:var(--s3)}}
+/* The numeral, drawn rather than written: the list element already tells a
+   screen reader the position, so this is decorative and hidden from one. */
+.step-n{flex:none;width:2rem;height:2rem;border-radius:var(--pill);
+display:inline-flex;align-items:center;justify-content:center;
+background:color-mix(in srgb,var(--link) 14%,transparent);
+color:var(--link);font-weight:700;font-size:.9rem}
+.step h3{margin:0 0 var(--s2);font-family:"Fraunces",Georgia,"Times New Roman",serif;
+font-weight:600;font-size:1.05rem;letter-spacing:-.01em}
+.step p{margin:0;color:var(--dim);font-size:.92rem;line-height:1.65}
+
+/* The three points, as cards. */
+.cards{display:grid;gap:var(--s4)}
+@media(min-width:48rem){.cards{grid-template-columns:repeat(3,1fr)}}
+.card{padding:var(--s5);background:var(--surface);
+border:1px solid var(--line);border-radius:var(--radius);
+box-shadow:var(--shadow)}
+.card h3{margin:0 0 var(--s2);font-family:"Fraunces",Georgia,"Times New Roman",serif;
+font-weight:600;font-size:1.05rem;letter-spacing:-.01em}
+.card p{margin:0;color:var(--dim);font-size:.92rem;line-height:1.65}
+
+/* The closing band. The same argument as the hero, made once more now that it
+   has been made — so it carries the gradient's counterpart rather than a second
+   flat surface, and reads as the end of the page rather than a fourth section
+   of it. */
+.closer{margin-block:4rem 1rem;padding:3rem var(--s5);text-align:center;
+border:1px solid var(--line);border-radius:var(--radius);
+background:radial-gradient(ellipse 100% 120% at 50% 0%,
+color-mix(in srgb,var(--link) 12%,transparent),transparent 70%),var(--surface)}
+.closer h2{margin:0 0 var(--s3);font-size:clamp(1.3rem,2.5vw,1.7rem)}
+.closer p{margin:0 auto;max-width:44ch;color:var(--dim);line-height:1.65}
+/* The `.cta-row` default is a 1.5rem gap from what precedes it, which is right
+   under a hero's lede and too tight under a closing paragraph inside a box —
+   the button ends up nearer the text than the text is to the box's own edge,
+   and reads as having fallen into it. */
+.closer .cta-row{margin-top:var(--s5)}
