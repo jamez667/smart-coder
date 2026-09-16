@@ -291,6 +291,69 @@ pub struct Strings {
     pub landing_close_heading: &'static str,
     pub landing_close_body: &'static str,
 
+    // -- the landing page as a product page ----------------------------------
+    //
+    // **The page argued for the wrong thing, and these fields are the
+    // correction.** Everything above reads as "ask *us* for a change" — one
+    // intake queue, belonging to whoever is running the server. What this is
+    // actually for is a company running its own: their repositories, their
+    // stakeholders, their machine drafting the specs.
+    //
+    // The distinction is not marketing gloss. A reader who thinks this is a
+    // suggestion box for somebody else's project never asks the question the
+    // page exists to answer, which is whether to deploy one.
+    /// Who the page is talking to, named before the argument starts.
+    pub landing_for_heading: &'static str,
+    pub landing_for_body: &'static str,
+    /// The two sides of the deployment, as headings over their own columns.
+    ///
+    /// **Two audiences on one page**, because the product has two and they want
+    /// opposite things: the people filing want to be heard without learning a
+    /// tracker, and the team receiving wants the noise to arrive as something
+    /// they can act on.
+    pub landing_side_filers_title: &'static str,
+    pub landing_side_filers_body: &'static str,
+    pub landing_side_team_title: &'static str,
+    pub landing_side_team_body: &'static str,
+    /// The section on what the deployment costs and where it runs.
+    ///
+    /// **The strongest honest claim the product has**, and the one a buyer
+    /// checks first: the intake server holds no repository, no filesystem and
+    /// no model, and the machine that drafts dials out rather than listening.
+    pub landing_host_heading: &'static str,
+    pub landing_host_body: &'static str,
+    pub landing_host_1_title: &'static str,
+    pub landing_host_1_body: &'static str,
+    pub landing_host_2_title: &'static str,
+    pub landing_host_2_body: &'static str,
+    pub landing_host_3_title: &'static str,
+    pub landing_host_3_body: &'static str,
+    /// The live demo band.
+    ///
+    /// **Says what it is before it invites anybody in.** This deployment
+    /// collects for the product's own repository, which makes it a working
+    /// example and *not* the way anybody else's requests get handled — a reader
+    /// who files here thinking otherwise has been misled by the page.
+    pub landing_demo_heading: &'static str,
+    pub landing_demo_body: &'static str,
+    pub landing_demo_note: &'static str,
+    pub landing_demo_cta: &'static str,
+    /// Free and open source, said in the hero rather than in a footer.
+    ///
+    /// **For a self-hosted product this is the objection, not a footnote.** The
+    /// reader is being asked to run a container on their own infrastructure;
+    /// what they want to know before reading any further is what it costs and
+    /// whether they can see inside it. The licence name is deliberately in the
+    /// string — "open source" is a claim a reader has learned to discount, and
+    /// "MIT" is the version of it that can be checked.
+    pub landing_oss_badge: &'static str,
+    /// The section making the same point at length, with the repository behind
+    /// it. Separate from the badge because one is read in half a second and the
+    /// other is read by somebody who has decided to care.
+    pub landing_oss_heading: &'static str,
+    pub landing_oss_body: &'static str,
+    pub landing_oss_cta: &'static str,
+
     // -- signing in ---------------------------------------------------------
     pub signin_title: &'static str,
     pub signin_intro: &'static str,
@@ -835,6 +898,28 @@ mod tests {
             s.landing_points_heading,
             s.landing_close_heading,
             s.landing_close_body,
+            s.landing_for_heading,
+            s.landing_for_body,
+            s.landing_side_filers_title,
+            s.landing_side_filers_body,
+            s.landing_side_team_title,
+            s.landing_side_team_body,
+            s.landing_host_heading,
+            s.landing_host_body,
+            s.landing_host_1_title,
+            s.landing_host_1_body,
+            s.landing_host_2_title,
+            s.landing_host_2_body,
+            s.landing_host_3_title,
+            s.landing_host_3_body,
+            s.landing_demo_heading,
+            s.landing_demo_body,
+            s.landing_demo_note,
+            s.landing_demo_cta,
+            s.landing_oss_badge,
+            s.landing_oss_heading,
+            s.landing_oss_body,
+            s.landing_oss_cta,
             s.signin_title,
             s.signin_intro,
             s.signin_email_label,

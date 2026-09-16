@@ -90,6 +90,30 @@ export interface Strings {
   landing_points_heading: string;
   landing_close_heading: string;
   landing_close_body: string;
+  // The product page: who deploys it, the two audiences it serves, where it
+  // runs, what it costs, and the demonstration this deployment happens to be.
+  landing_for_heading: string;
+  landing_for_body: string;
+  landing_side_filers_title: string;
+  landing_side_filers_body: string;
+  landing_side_team_title: string;
+  landing_side_team_body: string;
+  landing_host_heading: string;
+  landing_host_body: string;
+  landing_host_1_title: string;
+  landing_host_1_body: string;
+  landing_host_2_title: string;
+  landing_host_2_body: string;
+  landing_host_3_title: string;
+  landing_host_3_body: string;
+  landing_demo_heading: string;
+  landing_demo_body: string;
+  landing_demo_note: string;
+  landing_demo_cta: string;
+  landing_oss_badge: string;
+  landing_oss_heading: string;
+  landing_oss_body: string;
+  landing_oss_cta: string;
 
   // signing in
   signin_title: string;

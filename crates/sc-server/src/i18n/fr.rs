@@ -31,49 +31,58 @@ pub static STRINGS: Strings = Strings {
     nav_admin_accounts: "Qui peut déposer",
     dialog_close: "Fermer",
 
-    landing_headline: "Demandez un changement, recevez une spécification.",
-    landing_sub: "Décrivez ce qu'il faut faire avec vos propres mots. Vous recevez en \
-                  retour une spécification écrite que le développeur lira, approuvera ou \
-                  renverra pour une nouvelle version.",
-    landing_point_1_title: "Dites-le simplement",
-    landing_point_1_body: "Ni modèle de ticket, ni jargon. Une ou deux phrases sur ce qui \
-                           ne va pas ou sur ce que vous voulez suffisent à démarrer.",
-    landing_point_2_title: "Une spécification, pas un ticket",
-    landing_point_2_body: "Ce que vous recevez est une spécification écrite, ancrée dans le \
-                           code réel, et non une reformulation de votre demande.",
-    landing_point_3_title: "Quelqu'un la lit",
-    landing_point_3_body: "Rien n'est construit tant qu'une personne n'a pas approuvé la \
-                           spécification. Le passage obligé est humain, et il le reste.",
+    landing_headline: "Transformez chaque demande en spécification prête à développer.",
+    landing_sub: "Tickets du support, demandes des commerciaux, idées lancées dans un couloir : tout arrive sous forme de prose vague. Smart Coder confronte chacune à votre code et rédige la spécification — qu'un de vos développeurs approuve, renvoie ou écarte.",
+    landing_point_1_title: "Une spécification, pas une pull request",
+    landing_point_1_body: "Il rédige la spécification et s'arrête là. Aucune branche, aucun correctif, rien de fusionné — vos développeurs écrivent toujours le code, à partir d'un document qui nomme déjà les fichiers et les cas limites.",
+    landing_point_2_title: "Ancrée dans votre code",
+    landing_point_2_body: "Chaque spécification est rédigée face au dépôt tel qu'il est, et non face à ce que la demande supposait. C'est toute la différence entre un ticket reformulé et un texte dont on peut partir.",
+    landing_point_3_title: "Une personne garde la porte",
+    landing_point_3_body: "Rien n'entre dans votre dépôt tant qu'un de vos développeurs n'a pas accepté. Les personnes que vous désignez peuvent renvoyer ou écarter une spécification ; seul le propriétaire peut accepter.",
 
-    // Shorter than a literal rendering of the English ("des demandes d'un côté,
-    // des spécifications de l'autre"), which set uppercase at this tracking ran
-    // wider than the headline beneath it and made the eyebrow the widest line on
-    // the page — the one thing an eyebrow must not be.
-    landing_eyebrow: "Des demandes, des spécifications",
+    landing_eyebrow: "La réception des demandes, pour les équipes techniques",
     landing_cta: "Déposer une demande",
     landing_cta_signed_in: "Voir vos demandes",
-    landing_cta_note: "Aucun outil de suivi à apprendre, et pas de compte tant que vous \
-                       n'en voulez pas.",
+    landing_cta_note: "Gratuit et open source. À héberger vous-même, dans un conteneur.",
+    landing_oss_badge: "Gratuit et open source — licence MIT",
+
+    landing_for_heading: "À qui cela s'adresse",
+    landing_for_body: "Aux équipes techniques dont le backlog arrive de partout à la fois — support, commerciaux, clients, direction — et toujours sous la mauvaise forme. Vous déployez Smart Coder pour vos propres dépôts, décidez qui peut y déposer, et recevez des spécifications au lieu d'une file de prose que personne n'a le temps de trier.",
+    landing_side_filers_title: "Pour celles et ceux qui demandent",
+    landing_side_filers_body: "Aucun outil à apprendre, aucun formulaire à remplir. Ils décrivent le problème avec leurs mots, dans leur langue, et suivent ce qu'il en advient. À vous de décider si cela concerne vos équipes, vos clients, ou toute personne disposant du lien.",
+    landing_side_team_title: "Pour l'équipe qui reçoit",
+    landing_side_team_body: "Les demandes arrivent déjà instruites : ce qu'elles touchent, le comportement attendu, les endroits délicats. Le spam est filtré avant d'atteindre quiconque, et chaque compte est plafonné : un formulaire ouvert ne devient pas une passoire.",
 
     landing_how_heading: "Comment ça marche",
-    landing_step_1_title: "Vous décrivez le changement",
-    landing_step_1_body: "Une ou deux phrases, dans les mots que vous emploieriez pour \
-                          l'expliquer à un collègue. Dites ce qui ne va pas, ou ce que le \
-                          logiciel devrait faire à la place.",
-    landing_step_2_title: "Elle est confrontée au code",
-    landing_step_2_body: "Votre demande devient une spécification qui nomme les fichiers, \
-                          le comportement attendu et les cas limites — ancrée dans le \
-                          dépôt tel qu'il est, et non dans ce que la demande supposait.",
-    landing_step_3_title: "Un développeur tranche",
-    landing_step_3_body: "La spécification est soumise à une personne, qui l'approuve, la \
-                          renvoie pour une nouvelle version, ou l'écarte. Vous suivez la \
-                          vôtre dès l'instant où vous la déposez.",
+    landing_step_1_title: "Quelqu'un dépose une demande",
+    landing_step_1_body: "Via un formulaire web que vous hébergez, en une ou deux phrases. La personne choisit le dépôt et s'il s'agit d'un bogue, d'une fonctionnalité ou d'une amélioration — rien de plus technique que cela.",
+    landing_step_2_title: "Votre machine rédige la spécification",
+    landing_step_2_body: "Un démon, sur votre propre matériel, récupère la demande, la confronte au dépôt qu'il détient, et rédige une spécification nommant les fichiers, le comportement et les cas limites.",
+    landing_step_3_title: "Votre développeur tranche",
+    landing_step_3_body: "La spécification revient pour relecture. Acceptez-la et elle est inscrite dans le dépôt sous forme de fichier Markdown, prête à développer. Renvoyez-la pour une nouvelle version, ou écartez-la.",
 
-    landing_points_heading: "Pourquoi c'est conçu ainsi",
+    landing_points_heading: "Ce qui fait la différence",
 
-    landing_close_heading: "Commencez par une demande",
-    landing_close_body: "Rien à installer, rien à configurer. Décrivez une chose à faire \
-                         et lisez ce qui vous revient.",
+    landing_host_heading: "Votre code ne quitte jamais votre infrastructure",
+    landing_host_body: "Le serveur de réception n'est qu'une boîte à texte. La machine qui lit votre code est une machine qui vous appartient déjà.",
+    landing_host_1_title: "Le serveur ne détient aucun code",
+    landing_host_1_body: "Ni dépôt, ni système de fichiers, ni modèle — rien de tout cela n'y est lié. Des demandes d'un côté, des spécifications de l'autre : il ne détient jamais que du texte.",
+    landing_host_2_title: "Rien n'écoute sur votre réseau",
+    landing_host_2_body: "La machine qui rédige appelle vers l'extérieur et attend du travail. Aucun port entrant, aucune ouverture de pare-feu, aucun certificat — elle fonctionne derrière un NAT d'entreprise exactement comme ailleurs.",
+    landing_host_3_title: "Votre modèle, votre matériel",
+    landing_host_3_body: "Les spécifications sont rédigées là où se trouve déjà votre code, par un modèle que vous désignez. Faites tourner un petit modèle en local et rien n'est envoyé nulle part.",
+
+    landing_oss_heading: "Gratuit, et ouvert à la lecture",
+    landing_oss_body: "Sous licence MIT, et l'ensemble est sur GitHub — le serveur, le démon, et les spécifications qui l'ont fait naître. Ni sièges, ni paliers, ni quota, et rien que vous ne puissiez lire avant de l'exécuter.",
+    landing_oss_cta: "Lire le code source",
+
+    landing_demo_heading: "Cette page en est un exemplaire vivant",
+    landing_demo_body: "Smart Coder reçoit ses propres demandes par le déploiement que vous êtes en train de lire. Déposez-en une sur le projet lui-même et regardez-la revenir en spécification — le chemin exact qu'emprunteraient vos propres interlocuteurs.",
+    landing_demo_note: "Une démonstration du produit, et non un canal de support pour le vôtre.",
+    landing_demo_cta: "Essayer sur ce dépôt",
+
+    landing_close_heading: "Déployez-le pour votre équipe",
+    landing_close_body: "Un conteneur, un volume, un port. Revendiquez-le, nommez vos dépôts, et pointez un démon vers le code que vous avez déjà.",
 
     signin_title: "Se connecter",
     signin_intro: "Déposer une demande nécessite une adresse e-mail — c'est ce qui vous \
@@ -184,7 +193,7 @@ pub static STRINGS: Strings = Strings {
                          connecter demande une adresse e-mail, et rien d'autre.",
     theme_to_light: "Clair",
     theme_to_dark: "Sombre",
-    footer_tagline_app: " — demandez un changement, recevez une spécification.",
+    footer_tagline_app: " — la réception des demandes qui rend une spécification.",
 
     filing_heading: "Que faut-il faire\u{a0}?",
     filing_text_label: "De quoi avez-vous besoin\u{a0}?",

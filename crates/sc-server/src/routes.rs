@@ -6351,9 +6351,16 @@ mod tests {
         // The locale travels *beside* the strings: the client cannot derive the
         // code from the text, and it needs one for `<html lang>`.
         assert_eq!(body["locale"], "en");
+        // **Compared against the catalogue, not against a copy of its words.**
+        // This asserted the English string literally, which made a test about
+        // *language negotiation* fail whenever the landing page was reworded —
+        // and it did, the first time that copy changed. What it is actually
+        // for is that the body carries the strings for the negotiated locale,
+        // and reading the expected value from the catalogue says exactly that
+        // while surviving every edit to the prose.
         assert_eq!(
             body["strings"]["landing_point_2_title"],
-            "A spec, not a ticket"
+            crate::i18n::Locale::En.strings().landing_point_2_title
         );
 
         // And the negotiation is the one `Req::locale` already does — cookie,
@@ -6364,7 +6371,13 @@ mod tests {
         assert_eq!(body["locale"], "fr");
         assert_eq!(
             body["strings"]["landing_point_2_title"],
-            "Une spécification, pas un ticket"
+            crate::i18n::Locale::Fr.strings().landing_point_2_title
+        );
+        // The two catalogues really are different, which is what makes the
+        // assertion above meaningful rather than trivially true of any locale.
+        assert_ne!(
+            crate::i18n::Locale::Fr.strings().landing_point_2_title,
+            crate::i18n::Locale::En.strings().landing_point_2_title
         );
 
         // A cookie beats the header, so the switcher is not silently overridden

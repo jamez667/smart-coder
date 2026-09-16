@@ -520,3 +520,39 @@ color-mix(in srgb,var(--link) 12%,transparent),transparent 70%),var(--surface)}
    the button ends up nearer the text than the text is to the box's own edge,
    and reads as having fallen into it. */
 .closer .cta-row{margin-top:var(--s5)}
+
+/* The eyebrow row: what this is, and what it costs, on one line above the
+   headline. Wraps to two centred lines on a narrow screen rather than letting
+   either half shrink. */
+.eyebrow-row{display:flex;justify-content:center;align-items:center;
+gap:var(--s3);flex-wrap:wrap;margin:0 0 var(--s4)}
+.eyebrow-row .eyebrow{margin:0}
+/* The licence badge. A pill rather than a line of text, so it reads as a fact
+   about the product and not as another sentence of the argument. */
+.badge{display:inline-block;padding:.3rem .85rem;border-radius:var(--pill);
+border:1px solid color-mix(in srgb,var(--link) 35%,var(--line));
+background:color-mix(in srgb,var(--link) 10%,transparent);
+color:var(--link);font-size:.78rem;font-weight:700;letter-spacing:.02em}
+
+/* A band: one section of the argument, spaced away from its neighbours.
+   `.band-heading` already centres the heading; this is the room around it. */
+.band{margin-block:4rem}
+/* The sentence under a band heading, before its cards. Centred and measured,
+   because it is read as a caption to the heading rather than as body prose. */
+.band-lede{max-width:56ch;margin:calc(var(--s5) * -1) auto var(--s5);
+text-align:center;color:var(--dim);line-height:1.65}
+
+/* The two audiences, side by side. Two columns rather than three, so each gets
+   the room its paragraph needs — the cards grid is for shorter items. */
+.sides{display:grid;gap:var(--s4)}
+@media(min-width:48rem){.sides{grid-template-columns:repeat(2,1fr);gap:var(--s5)}}
+.sides .card{padding:var(--s5)}
+
+/* The demonstration band. Tinted rather than bordered like a card, so it reads
+   as an aside about *this* deployment rather than as another product claim. */
+.demo{margin-block:4rem;padding:2.5rem var(--s5);text-align:center;
+border:1px dashed var(--line-2);border-radius:var(--radius);
+background:color-mix(in srgb,var(--surface) 70%,transparent)}
+.demo h2{margin:0 0 var(--s3);font-size:clamp(1.2rem,2.2vw,1.5rem)}
+.demo p{margin:0 auto;max-width:52ch;color:var(--dim);line-height:1.65}
+.demo .cta-note{margin-top:var(--s4)}

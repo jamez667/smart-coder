@@ -1214,15 +1214,52 @@ steps: a stranger is offered the sign-in dialog, a known caller the door to
 their own requests. Two versions of the argument would be two things to keep
 true, and the argument does not depend on who is reading it.
 
-The page is a hero, a numbered sequence of what happens after a request is
-filed, the three points as cards, and a close. The sequence is an ordered list
-because the order is the content — a screen reader gets the position from the
-element, and the numerals are drawn in CSS and hidden from it. The hero widens
-the column to the 60rem the masthead and footer already use: `main` is capped at
-45rem, a measure chosen for reading a specification, and a first screen whose
-job is the whole argument is not that. The wider cap is taken by raising
-`main`'s own on this page rather than by letting a section escape it with
-negative margins, so the two widths stay declared once each.
+**It argues for the product, not for this queue.** The first version of the page
+read "ask *us* for a change" — which described this deployment rather than the
+thing being deployed, and left a reader thinking Smart Coder was a suggestion
+box for somebody else's project. What it is for is a company running their own:
+their repositories, their stakeholders, their machine drafting the specs. So the
+page speaks to both halves of that deployment in turn — the people filing, who
+want to be heard without learning a tracker, and the team receiving, who want
+the noise to arrive as something they can act on.
+
+**The page leads with what it does not do.** Accepting a spec writes one
+Markdown file and settles the request; a developer then does the work. That
+boundary is what the daemon is built to be unable to cross, so it is the first
+of the three points rather than something a reader discovers on first use. No
+claim on this page implies a branch, a patch, a build or a merge.
+
+Two further sections follow from what the deployment actually is. **Where it
+runs** is the strongest honest claim the product has — the intake server links
+no repository, no filesystem and no model, and the machine that drafts dials out
+rather than listening — and it is the first thing a buyer checks. **What it
+costs** is the objection that stops a reader being asked to run a container on
+their own infrastructure, so the licence is named in the hero beside the eyebrow
+rather than after the call to action, where it would arrive too late to remove
+it.
+
+**This deployment is a demonstration, and says so.** It collects for the
+product's own repository, which makes it a working example and not how anybody
+else's requests would be handled. A reader who files here expecting support for
+their own project has been misled by the page, so the band naming it carries
+that distinction before its button invites anybody in.
+
+The page is a hero, the two audiences, a numbered sequence of what happens after
+a request is filed, the three points as cards, the hosting section, the licence,
+the demonstration and a close. The sequence is an ordered list because the order
+is the content — a screen reader gets the position from the element, and the
+numerals are drawn in CSS and hidden from it. The hero widens the column to the
+60rem the masthead and footer already use: `main` is capped at 45rem, a measure
+chosen for reading a specification, and a first screen whose job is the whole
+argument is not that. The wider cap is taken by raising `main`'s own on this
+page rather than by letting a section escape it with negative margins, so the
+two widths stay declared once each.
+
+**The repository link is a constant, not a catalogue string**
+<!--@ web/src/App.tsx -->. A URL is identical in every language, and the
+catalogue forbids markup and is tested for it — a translated link is an
+injection point maintained by whoever last edited the translation. The same
+reasoning already keeps repository names and email addresses out of it.
 
 **A navigation bar, drawn only for a caller with a session**
 <!--@ web/src/Masthead.tsx -->. A stranger gets an empty bar, because both

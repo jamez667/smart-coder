@@ -26,49 +26,70 @@ pub static STRINGS: Strings = Strings {
     nav_admin_accounts: "Who can file",
     dialog_close: "Close",
 
-    // **The client's wording, which replaced the catalogue's.** The three points
-    // were on entirely different topics in each — the catalogue argued "say it
-    // plainly / a person decides / no password to forget", and the interface
-    // argued "say it plainly / a spec not a ticket / somebody reads it". The
-    // interface is what a reader actually sees, so it won and this followed.
-    landing_headline: "Ask for a change — get a spec back.",
-    landing_sub: "Describe what needs doing in your own words. It comes back as a \
-                  written specification for the developer to read, approve, or send \
-                  back for another pass.",
-    landing_point_1_title: "Say it plainly",
-    landing_point_1_body: "No issue templates and no jargon. A sentence or two about what \
-                           is wrong or what you want is enough to start.",
-    landing_point_2_title: "A spec, not a ticket",
-    landing_point_2_body: "What comes back is a written specification grounded in the \
-                           actual code, not a restatement of what you asked for.",
-    landing_point_3_title: "Somebody reads it",
-    landing_point_3_body: "Nothing is built until a person approves the spec. The gate is \
-                           a human one, and it stays that way.",
+    // **Rewritten to argue for the product rather than for this queue.** The
+    // previous copy read "ask *us* for a change" — one intake queue belonging to
+    // whoever ran the server — which described this deployment and not the thing
+    // being deployed. A reader who took the page at its word thought this was a
+    // suggestion box for somebody else's project and never reached the question
+    // it exists to ask, which is whether to run one themselves.
+    //
+    // **Nothing here claims code is written.** Accepting a spec writes one
+    // Markdown file into the repository and marks the request settled; a
+    // developer then does the work. That boundary is load-bearing — the daemon
+    // is built to be unable to cross it — so the page leads with it rather than
+    // letting a reader discover it on first use.
+    landing_headline: "Turn every request into a spec your developers can build from.",
+    landing_sub: "Support tickets, sales asks and half-remembered hallway requests arrive as vague prose. Smart Coder reads each one against your actual codebase and writes the specification — for one of your developers to approve, send back, or bin.",
+    landing_point_1_title: "A spec, not a pull request",
+    landing_point_1_body: "It writes the specification and stops. No branches, no patches, nothing merged — your developers still write the code, starting from a document that already names the files and the edge cases.",
+    landing_point_2_title: "Grounded in your code",
+    landing_point_2_body: "Each spec is drafted against the repository as it actually is, not against what the request assumed. That is the difference between a restated ticket and something worth building from.",
+    landing_point_3_title: "A person holds the gate",
+    landing_point_3_body: "Nothing reaches your repository until one of your developers accepts it. Anyone you nominate can send a spec back or bin it; only the owner can accept.",
 
-    landing_eyebrow: "Requests in, specifications out",
+    landing_eyebrow: "Request intake for engineering teams",
     landing_cta: "File a request",
     landing_cta_signed_in: "Go to your requests",
-    landing_cta_note: "No issue tracker to learn, and no account until you want one.",
+    landing_cta_note: "Free and open source. Run it yourself in a container.",
+    landing_oss_badge: "Free and open source — MIT",
+
+    landing_for_heading: "Who it is for",
+    landing_for_body: "Engineering teams whose backlog arrives from everywhere at once — support, sales, customers, the founder — and always in the wrong shape. You deploy Smart Coder for your own repositories, decide who may file into it, and get back specifications instead of a queue of prose nobody has time to triage.",
+    landing_side_filers_title: "For the people asking",
+    landing_side_filers_body: "No tracker to learn and no template to fill in. They describe the problem in their own words, in their own language, and can follow what became of it. You choose whether that means your staff, your customers, or anyone with the link.",
+    landing_side_team_title: "For the team receiving",
+    landing_side_team_body: "Requests arrive already worked up: what it touches, how it should behave, where it gets awkward. Spam is screened before it reaches anybody, and every account is capped, so an open form does not become an open drain.",
 
     landing_how_heading: "How it works",
-    landing_step_1_title: "You describe the change",
-    landing_step_1_body: "A sentence or two, in the words you would use to explain it to \
-                          a colleague. Say what is wrong, or what you wish the software \
-                          did instead.",
-    landing_step_2_title: "It is read against the code",
-    landing_step_2_body: "Your request is worked up into a specification that names the \
-                          files, the behaviour and the edge cases — grounded in the \
-                          repository as it actually is, not in what the request assumed.",
-    landing_step_3_title: "A developer decides",
-    landing_step_3_body: "The specification goes to a person, who approves it, sends it \
-                          back for another pass, or discards it. You can follow yours \
-                          from the moment you file it.",
+    landing_step_1_title: "Somebody files a request",
+    landing_step_1_body: "Through a web form you host, in a sentence or two. They choose the repository and whether it is a bug, a feature or an improvement — and nothing more technical than that.",
+    landing_step_2_title: "Your machine drafts the spec",
+    landing_step_2_body: "A daemon on your own hardware picks up the request, reads it against the repository it holds, and writes a specification naming the files, the behaviour and the edge cases.",
+    landing_step_3_title: "Your developer decides",
+    landing_step_3_body: "The spec comes back for review. Accept it and it is written into the repository as a Markdown file, ready to build from. Send it back for another pass, or bin it.",
 
-    landing_points_heading: "Why it is shaped this way",
+    landing_points_heading: "What makes it different",
 
-    landing_close_heading: "Start with one request",
-    landing_close_body: "There is nothing to install and nothing to configure. Describe \
-                         one thing that needs doing and read what comes back.",
+    landing_host_heading: "Your code never leaves your infrastructure",
+    landing_host_body: "The intake server is a text inbox and nothing more. The machine that reads your code is one you already own.",
+    landing_host_1_title: "The server holds no code",
+    landing_host_1_body: "No repository, no filesystem, no model — it links none of that. Requests in, drafted specs out, and text is all it ever holds.",
+    landing_host_2_title: "Nothing listens on your network",
+    landing_host_2_body: "The drafting machine dials out and waits for work. No inbound port, no firewall hole, no certificate — it works from behind corporate NAT exactly as it does anywhere else.",
+    landing_host_3_title: "Your model, your hardware",
+    landing_host_3_body: "Specs are drafted where your code already is, by a model you point it at. Run a small one locally and nothing is sent anywhere at all.",
+
+    landing_oss_heading: "Free, and open to read",
+    landing_oss_body: "MIT licensed, and the whole thing is on GitHub — the server, the daemon, and the specifications it was built from. No seats, no tiers, no quota, and nothing you cannot read before you run it.",
+    landing_oss_cta: "Read the source",
+
+    landing_demo_heading: "This page is a live one",
+    landing_demo_body: "Smart Coder collects its own requests through the deployment you are reading. File one against the project itself and watch it come back as a specification — the same path your own stakeholders would take.",
+    landing_demo_note: "A demonstration of the product, not a support channel for yours.",
+    landing_demo_cta: "Try it on this repository",
+
+    landing_close_heading: "Run one for your team",
+    landing_close_body: "One container, one volume, one port. Claim it, name your repositories, and point a daemon at the code you already have.",
 
     signin_title: "Sign in",
     signin_intro: "Filing a request needs an email address — it is how you find your way back \
@@ -175,7 +196,7 @@ pub static STRINGS: Strings = Strings {
                          Signing in takes an email address and nothing else.",
     theme_to_light: "Light",
     theme_to_dark: "Dark",
-    footer_tagline_app: " — ask for a change, get a spec back.",
+    footer_tagline_app: " — request intake that returns a specification.",
 
     filing_heading: "What needs doing?",
     filing_text_label: "What do you need?",

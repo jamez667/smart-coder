@@ -244,7 +244,7 @@ export function App() {
   );
 }
 
-/// The page that says what this is for — **now shown to everybody**.
+//// The page that says what the product is — **shown to everybody**.
 ///
 /// It used to be what a caller with no capabilities fell through to, which made
 /// it a page for strangers by accident rather than by design: anybody with an
@@ -252,6 +252,14 @@ export function App() {
 /// person best placed to send a colleague a link to the product had never seen
 /// the page they were linking to, and nothing on it acknowledged a reader who
 /// was already signed in.
+///
+/// **It argues for the product, not for this queue.** The first version of this
+/// page read "ask *us* for a change" — which described this deployment rather
+/// than the thing being deployed, and left a reader thinking Smart Coder was a
+/// suggestion box for somebody else's project. What it is for is a company
+/// running their own: their repositories, their stakeholders, their machine
+/// drafting the specs. This deployment is then a *demonstration* of that, and
+/// says so in its own band rather than being silently mistaken for the point.
 ///
 /// **What differs when signed in is the call to action and nothing else.** Two
 /// versions of the argument would be two things to keep true; the argument is
@@ -268,6 +276,12 @@ function Landing({
 }) {
   const s = useStrings();
   const known = me.role !== "anonymous";
+  // The same control in three places, so it is built once. Written inline three
+  // times in the first draft, which is three places to forget the modifier-key
+  // check that keeps "open in a new tab" working.
+  const cta = (
+    <Cta known={known} onGo={onGo} onSignIn={onSignIn} label={known ? s.landing_cta_signed_in : s.landing_cta} />
+  );
   return (
     <>
       {/* **The hero breaks the text column.** `main` is capped at 45rem, which
@@ -276,37 +290,42 @@ function Landing({
           the 60rem the masthead and footer already use, so the hero lines up
           with the bar above it instead of sitting inside it. */}
       <section className="hero wide">
-        <p className="eyebrow">{s.landing_eyebrow}</p>
+        {/* **The licence above the headline, not below the buttons.** For
+            something a reader is being asked to run on their own
+            infrastructure, what it costs and whether they can see inside it is
+            the question — and said *after* the call to action it arrives too
+            late to remove the objection that stopped them clicking. Sitting it
+            beside the eyebrow also spares the hero a third stacked line under
+            the button, which was diluting the one thing that should be there. */}
+        <p className="eyebrow-row">
+          <span className="eyebrow">{s.landing_eyebrow}</span>
+          <span className="badge">{s.landing_oss_badge}</span>
+        </p>
         <h1>{s.landing_headline}</h1>
         <p className="lede">{s.landing_sub}</p>
-        <p className="cta-row">
-          {known ? (
-            <a
-              className="btn primary"
-              href="/requests"
-              onClick={(e) => {
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                e.preventDefault();
-                onGo("/requests");
-              }}
-            >
-              {s.landing_cta_signed_in}
-            </a>
-          ) : (
-            // **A button, not a link, and deliberately.** Signing in opens a
-            // `<dialog>` on this page rather than navigating anywhere, so an
-            // anchor would be announcing a destination that does not exist.
-            <button className="btn primary" type="button" onClick={onSignIn}>
-              {s.landing_cta}
-            </button>
-          )}
-        </p>
+        <p className="cta-row">{cta}</p>
         {/* The objection answered before it is raised — and only worth saying
             to somebody who has not already signed in. */}
         {!known && <p className="cta-note">{s.landing_cta_note}</p>}
       </section>
 
-      <section className="wide">
+      {/* Who is being spoken to, named before the argument goes on. A reader who
+          has mistaken the audience reads every following section wrongly. */}
+      <section className="wide band">
+        <h2 className="band-heading">{s.landing_for_heading}</h2>
+        <p className="band-lede">{s.landing_for_body}</p>
+        {/* **Two audiences, side by side.** The product has two and they want
+            opposite things — the people filing want to be heard without
+            learning a tracker, the team receiving wants the noise to arrive as
+            something they can act on. Putting them in one column would make one
+            of them read as an afterthought. */}
+        <div className="sides">
+          <Card title={s.landing_side_filers_title} body={s.landing_side_filers_body} />
+          <Card title={s.landing_side_team_title} body={s.landing_side_team_body} />
+        </div>
+      </section>
+
+      <section className="wide band">
         <h2 className="band-heading">{s.landing_how_heading}</h2>
         {/* **An ordered list, because the order is the content.** These are
             three things that happen one after another; a screen reader gets
@@ -319,12 +338,11 @@ function Landing({
         </ol>
       </section>
 
-      <section className="wide">
+      <section className="wide band">
         <h2 className="band-heading">{s.landing_points_heading}</h2>
-        {/* The three points as they were, in a grid rather than stacked. The
-            words are untouched — they were argued over once and the argument
-            still holds; what changed is that they now sit under a heading that
-            says why they are there. */}
+        {/* The three points, rewritten for the new argument and kept as cards.
+            The first of them — a spec and not a pull request — is the boundary
+            the whole product is built around, so it leads. */}
         <div className="cards">
           <Card title={s.landing_point_1_title} body={s.landing_point_1_body} />
           <Card title={s.landing_point_2_title} body={s.landing_point_2_body} />
@@ -332,34 +350,116 @@ function Landing({
         </div>
       </section>
 
+      {/* **Where it runs, in its own band.** The strongest honest claim the
+          product has, and the first thing a buyer checks: the intake server
+          links no repository, no filesystem and no model, and the machine that
+          drafts dials out rather than listening. */}
+      <section className="wide band">
+        <h2 className="band-heading">{s.landing_host_heading}</h2>
+        <p className="band-lede">{s.landing_host_body}</p>
+        <div className="cards">
+          <Card title={s.landing_host_1_title} body={s.landing_host_1_body} />
+          <Card title={s.landing_host_2_title} body={s.landing_host_2_body} />
+          <Card title={s.landing_host_3_title} body={s.landing_host_3_body} />
+        </div>
+      </section>
+
+      {/* Free and open source, at length, for the reader who has decided to
+          care. The badge in the hero is the half-second version. */}
+      <section className="wide band">
+        <h2 className="band-heading">{s.landing_oss_heading}</h2>
+        <p className="band-lede">{s.landing_oss_body}</p>
+        <p className="cta-row">
+          {/* **A real navigation, so a real anchor** — this one leaves the site
+              entirely, which is exactly the case the routed links are not.
+              `rel="noreferrer"` because there is nothing the destination needs
+              to learn about where the reader came from. */}
+          <a
+            className="btn"
+            href={SOURCE_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {s.landing_oss_cta}
+          </a>
+        </p>
+      </section>
+
+      {/* **The demonstration, named as one.** This deployment collects for the
+          product's own repository, which makes it a working example and *not*
+          how anybody else's requests would be handled. A reader who files here
+          expecting support for their own project has been misled by the page,
+          so the note says which it is before the button invites them in. */}
+      <section className="demo wide">
+        <h2>{s.landing_demo_heading}</h2>
+        <p>{s.landing_demo_body}</p>
+        <p className="cta-row">
+          <Cta known={known} onGo={onGo} onSignIn={onSignIn} label={known ? s.landing_cta_signed_in : s.landing_demo_cta} />
+        </p>
+        <p className="cta-note">{s.landing_demo_note}</p>
+      </section>
+
       <section className="closer wide">
         <h2>{s.landing_close_heading}</h2>
         <p>{s.landing_close_body}</p>
-        <p className="cta-row">
-          {known ? (
-            <a
-              className="btn primary"
-              href="/requests"
-              onClick={(e) => {
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                e.preventDefault();
-                onGo("/requests");
-              }}
-            >
-              {s.landing_cta_signed_in}
-            </a>
-          ) : (
-            <button className="btn primary" type="button" onClick={onSignIn}>
-              {s.landing_cta}
-            </button>
-          )}
-        </p>
+        <p className="cta-row">{cta}</p>
       </section>
     </>
   );
 }
 
-/// One numbered step.
+/// Where the source lives.
+///
+/// **A constant rather than a catalogue string.** A URL is not prose: it is
+/// identical in every language, and the catalogue forbids markup and is tested
+/// for it — a translated link is an injection point maintained by whoever last
+/// edited the translation. The same reasoning already keeps repository names and
+/// email addresses out of it.
+const SOURCE_URL = "https://github.com/jamez667/smart-coder";
+
+/// The page's call to action, wherever it appears.
+///
+/// **A button for a stranger and a link for a caller we know**, because they do
+/// different things: signing in opens a `<dialog>` on this page, while a known
+/// caller is being sent to another address. An anchor that goes nowhere would be
+/// announcing a destination that does not exist, and a button that navigates
+/// loses middle-click and "open in new tab".
+function Cta({
+  known,
+  label,
+  onGo,
+  onSignIn,
+}: {
+  known: boolean;
+  label: string;
+  onGo: (to: string) => void;
+  onSignIn: () => void;
+}) {
+  if (!known) {
+    return (
+      <button className="btn primary" type="button" onClick={onSignIn}>
+        {label}
+      </button>
+    );
+  }
+  return (
+    <a
+      className="btn primary"
+      href="/requests"
+      onClick={(e) => {
+        // Anything but a plain left click belongs to the browser, so opening in
+        // a new tab still works.
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        onGo("/requests");
+      }}
+    >
+      {label}
+    </a>
+  );
+}
+
+// One numbered step.
 ///
 /// The numeral is an attribute rather than text in the markup: CSS draws it, so
 /// a screen reader hears the list's own position instead of hearing the number
