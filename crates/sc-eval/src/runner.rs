@@ -161,11 +161,31 @@ fn kill_tree(child: &mut std::process::Child) {
 /// only to bound a solution that never terminates.
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The same bound, for a task the *tests* build.
+///
+/// **A test must not be able to wait five minutes on one command.** The default
+/// above is sized for a real repository's test suite on a cold cache; this
+/// crate's own tests verify a two-line shell script, so any wait beyond a few
+/// seconds is a stall rather than slowness. When one happened in CI the job hit
+/// its 30-minute bound with several such waits inside it, and the default hid
+/// which command was stuck behind a timeout longer than anybody would watch.
+///
+/// Read from `SC_EVAL_VERIFY_TIMEOUT_SECS` so CI can tighten it without changing
+/// what a real eval run allows — the variable is unset everywhere else, and the
+/// production default is untouched.
+fn verify_timeout_default() -> Duration {
+    std::env::var("SC_EVAL_VERIFY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(VERIFY_TIMEOUT)
+}
+
 /// The verify timeout for one task: its own, or the default.
 fn task_timeout(task: &EvalTask) -> Duration {
     task.timeout_secs
         .map(Duration::from_secs)
-        .unwrap_or(VERIFY_TIMEOUT)
+        .unwrap_or_else(verify_timeout_default)
 }
 
 /// Snapshot the contents of each contract-test file (None == missing).
