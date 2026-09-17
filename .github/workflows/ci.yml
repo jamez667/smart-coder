@@ -152,9 +152,10 @@ jobs:
       # slow" from "a test is stuck", which the single step could not.
       #
       # `--test-threads=1 --nocapture` so the last name printed is the test that
-      # hung rather than one of several interleaved; `--report-time` puts a
-      # duration beside each, which is what identifies a slow test as against a
-      # stopped one.
+      # hung rather than one of several interleaved. **Not `--report-time`**,
+      # which is nightly-only and is rejected outright on stable — it failed the
+      # step in three seconds without running a single test, which looked like a
+      # hang fixing itself and was nothing of the sort.
       #
       # 300s is generous against the ~1s this suite takes locally. If it trips,
       # the tail of this step names the test — and that is the diagnosis this
@@ -162,7 +163,7 @@ jobs:
       - name: build sc-eval tests
         run: timeout 600 cargo test -p sc-eval --no-run
       - name: test sc-eval
-        run: timeout 300 cargo test -p sc-eval -- --test-threads=1 --nocapture --report-time
+        run: timeout 300 cargo test -p sc-eval -- --test-threads=1 --nocapture
       - name: test sc-flame
         run: cargo test -p sc-flame
       - name: test sc-fsutil
