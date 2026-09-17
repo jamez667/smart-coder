@@ -178,6 +178,13 @@ jobs:
           # 240s — which is what the solver tests actually go through.
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
+          # Prints, from a background thread, which task and phase is still
+          # running after 60s. A job killed by `timeout-minutes` uploads no log
+          # for the step that was running, so anything that only prints at the
+          # end is unrecoverable -- three attempts at that produced nothing. This
+          # lands in the live output before the kill, and the last line printed
+          # names the phase that never finished.
+          SC_EVAL_WATCHDOG_SECS: 60
         run: cargo test -p sc-eval -- --test-threads=1 --nocapture
       - name: test sc-flame
         run: cargo test -p sc-flame

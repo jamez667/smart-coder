@@ -221,6 +221,47 @@ fn snapshot_contracts(workspace: &Path, contracts: &[String]) -> BTreeMap<String
         .collect()
 }
 
+/// Say where a task got to, if it takes longer than anybody would watch.
+///
+/// **A job killed by a CI timeout uploads no log for the step that was running**,
+/// so instrumentation that only prints at the end is unrecoverable by
+/// construction — three attempts at it produced nothing. This prints from a
+/// background thread *while* the task is still running, so the line is in the
+/// step's live output before the kill, and the last one printed names the phase
+/// that never finished.
+///
+/// Off unless `SC_EVAL_WATCHDOG_SECS` is set, so a normal run is silent.
+struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Watchdog {
+    fn start(what: String) -> Watchdog {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(secs) = std::env::var("SC_EVAL_WATCHDOG_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            let flag = done.clone();
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(250));
+                    if start.elapsed() >= Duration::from_secs(secs) {
+                        eprintln!("WATCHDOG: still inside {what} after {:?}", start.elapsed());
+                        return;
+                    }
+                }
+            });
+        }
+        Watchdog(done)
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Score a single task against a solver. Always returns a [`TaskResult`].
 pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     let result = |outcome| TaskResult {
@@ -261,7 +302,10 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     sc_verify::forget_runs();
 
     // (1) verify-red-first: the unsolved fixture must fail.
-    match verify(ws.path(), &task.verify_cmd, task_timeout(task)) {
+    let w = Watchdog::start(format!("{}: verify (red check)", task.id));
+    let red = verify(ws.path(), &task.verify_cmd, task_timeout(task));
+    drop(w);
+    match red {
         Ok(true) => return result(Outcome::NotRedFirst),
         Ok(false) => {}
         Err(e) => {
@@ -275,7 +319,10 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     let before = snapshot_contracts(ws.path(), &task.contract_tests);
 
     // Let the solver attempt the task.
-    if let Err(e) = solver.solve(task, ws.path()) {
+    let w = Watchdog::start(format!("{}: solver {}", task.id, solver.name()));
+    let solved = solver.solve(task, ws.path());
+    drop(w);
+    if let Err(e) = solved {
         return result(Outcome::SolverError(e.to_string()));
     }
 
@@ -288,7 +335,10 @@ pub fn run_task(task: &EvalTask, solver: &dyn Solver) -> TaskResult {
     }
 
     // (3) green after solve.
-    match verify(ws.path(), &task.verify_cmd, task_timeout(task)) {
+    let w = Watchdog::start(format!("{}: verify (green check)", task.id));
+    let green = verify(ws.path(), &task.verify_cmd, task_timeout(task));
+    drop(w);
+    match green {
         Ok(true) => result_with_metrics(Outcome::Pass),
         Ok(false) => result_with_metrics(Outcome::StillRed),
         Err(e) => result_with_metrics(Outcome::HarnessError(format!(
@@ -538,5 +588,32 @@ mod tests {
     unsafe extern "C" {
         #[link_name = "kill"]
         unsafe fn kill_probe(pid: i32, sig: i32) -> i32;
+    }
+
+    /// The watchdog says where a task got to, which is the only evidence a killed
+    /// CI job leaves behind.
+    ///
+    /// Asserting it fires matters more than it looks: the mechanism is a thread
+    /// that prints and exits, so a mistake in the arming logic is silent, and a
+    /// silent diagnostic is worse than none — it is a diagnostic that has been
+    /// trusted. Uses a verify command that outlives the watchdog interval.
+    #[test]
+    fn the_watchdog_names_the_phase_that_is_still_running() {
+        // SAFETY: single-threaded within this test, and the variable is read only
+        // by `Watchdog::start` on this thread's call below.
+        unsafe { std::env::set_var("SC_EVAL_WATCHDOG_SECS", "0") };
+
+        let printed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let _w = Watchdog::start("probe: a phase".into());
+            // Longer than the watchdog's 250ms poll, so it must have printed.
+            thread::sleep(Duration::from_millis(600));
+            printed.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        assert!(printed.load(std::sync::atomic::Ordering::Relaxed));
+
+        // And it is silent when unset, which is what keeps a normal run quiet.
+        unsafe { std::env::remove_var("SC_EVAL_WATCHDOG_SECS") };
+        let _w = Watchdog::start("probe: silent".into());
     }
 }
