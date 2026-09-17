@@ -170,7 +170,14 @@ jobs:
         run: cargo test -p sc-eval --no-run
       - name: test sc-eval
         env:
+          # Two different timeouts, on two different paths, and the first alone
+          # was not enough. `SC_EVAL_VERIFY_TIMEOUT_SECS` bounds sc-eval's own
+          # `verify`; the run with only that set still stalled 27 minutes, which
+          # is what proved the wait is NOT there. `SC_COMMAND_TIMEOUT_SECS`
+          # bounds `sc_verify::run_command` — the agent's shell path, default
+          # 240s — which is what the solver tests actually go through.
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
+          SC_COMMAND_TIMEOUT_SECS: 20
         run: cargo test -p sc-eval -- --test-threads=1 --nocapture
       - name: test sc-flame
         run: cargo test -p sc-flame

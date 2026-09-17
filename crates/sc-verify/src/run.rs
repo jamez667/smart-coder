@@ -318,7 +318,26 @@ pub fn run_command(workspace: &Path, command: &str) -> CommandResult {
 /// Run `command` in `workspace` under `sandbox`. Combined stdout/stderr captured; a
 /// spawn failure (e.g. Docker not installed) is a non-ok result, never a panic.
 pub fn run_command_in(sandbox: &Sandbox, workspace: &Path, command: &str) -> CommandResult {
-    run_command_bounded(sandbox, workspace, command, COMMAND_TIMEOUT)
+    run_command_bounded(sandbox, workspace, command, command_timeout())
+}
+
+/// [`COMMAND_TIMEOUT`], or a shorter bound a test environment asked for.
+///
+/// **Four minutes is right for a real build and far too long for a test suite.**
+/// The tests that drive the agent loop run two-line shell scripts, so anything
+/// past a few seconds is a stall — but a stalled command still held the default,
+/// and several of them consumed a 30-minute CI job while looking like a hang.
+/// `sc-eval`'s own verify timeout had exactly this problem and is bounded the
+/// same way; this is the other half, on the path the agent's shell tool takes.
+///
+/// Read from `SC_COMMAND_TIMEOUT_SECS`. Unset everywhere but CI, so what a real
+/// eval or a real build is allowed is unchanged.
+fn command_timeout() -> Duration {
+    std::env::var("SC_COMMAND_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(COMMAND_TIMEOUT)
 }
 
 /// How long any harness-spawned command may run before it is killed.
@@ -364,7 +383,10 @@ pub fn run_command_bounded(
 /// would miss every failure in the middle and report the survivors as the whole
 /// story. Still bounded by [`COMMAND_TIMEOUT`].
 pub fn run_command_full(sandbox: &Sandbox, workspace: &Path, command: &str) -> CommandResult {
-    run_raw(sandbox, workspace, command, COMMAND_TIMEOUT)
+    // Same bound as `run_command_in`, and for the same reason — this is the path a
+    // test parser takes, and a stalled test suite is exactly what it must not wait
+    // four minutes for.
+    run_raw(sandbox, workspace, command, command_timeout())
 }
 
 /// Spawn, drain, and bound `command`; the uncapped output in write order.

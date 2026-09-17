@@ -84,13 +84,35 @@ fn verify(workspace: &Path, cmd: &str, timeout: Duration) -> std::io::Result<boo
     // duplicated here first, which is how the agent's own `run_command` kept using
     // `cmd` after this function had been fixed.
     let (shell, flag) = sc_verify::host_shell();
-    let mut child = Command::new(shell)
+    let mut command = Command::new(shell);
+    command
         .arg(flag)
         .arg(cmd)
         .current_dir(workspace)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+
+    // **Its own process group, so `kill_tree` can actually reach the tree.**
+    //
+    // `kill_tree` signals the negated pid, which is a *process group* id, and its
+    // comment claimed "the shell is its own group leader here". It was not:
+    // `spawn` leaves a child in the parent's group, so that call named a group
+    // that did not exist and the descendants it was written to reach survived it.
+    // Verified on Linux — the child's pgid came back equal to the harness's own.
+    //
+    // It worked by accident, because the direct `child.kill()` afterwards handles
+    // the common case of a shell with no children. The case it exists for — a
+    // verify command that spawned a test runner — is the one it missed.
+    //
+    // `process_group(0)` puts the child in a new group led by itself, which is
+    // what makes the negated-pid kill correct rather than merely harmless.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let mut child = command.spawn()?;
 
     // Bounded, because the thing being verified is code a MODEL wrote. An infinite
     // loop in a solution used to hang the whole suite with no output -- indefinitely,
@@ -135,8 +157,11 @@ fn kill_tree(child: &mut std::process::Child) {
 
     #[cfg(unix)]
     {
-        // Negating the pid signals the process GROUP. The shell is its own group
-        // leader here, so this reaches the children it spawned.
+        // Negating the pid signals the process GROUP, and the shell **is** its own
+        // group leader — but only because `verify` asks for that with
+        // `process_group(0)`. It was not, for as long as this comment claimed it
+        // was: `spawn` leaves a child in the parent's group, so this named a
+        // group that did not exist. See `verify`.
         let _ = Command::new("kill")
             .args(["-9", &format!("-{pid}")])
             .stdout(Stdio::null())
@@ -456,5 +481,57 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "should be killed at the deadline, took {elapsed:?}"
         );
+    }
+
+    /// A verify command's **children** are killed too, not just the shell.
+    ///
+    /// This is the case `kill_tree` exists for and the one it was missing. The
+    /// old code signalled the negated pid — a process *group* id — with a comment
+    /// asserting "the shell is its own group leader here". It was not: `spawn`
+    /// leaves a child in the parent's group, so the signal named a group that did
+    /// not exist, and only the direct `child.kill()` afterwards did any work. That
+    /// reaches the shell and nothing it spawned.
+    ///
+    /// A verify command is a test runner, so a surviving grandchild is the normal
+    /// case rather than an exotic one — and on a CI runner a stray spinner is a
+    /// core burned for the rest of the job.
+    ///
+    /// Unix only: the Windows path uses `taskkill /T`, which walks the tree by
+    /// handle and never depended on the group at all.
+    #[cfg(unix)]
+    #[test]
+    fn killing_a_verify_command_kills_what_it_spawned() {
+        let ws = crate::fsutil::TempWorkspace::new("verify-grandchild").unwrap();
+        // The shell spawns a child that outlives it unless the whole group is
+        // signalled, and writes its pid where this test can read it.
+        let pidfile = ws.path().join("child.pid");
+        let cmd = "sh -c 'echo $$ > child.pid; while :; do sleep 1; done' & wait";
+
+        let green = verify(ws.path(), cmd, Duration::from_millis(400)).unwrap();
+        assert!(
+            !green,
+            "a command that never exits has not verified anything"
+        );
+
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("the grandchild wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+
+        // Signal 0 tests for existence without delivering anything. The
+        // grandchild must be gone; if the group kill did nothing, it is still
+        // spinning.
+        std::thread::sleep(Duration::from_millis(200));
+        let alive = unsafe { kill_probe(pid, 0) } == 0;
+        assert!(!alive, "the grandchild (pid {pid}) survived the kill");
+    }
+
+    /// `kill(pid, sig)`. Signal 0 delivers nothing and only reports whether the
+    /// process exists, which is the whole of what this test needs.
+    #[cfg(unix)]
+    unsafe extern "C" {
+        #[link_name = "kill"]
+        unsafe fn kill_probe(pid: i32, sig: i32) -> i32;
     }
 }
