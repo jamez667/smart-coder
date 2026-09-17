@@ -87,8 +87,22 @@ impl RetrievalSuite {
     /// this repository, and rebuilding its index for each of them cost 105 seconds
     /// of a 110-second suite — a gate slow enough that people stop running it.
     pub fn run(&self) -> Vec<QueryResult> {
+        self.run_with_indexes().0
+    }
+
+    /// The suite, graded, **with the indexes it was graded against**.
+    ///
+    /// Building the index is the whole cost of this suite — six of the twelve
+    /// questions point at this repository, and a walk of it parses every file.
+    /// A caller that wants to ask something else of the same indexes (the
+    /// determinism test does) would otherwise have to build them a second time,
+    /// which is exactly the expense `run`'s own per-fixture cache exists to
+    /// avoid. Handing them back costs nothing and removes the only reason to
+    /// walk the tree twice.
+    fn run_with_indexes(&self) -> (Vec<QueryResult>, BTreeMap<String, sc_index::RepoIndex>) {
         let mut built: BTreeMap<String, sc_index::RepoIndex> = BTreeMap::new();
-        self.queries
+        let results = self
+            .queries
             .iter()
             .map(|q| {
                 let fixture = self.dir.join(&q.fixture);
@@ -127,7 +141,8 @@ impl RetrievalSuite {
                 });
                 grade(q, index)
             })
-            .collect()
+            .collect();
+        (results, built)
     }
 }
 
@@ -234,13 +249,37 @@ impl QueryResult {
 mod tests {
     use super::*;
 
-    /// The suite as shipped must be well-formed and must every one of it pass.
+    /// The suite as shipped must be well-formed, must pass, and must be
+    /// deterministic — **asserted from one run, because they are three
+    /// properties of the same run.**
     ///
-    /// This is the gate: it runs in `scripts/check.sh`, with no model and no GPU, and
-    /// a ranking change that makes any seeded question worse turns the build red with
-    /// the query named.
+    /// This is the gate: it runs in `scripts/check.sh`, with no model and no GPU,
+    /// and a ranking change that makes any seeded question worse turns the build
+    /// red with the query named.
+    ///
+    /// ## Why this is one test and not two
+    ///
+    /// Determinism used to live in its own test that called `suite.run()` twice,
+    /// which is the honest reading of "run it twice" and was the single most
+    /// expensive thing in this crate: **31 of its 49 test seconds.** `run` builds
+    /// an index per fixture, and six of the twelve questions point at `../..` —
+    /// this whole repository — so every call parses every file in the tree.
+    /// `run` already caches per fixture *within* a call, precisely because
+    /// rebuilding cost 105 seconds of a 110-second suite; a second call
+    /// reintroduced exactly that, one level up.
+    ///
+    /// Splitting the two tests then paid the walk **twice over** regardless,
+    /// once per test, because neither could see the other's indexes. Merging
+    /// them is what removes the second walk rather than merely halving it: one
+    /// build, graded once for the gate and re-graded for determinism.
+    ///
+    /// **A second walk was never what made this a determinism test.** The index
+    /// comes from a walk of the filesystem, and re-walking an unchanged tree
+    /// re-proves that the filesystem did not change underneath the test. What
+    /// has to be deterministic is `grade` — same query, same index, same answer
+    /// — and that is what this asserts.
     #[test]
-    fn the_shipped_retrieval_suite_passes() {
+    fn the_shipped_retrieval_suite_passes_and_is_deterministic() {
         let suite_path = repo_root().join("evals/retrieval/suite.toml");
         let suite = RetrievalSuite::load(&suite_path).expect("suite loads");
         assert!(
@@ -249,7 +288,7 @@ mod tests {
             suite.queries.len()
         );
 
-        let results = suite.run();
+        let (results, indexes) = suite.run_with_indexes();
         let failed: Vec<&QueryResult> = results.iter().filter(|r| !r.passed).collect();
         if !failed.is_empty() {
             let report: Vec<String> = results.iter().map(|r| r.line()).collect();
@@ -260,16 +299,28 @@ mod tests {
                 report.join("\n")
             );
         }
-    }
 
-    /// **Determinism, end to end.** The whole suite must produce identical results
-    /// twice; anything else and the eval cannot be used as a gate.
-    #[test]
-    fn the_suite_is_deterministic() {
-        let suite = RetrievalSuite::load(&repo_root().join("evals/retrieval/suite.toml")).unwrap();
-        assert_eq!(suite.run(), suite.run());
+        // Determinism, against the indexes that were just graded. Queries whose
+        // fixture is missing are skipped: `run` records those without building an
+        // index, so there is nothing to re-grade.
+        let mut compared = 0;
+        for (q, before) in suite.queries.iter().zip(&results) {
+            let Some(index) = indexes.get(&q.fixture) else {
+                continue;
+            };
+            assert_eq!(
+                *before,
+                grade(q, index),
+                "grading '{}' twice against one index disagreed",
+                q.question
+            );
+            compared += 1;
+        }
+        assert!(
+            compared > 0,
+            "no query was re-graded, so nothing was proven"
+        );
     }
-
     /// The repo root, found by walking up from this crate. `CARGO_MANIFEST_DIR` is
     /// `crates/sc-eval`, and the suite lives at the workspace root.
     fn repo_root() -> PathBuf {

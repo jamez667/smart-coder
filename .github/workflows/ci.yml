@@ -141,29 +141,31 @@ jobs:
         run: cargo test -p sc-daemon
       - name: test sc-editor
         run: cargo test -p sc-editor
-      # **Bounded and split, because this is the step that hangs.** It ran 22
-      # minutes and took the job's 30-minute bound with it, three runs running,
-      # while every other crate finished in seconds — and a killed job uploads
-      # no log, so the crate named itself and then told us nothing further.
+      # **sc-eval took this job's 30-minute bound three runs running.** Every
+      # other crate finished in seconds; this one started and never returned, and
+      # because a killed job uploads no log for the running step, splitting by
+      # crate could name it and nothing more.
       #
-      # `timeout` on each command turns "the job died" into "this command
-      # exceeded its bound", which is a line in a step that *completes* and is
-      # therefore uploaded. Splitting compile from run separates "the build is
-      # slow" from "a test is stuck", which the single step could not.
+      # The cause was one test: `the_suite_is_deterministic` asserted
+      # `suite.run() == suite.run()`, and `run` builds a search index by walking
+      # and parsing every file in this repository — six of the twelve retrieval
+      # questions point at `../..`. Three full walks per run of this crate, ~15s
+      # each here and far worse on a shared runner with a cold page cache. Fixed
+      # at the source: one walk, graded twice. See `retrieval.rs`.
       #
-      # `--test-threads=1 --nocapture` so the last name printed is the test that
-      # hung rather than one of several interleaved. **Not `--report-time`**,
-      # which is nightly-only and is rejected outright on stable — it failed the
-      # step in three seconds without running a single test, which looked like a
-      # hang fixing itself and was nothing of the sort.
+      # **The compile stays its own step.** Not for speed — it is four seconds —
+      # but because it is the measurement that found this: a single step could
+      # not say whether 22 minutes was the build or the run, and splitting them
+      # answered that on the first run afterwards.
       #
-      # 300s is generous against the ~1s this suite takes locally. If it trips,
-      # the tail of this step names the test — and that is the diagnosis this
-      # workflow has not been able to produce so far.
+      # Deliberately NOT wrapped in `timeout`: that was tried, and `timeout`
+      # signals `cargo` rather than the stuck test binary beneath it, so the step
+      # ran 12 minutes past a 300-second bound. Bounding belongs on the job,
+      # where GitHub enforces it from outside the runner.
       - name: build sc-eval tests
-        run: timeout 600 cargo test -p sc-eval --no-run
+        run: cargo test -p sc-eval --no-run
       - name: test sc-eval
-        run: timeout 300 cargo test -p sc-eval -- --test-threads=1 --nocapture
+        run: cargo test -p sc-eval
       - name: test sc-flame
         run: cargo test -p sc-flame
       - name: test sc-fsutil
