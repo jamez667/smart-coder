@@ -414,6 +414,25 @@ fn run_raw(sandbox: &Sandbox, workspace: &Path, command: &str, timeout: Duration
     cmd.stdout(Stdio::from(writer))
         .stderr(Stdio::from(err_writer));
 
+    // **Its own process group, so `kill_tree` can actually reach the tree.**
+    //
+    // `kill_tree` signals the negated pid — a process GROUP id — under a comment
+    // claiming it "reaches the children". It did not: `spawn` leaves a child in
+    // the parent's group, so the signal named a group that did not exist and
+    // every descendant survived. Verified on Linux, where the child's pgid came
+    // back equal to the harness's own.
+    //
+    // On this path that is not merely untidy, it is the hang. The drain thread
+    // below reads to EOF, and EOF arrives only when the last writer closes — so
+    // one surviving grandchild holding the pipe means `drain.join()` waits
+    // forever, *after* the timeout has already fired. A bounded command that
+    // never returns is exactly what CI kept showing.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return spawn_failure(e),
@@ -425,10 +444,14 @@ fn run_raw(sandbox: &Sandbox, workspace: &Path, command: &str, timeout: Duration
     // Drain the pipe on its own thread. A child that fills the pipe buffer blocks on
     // the write, so polling `try_wait` without reading would deadlock on exactly the
     // chatty command most likely to be slow.
-    let drain = std::thread::spawn(move || {
+    //
+    // The result comes back over a channel rather than from `join`, so the caller
+    // can stop waiting on a thread it cannot kill. See `join_bounded`.
+    let (tx, drain) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = std::io::Read::read_to_end(&mut reader, &mut buf);
-        buf
+        let _ = tx.send(buf);
     });
 
     let deadline = Instant::now() + timeout;
@@ -445,7 +468,23 @@ fn run_raw(sandbox: &Sandbox, workspace: &Path, command: &str, timeout: Duration
         std::thread::sleep(Duration::from_millis(20));
     };
 
-    let mut output = String::from_utf8_lossy(&drain.join().unwrap_or_default()).into_owned();
+    // **The drain is joined with a deadline, because `join` has no timeout.**
+    //
+    // The thread reads to EOF, and EOF needs every writer closed. If one ever
+    // survives — a descendant the kill missed, a grandchild holding the
+    // inherited handle — this join blocks forever, *after* the timeout has
+    // fired and the child is dead. That is a bounded command that never
+    // returns, and no amount of shortening the timeout above can help.
+    //
+    // `process_group(0)` on the spawn is what should make that impossible. This
+    // is the belt to that braces: the failure mode is a wedged CI job with no
+    // output, which is expensive enough to be worth refusing structurally
+    // rather than trusting one platform call to be right everywhere.
+    //
+    // A detached thread leaks its pipe, which is a few kilobytes on a path that
+    // is already giving up on this command — much the better trade against a
+    // process that never exits.
+    let mut output = String::from_utf8_lossy(&join_bounded(drain, DRAIN_GRACE)).into_owned();
 
     match status {
         Some(st) => CommandResult {
@@ -514,6 +553,26 @@ fn cap_output(output: &str) -> String {
 /// naive kill-then-wait pair hangs on exactly the input it exists to handle. A
 /// harness command is usually a shell that spawned a compiler that spawned a test
 /// binary, so killing the tree is the normal case here, not an edge case.
+/// How long to wait for the drain thread after the child is gone.
+///
+/// Generous against the microseconds a closed pipe actually needs, and tiny
+/// against the job it protects. Reached only when a writer outlived the kill,
+/// which `process_group(0)` is there to prevent.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Take the drained output, or give up after `grace`.
+///
+/// **`JoinHandle::join` has no timeout and a thread cannot be killed**, so a
+/// reader blocked on a pipe that never sees EOF would wedge the caller
+/// permanently — after the command it was reading has already been killed. This
+/// waits on a channel instead, and returns what it has when the grace expires.
+///
+/// Losing the tail of a timed-out command's output is not a real cost: the
+/// command has failed, and the caller says so. A harness that never returns is.
+fn join_bounded(rx: std::sync::mpsc::Receiver<Vec<u8>>, grace: Duration) -> Vec<u8> {
+    rx.recv_timeout(grace).unwrap_or_default()
+}
+
 fn kill_tree(child: &mut std::process::Child) {
     let pid = child.id();
 
@@ -528,7 +587,10 @@ fn kill_tree(child: &mut std::process::Child) {
 
     #[cfg(unix)]
     {
-        // Negating the pid signals the process GROUP, reaching the children.
+        // Negating the pid signals the process GROUP, and it reaches the children
+        // **only because `run_raw` asks for one** with `process_group(0)`. For as
+        // long as this comment claimed otherwise, `spawn` was leaving the child in
+        // the parent's group and this named a group that did not exist.
         let _ = Command::new("kill")
             .args(["-9", &format!("-{pid}")])
             .stdout(Stdio::null())
@@ -885,6 +947,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// **A timed-out command whose GRANDCHILD holds the pipe must still return.**
+    ///
+    /// This is the case the test above cannot see, and the one that wedged CI for
+    /// four runs. The chain:
+    ///
+    /// 1. the deadline fires and `kill_tree` runs;
+    /// 2. its group kill reached nothing, because `spawn` left the child in the
+    ///    parent's group — so a grandchild survived;
+    /// 3. the survivor still holds the write end of the output pipe, so the drain
+    ///    thread never sees EOF;
+    /// 4. `join` has no timeout, so the harness blocked **after** the timeout had
+    ///    already fired and the child was dead.
+    ///
+    /// A bounded command that never returns. `process_group(0)` fixes (2), and
+    /// `join_bounded` makes (4) impossible even if a writer somehow survives —
+    /// which is why this asserts the wall clock rather than the exit code.
+    ///
+    /// Unix only: the Windows path kills by handle with `taskkill /T` and never
+    /// depended on the process group.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_command_returns_even_when_a_grandchild_holds_the_pipe() {
+        let ws = std::env::temp_dir().join(format!("sc-verify-gc-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // The shell backgrounds a child that outlives it and inherits the pipe,
+        // then waits. Killing only the shell leaves the grandchild holding the
+        // write end open.
+        let cmd = "sh -c 'while :; do sleep 1; done' & wait";
+
+        let start = Instant::now();
+        let r = run_command_bounded(&Sandbox::Host, &ws, cmd, Duration::from_millis(400));
+        let elapsed = start.elapsed();
+
+        assert!(!r.ok, "a killed command has not succeeded");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "the harness blocked on a pipe no one will close: took {elapsed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
     /// The deadline must not cost output. A command that finishes normally keeps
     /// its stdout, which the threaded pipe drain is there to guarantee.
     #[test]
