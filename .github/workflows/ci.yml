@@ -19,6 +19,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Re-runnable by hand. Needed while `test sc-eval` is under investigation: the
+  # step's watchdog output is only visible in the LIVE log, because a job killed
+  # by `timeout-minutes` uploads nothing for the step that was running -- so
+  # someone has to be watching, and that meant pushing a commit to get a run.
+  workflow_dispatch:
 
 permissions:
   contents: read
