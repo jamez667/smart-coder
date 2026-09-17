@@ -141,8 +141,28 @@ jobs:
         run: cargo test -p sc-daemon
       - name: test sc-editor
         run: cargo test -p sc-editor
+      # **Bounded and split, because this is the step that hangs.** It ran 22
+      # minutes and took the job's 30-minute bound with it, three runs running,
+      # while every other crate finished in seconds — and a killed job uploads
+      # no log, so the crate named itself and then told us nothing further.
+      #
+      # `timeout` on each command turns "the job died" into "this command
+      # exceeded its bound", which is a line in a step that *completes* and is
+      # therefore uploaded. Splitting compile from run separates "the build is
+      # slow" from "a test is stuck", which the single step could not.
+      #
+      # `--test-threads=1 --nocapture` so the last name printed is the test that
+      # hung rather than one of several interleaved; `--report-time` puts a
+      # duration beside each, which is what identifies a slow test as against a
+      # stopped one.
+      #
+      # 300s is generous against the ~1s this suite takes locally. If it trips,
+      # the tail of this step names the test — and that is the diagnosis this
+      # workflow has not been able to produce so far.
+      - name: build sc-eval tests
+        run: timeout 600 cargo test -p sc-eval --no-run
       - name: test sc-eval
-        run: cargo test -p sc-eval
+        run: timeout 300 cargo test -p sc-eval -- --test-threads=1 --nocapture --report-time
       - name: test sc-flame
         run: cargo test -p sc-flame
       - name: test sc-fsutil
