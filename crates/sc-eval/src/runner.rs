@@ -527,8 +527,13 @@ mod tests {
         assert!(!alive, "the grandchild (pid {pid}) survived the kill");
     }
 
-    /// `kill(pid, sig)`. Signal 0 delivers nothing and only reports whether the
-    /// process exists, which is the whole of what this test needs.
+    // `kill(pid, sig)`. Signal 0 delivers nothing and only reports whether the
+    // process exists, which is the whole of what this test needs.
+    //
+    // A `//` comment rather than `///`: a doc comment on an `extern` block is an
+    // `unused_doc_comments` error, and CI runs clippy with `-D warnings`. It
+    // compiles on Windows only because the whole block is `#[cfg(unix)]`, so the
+    // local lint never saw it.
     #[cfg(unix)]
     unsafe extern "C" {
         #[link_name = "kill"]
