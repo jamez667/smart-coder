@@ -140,38 +140,49 @@ jobs:
       # cache this job writes and `reports` does not.
       - name: build sc-eval tests
         run: cargo test -p sc-eval --no-run
+      # **Run it in the background and watch it from the step.**
+      #
+      # `timeout --signal=KILL 300s` did NOT fire: the step ran 19 minutes on a
+      # 5-minute SIGKILL bound. A process cannot ignore SIGKILL, so it is not
+      # ignoring it -- it is unkillable, which on Linux means stuck in
+      # uninterruptible sleep (D state) on I/O the kernel will not abandon.
+      #
+      # That is a different failure from anything assumed so far, and none of the
+      # timeouts, kills or process groups tried could ever have helped.
+      #
+      # So stop trying to bound it and observe it instead: start the tests in the
+      # background, poll from the shell that owns the step, and print the process
+      # table, each thread's kernel stack (`/proc/<pid>/task/*/stack` is what
+      # names a D-state wait) and the partial test output. Everything is echoed
+      # from a step that RETURNS, so the log survives the job.
       - name: test sc-eval
         env:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
-        # **Exactly what `reports` runs, which passes in ~18 seconds.**
-        #
-        # The same crate, the same command and the same runner image finish in
-        # `reports` and have never finished here. With sc-eval moved to the front
-        # of the job, position is ruled out too -- so what was left was the two
-        # things this step did that `reports` did not:
-        #
-        #   - `SC_EVAL_WATCHDOG_SECS`, which arms a thread that calls
-        #     `std::process::abort()`. That was added to make a stall report
-        #     itself; a diagnostic that can kill the process is a poor thing to
-        #     leave armed while the stall is still unexplained.
-        #   - `setsid`, which detaches the process group. Combined with stdio
-        #     inherited by the step (rather than redirected to a file), a
-        #     detached leader whose output nobody is draining is a plausible
-        #     wedge on its own.
-        #
-        # Both are removed and the output goes to a file, so this step is now the
-        # `reports` step character for character. If it passes, one of those two
-        # was the cause -- which would mean the hang has been MINE since the
-        # watchdog landed, and the original cause is still upstream of it.
         run: |
           set +e
-          timeout --signal=KILL 300s cargo test -p sc-eval -- --test-threads=1 --nocapture > /tmp/eval.log 2>&1
-          rc=$?
-          set -e
-          echo "rc=$rc"
-          tail -40 /tmp/eval.log
-          exit $rc
+          cargo test -p sc-eval -- --test-threads=1 --nocapture > /tmp/eval.log 2>&1 &
+          TESTPID=$!
+          for i in $(seq 1 24); do
+            sleep 10
+            if ! kill -0 $TESTPID 2>/dev/null; then
+              wait $TESTPID; rc=$?
+              echo "finished rc=$rc after ${i}0s"; tail -30 /tmp/eval.log; exit $rc
+            fi
+          done
+          echo "=== STILL RUNNING AFTER 240s ==="
+          echo "--- last test output ---"; tail -20 /tmp/eval.log
+          echo "--- processes ---"; ps -eo pid,ppid,stat,wchan:32,etime,comm | grep -Ev "^ *PID" | head -40
+          echo "--- D-state (uninterruptible) ---"; ps -eo pid,stat,wchan:32,comm | awk '$2 ~ /D/'
+          echo "--- kernel stacks of the test tree ---"
+          for p in $(ps -eo pid,comm | awk '/sc_eval|cargo|sh|sleep/ {print $1}'); do
+            echo "pid $p ($(cat /proc/$p/comm 2>/dev/null)) state=$(awk "/^State:/{print \$2}" /proc/$p/status 2>/dev/null)"
+            cat /proc/$p/task/*/stack 2>/dev/null | head -12
+            cat /proc/$p/wchan 2>/dev/null && echo
+          done
+          echo "--- mounts / disk ---"; df -h | head -8
+          kill -9 $TESTPID 2>/dev/null
+          exit 1
 
       - name: test sc-android
         run: cargo test -p sc-android
