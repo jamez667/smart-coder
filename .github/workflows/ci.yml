@@ -138,33 +138,43 @@ jobs:
       # moves there. If it still hangs first thing, position is irrelevant and
       # the difference is the job's own setup — `rustup components`, or the
       # cache this job writes and `reports` does not.
-      # **sc-eval is NOT in the gate while this is unexplained, and that is a
-      # deliberate, narrow retreat rather than a fix.**
+      # **sc-eval runs per test target, each bounded, because that is what
+      # demonstrably works on this runner.**
       #
-      # What is established: the full CI sequence -- web build, `cargo clippy
-      # --workspace --all-targets`, then this exact command -- passes on a
-      # two-core Linux container with 7 GB in about ninety seconds, clean clone,
-      # no leftover processes. Every module passes when run separately on the
-      # runner too. And `timeout --signal=KILL` does not fire on the step, so
-      # whatever it is waiting on is in the kernel, not in a loop this code
-      # controls.
+      # The whole-crate command has never finished in `check`. Running the same
+      # crate one target at a time, each under `timeout --signal=KILL`, finishes
+      # in seconds -- that is exactly what `reports` has been doing all along,
+      # and it is the only form of this command that has ever completed here.
       #
-      # What is not established is why the hosted runner differs. Until it is,
-      # `ci.yml` has never once gone green since it was written -- so every other
-      # crate in this workspace has effectively had NO gate for weeks, which is a
-      # far larger hole than one crate being advisory.
+      # It was not the timeout that made the difference, or so I assumed when I
+      # made this step "identical to the passing one" and dropped the wrapper.
+      # It hung again. The passing steps bound EVERY command; this one bounded
+      # nothing. So the wrapper goes back, per target.
       #
-      # So: it runs, bounded, and it does not fail the job. `reports` reproduces
-      # the hang on purpose and prints what the machine and /proc say
-      # (`scripts/why-stuck.sh`). When that names the wait, this comes back into
-      # the gate.
-      - name: test sc-eval (advisory while the runner hang is unexplained)
-        continue-on-error: true
-        timeout-minutes: 6
+      # Everything measured and ruled out, so nobody repeats it: disk (target/
+      # peaks at 2.0G against ~14G free), memory (peak 3,985 MB), the tests
+      # themselves (every module passes separately, here and locally), the
+      # sequence (web build -> workspace clippy -> cargo test passes on a clean
+      # Linux clone in ~90s), and ordering (it hangs running first).
+      #
+      # Still unexplained: `timeout-minutes` on the step does not fire either,
+      # and that is enforced outside the runner. Whatever wedges takes the
+      # Actions agent with it. Bounding each command is a containment, not a
+      # cure -- but a bounded step reports, and an unbounded one has never once
+      # let this workflow go green.
+      - name: test sc-eval
         env:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
-        run: cargo test -p sc-eval -- --test-threads=1
+        run: |
+          set -e
+          cargo test -p sc-eval --no-run
+          for m in fsutil pi_arm raw_arm report results retrieval runner solver task; do
+            timeout --signal=KILL 180s cargo test -p sc-eval --lib "${m}::" -- --test-threads=1
+          done
+          for t in suite_smoke suite_shape gateway_ab; do
+            timeout --signal=KILL 180s cargo test -p sc-eval --test "$t" -- --test-threads=1
+          done
 
       - name: test sc-android
         run: cargo test -p sc-android
