@@ -319,6 +319,11 @@ jobs:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
         run: |
+          # `set +e` for the whole block: the runner uses `bash -e`, so the first
+          # module that exits non-zero aborts the script and everything after it
+          # goes unreported -- which is what happened on the first attempt, where
+          # the log stopped dead after `retrieval` with no verdict for `runner`.
+          set +e
           cargo test -p sc-eval --no-run 2>&1 | tail -2
           for m in fsutil pi_arm raw_arm report results retrieval runner solver task; do
             start=$(date +%s)
@@ -327,10 +332,12 @@ jobs:
             end=$(date +%s)
             if [ $rc -eq 137 ] || [ $rc -eq 124 ]; then
               echo "HUNG: $m exceeded 120s"
-              echo "--- last lines of $m ---"
-              tail -20 /tmp/$m.log || true
+              tail -30 /tmp/$m.log
+            elif [ $rc -ne 0 ]; then
+              echo "FAILED: $m rc=$rc in $((end-start))s"
+              tail -30 /tmp/$m.log
             else
-              echo "ok: $m in $((end-start))s (rc=$rc)"
+              echo "ok: $m in $((end-start))s"
             fi
           done
           for t in suite_smoke suite_shape gateway_ab; do
@@ -340,9 +347,12 @@ jobs:
             end=$(date +%s)
             if [ $rc -eq 137 ] || [ $rc -eq 124 ]; then
               echo "HUNG: test/$t exceeded 120s"
-              tail -20 /tmp/$t.log || true
+              tail -30 /tmp/$t.log
+            elif [ $rc -ne 0 ]; then
+              echo "FAILED: test/$t rc=$rc in $((end-start))s"
+              tail -30 /tmp/$t.log
             else
-              echo "ok: test/$t in $((end-start))s (rc=$rc)"
+              echo "ok: test/$t in $((end-start))s"
             fi
           done
 

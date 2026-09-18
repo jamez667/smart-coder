@@ -590,8 +590,23 @@ mod tests {
         // Signal 0 tests for existence without delivering anything. The
         // grandchild must be gone; if the group kill did nothing, it is still
         // spinning.
-        std::thread::sleep(Duration::from_millis(200));
-        let alive = unsafe { kill_probe(pid, 0) } == 0;
+        //
+        // **Given a moment, and retried.** The kill is asynchronous: `kill(2)`
+        // returns once the signal is queued, not once the target has been
+        // reaped, and on a loaded two-core runner that gap is real. A single
+        // probe 200ms later failed in CI while the same code passed everywhere
+        // else -- which read as the fix not working, and was a race in the
+        // test. Polling to a deadline asserts the same property without
+        // asserting a schedule the kernel never promised.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut alive = true;
+        while Instant::now() < deadline {
+            if unsafe { kill_probe(pid, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         assert!(!alive, "the grandchild (pid {pid}) survived the kill");
     }
 
