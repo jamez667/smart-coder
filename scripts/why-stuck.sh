@@ -20,6 +20,19 @@
 
 GRACE=${1:-180}
 
+# **Print the machine first.** The full CI sequence -- web build, workspace
+# clippy, then this exact command -- passes on a two-core Linux container with
+# 7 GB in about ninety seconds. It has never finished on the hosted runner. So
+# the difference is the runner, and these three lines are the cheapest way to
+# see it: how much disk is left, how much memory, and how many cores.
+echo "=== the machine, before anything runs ==="
+df -h / /tmp 2>/dev/null
+free -m 2>/dev/null
+nproc 2>/dev/null
+echo "=== target/ size (clippy --workspace --all-targets built into it) ==="
+du -sh target 2>/dev/null || echo "no target/"
+echo
+
 cargo test -p sc-eval -- --test-threads=1 --nocapture >/tmp/eval.log 2>&1 &
 TESTPID=$!
 
