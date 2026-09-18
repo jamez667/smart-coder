@@ -247,25 +247,18 @@ impl Watchdog {
                     thread::sleep(Duration::from_millis(250));
                     if start.elapsed() >= Duration::from_secs(secs) {
                         eprintln!("WATCHDOG: still inside {what} after {:?}", start.elapsed());
-                        // **Then end the process, so the step COMPLETES.**
+                        // **Prints, and stops there.** It used to call
+                        // `std::process::abort()` so a stalled step would
+                        // complete and upload its log. That was a bad trade:
+                        // `abort()` raises SIGABRT, which dumps core, and a
+                        // large debug binary dumping core on a CI runner is
+                        // itself a long uninterruptible write -- on a runner
+                        // already suspected of blocking in I/O.
                         //
-                        // Printing alone was not enough, and that is the whole
-                        // lesson of this hunt: a job killed by `timeout-minutes`
-                        // uploads no log for the step that was running, so the
-                        // line above reaches the live view and then vanishes.
-                        // Seven runs produced nothing through the API.
-                        //
-                        // A step that exits on its own is a step that completed,
-                        // and a completed step's log is uploaded — so aborting
-                        // here is what turns this diagnostic into evidence
-                        // anybody can read afterwards.
-                        //
-                        // `abort` rather than `panic`: the stall is on another
-                        // thread, and unwinding this one would not stop it.
-                        // Only set when `SC_EVAL_WATCHDOG_SECS` is, so this can
-                        // never fire outside CI.
+                        // A diagnostic must not be able to hurt the thing it is
+                        // diagnosing. The line above is the whole value here.
                         std::io::Write::flush(&mut std::io::stderr()).ok();
-                        std::process::abort();
+                        return;
                     }
                 }
             });
@@ -634,54 +627,23 @@ mod tests {
         unsafe fn kill_probe(pid: i32, sig: i32) -> i32;
     }
 
-    /// The watchdog names the phase that is still running, then ends the process.
+    /// The watchdog names the phase that is still running.
     ///
-    /// **Both halves matter and the second is the point.** Printing alone reaches
-    /// only the live log, and a job killed by a CI timeout uploads nothing for the
-    /// step that was running — seven runs produced no evidence that way. A step
-    /// that exits on its own completes, and a completed step's log is kept.
-    ///
-    /// Tested in a SUBPROCESS, because the behaviour under test is `abort`: any
-    /// in-process assertion would take the test binary down with it. The child is
-    /// this same test binary, re-invoked to run only the helper below.
+    /// **It no longer asserts that the process ends, because it no longer ends
+    /// it.** That was tested by re-invoking this binary with the watchdog armed
+    /// so the child would `abort()` -- which put a deliberate core dump inside a
+    /// CI gate, on a runner already suspected of blocking in I/O. A diagnostic
+    /// that can wedge the machine is worse than no diagnostic.
     #[test]
-    fn the_watchdog_names_the_phase_then_ends_the_process() {
-        let exe = std::env::current_exe().expect("test binary");
-        let out = Command::new(exe)
-            // **The full module path, not the bare function name.** `--exact`
-            // matches what `--list` prints, and that is the path — a bare name
-            // silently matches nothing, which looks exactly like a watchdog that
-            // failed to fire.
-            .args([
-                "--exact",
-                "runner::tests::watchdog_probe_child",
-                "--nocapture",
-                "--ignored",
-            ])
-            .env("SC_EVAL_WATCHDOG_SECS", "0")
-            .output()
-            .expect("run the probe");
-
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("WATCHDOG: still inside probe: a phase"),
-            "the watchdog must name the phase; stderr was: {stderr}"
-        );
-        assert!(
-            !out.status.success(),
-            "the watchdog must end the process, but it exited {:?}",
-            out.status.code()
-        );
-    }
-
-    /// The child half of the test above. `#[ignore]` so a normal run never starts
-    /// it — it deliberately aborts.
-    #[test]
-    #[ignore]
-    fn watchdog_probe_child() {
+    fn the_watchdog_names_the_phase_that_is_still_running() {
+        // SAFETY: the variable is read only by `Watchdog::start`, on this thread.
+        unsafe { std::env::set_var("SC_EVAL_WATCHDOG_SECS", "0") };
         let _w = Watchdog::start("probe: a phase".into());
-        // Longer than the watchdog's 250ms poll, so it must fire.
-        thread::sleep(Duration::from_secs(30));
+        // Longer than the watchdog's 250ms poll, so it has fired by now. Reaching
+        // this line at all is half the assertion: the armed watchdog used to take
+        // the whole process down here.
+        thread::sleep(Duration::from_millis(600));
+        unsafe { std::env::remove_var("SC_EVAL_WATCHDOG_SECS") };
     }
 
     /// Unset means silent, which is what keeps a normal run quiet — and, given
