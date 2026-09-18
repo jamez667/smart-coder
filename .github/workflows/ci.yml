@@ -356,6 +356,32 @@ jobs:
             fi
           done
 
+      # **The whole crate, exactly as `check` runs it, but here.**
+      #
+      # The per-module bisection above shows NOTHING hanging: eleven modules in
+      # 1-23s each. Yet `test sc-eval` in `check` has never finished. The only
+      # difference left is that it runs the crate in one command -- all five test
+      # binaries, in one `cargo test` -- so this runs precisely that, bounded, in
+      # the job whose logs survive.
+      #
+      # If it hangs here, the tail names the last test to print. If it passes
+      # here and still hangs in `check`, the difference is the JOB and not the
+      # tests, which is a different search entirely.
+      - name: the whole sc-eval crate, bounded
+        env:
+          SC_EVAL_VERIFY_TIMEOUT_SECS: 20
+          SC_COMMAND_TIMEOUT_SECS: 20
+        run: |
+          set +e
+          timeout --signal=KILL 300s cargo test -p sc-eval -- --test-threads=1 --nocapture > /tmp/whole.log 2>&1
+          rc=$?
+          set -e
+          echo "rc=$rc"
+          tail -40 /tmp/whole.log
+          if [ $rc -eq 137 ] || [ $rc -eq 124 ]; then
+            echo "::error::the whole crate hung; the last test above is the one"
+          fi
+
       - name: gateway routing benchmark
         run: cargo test --quiet -p sc-gateway --test bench -- --nocapture
 
