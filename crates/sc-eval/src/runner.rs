@@ -157,21 +157,27 @@ fn kill_tree(child: &mut std::process::Child) {
 
     #[cfg(unix)]
     {
-        // Negating the pid signals the process GROUP, and the shell **is** its own
-        // group leader — but only because `verify` asks for that with
-        // `process_group(0)`. It was not, for as long as this comment claimed it
-        // was: `spawn` leaves a child in the parent's group, so this named a
-        // group that did not exist. See `verify`.
-        let _ = Command::new("kill")
-            .args(["-9", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // **The syscall, not `/usr/bin/kill`.**
+        //
+        // This spawned two helper processes to deliver two signals, and spawning
+        // is the one thing that cannot be relied on here: the command being
+        // killed is, by definition, misbehaving -- a busy loop pinning the CPU,
+        // on a two-core runner. `fork`/`exec` under that load can take
+        // arbitrarily long, so the kill that ends the spin is itself waiting on
+        // the spin to yield. Measured: on a hosted runner this never completed,
+        // and the whole job died at its 30-minute bound with no log.
+        //
+        // `libc::kill` is a syscall. It cannot block, cannot fail to schedule,
+        // and needs nothing from the process table.
+        //
+        // Negating the pid signals the process GROUP, which reaches the
+        // children -- and the group exists because `verify` asks for one with
+        // `process_group(0)`. The comment here used to claim the shell was its
+        // own group leader before anything arranged that; it was not.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
     }
 
     // Direct kill too, in case the platform helper is unavailable, then reap. By now

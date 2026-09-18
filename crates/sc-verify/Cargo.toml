@@ -7,3 +7,10 @@ repository.workspace = true
 description = "Run the project's tests and parse structured per-test results (spec 04/11)."
 
 [dependencies]
+
+# The `kill` syscall. `kill_tree` spawned `/usr/bin/kill`, which means fork/exec
+# while a runaway command saturates the CPU -- the one moment spawning is least
+# reliable. The syscall cannot block.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

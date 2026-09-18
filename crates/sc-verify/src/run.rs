@@ -587,20 +587,17 @@ fn kill_tree(child: &mut std::process::Child) {
 
     #[cfg(unix)]
     {
-        // Negating the pid signals the process GROUP, and it reaches the children
-        // **only because `run_raw` asks for one** with `process_group(0)`. For as
-        // long as this comment claimed otherwise, `spawn` was leaving the child in
-        // the parent's group and this named a group that did not exist.
-        let _ = Command::new("kill")
-            .args(["-9", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // **The syscall, not `/usr/bin/kill`.** Spawning a helper to deliver the
+        // signal means `fork`/`exec` while the thing being killed is misbehaving
+        // -- typically a busy loop pinning the CPU -- so the kill waits on the
+        // spin it exists to end. `libc::kill` cannot block.
+        //
+        // Negating the pid signals the process GROUP, which reaches the children
+        // because `run_raw` asks for a group with `process_group(0)`.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
     }
 
     let _ = child.kill();

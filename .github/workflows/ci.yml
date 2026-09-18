@@ -38,19 +38,21 @@ env:
 
 jobs:
   check:
-    # **Pinned, not `ubuntu-latest`.** Every other explanation has been measured
-    # and ruled out: the tests (each module passes on this very runner), the
-    # sequence (identical steps pass on a clean Linux clone in ~90s), disk (2.0G
-    # peak against ~14G free), memory (3,985 MB peak), ordering, stale artifacts
-    # (`cargo clean` did not help) and the rust cache (hangs with it off, cold).
+    # `ubuntu-22.04` was pinned here for one run, to test whether the image was
+    # the cause. It was not -- it was the image that finally let the failure
+    # REPORT. On 22.04 the `timeout` fired, the step completed in 51 seconds, and
+    # the uploaded log named the test:
     #
-    # What is left is the image. `ubuntu-latest` is mid-migration to 26.04 --
-    # the runs themselves carry the notice -- and this workflow has never gone
-    # green since the day it was written, which fits an image-specific fault
-    # better than anything else remaining.
+    #     runner::tests::a_verify_command_that_never_ends_is_a_failure_not_a_hang
+    #     10199 Killed  timeout --signal=KILL 180s
     #
-    # `reports` deliberately stays on `ubuntu-latest`, so one run compares them.
-    runs-on: ubuntu-22.04
+    # That test spins `while :; do :; done` and expects `kill_tree` to end it.
+    # `kill_tree` shelled out to `/usr/bin/kill` -- fork/exec while a busy loop
+    # saturates a two-core runner, which is the one moment spawning cannot be
+    # relied on. The kill was waiting on the spin it existed to end. Fixed in
+    # both copies (`sc-eval` and `sc-verify`) by calling `libc::kill` directly:
+    # a syscall cannot block.
+    runs-on: ubuntu-latest
     # Enforced by GitHub OUTSIDE the runner, which is the point: a `timeout`
     # wrapped around the command did not hold, because it signals `cargo` and
     # not the stuck test binary beneath it. 30 minutes is generous against a
