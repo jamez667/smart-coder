@@ -162,12 +162,32 @@ jobs:
       # Actions agent with it. Bounding each command is a containment, not a
       # cure -- but a bounded step reports, and an unbounded one has never once
       # let this workflow go green.
+      # **The build artifacts clippy leaves behind are the trigger, so drop
+      # them before testing.**
+      #
+      # Proven in `reports`, same job, minutes apart: sc-eval runs every module
+      # and passes in 42 seconds BEFORE `cargo clippy --workspace --all-targets`,
+      # then the very next sc-eval command after clippy hangs. Ordering within
+      # the job is the whole difference.
+      #
+      # Bounding did not help -- `timeout --signal=KILL` per command, and
+      # `timeout-minutes` on the step, neither fires. Whatever this is takes the
+      # Actions agent with it, which is why nothing inside the VM can bound it.
+      #
+      # `cargo clean -p sc-eval` drops the artifacts clippy built for this crate
+      # and forces `cargo test` to build its own, rather than reusing or racing
+      # whatever clippy left. It costs one crate's rebuild.
+      #
+      # Still a containment. What exactly collides in those artifacts, and why
+      # only on the hosted runner, is unknown -- reproducing the identical
+      # sequence on a clean Linux clone passes in ~90 seconds.
       - name: test sc-eval
         env:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
         run: |
           set -e
+          cargo clean -p sc-eval
           cargo test -p sc-eval --no-run
           for m in fsutil pi_arm raw_arm report results retrieval runner solver task; do
             timeout --signal=KILL 180s cargo test -p sc-eval --lib "${m}::" -- --test-threads=1
