@@ -360,6 +360,21 @@ jobs:
       # If it hangs here, the tail names the last test to print. If it passes
       # here and still hangs in `check`, the difference is the JOB and not the
       # tests, which is a different search entirely.
+      # **Does clippy --all-targets poison the next `cargo test`?**
+      #
+      # `reports` runs the crate and finishes; `check` runs the identical command
+      # and hangs -- same run, same commit, same runner image. With ordering
+      # ruled out, the difference left is what `check` does BEFORE the tests, and
+      # the candidate is `cargo clippy --workspace --all-targets`: it builds
+      # every test binary, and then `cargo test` builds them again.
+      #
+      # Running clippy here first makes the two jobs match. If `the whole
+      # sc-eval crate` then hangs in THIS job too, clippy is the trigger and the
+      # search has a target. If it still passes, the difference is something
+      # about the `check` runner itself and not its steps.
+      - name: clippy first, to mirror check
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: the whole sc-eval crate, bounded
         env:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
