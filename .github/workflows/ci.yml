@@ -304,6 +304,48 @@ jobs:
       - name: retrieval ranking
         run: "cargo test --quiet -p sc-eval retrieval:: -- --nocapture"
 
+      # **Which sc-eval test hangs.** Here rather than in `check` because this
+      # job is `continue-on-error` and therefore always COMPLETES — and only a
+      # completed job uploads its logs. `check` is killed by `timeout-minutes`
+      # with `test sc-eval` still running, and the archive for such a run holds
+      # this job and nothing else; that is why eight attempts to instrument the
+      # real step produced no evidence at all.
+      #
+      # Each module is bounded and reported separately, so the one that times
+      # out names itself in a log that survives. `|| true` per module so one
+      # hang does not hide the modules after it.
+      - name: which sc-eval module hangs
+        env:
+          SC_EVAL_VERIFY_TIMEOUT_SECS: 20
+          SC_COMMAND_TIMEOUT_SECS: 20
+        run: |
+          cargo test -p sc-eval --no-run 2>&1 | tail -2
+          for m in fsutil pi_arm raw_arm report results retrieval runner solver task; do
+            start=$(date +%s)
+            timeout --signal=KILL 120s cargo test -p sc-eval --lib "${m}::" -- --test-threads=1 >/tmp/$m.log 2>&1
+            rc=$?
+            end=$(date +%s)
+            if [ $rc -eq 137 ] || [ $rc -eq 124 ]; then
+              echo "HUNG: $m exceeded 120s"
+              echo "--- last lines of $m ---"
+              tail -20 /tmp/$m.log || true
+            else
+              echo "ok: $m in $((end-start))s (rc=$rc)"
+            fi
+          done
+          for t in suite_smoke suite_shape gateway_ab; do
+            start=$(date +%s)
+            timeout --signal=KILL 120s cargo test -p sc-eval --test "$t" -- --test-threads=1 >/tmp/$t.log 2>&1
+            rc=$?
+            end=$(date +%s)
+            if [ $rc -eq 137 ] || [ $rc -eq 124 ]; then
+              echo "HUNG: test/$t exceeded 120s"
+              tail -20 /tmp/$t.log || true
+            else
+              echo "ok: test/$t in $((end-start))s (rc=$rc)"
+            fi
+          done
+
       - name: gateway routing benchmark
         run: cargo test --quiet -p sc-gateway --test bench -- --nocapture
 
