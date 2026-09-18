@@ -190,7 +190,27 @@ jobs:
           # lands in the live output before the kill, and the last line printed
           # names the phase that never finished.
           SC_EVAL_WATCHDOG_SECS: 60
-        run: cargo test -p sc-eval -- --test-threads=1 --nocapture
+        # **`setsid` + `timeout -s KILL`, because plain `timeout` did not hold.**
+        #
+        # `timeout cargo test` signals `cargo`, which does not pass it on to the
+        # stuck test binary underneath — measured: the step ran 12 minutes past a
+        # 300-second bound. Running under `setsid` puts the whole thing in its own
+        # process group, and `--kill-after` then SIGKILLs that group, so the
+        # binary cannot outlive the deadline.
+        #
+        # This is what makes the step COMPLETE instead of the job being killed —
+        # and a completed step uploads its log, where a killed job uploads
+        # nothing for the step that was running. That is the difference between a
+        # diagnosis and eight runs of silence.
+        run: |
+          set +e
+          setsid timeout --signal=INT --kill-after=30s 600s cargo test -p sc-eval -- --test-threads=1 --nocapture
+          rc=$?
+          set -e
+          if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
+            echo "::error::sc-eval hit the 600s bound. The last test name printed above is the one that never finished."
+          fi
+          exit $rc
       - name: test sc-flame
         run: cargo test -p sc-flame
       - name: test sc-fsutil
