@@ -153,10 +153,12 @@ jobs:
       # from 18 seconds to 15+ minutes, again un-SIGKILLable. That is the
       # trigger.
       #
-      # Both commands build every test binary into the same `target/`, and cargo
-      # holds a lock on it. A separate `CARGO_TARGET_DIR` gives this step its own
-      # tree, so it cannot contend with whatever clippy left behind. It costs a
-      # rebuild of this crate's dependencies and buys a step that completes.
+      # A separate `CARGO_TARGET_DIR` was tried on the theory that the two
+      # commands contend for cargo's lock on `target/`. It did NOT help -- the
+      # step hung for 20 minutes with its own tree -- so the lock is not it, and
+      # the theory is recorded here rather than left in the file as a workaround
+      # that does nothing. `reports` now reproduces the hang and asks /proc what
+      # the wait actually is; see `scripts/why-stuck.sh`.
       #
       # Not a root cause. What blocks in the kernel, and why only on the hosted
       # Linux runner, is still open -- but a gate that runs is worth more than a
@@ -165,7 +167,6 @@ jobs:
         env:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
-          CARGO_TARGET_DIR: /tmp/sc-eval-target
         run: cargo test -p sc-eval -- --test-threads=1
 
       - name: test sc-android
@@ -344,20 +345,25 @@ jobs:
       # If it hangs here, the tail names the last test to print. If it passes
       # here and still hangs in `check`, the difference is the JOB and not the
       # tests, which is a different search entirely.
-      - name: the whole sc-eval crate, bounded
+      # **Reproduce the hang here, then ask the kernel what is stuck.**
+      #
+      # `clippy --all-targets` before the tests reproduces it in this job: 18
+      # seconds becomes 15+ minutes, and `timeout --signal=KILL` does not fire.
+      # A separate `CARGO_TARGET_DIR` did not help either, so cargo's lock on
+      # `target/` was the wrong guess.
+      #
+      # A process that cannot be SIGKILLed is blocked in the kernel, and only
+      # /proc names that wait. `reports` is `continue-on-error` and always
+      # completes, so what the script prints survives in the uploaded log --
+      # which the killed `check` job never manages.
+      - name: clippy first, to mirror check
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: what is the stuck process waiting on
         env:
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
-        run: |
-          set +e
-          timeout --signal=KILL 300s cargo test -p sc-eval -- --test-threads=1 --nocapture > /tmp/whole.log 2>&1
-          rc=$?
-          set -e
-          echo "rc=$rc"
-          tail -40 /tmp/whole.log
-          if [ $rc -eq 137 ] || [ $rc -eq 124 ]; then
-            echo "::error::the whole crate hung; the last test above is the one"
-          fi
+        run: sh scripts/why-stuck.sh 180
 
       - name: gateway routing benchmark
         run: cargo test --quiet -p sc-gateway --test bench -- --nocapture
