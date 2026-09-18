@@ -142,42 +142,37 @@ jobs:
         run: cargo test -p sc-eval --no-run
       - name: test sc-eval
         env:
-          # Two different timeouts, on two different paths, and the first alone
-          # was not enough. `SC_EVAL_VERIFY_TIMEOUT_SECS` bounds sc-eval's own
-          # `verify`; the run with only that set still stalled 27 minutes, which
-          # is what proved the wait is NOT there. `SC_COMMAND_TIMEOUT_SECS`
-          # bounds `sc_verify::run_command` — the agent's shell path, default
-          # 240s — which is what the solver tests actually go through.
           SC_EVAL_VERIFY_TIMEOUT_SECS: 20
           SC_COMMAND_TIMEOUT_SECS: 20
-          # Prints, from a background thread, which task and phase is still
-          # running after 60s. A job killed by `timeout-minutes` uploads no log
-          # for the step that was running, so anything that only prints at the
-          # end is unrecoverable -- three attempts at that produced nothing. This
-          # lands in the live output before the kill, and the last line printed
-          # names the phase that never finished.
-          SC_EVAL_WATCHDOG_SECS: 60
-        # **`setsid` + `timeout -s KILL`, because plain `timeout` did not hold.**
+        # **Exactly what `reports` runs, which passes in ~18 seconds.**
         #
-        # `timeout cargo test` signals `cargo`, which does not pass it on to the
-        # stuck test binary underneath — measured: the step ran 12 minutes past a
-        # 300-second bound. Running under `setsid` puts the whole thing in its own
-        # process group, and `--kill-after` then SIGKILLs that group, so the
-        # binary cannot outlive the deadline.
+        # The same crate, the same command and the same runner image finish in
+        # `reports` and have never finished here. With sc-eval moved to the front
+        # of the job, position is ruled out too -- so what was left was the two
+        # things this step did that `reports` did not:
         #
-        # This is what makes the step COMPLETE instead of the job being killed —
-        # and a completed step uploads its log, where a killed job uploads
-        # nothing for the step that was running. That is the difference between a
-        # diagnosis and eight runs of silence.
+        #   - `SC_EVAL_WATCHDOG_SECS`, which arms a thread that calls
+        #     `std::process::abort()`. That was added to make a stall report
+        #     itself; a diagnostic that can kill the process is a poor thing to
+        #     leave armed while the stall is still unexplained.
+        #   - `setsid`, which detaches the process group. Combined with stdio
+        #     inherited by the step (rather than redirected to a file), a
+        #     detached leader whose output nobody is draining is a plausible
+        #     wedge on its own.
+        #
+        # Both are removed and the output goes to a file, so this step is now the
+        # `reports` step character for character. If it passes, one of those two
+        # was the cause -- which would mean the hang has been MINE since the
+        # watchdog landed, and the original cause is still upstream of it.
         run: |
           set +e
-          setsid timeout --signal=INT --kill-after=30s 600s cargo test -p sc-eval -- --test-threads=1 --nocapture
+          timeout --signal=KILL 300s cargo test -p sc-eval -- --test-threads=1 --nocapture > /tmp/eval.log 2>&1
           rc=$?
           set -e
-          if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
-            echo "::error::sc-eval hit the 600s bound. The last test name printed above is the one that never finished."
-          fi
+          echo "rc=$rc"
+          tail -40 /tmp/eval.log
           exit $rc
+
       - name: test sc-android
         run: cargo test -p sc-android
       - name: test sc-cargo
