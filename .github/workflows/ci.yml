@@ -126,51 +126,18 @@ jobs:
       #
       # `--no-fail-fast` is NOT used: a crate that fails should stop its own step,
       # and the remaining steps still run because each is independent.
-      - name: test sc-android
-        run: cargo test -p sc-android
-      - name: test sc-cargo
-        run: cargo test -p sc-cargo
-      - name: test sc-cli
-        run: cargo test -p sc-cli
-      - name: test sc-comply
-        run: cargo test -p sc-comply
-      - name: test sc-comply-author
-        run: cargo test -p sc-comply-author
-      - name: test sc-context
-        run: cargo test -p sc-context
-      - name: test sc-core
-        run: cargo test -p sc-core
-      - name: test sc-craft-ui
-        run: cargo test -p sc-craft-ui
-      - name: test sc-daemon
-        run: cargo test -p sc-daemon
-      - name: test sc-editor
-        run: cargo test -p sc-editor
-      # **sc-eval has taken this job's 30-minute bound four runs running.** Every
-      # other crate finishes in seconds; this one starts and never returns, and
-      # because a killed job uploads no log for the running step, splitting by
-      # crate could name the crate and nothing more.
+      # **sc-eval runs FIRST, and that is the experiment.**
       #
-      # One real cost was found and fixed at the source: the retrieval
-      # determinism test walked and parsed this entire repository a second time
-      # (`retrieval.rs`), 45s -> 16s. That was not the whole of it — the live log
-      # shows the run reaching `solver::tests` and stopping there.
+      # The same command passes in `reports` in ~18 seconds — whole crate, same
+      # runner image, same env — while here it has never once finished. The
+      # difference is not the tests; it is that ten crates run before it, and
+      # `sc-craft-ui` alone takes nearly two minutes of GUI/wgpu work.
       #
-      # `SC_EVAL_VERIFY_TIMEOUT_SECS` bounds each `verify` call, which is the only
-      # thing in this crate that waits on a spawned process. The tests here verify
-      # two-line shell scripts, so 20 seconds is enormous; the production default
-      # is 300s and is deliberately left alone. A stalled command now fails its
-      # own task in seconds and the assertion names the test, instead of the
-      # 300s-per-task wait that silently consumed the job.
-      #
-      # **The compile stays its own step.** Not for speed — it is four seconds —
-      # but because splitting it is the measurement that proved the 22 minutes was
-      # the run and not the build.
-      #
-      # Deliberately NOT wrapped in `timeout`: that was tried, and `timeout`
-      # signals `cargo` rather than the stuck test binary beneath it, so the step
-      # ran 12 minutes past a 300-second bound. Bounding belongs on the job, where
-      # GitHub enforces it from outside the runner.
+      # Moving it to the front is the cheapest way to tell those apart. If it
+      # passes here, something earlier in the job is the cause and the search
+      # moves there. If it still hangs first thing, position is irrelevant and
+      # the difference is the job's own setup — `rustup components`, or the
+      # cache this job writes and `reports` does not.
       - name: build sc-eval tests
         run: cargo test -p sc-eval --no-run
       - name: test sc-eval
@@ -211,6 +178,26 @@ jobs:
             echo "::error::sc-eval hit the 600s bound. The last test name printed above is the one that never finished."
           fi
           exit $rc
+      - name: test sc-android
+        run: cargo test -p sc-android
+      - name: test sc-cargo
+        run: cargo test -p sc-cargo
+      - name: test sc-cli
+        run: cargo test -p sc-cli
+      - name: test sc-comply
+        run: cargo test -p sc-comply
+      - name: test sc-comply-author
+        run: cargo test -p sc-comply-author
+      - name: test sc-context
+        run: cargo test -p sc-context
+      - name: test sc-core
+        run: cargo test -p sc-core
+      - name: test sc-craft-ui
+        run: cargo test -p sc-craft-ui
+      - name: test sc-daemon
+        run: cargo test -p sc-daemon
+      - name: test sc-editor
+        run: cargo test -p sc-editor
       - name: test sc-flame
         run: cargo test -p sc-flame
       - name: test sc-fsutil
