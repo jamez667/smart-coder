@@ -71,7 +71,23 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - uses: Swatinem/rust-cache@v2
+      # **The rust cache is OFF in this job, as an experiment.**
+      #
+      # It is the one piece of state a local reproduction never has, and the
+      # local reproduction passes: identical sequence -- web build, workspace
+      # clippy, `cargo test -p sc-eval` -- finishes in ~90s on a clean Linux
+      # clone. On the runner, with a restored cache, the same command has never
+      # finished once.
+      #
+      # `cargo clean -p sc-eval` before the tests did not help, so it is not
+      # simply stale artifacts for that crate. Turning the cache off entirely
+      # tests whether restored state is involved at all. `reports` keeps its
+      # cache, so a single run compares the two.
+      #
+      # If this makes `check` pass, the cache is implicated and the fix is a
+      # cache key or a narrower restore. If it hangs anyway, the cache is
+      # exonerated and what is left is the runner image itself.
+      # - uses: Swatinem/rust-cache@v2
 
       # **The interface, built before any cargo command touches sc-server.**
       # `include_str!` reads the bundle at compile time, so `cargo check` fails
