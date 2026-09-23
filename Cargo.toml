@@ -50,6 +50,35 @@ serde_json = "1"
 toml = "0.8"
 regex = "1"
 
+[profile.dev]
+# Debug builds of this workspace are large enough to matter: with cargo's
+# defaults (`debug = true`, full DWARF) `target/` reached 257 GB on a dev
+# machine — 131 GB of `debug/deps` and 85 GB of `debug/incremental` across
+# 4,755 incremental directories, against a ~300 MB source tree.
+#
+# `debug = 1` keeps line tables, so backtraces and `panic!` locations still name
+# the right file and line, and `cargo test` failures stay readable. What it drops
+# is full variable-inspection DWARF — stepping in a debugger and printing locals.
+# That is the trade: the common case (read a backtrace) is unaffected, the rarer
+# case (attach a debugger) needs a one-off `RUSTFLAGS="-C debuginfo=2"` build.
+debug = 1
+
+# Incremental state was the single largest directory after `deps`. It buys
+# faster rebuilds of a crate you are actively editing; across a 20+ crate
+# workspace it also accumulates a per-crate cache that nothing ever prunes.
+# Left on deliberately — the rebuild speed is the point of a dev profile — but
+# see `[profile.test]` below, which is where the unbounded growth came from.
+incremental = true
+
+[profile.test]
+# Test binaries are built once per run and rarely stepped through, so they carry
+# the same debug cost as `dev` with none of the iteration benefit. Turning
+# incremental off here is what stops `debug/incremental` growing without bound:
+# every `cargo test` was writing a fresh per-crate cache that no later build
+# reused.
+debug = 1
+incremental = false
+
 [profile.release]
 # Both release artifacts are things people download or pull: the desktop client
 # as a tarball and `sc-server` as a container layer. A slower build is worth a
