@@ -277,11 +277,7 @@ mod tests {
     /// process — `plugin::host::wants` covers who it reaches.
     #[test]
     fn saving_a_file_emits_a_buffer_event() {
-        let (mut app, dir) = app_with_file(
-            "a.rs",
-            "fn main() {}
-",
-        );
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
         app.select_file("a.rs".to_string());
 
         // Dirty the buffer, or the save is a no-op and must emit nothing.
@@ -308,11 +304,7 @@ mod tests {
     /// A clean buffer writes nothing, so it announces nothing (spec 29).
     #[test]
     fn saving_a_clean_buffer_emits_nothing() {
-        let (mut app, dir) = app_with_file(
-            "a.rs",
-            "fn main() {}
-",
-        );
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
         app.select_file("a.rs".to_string());
         let before = std::fs::metadata(dir.join("a.rs")).unwrap().modified().ok();
 
@@ -333,28 +325,45 @@ mod tests {
     /// host had the diagnostics in hand.
     #[test]
     fn a_plugin_with_no_panel_still_arms_the_tick() {
-        let (app, dir) = app_with_file(
-            "a.rs",
-            "fn main() {}
-",
-        );
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
         assert!(
             !app.a_plugin_is_running(),
             "nothing running, nothing to pump"
         );
-        // `Plugins` owns live child processes and cannot be built here, so this pins the
-        // half that is decidable: the gate reads `running`, not a panel registry.
+
+        // A plugin with NO panels and NO subscriptions — the shape that armed nothing.
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/c".to_string(), "exit".to_string()])
+        } else {
+            ("true", Vec::new())
+        };
+        let Ok(plugin) = sc_craft_ui::plugin::Plugin::spawn(&sc_craft_ui::plugin::Discovered {
+            dir_name: "idle".to_string(),
+            dir: std::env::temp_dir(),
+            command: command.into(),
+            args,
+            enabled: Some(true),
+        }) else {
+            let _ = std::fs::remove_dir_all(dir);
+            return; // no shell to spawn; nothing to assert rather than a false failure
+        };
+        app.plugins = Some(sc_craft_ui::plugin::Plugins {
+            running: vec![plugin],
+            ..Default::default()
+        });
+
+        assert!(
+            app.a_plugin_is_running(),
+            "a running plugin arms the tick even with no panel — the tick is the only              caller of `pump_plugins`, and without this its messages are never drained"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A plugin's diagnostics land in the panel beside the compiler's (spec 29).
     #[test]
     fn a_plugin_publishing_reaches_the_problems_panel() {
-        let (mut app, dir) = app_with_file(
-            "shader.wgsl",
-            "fn main() {}
-",
-        );
+        let (mut app, dir) = app_with_file("shader.wgsl", "fn main() {}\n");
         app.diagnostics.replace_all(
             sc_win::diagnostics::DiagnosticSource::Compile,
             vec![sc_win::diagnostics::Diagnostic {
@@ -398,11 +407,7 @@ mod tests {
     /// HOST to act on a path outside the workspace on its behalf.
     #[test]
     fn a_diagnostic_outside_the_workspace_is_refused() {
-        let (mut app, dir) = app_with_file(
-            "a.rs",
-            "fn main() {}
-",
-        );
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
 
         for escape in ["../outside.rs", "C:/Windows/System32/evil.rs"] {
             app.publish_plugin_diagnostics(
@@ -428,11 +433,7 @@ mod tests {
     /// A plugin's `Info` stays informational (spec 29).
     #[test]
     fn a_plugins_info_severity_survives_the_conversion() {
-        let (mut app, dir) = app_with_file(
-            "a.rs",
-            "fn main() {}
-",
-        );
+        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
         app.publish_plugin_diagnostics(
             "hints",
             "a.rs",
@@ -465,12 +466,7 @@ mod tests {
     /// order separately, a click would open a different file once a plugin published.
     #[test]
     fn clicking_a_plugins_problem_opens_that_file() {
-        let (mut app, dir) = app_with_file(
-            "shader.wgsl",
-            "fn main() {}
-bad
-",
-        );
+        let (mut app, dir) = app_with_file("shader.wgsl", "fn main() {}\nbad\n");
         // The compiler sorts first, so the plugin's row is index 1.
         app.diagnostics.replace_all(
             sc_win::diagnostics::DiagnosticSource::Compile,
