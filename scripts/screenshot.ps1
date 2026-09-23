@@ -34,7 +34,11 @@ public class Win2 {
 '@
 Add-Type -TypeDefinition $sig
 
-$p = Get-Process sc-win -ErrorAction SilentlyContinue | Select-Object -First 1
+# The PROCESS names, not the crate name. `sc-win` builds two binaries and neither is
+# called that (spec 21's product split), so looking for `sc-win` found nothing and
+# reported a running window as NOT RUNNING.
+$p = Get-Process smart-coder, smart-coder-crafter -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $p) { Write-Output "NOT RUNNING"; exit 1 }
 $h = $p.MainWindowHandle
 if ($h -eq 0) { Write-Output "NO WINDOW HANDLE"; exit 1 }

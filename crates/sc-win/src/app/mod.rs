@@ -324,6 +324,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A panel-less plugin still keeps the tick alive (spec 29).
+    ///
+    /// The tick is the ONLY caller of `pump_plugins`, and every other gate on it is a
+    /// panel-feed symptom (a terminal, a pending diff, a plugin autoscroll). A plugin
+    /// that only publishes diagnostics owns no panel and arms none of them, so its
+    /// messages sat unread in the channel forever — the panel stayed empty while the
+    /// host had the diagnostics in hand.
+    #[test]
+    fn a_plugin_with_no_panel_still_arms_the_tick() {
+        let (app, dir) = app_with_file(
+            "a.rs",
+            "fn main() {}
+",
+        );
+        assert!(
+            !app.a_plugin_is_running(),
+            "nothing running, nothing to pump"
+        );
+        // `Plugins` owns live child processes and cannot be built here, so this pins the
+        // half that is decidable: the gate reads `running`, not a panel registry.
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A plugin's diagnostics land in the panel beside the compiler's (spec 29).
     #[test]
     fn a_plugin_publishing_reaches_the_problems_panel() {

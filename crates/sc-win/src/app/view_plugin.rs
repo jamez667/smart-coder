@@ -61,8 +61,13 @@ impl App {
         let mut requests: Vec<(String, PluginMessage)> = Vec::new();
 
         for p in plugins.running.iter_mut() {
-            let plugin_id = p.manifest.as_ref().map(|m| m.id.clone());
-            for ev in p.drain() {
+            // Drained FIRST, then read per message. `drain` sets the manifest when it
+            // passes `Ready`, so a plugin that pushes in the same breath as its handshake
+            // has those messages in the SAME batch — and an id captured before the drain
+            // is still `None` for them, which silently dropped every one.
+            let events = p.drain();
+            for ev in events {
+                let plugin_id = p.manifest.as_ref().map(|m| m.id.clone());
                 match ev {
                     PluginEvent::Message(m) => match *m {
                         PluginMessage::PanelContent {

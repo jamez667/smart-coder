@@ -23,6 +23,18 @@ impl App {
         }
     }
 
+    /// Whether any plugin process is alive.
+    ///
+    /// **This gates the tick, and the tick is the only thing that calls
+    /// `pump_plugins`** (spec 29). A plugin does not have to own a panel to have
+    /// something to say: the three shipped plugins are all panel feeds, so the other tick
+    /// gates happened to cover them, and a plugin that only publishes diagnostics has no
+    /// panel, arms none of those gates, and had its messages sit unread in the channel
+    /// forever. Anything running is reason enough to keep draining.
+    pub(crate) fn a_plugin_is_running(&self) -> bool {
+        self.plugins.as_ref().is_some_and(|p| !p.running.is_empty())
+    }
+
     pub(crate) fn theme(&self) -> Theme {
         Theme::TokyoNight
     }
@@ -42,6 +54,7 @@ impl App {
             // the armed request would sit there until something else woke the app.
             || self.diff_wanted.is_some()
             || !self.plugin_scroll_to_bottom.is_empty()
+            || self.a_plugin_is_running()
         {
             iced::time::every(Duration::from_millis(50)).map(|_| Message::Tick)
         } else {

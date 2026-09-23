@@ -68,6 +68,14 @@ pub struct Plugin {
     /// How long the handshake took. Worth showing: it is the part of startup a plugin
     /// can make slow.
     pub handshake_ms: Option<u128>,
+    /// Messages that arrived in the same drained batch as the handshake.
+    ///
+    /// `drain` is batched, so a plugin that pushes in the same breath as its
+    /// `Initialized` — the natural thing to do, and what a diagnostics plugin does —
+    /// has those messages sitting behind `Ready` in one `Vec`. The handshake returns as
+    /// soon as it sees `Ready`, so without somewhere to put the rest they were dropped
+    /// on the floor and the plugin's first push never arrived.
+    pending: Vec<PluginEvent>,
     /// The protocol version this plugin speaks, retained after the handshake (spec 29).
     ///
     /// **Kept rather than discarded once checked**, because the compatibility promise is
@@ -138,6 +146,7 @@ impl Plugin {
             log: Vec::new(),
             handshake_ms: None,
             protocol_version: None,
+            pending: Vec::new(),
             events,
             next_request_id: 1,
         })
@@ -171,7 +180,8 @@ impl Plugin {
     /// pushes faster than the tick drains, so taking one event per tick would fall
     /// steadily further behind. `Session::drain_events` batches for the same reason.
     pub fn drain(&mut self) -> Vec<PluginEvent> {
-        let mut out = Vec::new();
+        // Anything the handshake set aside comes first, so ordering is preserved.
+        let mut out: Vec<PluginEvent> = std::mem::take(&mut self.pending);
         while let Ok(ev) = self.events.try_recv() {
             match &ev {
                 PluginEvent::Message(m) => {
@@ -185,6 +195,13 @@ impl Plugin {
             out.push(ev);
         }
         out
+    }
+
+    /// Hold `events` until the next [`drain`](Self::drain).
+    ///
+    /// Used by the handshake to put back what it drained but did not consume.
+    pub fn defer(&mut self, events: Vec<PluginEvent>) {
+        self.pending.extend(events);
     }
 
     /// Record a log line, keeping only the tail.
@@ -365,6 +382,27 @@ mod tests {
             capabilities: Vec::new(),
             subscriptions: subs,
         }
+    }
+
+    #[test]
+    fn deferred_events_lead_the_next_batch_and_are_taken_once() {
+        // A plugin that pushes in the same breath as its manifest has those messages in
+        // the SAME drained batch, behind `Ready`. The handshake returns on `Ready`, so
+        // the rest is deferred rather than dropped — otherwise a diagnostics plugin's
+        // first push silently never arrives. `Plugin` owns a live child process, so the
+        // queue's own semantics are what is pinned here: ordering, and taken exactly once.
+        let mut pending: Vec<u8> = vec![1, 2];
+        let mut drain = |pending: &mut Vec<u8>, fresh: Vec<u8>| -> Vec<u8> {
+            let mut out = std::mem::take(pending);
+            out.extend(fresh);
+            out
+        };
+        assert_eq!(
+            drain(&mut pending, vec![3]),
+            vec![1, 2, 3],
+            "deferred first"
+        );
+        assert_eq!(drain(&mut pending, vec![4]), vec![4], "taken exactly once");
     }
 
     #[test]

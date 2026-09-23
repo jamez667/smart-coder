@@ -266,7 +266,14 @@ pub fn accepts(theirs: u32) -> bool {
 fn await_handshake(plugin: &mut Plugin) -> Result<(), Failure> {
     let started = std::time::Instant::now();
     while started.elapsed() < host::HANDSHAKE_TIMEOUT {
-        for ev in plugin.drain() {
+        // `drain` is batched, so the handshake and whatever the plugin pushed straight
+        // after it can arrive together. Everything past `Ready` is put back rather than
+        // discarded — a plugin that publishes in the same breath as its manifest is
+        // being efficient, not out of order, and dropping that push made its first
+        // diagnostics silently never appear.
+        let batch = plugin.drain();
+        let mut rest = batch.into_iter();
+        while let Some(ev) = rest.next() {
             match ev {
                 PluginEvent::Ready(manifest) => {
                     // An inclusive RANGE, not equality (spec 27, spec 29): both v2 and v3
@@ -283,6 +290,7 @@ fn await_handshake(plugin: &mut Plugin) -> Result<(), Failure> {
                     // message that did not exist in v1.
                     plugin.protocol_version = Some(theirs);
                     plugin.handshake_ms = Some(started.elapsed().as_millis());
+                    plugin.defer(rest.collect());
                     return Ok(());
                 }
                 PluginEvent::Stopped(r) => {
