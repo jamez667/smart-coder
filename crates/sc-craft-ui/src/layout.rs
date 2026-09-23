@@ -1762,6 +1762,13 @@ mod tests {
 
     #[test]
     fn a_moved_panel_survives_a_round_trip_through_json() {
+        // **Pins the product, although it never flips it.** `parse` prunes the panels a
+        // Crafter may not have, so this test's `Chat` silently vanished whenever another
+        // test held the product at `Crafter` — cargo runs these on several threads. Taking
+        // the same lock is what makes the read safe, not just the write: the guard exists
+        // to serialise access to a process-global, and a reader outside it races.
+        let _product = product_guard(Product::SmartCoder);
+
         // A rearranged layout has generated split ids; they must persist like any other.
         let moved = Layout::assistant_default()
             .move_panel(
