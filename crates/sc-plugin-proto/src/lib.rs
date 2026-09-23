@@ -98,6 +98,21 @@ pub use manifest::{Capability, Manifest, PanelDecl};
 /// Additive again — a v2 plugin runs unchanged.
 pub const PROTOCOL_VERSION: u32 = 3;
 
+/// The oldest protocol version this host still accepts (spec 27, spec 29).
+///
+/// **The compatibility promise, implemented.** This module has always documented that
+/// the host supports every version it has ever shipped, while the check was an equality
+/// against [`PROTOCOL_VERSION`] — so a v1 plugin that would run correctly was refused
+/// anyway. Both v2 and v3 were additive, every addition defaulting to the v1 behaviour,
+/// which is what makes the range honest rather than optimistic.
+///
+/// The accepted range is `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`, inclusive.
+///
+/// **Raising this is a deliberate, documented release act.** It does not drift upward as
+/// a side effect of adding a message; when translating an old version becomes a genuine
+/// burden, the minimum rises in a release that says so.
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+
 /// A request id, correlating a request with its response.
 ///
 /// Scoped to the sender: the host and the plugin each number their own requests from

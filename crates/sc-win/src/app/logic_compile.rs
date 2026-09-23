@@ -25,8 +25,11 @@ impl App {
         } else {
             ProjectKind::Unknown
         };
-        // A previous project's problems must not linger against a new one.
+        // A previous project's problems must not linger against a new one — from ANY
+        // source. A plugin's diagnostics are as stale as the compiler's when the files
+        // they point at belong to a different project (spec 29).
         self.compile_report = None;
+        self.diagnostics.clear_all();
     }
 
     /// Fold the settings inputs back into [`Self::cfg`] and persist them (save-on-close).
@@ -81,12 +84,17 @@ impl App {
                 // Blocking: this is a full compiler run. Never on the UI thread.
                 tokio::task::spawn_blocking(move || run_compile(&cmd, &root, &cancel))
                     .await
-                    .unwrap_or_else(|e| CompileReport {
-                        failure: Some(format!("the compile thread panicked: {e}")),
-                        ..CompileReport::default()
+                    .unwrap_or_else(|e| {
+                        (
+                            CompileReport {
+                                failure: Some(format!("the compile thread panicked: {e}")),
+                                ..CompileReport::default()
+                            },
+                            Vec::new(),
+                        )
                     })
             },
-            |r| Message::CompileDone(Box::new(r)),
+            |(report, diagnostics)| Message::CompileDone(Box::new((report, diagnostics))),
         )
     }
 
@@ -102,11 +110,9 @@ impl App {
     /// This is the feature: a list you can act on, rather than a log you have to read. Opens in
     /// the REVIEW view — a compile error is something to look at, and it keeps the diff wash.
     pub(crate) fn open_diagnostic(&mut self, index: usize) -> Task<Message> {
-        let Some(d) = self
-            .compile_report
-            .as_ref()
-            .and_then(|r| r.diagnostics.get(index))
-        else {
+        // Indexes the SAME flattened list the panel renders (spec 29). Deriving the order
+        // separately here would open a different file the moment a plugin published.
+        let Some((_, d)) = self.diagnostics.flattened().get(index).copied() else {
             return Task::none();
         };
         let (file, line) = (d.file.clone(), d.line);
@@ -128,11 +134,16 @@ impl App {
 ///
 /// Reads stdout and stderr both — toolchains disagree about which one diagnostics belong on, and
 /// Unity's `-logFile -` writes to stdout while its fatal errors go to stderr.
+/// Run the toolchain, returning its outcome and the diagnostics it produced.
+///
+/// The two are separate because they are stored separately: the report is the compile's
+/// own (exit code, failure), while the diagnostics are filed under
+/// `DiagnosticSource::Compile` in the shared store (spec 29).
 fn run_compile(
     cmd: &project::CompileCommand,
     root: &std::path::Path,
     cancel: &Arc<AtomicBool>,
-) -> CompileReport {
+) -> (CompileReport, Vec<sc_win::diagnostics::Diagnostic>) {
     use std::io::Read;
     use std::process::Stdio;
 
@@ -145,12 +156,15 @@ fn run_compile(
     {
         Ok(c) => c,
         Err(e) => {
-            return CompileReport {
-                // Distinguish "couldn't launch the compiler" from "your code is broken" — they
-                // have entirely different fixes.
-                failure: Some(format!("Could not run `{}`: {e}", cmd.display())),
-                ..CompileReport::default()
-            };
+            return (
+                CompileReport {
+                    // Distinguish "couldn't launch the compiler" from "your code is broken" —
+                    // they have entirely different fixes.
+                    failure: Some(format!("Could not run `{}`: {e}", cmd.display())),
+                    ..CompileReport::default()
+                },
+                Vec::new(),
+            );
         }
     };
 
@@ -172,10 +186,13 @@ fn run_compile(
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
-            return CompileReport {
-                failure: Some("Compile cancelled.".to_string()),
-                ..CompileReport::default()
-            };
+            return (
+                CompileReport {
+                    failure: Some("Compile cancelled.".to_string()),
+                    ..CompileReport::default()
+                },
+                Vec::new(),
+            );
         }
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
@@ -194,18 +211,23 @@ fn run_compile(
     // A locked project is Unity's most common failure and its message is easy to lose in a long
     // log — surface the actionable version instead.
     if project::is_unity_lock_error(&out) {
-        return CompileReport {
-            failure: Some(
-                "Unity has this project open. Close the Unity editor and compile again."
-                    .to_string(),
-            ),
-            ..CompileReport::default()
-        };
+        return (
+            CompileReport {
+                failure: Some(
+                    "Unity has this project open. Close the Unity editor and compile again."
+                        .to_string(),
+                ),
+                ..CompileReport::default()
+            },
+            Vec::new(),
+        );
     }
 
-    CompileReport {
-        diagnostics: sc_win::diagnostics::parse(&out, root),
-        exit_code: status.and_then(|s| s.code()),
-        failure: None,
-    }
+    (
+        CompileReport {
+            exit_code: status.and_then(|s| s.code()),
+            failure: None,
+        },
+        sc_win::diagnostics::parse(&out, root),
+    )
 }

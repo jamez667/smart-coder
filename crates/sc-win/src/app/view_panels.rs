@@ -383,44 +383,79 @@ impl App {
         let mut col = column![action].spacing(8);
 
         if let Some(report) = &self.compile_report {
-            // The headline, coloured by outcome so "did it build?" needs no reading.
+            // The headline, coloured by outcome so "did it build?" needs no reading. It
+            // describes the COMPILE's diagnostics only — a plugin's shader errors are not
+            // evidence about whether cargo built the code.
+            let compiled = self
+                .diagnostics
+                .get(&sc_win::diagnostics::DiagnosticSource::Compile);
             let colour = if report.failure.is_some() {
                 AMBER
-            } else if report.ok() {
+            } else if report.ok(compiled) {
                 GOOD
             } else {
                 BAD
             };
-            col = col.push(text(report.summary()).size(12).color(colour));
+            col = col.push(text(report.summary(compiled)).size(12).color(colour));
+        }
 
-            // One clickable row per problem. Location first — it's what you're scanning for.
+        // One clickable row per problem, grouped by source (spec 29). The compiler first,
+        // then plugins by id — and rendered from the SAME flattened order `open_diagnostic`
+        // indexes, so a click always opens the row the user pointed at.
+        if !self.diagnostics.is_empty() {
             let mut list = column![].spacing(2);
-            for (i, d) in report.diagnostics.iter().enumerate() {
-                let sev_colour = match d.severity {
-                    sc_win::diagnostics::Severity::Error => BAD,
-                    sc_win::diagnostics::Severity::Warning => AMBER,
-                };
-                let code = d
-                    .code
-                    .as_deref()
-                    .map(|c| format!(" {c}"))
-                    .unwrap_or_default();
-                list = list.push(
-                    button(
-                        row![
-                            text(d.location()).size(11).color(ACCENT),
-                            text(format!("{}{}", d.severity.label(), code))
-                                .size(11)
-                                .color(sev_colour),
-                            text(d.message.clone()).size(11).color(FG),
-                        ]
-                        .spacing(8),
-                    )
-                    .on_press(Message::OpenDiagnostic(i))
-                    .padding([1, 4])
-                    .width(Fill)
-                    .style(tree_button),
-                );
+            let mut i = 0usize;
+            // A header only where there is more than one producer: labelling a lone
+            // "compile" group is noise for the case that has always been the only one.
+            let grouped = self.diagnostics.sources().count() > 1;
+            for (source, diagnostics) in self.diagnostics.sources() {
+                if grouped {
+                    list = list.push(text(source.label().to_string()).size(10).color(FG_MUTED));
+                }
+                for d in diagnostics {
+                    let sev_colour = match d.severity {
+                        sc_win::diagnostics::Severity::Error => BAD,
+                        sc_win::diagnostics::Severity::Warning => AMBER,
+                        sc_win::diagnostics::Severity::Info => FG,
+                    };
+                    let code = d
+                        .code
+                        .as_deref()
+                        .map(|c| format!(" {c}"))
+                        .unwrap_or_default();
+                    list = list.push(
+                        button(
+                            row![
+                                text(d.location()).size(11).color(ACCENT),
+                                text(format!("{}{}", d.severity.label(), code))
+                                    .size(11)
+                                    .color(sev_colour),
+                                text(d.message.clone()).size(11).color(FG),
+                            ]
+                            .spacing(8),
+                        )
+                        .on_press(Message::OpenDiagnostic(i))
+                        .padding([1, 4])
+                        .width(Fill)
+                        .style(tree_button),
+                    );
+                    i += 1;
+                }
+                // Truncation is reported, not silent: a source that trips the cap has a
+                // bug, and hiding that makes it harder to find.
+                if self.diagnostics.is_truncated(source) {
+                    // Names the source, because the note is only actionable if the
+                    // reader can tell WHOSE problems were cut when several are listed.
+                    list = list.push(
+                        text(format!(
+                            "… {} truncated at {} problems",
+                            source.label(),
+                            sc_win::diagnostics::MAX_DIAGNOSTICS_PER_SOURCE
+                        ))
+                        .size(11)
+                        .color(FG_MUTED),
+                    );
+                }
             }
             col = col.push(scrollable(list).height(Fill));
         }

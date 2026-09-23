@@ -111,6 +111,7 @@ impl App {
 
         // Re-stamp from what we just wrote, so the next save compares against this version.
         let stamp = editbuf::DiskStamp::read(&abs).unwrap_or_default();
+        let mut version = 0;
         if let Some(tab) = self
             .panes
             .get_mut(owner)
@@ -118,8 +119,15 @@ impl App {
         {
             tab.opened = stamp;
             tab.dirty = false;
+            version = tab.version;
         }
         self.save_conflict = None;
+
+        // The single choke point for a save (spec 29). `SaveFile`, `SaveAndClose`,
+        // `SaveAllAndQuit` and the agent's own writes all funnel through here, so one
+        // emit site covers every route — and every path that does NOT write has already
+        // returned above, so a refused save (`Conflict`) or a clean buffer emits nothing.
+        self.notify_buffer_event(sc_plugin_proto::BufferEventKind::Saved, rel, version);
 
         // The file just changed: refresh the review view and the git diff so the green/red
         // gutter reflects what is now on disk. In the OWNING pane — refreshing the focused one

@@ -58,15 +58,23 @@ impl App {
         self.panes.focused_mut().code = Some(sc_win::codeview::load(&root, &rel));
         // Re-selecting an ALREADY-OPEN tab must not re-open it: that would throw away its
         // buffer, and with it any unsaved edits. Just make it active.
+        let mut opened = false;
         if !self.panes.focused().tabs.iter().any(|t| t.path == rel) {
             let abs = root.join(&rel);
             self.panes
                 .focused_mut()
                 .tabs
                 .push(Tab::open(rel.clone(), &abs, origin));
+            opened = true;
         }
-        self.panes.focused_mut().selected_file = Some(rel);
+        self.panes.focused_mut().selected_file = Some(rel.clone());
         self.refresh_changed_lines();
+        // Only a tab that was actually created (spec 29). Re-selecting an open tab is a
+        // focus change, not an open, and a plugin told otherwise would see one file
+        // opened many times.
+        if opened {
+            self.notify_buffer_event(sc_plugin_proto::BufferEventKind::Opened, &rel, 0);
+        }
     }
 
     /// The active tab, if any.
@@ -120,7 +128,9 @@ impl App {
             .position(|t| t.path == path)
         {
             let was_active = self.panes.focused().selected_file.as_deref() == Some(path);
+            let version = self.panes.focused().tabs[i].version;
             self.panes.focused_mut().tabs.remove(i);
+            self.notify_buffer_event(sc_plugin_proto::BufferEventKind::Closed, path, version);
             if self.confirm_close.as_deref() == Some(path) {
                 self.confirm_close = None;
             }

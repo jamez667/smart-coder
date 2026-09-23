@@ -91,8 +91,13 @@ pub(crate) struct App {
     /// The kind of project open, detected from the tree on workspace change. Decides whether a
     /// compile can be offered at all, and with what command.
     pub(crate) project_kind: sc_win::project::ProjectKind,
-    /// The last compile's outcome. `None` before the first run.
+    /// The last compile's outcome — exit code and failure reason. `None` before the first run.
+    ///
+    /// Its *diagnostics* are in [`Self::diagnostics`] under `DiagnosticSource::Compile`,
+    /// because the Problems panel has more than one producer (spec 29).
     pub(crate) compile_report: Option<sc_win::diagnostics::CompileReport>,
+    /// Every source's problems, keyed by who produced them (spec 29).
+    pub(crate) diagnostics: sc_win::diagnostics::Diagnostics,
     /// A compile is in flight — the button reads "Compiling…" and offers cancel.
     pub(crate) compiling: bool,
 
@@ -336,6 +341,7 @@ impl Default for App {
             panes: Panes::default(),
             project_kind: sc_win::project::ProjectKind::Unknown,
             compile_report: None,
+            diagnostics: sc_win::diagnostics::Diagnostics::default(),
             compiling: false,
             flame_profile: None,
             flame_source: String::new(),
@@ -461,8 +467,13 @@ pub(crate) enum Message {
     // --- Compile & check (spec 21) ---
     /// Run the project's compile command and parse its diagnostics.
     RunCompile,
-    /// The compile finished off-thread.
-    CompileDone(Box<sc_win::diagnostics::CompileReport>),
+    /// The compile finished off-thread, with the diagnostics it produced (spec 29).
+    CompileDone(
+        Box<(
+            sc_win::diagnostics::CompileReport,
+            Vec<sc_win::diagnostics::Diagnostic>,
+        )>,
+    ),
     /// Stop an in-flight compile — a cold Unity build is minutes, not seconds.
     CancelCompile,
     /// Open a diagnostic's file at its line. This is what makes the panel a list rather than a

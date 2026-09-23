@@ -48,6 +48,7 @@ pub use host::{Plugin, PluginEvent};
 pub use registry::{PanelRegistry, PluginPanelId, RegisteredPanel};
 pub use view::{flatten, Row};
 
+use sc_plugin_proto::manifest::Subscription;
 use sc_plugin_proto::{Capability, HostMessage, PROTOCOL_VERSION};
 
 /// What this host implements, advertised in the handshake.
@@ -73,10 +74,13 @@ pub enum Failure {
     NotStarted(String),
     /// Started, but never answered the handshake.
     HandshakeTimeout,
-    /// Speaks a protocol this build does not know.
+    /// Speaks a protocol outside the range this build accepts.
     ///
     /// Refused **by name** rather than discovered as a stream of unparseable messages,
-    /// so the Plugins panel can say "speaks protocol 3; this build understands 1".
+    /// so the Plugins panel can say which version each side speaks — **and which is
+    /// older**, which is the difference between a message a user can act on and one they
+    /// can only report. "Too old" means update the plugin; "too new" means update the
+    /// editor. The daemon↔server check is the precedent (spec 27).
     ProtocolMismatch { theirs: u32, ours: u32 },
     /// The user disabled it.
     Disabled,
@@ -102,7 +106,15 @@ impl Failure {
                 host::HANDSHAKE_TIMEOUT.as_secs()
             ),
             Failure::ProtocolMismatch { theirs, ours } => {
-                format!("speaks protocol {theirs}; this build understands {ours}")
+                let direction = if *theirs > *ours {
+                    "the editor is older"
+                } else {
+                    "the plugin is older"
+                };
+                let min = sc_plugin_proto::MIN_PROTOCOL_VERSION;
+                format!(
+                    "speaks protocol {theirs}; this build understands {min}-{ours} — {direction}"
+                )
             }
             Failure::Disabled => "disabled".to_string(),
             Failure::NotChosen => "not enabled yet".to_string(),
@@ -212,6 +224,16 @@ impl Plugins {
         (plugins, registry)
     }
 
+    /// Send a notification to every plugin that subscribed to it (spec 29).
+    ///
+    /// The filter is per plugin, in [`Plugin::notify`] — so the emit sites say *what
+    /// happened* and never have to know who is listening.
+    pub fn notify_all(&mut self, wanted: Subscription, msg: &HostMessage) {
+        for p in &mut self.running {
+            p.notify(wanted.clone(), msg);
+        }
+    }
+
     /// Stop every plugin, politely then firmly.
     pub fn shutdown(&mut self) {
         for p in &mut self.running {
@@ -219,6 +241,16 @@ impl Plugins {
         }
         self.running.clear();
     }
+}
+
+/// Whether this host will load a plugin speaking protocol `theirs` (spec 27, spec 29).
+///
+/// An inclusive range, `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`, which is what the
+/// protocol's own documentation has always promised: the host supports every version it
+/// has ever shipped. The check used to be equality, so a v1 plugin that would run
+/// correctly was refused anyway.
+pub fn accepts(theirs: u32) -> bool {
+    (sc_plugin_proto::MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&theirs)
 }
 
 /// Wait for a plugin's handshake reply, or give up.
@@ -237,12 +269,19 @@ fn await_handshake(plugin: &mut Plugin) -> Result<(), Failure> {
         for ev in plugin.drain() {
             match ev {
                 PluginEvent::Ready(manifest) => {
-                    if manifest.protocol_version != PROTOCOL_VERSION {
+                    // An inclusive RANGE, not equality (spec 27, spec 29): both v2 and v3
+                    // were additive, so an older plugin runs correctly here and refusing
+                    // it broke a promise this protocol's own documentation makes.
+                    let theirs = manifest.protocol_version;
+                    if !accepts(theirs) {
                         return Err(Failure::ProtocolMismatch {
-                            theirs: manifest.protocol_version,
+                            theirs,
                             ours: PROTOCOL_VERSION,
                         });
                     }
+                    // Retained, not discarded: the host must not send a v1 plugin a
+                    // message that did not exist in v1.
+                    plugin.protocol_version = Some(theirs);
                     plugin.handshake_ms = Some(started.elapsed().as_millis());
                     return Ok(());
                 }
@@ -269,6 +308,48 @@ fn await_handshake(plugin: &mut Plugin) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_version_this_host_has_shipped_is_still_accepted() {
+        // The compatibility promise, which the equality check broke: both v2 and v3 were
+        // additive, so a v1 plugin runs correctly here and refusing it was a bug.
+        for v in sc_plugin_proto::MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+            assert!(accepts(v), "v{v} must load");
+        }
+        assert!(accepts(1), "v1 specifically — the case that was refused");
+    }
+
+    #[test]
+    fn a_version_outside_the_range_is_refused_at_either_end() {
+        assert!(
+            !accepts(PROTOCOL_VERSION + 1),
+            "newer than this host speaks"
+        );
+        assert!(
+            !accepts(sc_plugin_proto::MIN_PROTOCOL_VERSION - 1),
+            "older than the documented minimum"
+        );
+    }
+
+    #[test]
+    fn a_rejection_says_which_side_is_older() {
+        // The difference between a message a user can act on and one they can only
+        // report: too old means update the plugin, too new means update the editor.
+        let too_new = Failure::ProtocolMismatch {
+            theirs: PROTOCOL_VERSION + 1,
+            ours: PROTOCOL_VERSION,
+        }
+        .describe();
+        assert!(too_new.contains("the editor is older"), "{too_new}");
+
+        // The WHOLE string, not a substring: a `contains` check passes happily on a
+        // message mangled by a stray line continuation, which is exactly what it did.
+        let too_old = Failure::ProtocolMismatch { theirs: 0, ours: 3 }.describe();
+        assert_eq!(
+            too_old,
+            "speaks protocol 0; this build understands 1-3 — the plugin is older"
+        );
+    }
 
     /// Every failure explains itself in a sentence a user can act on. "Plugin failed to
     /// load" is the message this exists to prevent.

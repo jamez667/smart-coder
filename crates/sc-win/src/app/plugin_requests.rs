@@ -273,6 +273,76 @@ impl App {
             payload: ResponsePayload::Ok,
         }
     }
+
+    /// File a plugin's diagnostics for one path (spec 29).
+    ///
+    /// A **notification**, so nothing is replied and nothing can be refused back to the
+    /// plugin — which is exactly why the two guards here are silent to it and loud to the
+    /// user, in the Plugins panel:
+    ///
+    /// * **The path goes through `safe_join`**, for the reason this module's header
+    ///   already gives: a plugin may do what it likes in its own process, but it must not
+    ///   get the *host* to act on a path outside the workspace on its behalf. A diagnostic
+    ///   that escapes is dropped and the drop is logged.
+    /// * **The severity is the plugin's claim, not the host's.** `Info` is carried through
+    ///   rather than promoted, so a hint never inflates the problem count.
+    pub(crate) fn publish_plugin_diagnostics(
+        &mut self,
+        plugin_id: &str,
+        path: &str,
+        diagnostics: Vec<sc_plugin_proto::Diagnostic>,
+    ) {
+        let root = self.workspace_root();
+        if sc_fsutil::safe_join(&root, path).is_none() {
+            self.log_to_plugin(
+                plugin_id,
+                format!("dropped diagnostics for {path}: outside the workspace"),
+            );
+            return;
+        }
+
+        let converted = diagnostics
+            .into_iter()
+            .map(|d| sc_win::diagnostics::Diagnostic {
+                file: path.to_string(),
+                line: d.line,
+                col: d.column,
+                severity: match d.severity {
+                    sc_plugin_proto::Severity::Error => sc_win::diagnostics::Severity::Error,
+                    sc_plugin_proto::Severity::Warning => sc_win::diagnostics::Severity::Warning,
+                    sc_plugin_proto::Severity::Info => sc_win::diagnostics::Severity::Info,
+                },
+                code: d.code,
+                message: d.message,
+            })
+            .collect();
+
+        let source = sc_win::diagnostics::DiagnosticSource::Plugin(plugin_id.to_string());
+        self.diagnostics.publish(source.clone(), path, converted);
+        if self.diagnostics.is_truncated(&source) {
+            self.log_to_plugin(
+                plugin_id,
+                format!(
+                    "diagnostics truncated at {}",
+                    sc_win::diagnostics::MAX_DIAGNOSTICS_PER_SOURCE
+                ),
+            );
+        }
+    }
+
+    /// Write a line to `plugin_id`'s log, shown in the Plugins panel.
+    fn log_to_plugin(&mut self, plugin_id: &str, line: String) {
+        let Some(plugins) = self.plugins.as_mut() else {
+            return;
+        };
+        if let Some(p) = plugins
+            .running
+            .iter_mut()
+            .find(|p| p.manifest.as_ref().is_some_and(|m| m.id == plugin_id))
+        {
+            p.push_log(line);
+        }
+    }
 }
 
 /// The index of the plugin that owns `command`, if any.

@@ -20,6 +20,14 @@ pub enum Severity {
     Error,
     /// Compiled, but the toolchain objected.
     Warning,
+    /// Neither — a plugin's hint, note or suggestion (spec 29).
+    ///
+    /// **Never produced by [`parse`]**: no supported toolchain emits it, and a compiler
+    /// that did would be saying something about the build rather than about the code.
+    /// It exists because the wire protocol has carried three severities since v1 while
+    /// this type had two, and the missing one had to land somewhere. Counting a hint as
+    /// a warning would make `summary()` report a problem the plugin did not claim.
+    Info,
 }
 
 impl Severity {
@@ -27,9 +35,42 @@ impl Severity {
         match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
+            Severity::Info => "info",
         }
     }
 }
+
+/// Who produced a set of diagnostics.
+///
+/// `Ord` matters: it is the display order in the Problems panel, and [`Compile`] sorts
+/// first because the compiler is the authority on whether the code builds. Plugins sort
+/// after, among themselves by id, so the order does not change when a plugin restarts.
+///
+/// [`Compile`]: DiagnosticSource::Compile
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DiagnosticSource {
+    /// The project's own toolchain, via [`parse`].
+    Compile,
+    /// A plugin, by its manifest id (spec 29).
+    Plugin(String),
+}
+
+impl DiagnosticSource {
+    /// What the panel calls this source in a group header.
+    pub fn label(&self) -> &str {
+        match self {
+            DiagnosticSource::Compile => "compile",
+            DiagnosticSource::Plugin(id) => id,
+        }
+    }
+}
+
+/// Diagnostics kept per source. Beyond this the newest are dropped and the panel says so.
+///
+/// A plugin can push arbitrarily many, and the Problems panel is a widget per row — the
+/// same hazard `Content::element_count` exists for, and the same answer. A plugin that
+/// trips this has a bug, and hiding that makes it harder to find.
+pub const MAX_DIAGNOSTICS_PER_SOURCE: usize = 1_000;
 
 /// One problem, located precisely enough to jump to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,9 +100,13 @@ impl Diagnostic {
 }
 
 /// The outcome of a compile.
+///
+/// **The diagnostics themselves are not here.** They live in [`Diagnostics`] under
+/// [`DiagnosticSource::Compile`], because the panel has more than one producer since
+/// spec 29 and a single `Vec` on this struct made the last writer win. What remains is
+/// what only a compile has: the exit code and the reason a run failed to happen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompileReport {
-    pub diagnostics: Vec<Diagnostic>,
     /// The toolchain's exit code. `None` if it never ran or was cancelled.
     pub exit_code: Option<i32>,
     /// A reason the run itself failed (couldn't spawn, project locked) — distinct from the code
@@ -70,35 +115,32 @@ pub struct CompileReport {
 }
 
 impl CompileReport {
-    pub fn errors(&self) -> usize {
-        self.count(Severity::Error)
-    }
-
-    pub fn warnings(&self) -> usize {
-        self.count(Severity::Warning)
-    }
-
-    fn count(&self, s: Severity) -> usize {
-        self.diagnostics.iter().filter(|d| d.severity == s).count()
-    }
-
-    /// Whether the compile succeeded.
+    /// Whether the compile succeeded, given the diagnostics it produced.
     ///
     /// Requires BOTH a zero exit and no errors. Unity in particular can exit zero while having
     /// logged compiler errors, so trusting the exit code alone would report a broken project as
     /// green — the worst possible failure for this feature.
-    pub fn ok(&self) -> bool {
-        self.failure.is_none() && self.exit_code == Some(0) && self.errors() == 0
+    ///
+    /// Takes the diagnostics rather than owning them: they are the store's now, and a
+    /// copy kept here to answer this question would be the second producer's slot all
+    /// over again.
+    pub fn ok(&self, diagnostics: &[Diagnostic]) -> bool {
+        self.failure.is_none()
+            && self.exit_code == Some(0)
+            && count(diagnostics, Severity::Error) == 0
     }
 
-    /// One line for the panel header.
-    pub fn summary(&self) -> String {
+    /// One line for the panel header, describing `diagnostics` — the compile's own.
+    pub fn summary(&self, diagnostics: &[Diagnostic]) -> String {
         if let Some(f) = &self.failure {
             return f.clone();
         }
-        let (e, w) = (self.errors(), self.warnings());
+        let (e, w) = (
+            count(diagnostics, Severity::Error),
+            count(diagnostics, Severity::Warning),
+        );
         match (e, w) {
-            (0, 0) if self.ok() => "No problems.".to_string(),
+            (0, 0) if self.ok(diagnostics) => "No problems.".to_string(),
             (0, 0) => {
                 "Finished with no diagnostics, but the compiler reported failure.".to_string()
             }
@@ -106,6 +148,131 @@ impl CompileReport {
             (e, 0) => format!("{e} error{}.", plural(e)),
             (e, w) => format!("{e} error{}, {w} warning{}.", plural(e), plural(w)),
         }
+    }
+}
+
+/// How many of `diagnostics` have severity `s`.
+pub fn count(diagnostics: &[Diagnostic], s: Severity) -> usize {
+    diagnostics.iter().filter(|d| d.severity == s).count()
+}
+
+/// Every source's diagnostics, keyed by who produced them (spec 29).
+///
+/// **The Problems panel had one producer and now has several.** A single `Vec` meant a
+/// plugin publishing would erase `cargo`'s diagnostics and the next compile would erase
+/// the plugin's — whoever wrote last would win, and the panel would silently show a
+/// fraction of what is wrong with the code. Keying by source is what makes the panel
+/// additive instead.
+///
+/// `BTreeMap` rather than `HashMap` because the key order **is** the display order:
+/// [`DiagnosticSource::Compile`] first, then plugins by id, stable across restarts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Diagnostics {
+    by_source: std::collections::BTreeMap<DiagnosticSource, Vec<Diagnostic>>,
+    /// Sources that pushed more than [`MAX_DIAGNOSTICS_PER_SOURCE`] and were cut short.
+    truncated: std::collections::BTreeSet<DiagnosticSource>,
+}
+
+impl Diagnostics {
+    /// Replace everything `source` said **about `file`**, wholesale.
+    ///
+    /// Never a merge: a plugin that publishes on every change while appending produces a
+    /// growing pile of stale problems. An empty `diagnostics` is how a source says "this
+    /// file is clean now", which is why there is no delete message and does not need to
+    /// be one — the same rule LSP settled on, for the same reason. A plugin that crashes
+    /// mid-update leaves a stale set, not a corrupt one.
+    pub fn publish(&mut self, source: DiagnosticSource, file: &str, diagnostics: Vec<Diagnostic>) {
+        let entry = self.by_source.entry(source.clone()).or_default();
+        entry.retain(|d| d.file != file);
+        entry.extend(diagnostics);
+
+        // Bound per source, not per file: the cap protects the UI thread, and a plugin
+        // that spread 200,000 rows over a thousand files would slip a per-file cap while
+        // freezing the editor just the same.
+        let over = entry.len() > MAX_DIAGNOSTICS_PER_SOURCE;
+        if over {
+            entry.truncate(MAX_DIAGNOSTICS_PER_SOURCE);
+        }
+        // Nothing left from this source — drop the key so it stops appearing at all.
+        let now_empty = entry.is_empty();
+
+        if over {
+            self.truncated.insert(source);
+        } else {
+            self.truncated.remove(&source);
+            if now_empty {
+                self.by_source.remove(&source);
+            }
+        }
+    }
+
+    /// Replace **everything** `source` has said, across every file.
+    ///
+    /// What a compile does: a fresh run supersedes the previous one entirely, including
+    /// for files it no longer mentions.
+    pub fn replace_all(&mut self, source: DiagnosticSource, mut diagnostics: Vec<Diagnostic>) {
+        if diagnostics.len() > MAX_DIAGNOSTICS_PER_SOURCE {
+            diagnostics.truncate(MAX_DIAGNOSTICS_PER_SOURCE);
+            self.truncated.insert(source.clone());
+        } else {
+            self.truncated.remove(&source);
+        }
+        if diagnostics.is_empty() {
+            self.by_source.remove(&source);
+        } else {
+            self.by_source.insert(source, diagnostics);
+        }
+    }
+
+    /// Forget `source` entirely.
+    ///
+    /// **A stopped plugin's diagnostics are dropped**, unlike its panel content. These are
+    /// opposite cases: panel content is evidence of what the plugin was doing when it
+    /// died, whereas a diagnostic is a claim about the current state of a file that
+    /// nothing is left to retract. A dead plugin's errors pointing at lines the user has
+    /// since fixed is the same stale-diagnostics failure the compile path already guards
+    /// against on a project switch.
+    pub fn clear(&mut self, source: &DiagnosticSource) {
+        self.by_source.remove(source);
+        self.truncated.remove(source);
+    }
+
+    /// Drop everything, from every source — a new workspace.
+    pub fn clear_all(&mut self) {
+        self.by_source.clear();
+        self.truncated.clear();
+    }
+
+    /// What `source` currently says.
+    pub fn get(&self, source: &DiagnosticSource) -> &[Diagnostic] {
+        self.by_source.get(source).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `source` had diagnostics dropped at [`MAX_DIAGNOSTICS_PER_SOURCE`].
+    pub fn is_truncated(&self, source: &DiagnosticSource) -> bool {
+        self.truncated.contains(source)
+    }
+
+    /// Every source with diagnostics, in display order.
+    pub fn sources(&self) -> impl Iterator<Item = (&DiagnosticSource, &Vec<Diagnostic>)> {
+        self.by_source.iter()
+    }
+
+    /// Every diagnostic, in display order, paired with the source that produced it.
+    ///
+    /// **This is what the panel renders and what a click indexes into**, so the two agree
+    /// by construction. A view that flattened separately from the handler would open the
+    /// wrong file the moment a plugin published.
+    pub fn flattened(&self) -> Vec<(&DiagnosticSource, &Diagnostic)> {
+        self.by_source
+            .iter()
+            .flat_map(|(s, ds)| ds.iter().map(move |d| (s, d)))
+            .collect()
+    }
+
+    /// Whether nothing anywhere has anything to say.
+    pub fn is_empty(&self) -> bool {
+        self.by_source.values().all(Vec::is_empty)
     }
 }
 
@@ -312,15 +479,15 @@ mod tests {
     fn warnings_parse_and_are_counted_apart_from_errors() {
         let out = "Assets/A.cs(1,1): warning CS0168: variable declared but never used\n\
                    Assets/B.cs(9,3): error CS1002: ; expected\n";
+        let ds = parse(out, &root());
         let report = CompileReport {
-            diagnostics: parse(out, &root()),
             exit_code: Some(1),
             failure: None,
         };
-        assert_eq!(report.errors(), 1);
-        assert_eq!(report.warnings(), 1);
-        assert_eq!(report.summary(), "1 error, 1 warning.");
-        assert!(!report.ok());
+        assert_eq!(count(&ds, Severity::Error), 1);
+        assert_eq!(count(&ds, Severity::Warning), 1);
+        assert_eq!(report.summary(&ds), "1 error, 1 warning.");
+        assert!(!report.ok(&ds));
     }
 
     #[test]
@@ -392,22 +559,21 @@ mod tests {
     fn a_zero_exit_with_errors_logged_is_still_a_failure() {
         // Unity can exit 0 having logged compiler errors. Trusting the exit code alone would
         // report a broken project as green — the single worst bug this feature could have.
+        let ds = parse("Assets/A.cs(1,1): error CS1002: ; expected", &root());
         let report = CompileReport {
-            diagnostics: parse("Assets/A.cs(1,1): error CS1002: ; expected", &root()),
             exit_code: Some(0),
             failure: None,
         };
-        assert!(!report.ok(), "errors beat a zero exit code");
-        assert_eq!(report.summary(), "1 error.");
+        assert!(!report.ok(&ds), "errors beat a zero exit code");
+        assert_eq!(report.summary(&ds), "1 error.");
 
         // And the clean case really is clean.
         let good = CompileReport {
-            diagnostics: Vec::new(),
             exit_code: Some(0),
             failure: None,
         };
-        assert!(good.ok());
-        assert_eq!(good.summary(), "No problems.");
+        assert!(good.ok(&[]));
+        assert_eq!(good.summary(&[]), "No problems.");
     }
 
     #[test]
@@ -415,11 +581,269 @@ mod tests {
         // "Couldn't launch the compiler" and "your code is broken" are different problems with
         // different fixes; conflating them sends the user hunting through their own source.
         let report = CompileReport {
-            diagnostics: Vec::new(),
             exit_code: None,
             failure: Some("Unity 2022.3.10f1 was not found.".to_string()),
         };
-        assert!(!report.ok());
-        assert_eq!(report.summary(), "Unity 2022.3.10f1 was not found.");
+        assert!(!report.ok(&[]));
+        assert_eq!(report.summary(&[]), "Unity 2022.3.10f1 was not found.");
+    }
+
+    /// Build a diagnostic in `file` at `line`, for the store tests.
+    fn diag(file: &str, line: usize, severity: Severity) -> Diagnostic {
+        Diagnostic {
+            file: file.to_string(),
+            line,
+            col: 1,
+            severity,
+            code: None,
+            message: format!("problem at {line}"),
+        }
+    }
+
+    #[test]
+    fn a_plugin_publishing_does_not_erase_the_compiler() {
+        // THE bug spec 29 exists to fix. The panel was a single-producer slot: whoever
+        // wrote last won, and the user saw a fraction of what was wrong with the code.
+        let mut d = Diagnostics::default();
+        d.replace_all(
+            DiagnosticSource::Compile,
+            vec![diag("a.rs", 1, Severity::Error)],
+        );
+        d.publish(
+            DiagnosticSource::Plugin("shaders".into()),
+            "b.wgsl",
+            vec![diag("b.wgsl", 9, Severity::Error)],
+        );
+
+        assert_eq!(
+            d.get(&DiagnosticSource::Compile).len(),
+            1,
+            "compiler survived"
+        );
+        assert_eq!(d.flattened().len(), 2, "both are shown");
+    }
+
+    #[test]
+    fn the_compiler_sorts_before_plugins_and_plugins_sort_by_id() {
+        // The display order is the key order, and it must not move when a plugin
+        // restarts — a list that reshuffles under the cursor is unclickable.
+        let mut d = Diagnostics::default();
+        d.publish(
+            DiagnosticSource::Plugin("zebra".into()),
+            "z.rs",
+            vec![diag("z.rs", 1, Severity::Error)],
+        );
+        d.publish(
+            DiagnosticSource::Plugin("alpha".into()),
+            "a.rs",
+            vec![diag("a.rs", 1, Severity::Error)],
+        );
+        d.replace_all(
+            DiagnosticSource::Compile,
+            vec![diag("c.rs", 1, Severity::Error)],
+        );
+
+        let order: Vec<String> = d.sources().map(|(s, _)| s.label().to_string()).collect();
+        assert_eq!(order, vec!["compile", "alpha", "zebra"]);
+    }
+
+    #[test]
+    fn publishing_replaces_that_file_and_leaves_the_others_alone() {
+        // Replace, not append — and scoped to the file named, or a plugin reporting on
+        // one file would silently retract what it said about every other.
+        let mut d = Diagnostics::default();
+        let src = DiagnosticSource::Plugin("shaders".into());
+        d.publish(
+            src.clone(),
+            "a.wgsl",
+            vec![diag("a.wgsl", 1, Severity::Error)],
+        );
+        d.publish(
+            src.clone(),
+            "b.wgsl",
+            vec![diag("b.wgsl", 2, Severity::Error)],
+        );
+
+        // Re-publishing a.wgsl replaces only a.wgsl.
+        d.publish(
+            src.clone(),
+            "a.wgsl",
+            vec![diag("a.wgsl", 7, Severity::Warning)],
+        );
+
+        let lines: Vec<usize> = d.get(&src).iter().map(|x| x.line).collect();
+        assert_eq!(lines.len(), 2, "one per file, not three");
+        assert!(lines.contains(&7), "a.wgsl was replaced");
+        assert!(lines.contains(&2), "b.wgsl untouched");
+    }
+
+    #[test]
+    fn an_empty_publish_is_how_a_file_is_declared_clean() {
+        // There is no delete message and there does not need to be one: this is the rule
+        // LSP settled on, and it means a plugin that crashes mid-update leaves a stale
+        // set rather than a corrupt one.
+        let mut d = Diagnostics::default();
+        let src = DiagnosticSource::Plugin("shaders".into());
+        d.publish(
+            src.clone(),
+            "a.wgsl",
+            vec![diag("a.wgsl", 1, Severity::Error)],
+        );
+        d.publish(src.clone(), "a.wgsl", Vec::new());
+
+        assert!(d.get(&src).is_empty(), "the file is clean now");
+        assert!(d.is_empty(), "and the source stops appearing at all");
+    }
+
+    #[test]
+    fn a_stopped_plugins_diagnostics_are_dropped_but_the_compilers_are_not() {
+        // Panel content survives a plugin's death as evidence; a diagnostic does not,
+        // because it is a claim about the CURRENT state of a file and nothing is left to
+        // retract it.
+        let mut d = Diagnostics::default();
+        let src = DiagnosticSource::Plugin("shaders".into());
+        d.replace_all(
+            DiagnosticSource::Compile,
+            vec![diag("a.rs", 1, Severity::Error)],
+        );
+        d.publish(
+            src.clone(),
+            "b.wgsl",
+            vec![diag("b.wgsl", 1, Severity::Error)],
+        );
+
+        d.clear(&src);
+
+        assert!(d.get(&src).is_empty(), "the dead plugin's claims are gone");
+        assert_eq!(
+            d.get(&DiagnosticSource::Compile).len(),
+            1,
+            "the compiler's are not"
+        );
+    }
+
+    #[test]
+    fn a_runaway_source_is_truncated_and_says_so() {
+        // The Problems panel is a widget per row. Truncation is reported rather than
+        // silent: a plugin that trips this has a bug, and hiding it makes it harder to find.
+        let mut d = Diagnostics::default();
+        let src = DiagnosticSource::Plugin("runaway".into());
+        let flood: Vec<Diagnostic> = (1..=MAX_DIAGNOSTICS_PER_SOURCE + 500)
+            .map(|i| diag("a.rs", i, Severity::Error))
+            .collect();
+        d.publish(src.clone(), "a.rs", flood);
+
+        assert_eq!(d.get(&src).len(), MAX_DIAGNOSTICS_PER_SOURCE, "bounded");
+        assert!(d.is_truncated(&src), "and the panel is told");
+    }
+
+    #[test]
+    fn the_cap_drops_the_newest_and_keeps_what_other_files_already_said() {
+        // The cap is per SOURCE, so a flood about one file could in principle evict
+        // another file's problems from the same plugin. It does not: `retain` leaves the
+        // other files in place and the flood is appended after them, so truncation eats
+        // the newest — which is the spec's rule and also the safe one.
+        let mut d = Diagnostics::default();
+        let src = DiagnosticSource::Plugin("shaders".into());
+        d.publish(
+            src.clone(),
+            "quiet.wgsl",
+            vec![diag("quiet.wgsl", 1, Severity::Error)],
+        );
+
+        let flood: Vec<Diagnostic> = (1..=MAX_DIAGNOSTICS_PER_SOURCE + 50)
+            .map(|i| diag("noisy.wgsl", i, Severity::Error))
+            .collect();
+        d.publish(src.clone(), "noisy.wgsl", flood);
+
+        let kept = d.get(&src);
+        assert_eq!(kept.len(), MAX_DIAGNOSTICS_PER_SOURCE);
+        assert!(
+            kept.iter().any(|x| x.file == "quiet.wgsl"),
+            "the quiet file's problem was not evicted by the noisy one"
+        );
+        assert!(d.is_truncated(&src));
+    }
+
+    #[test]
+    fn a_source_that_comes_back_under_the_cap_stops_being_truncated() {
+        // The note must not outlive the flood that caused it.
+        let mut d = Diagnostics::default();
+        let src = DiagnosticSource::Plugin("runaway".into());
+        let flood: Vec<Diagnostic> = (1..=MAX_DIAGNOSTICS_PER_SOURCE + 1)
+            .map(|i| diag("a.rs", i, Severity::Error))
+            .collect();
+        d.publish(src.clone(), "a.rs", flood);
+        assert!(d.is_truncated(&src));
+
+        d.publish(src.clone(), "a.rs", vec![diag("a.rs", 1, Severity::Error)]);
+        assert!(!d.is_truncated(&src), "recovered");
+    }
+
+    #[test]
+    fn a_plugins_info_is_not_counted_as_a_warning() {
+        // The wire has carried three severities since v1 and this type had two. Folding
+        // Info into Warning would make the summary report a problem nobody claimed.
+        let ds = vec![diag("a.rs", 1, Severity::Info)];
+        assert_eq!(count(&ds, Severity::Warning), 0);
+        assert_eq!(count(&ds, Severity::Error), 0);
+        assert_eq!(Severity::Info.label(), "info");
+    }
+
+    #[test]
+    fn flattening_walks_the_groups_in_the_same_order_the_panel_renders_them() {
+        // The panel renders `sources()` group by group, counting rows as it goes, and a
+        // click indexes `flattened()`. These are two different traversals of the same map
+        // and they must agree element for element — if they ever diverge, every click
+        // below the first group opens the wrong file.
+        let mut d = Diagnostics::default();
+        d.replace_all(
+            DiagnosticSource::Compile,
+            vec![
+                diag("c.rs", 1, Severity::Error),
+                diag("c.rs", 2, Severity::Warning),
+            ],
+        );
+        d.publish(
+            DiagnosticSource::Plugin("zebra".into()),
+            "z.rs",
+            vec![diag("z.rs", 3, Severity::Error)],
+        );
+        d.publish(
+            DiagnosticSource::Plugin("alpha".into()),
+            "a.rs",
+            vec![diag("a.rs", 4, Severity::Info)],
+        );
+
+        // Exactly what the view's loop does.
+        let rendered: Vec<(&DiagnosticSource, &Diagnostic)> = d
+            .sources()
+            .flat_map(|(s, ds)| ds.iter().map(move |x| (s, x)))
+            .collect();
+
+        assert_eq!(rendered, d.flattened(), "the view and the click must agree");
+        assert_eq!(d.flattened().len(), 4);
+    }
+
+    #[test]
+    fn flattening_is_what_a_click_indexes_into() {
+        // The view renders `flattened()` and the click handler indexes it. If they were
+        // derived separately, clicking a row would open a different file the moment a
+        // plugin published.
+        let mut d = Diagnostics::default();
+        d.replace_all(
+            DiagnosticSource::Compile,
+            vec![diag("c.rs", 3, Severity::Error)],
+        );
+        d.publish(
+            DiagnosticSource::Plugin("p".into()),
+            "p.rs",
+            vec![diag("p.rs", 9, Severity::Error)],
+        );
+
+        let flat = d.flattened();
+        assert_eq!(flat[0].1.file, "c.rs", "compile first");
+        assert_eq!(flat[1].1.file, "p.rs");
+        assert_eq!(flat[1].0.label(), "p", "and it knows who said it");
     }
 }

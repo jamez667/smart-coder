@@ -14,6 +14,7 @@ use std::io::{BufRead, Write};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use sc_plugin_proto::manifest::Subscription;
 use sc_plugin_proto::{HostMessage, Incoming, Manifest, PluginMessage};
 
 use super::discover::Discovered;
@@ -67,6 +68,13 @@ pub struct Plugin {
     /// How long the handshake took. Worth showing: it is the part of startup a plugin
     /// can make slow.
     pub handshake_ms: Option<u128>,
+    /// The protocol version this plugin speaks, retained after the handshake (spec 29).
+    ///
+    /// **Kept rather than discarded once checked**, because the compatibility promise is
+    /// only true if the host remembers: a v1 plugin must not be sent a v2 or v3 message,
+    /// and a host that forgot its version would send them anyway. `None` until the
+    /// handshake lands.
+    pub protocol_version: Option<u32>,
     events: Receiver<PluginEvent>,
     next_request_id: u64,
 }
@@ -129,6 +137,7 @@ impl Plugin {
             unknown_lines: 0,
             log: Vec::new(),
             handshake_ms: None,
+            protocol_version: None,
             events,
             next_request_id: 1,
         })
@@ -193,6 +202,21 @@ impl Plugin {
     /// Whether the process is still alive.
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Send a notification, but only if this plugin asked for that stream (spec 29).
+    ///
+    /// **This is the point of `subscriptions` being enforced.** Without it every plugin
+    /// pays for every event, and the cost of adding one later is charged to plugins that
+    /// never wanted it. A plugin that declared nothing gets nothing.
+    ///
+    /// `Subscription::Other` — the forward-compatibility catch-all — matches nothing,
+    /// which is correct: a plugin asking for an event this host does not have must not
+    /// silently receive a different one.
+    pub fn notify(&mut self, wanted: Subscription, msg: &HostMessage) {
+        if wants(self.manifest.as_ref(), &wanted) {
+            self.send(msg);
+        }
     }
 
     /// Ask the plugin to stop, then make sure it has.
@@ -300,6 +324,22 @@ fn read_lines(stdout: std::process::ChildStdout, tx: Sender<PluginEvent>) {
     let _ = tx.send(PluginEvent::Stopped(Ok(())));
 }
 
+/// Whether a plugin with `manifest` should receive the `wanted` notification (spec 29).
+///
+/// Split out from [`Plugin::notify`] because a `Plugin` owns a live child process and
+/// cannot be built in a unit test, while the rule itself is the part worth pinning.
+///
+/// A plugin whose handshake has not landed (`None`) has declared nothing yet, so it gets
+/// nothing — the same reading `owner_of` takes of a manifest-less plugin.
+pub fn wants(manifest: Option<&Manifest>, wanted: &Subscription) -> bool {
+    // The forward-compatibility catch-all matches NOTHING. A plugin asking for an event
+    // this host does not have must not silently receive a different one.
+    if *wanted == Subscription::Other {
+        return false;
+    }
+    manifest.is_some_and(|m| m.subscriptions.contains(wanted))
+}
+
 /// Shorten a line for the log, so one enormous unparsed line cannot fill the panel.
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -312,6 +352,54 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest declaring exactly `subs`.
+    fn manifest_with(subs: Vec<Subscription>) -> Manifest {
+        Manifest {
+            id: "p".into(),
+            name: "P".into(),
+            version: String::new(),
+            protocol_version: sc_plugin_proto::PROTOCOL_VERSION,
+            panels: Vec::new(),
+            commands: Vec::new(),
+            capabilities: Vec::new(),
+            subscriptions: subs,
+        }
+    }
+
+    #[test]
+    fn a_plugin_receives_only_the_streams_it_asked_for() {
+        // Without this every plugin pays for every event, and the cost of adding one
+        // later is charged to plugins that never wanted it.
+        let m = manifest_with(vec![Subscription::BufferEvents]);
+        assert!(wants(Some(&m), &Subscription::BufferEvents));
+        assert!(
+            !wants(Some(&m), &Subscription::WorkspaceChanged),
+            "not subscribed, not sent"
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_declared_nothing_receives_nothing() {
+        let m = manifest_with(Vec::new());
+        assert!(!wants(Some(&m), &Subscription::BufferEvents));
+        assert!(!wants(Some(&m), &Subscription::WorkspaceChanged));
+    }
+
+    #[test]
+    fn a_plugin_without_a_handshake_receives_nothing() {
+        // It has declared nothing yet, so it owns nothing.
+        assert!(!wants(None, &Subscription::BufferEvents));
+    }
+
+    #[test]
+    fn the_forward_compatibility_catch_all_matches_nothing() {
+        // A plugin asking for a stream this host does not have must not silently receive
+        // a DIFFERENT one — which is what matching `Other` against `Other` would do.
+        let m = manifest_with(vec![Subscription::Other]);
+        assert!(!wants(Some(&m), &Subscription::Other));
+        assert!(!wants(Some(&m), &Subscription::BufferEvents));
+    }
 
     #[test]
     fn truncate_leaves_short_lines_alone() {

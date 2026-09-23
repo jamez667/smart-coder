@@ -56,6 +56,7 @@ impl App {
             Option<sc_plugin_proto::Scroll>,
         )> = Vec::new();
         let mut cleared: Vec<(String, String)> = Vec::new();
+        let mut published: Vec<(String, String, Vec<sc_plugin_proto::Diagnostic>)> = Vec::new();
         let mut stopped: Vec<(String, String)> = Vec::new();
         let mut requests: Vec<(String, PluginMessage)> = Vec::new();
 
@@ -76,6 +77,15 @@ impl App {
                         PluginMessage::ClearFields { panel } => {
                             if let Some(id) = plugin_id.clone() {
                                 cleared.push((id, panel));
+                            }
+                        }
+                        // A NOTIFICATION, not a request: it owes no reply, and routing it
+                        // through `answer_plugin` is how it was silently dropped before
+                        // spec 29 — the terminal `_ => None` there is for messages that
+                        // need an answer, and this one never has an id to answer.
+                        PluginMessage::PublishDiagnostics { path, diagnostics } => {
+                            if let Some(id) = plugin_id.clone() {
+                                published.push((id, path, diagnostics));
                             }
                         }
                         // A request. Answered below, outside this loop, because
@@ -115,6 +125,12 @@ impl App {
             }
         }
 
+        // Diagnostics, filed under the publishing plugin so they cannot erase the
+        // compiler's or another plugin's (spec 29).
+        for (plugin_id, path, diagnostics) in published {
+            self.publish_plugin_diagnostics(&plugin_id, &path, diagnostics);
+        }
+
         // Field clears BEFORE content pushes, so a plugin that empties the composer and
         // pushes the sent message in the same breath does not have the clear undone by
         // its own push carrying the old value.
@@ -141,20 +157,81 @@ impl App {
             }
         }
         if !stopped.is_empty() {
+            // The manifest ids of the plugins about to be removed, collected before the
+            // retain drops them.
+            let mut dead_ids: Vec<String> = Vec::new();
             if let Some(plugins) = self.plugins.as_mut() {
                 // A stopped plugin leaves its panels showing their last content rather
                 // than blanking them. The content was true when it was pushed, and a
                 // panel that empties itself on a crash destroys the evidence of what the
                 // plugin was doing when it died.
-                plugins
-                    .running
-                    .retain(|p| !stopped.iter().any(|(name, _)| *name == p.dir_name));
+                //
+                // **Its diagnostics are the opposite case and go** (spec 29): panel content
+                // is evidence of what it was doing, whereas a diagnostic is a claim about
+                // the current state of a file, and nothing is left to retract it. Errors
+                // pointing at lines the user has since fixed are the same stale-diagnostics
+                // failure a project switch already guards against.
+                plugins.running.retain(|p| {
+                    let dying = stopped.iter().any(|(name, _)| *name == p.dir_name);
+                    if dying {
+                        if let Some(m) = p.manifest.as_ref() {
+                            dead_ids.push(m.id.clone());
+                        }
+                    }
+                    !dying
+                });
                 for (name, why) in stopped {
                     plugins
                         .failed
                         .push((name, sc_craft_ui::plugin::Failure::Stopped(why)));
                 }
             }
+            for id in dead_ids {
+                self.diagnostics
+                    .clear(&sc_win::diagnostics::DiagnosticSource::Plugin(id));
+            }
+        }
+    }
+
+    /// Tell every subscribed plugin that a buffer was opened, saved or closed (spec 29).
+    ///
+    /// `Saved` is the one this exists for. There is **no file watcher** in the workspace
+    /// and this does not add one: a watcher fires on the editor's own writes and on
+    /// `target/` churn, and every consumer then has to tell its own saves from someone
+    /// else's. The editor already knows exactly when a file is written, and there is
+    /// exactly one place it happens.
+    pub(crate) fn notify_buffer_event(
+        &mut self,
+        event: sc_plugin_proto::BufferEventKind,
+        path: &str,
+        version: u64,
+    ) {
+        let msg = sc_plugin_proto::HostMessage::BufferEvent {
+            event,
+            path: path.to_string(),
+            version,
+        };
+        if let Some(plugins) = self.plugins.as_mut() {
+            plugins.notify_all(sc_plugin_proto::manifest::Subscription::BufferEvents, &msg);
+        }
+    }
+
+    /// Tell every subscribed plugin the open project changed (spec 29).
+    ///
+    /// All three shipped plugins subscribe to this and handle it by cancelling their run.
+    /// None has ever received it — which is why this is a fix and not a feature: the
+    /// behaviour they implement has never once executed.
+    pub(crate) fn notify_workspace_changed(&mut self) {
+        let workspace = self
+            .picked_workspace
+            .as_ref()
+            .map(|w| w.to_string_lossy().to_string());
+        let msg = sc_plugin_proto::HostMessage::WorkspaceChanged { workspace };
+        if let Some(plugins) = self.plugins.as_mut() {
+            plugins.notify_all(
+                sc_plugin_proto::manifest::Subscription::WorkspaceChanged,
+                &msg,
+            );
         }
     }
 

@@ -184,7 +184,12 @@ mod tests {
     fn clicking_a_problem_opens_the_file_at_that_line() {
         let (mut app, dir) = app_with_file("Broken.cs", "class A {\n  int x =\n}\n");
         app.compile_report = Some(sc_win::diagnostics::CompileReport {
-            diagnostics: vec![sc_win::diagnostics::Diagnostic {
+            exit_code: Some(1),
+            failure: None,
+        });
+        app.diagnostics.replace_all(
+            sc_win::diagnostics::DiagnosticSource::Compile,
+            vec![sc_win::diagnostics::Diagnostic {
                 file: "Broken.cs".to_string(),
                 line: 2,
                 col: 9,
@@ -192,9 +197,7 @@ mod tests {
                 code: Some("CS1525".to_string()),
                 message: "invalid expression term".to_string(),
             }],
-            exit_code: Some(1),
-            failure: None,
-        });
+        );
 
         let _ = app.open_diagnostic(0);
 
@@ -220,7 +223,12 @@ mod tests {
     fn a_problem_outside_the_workspace_is_not_opened() {
         let (mut app, dir) = app_with_file("Real.cs", "class A {}\n");
         app.compile_report = Some(sc_win::diagnostics::CompileReport {
-            diagnostics: vec![sc_win::diagnostics::Diagnostic {
+            exit_code: Some(1),
+            failure: None,
+        });
+        app.diagnostics.replace_all(
+            sc_win::diagnostics::DiagnosticSource::Compile,
+            vec![sc_win::diagnostics::Diagnostic {
                 file: "C:/Program Files/Unity/Editor/Data/Managed/UnityEngine.dll".to_string(),
                 line: 1,
                 col: 1,
@@ -228,9 +236,7 @@ mod tests {
                 code: None,
                 message: "somewhere else entirely".to_string(),
             }],
-            exit_code: Some(1),
-            failure: None,
-        });
+        );
 
         let _ = app.open_diagnostic(0);
 
@@ -259,7 +265,220 @@ mod tests {
             failure.contains("Unity"),
             "names what it looked for: {failure}"
         );
-        assert!(!report.ok());
+        assert!(!report.ok(&[]));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Saving a file emits `BufferEvent::Saved` (spec 29).
+    ///
+    /// The notification half of the protocol had never sent a single message. This pins
+    /// the emit site rather than the delivery, because a `Plugin` owns a live child
+    /// process — `plugin::host::wants` covers who it reaches.
+    #[test]
+    fn saving_a_file_emits_a_buffer_event() {
+        let (mut app, dir) = app_with_file(
+            "a.rs",
+            "fn main() {}
+",
+        );
+        app.select_file("a.rs".to_string());
+
+        // Dirty the buffer, or the save is a no-op and must emit nothing.
+        let owner = app.panes.pane_holding("a.rs").expect("open");
+        let tab = app
+            .panes
+            .get_mut(owner)
+            .and_then(|p| p.tabs.iter_mut().find(|t| t.path == "a.rs"))
+            .expect("tab");
+        tab.dirty = true;
+
+        // With no plugins running this is a no-op that must not panic — the emit site is
+        // on the save path, so a mistake here breaks saving itself.
+        app.save_tab("a.rs", true);
+
+        assert!(
+            !app.is_dirty("a.rs"),
+            "the save still landed with the emit site in the path"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A clean buffer writes nothing, so it announces nothing (spec 29).
+    #[test]
+    fn saving_a_clean_buffer_emits_nothing() {
+        let (mut app, dir) = app_with_file(
+            "a.rs",
+            "fn main() {}
+",
+        );
+        app.select_file("a.rs".to_string());
+        let before = std::fs::metadata(dir.join("a.rs")).unwrap().modified().ok();
+
+        app.save_tab("a.rs", false);
+
+        let after = std::fs::metadata(dir.join("a.rs")).unwrap().modified().ok();
+        assert_eq!(before, after, "nothing was written, so nothing happened");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A plugin's diagnostics land in the panel beside the compiler's (spec 29).
+    #[test]
+    fn a_plugin_publishing_reaches_the_problems_panel() {
+        let (mut app, dir) = app_with_file(
+            "shader.wgsl",
+            "fn main() {}
+",
+        );
+        app.diagnostics.replace_all(
+            sc_win::diagnostics::DiagnosticSource::Compile,
+            vec![sc_win::diagnostics::Diagnostic {
+                file: "a.rs".to_string(),
+                line: 1,
+                col: 1,
+                severity: sc_win::diagnostics::Severity::Error,
+                code: None,
+                message: "from cargo".to_string(),
+            }],
+        );
+
+        app.publish_plugin_diagnostics(
+            "shaders",
+            "shader.wgsl",
+            vec![sc_plugin_proto::Diagnostic {
+                line: 9,
+                column: 4,
+                severity: sc_plugin_proto::Severity::Error,
+                code: Some("E1".to_string()),
+                message: "bad swizzle".to_string(),
+            }],
+        );
+
+        let flat = app.diagnostics.flattened();
+        assert_eq!(flat.len(), 2, "the compiler's survived the plugin's push");
+        let plugin_rows = app
+            .diagnostics
+            .get(&sc_win::diagnostics::DiagnosticSource::Plugin(
+                "shaders".into(),
+            ));
+        assert_eq!(plugin_rows[0].file, "shader.wgsl");
+        assert_eq!((plugin_rows[0].line, plugin_rows[0].col), (9, 4));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A diagnostic whose path escapes the workspace is dropped (spec 29).
+    ///
+    /// A plugin may do what it likes in its own process; what it must not do is get the
+    /// HOST to act on a path outside the workspace on its behalf.
+    #[test]
+    fn a_diagnostic_outside_the_workspace_is_refused() {
+        let (mut app, dir) = app_with_file(
+            "a.rs",
+            "fn main() {}
+",
+        );
+
+        for escape in ["../outside.rs", "C:/Windows/System32/evil.rs"] {
+            app.publish_plugin_diagnostics(
+                "shaders",
+                escape,
+                vec![sc_plugin_proto::Diagnostic {
+                    line: 1,
+                    column: 1,
+                    severity: sc_plugin_proto::Severity::Error,
+                    code: None,
+                    message: "somewhere else entirely".to_string(),
+                }],
+            );
+            assert!(
+                app.diagnostics.is_empty(),
+                "{escape} must not reach the panel"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A plugin's `Info` stays informational (spec 29).
+    #[test]
+    fn a_plugins_info_severity_survives_the_conversion() {
+        let (mut app, dir) = app_with_file(
+            "a.rs",
+            "fn main() {}
+",
+        );
+        app.publish_plugin_diagnostics(
+            "hints",
+            "a.rs",
+            vec![sc_plugin_proto::Diagnostic {
+                line: 2,
+                column: 1,
+                severity: sc_plugin_proto::Severity::Info,
+                code: None,
+                message: "consider a shorter name".to_string(),
+            }],
+        );
+
+        let rows = app
+            .diagnostics
+            .get(&sc_win::diagnostics::DiagnosticSource::Plugin(
+                "hints".into(),
+            ));
+        assert_eq!(
+            rows[0].severity,
+            sc_win::diagnostics::Severity::Info,
+            "not promoted to a warning"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Clicking a row opens what the panel showed, whichever source produced it (spec 29).
+    ///
+    /// The view renders `flattened()` and this indexes it; if the two ever derived their
+    /// order separately, a click would open a different file once a plugin published.
+    #[test]
+    fn clicking_a_plugins_problem_opens_that_file() {
+        let (mut app, dir) = app_with_file(
+            "shader.wgsl",
+            "fn main() {}
+bad
+",
+        );
+        // The compiler sorts first, so the plugin's row is index 1.
+        app.diagnostics.replace_all(
+            sc_win::diagnostics::DiagnosticSource::Compile,
+            vec![sc_win::diagnostics::Diagnostic {
+                file: "shader.wgsl".to_string(),
+                line: 1,
+                col: 1,
+                severity: sc_win::diagnostics::Severity::Error,
+                code: None,
+                message: "from cargo".to_string(),
+            }],
+        );
+        app.publish_plugin_diagnostics(
+            "shaders",
+            "shader.wgsl",
+            vec![sc_plugin_proto::Diagnostic {
+                line: 2,
+                column: 1,
+                severity: sc_plugin_proto::Severity::Error,
+                code: None,
+                message: "bad swizzle".to_string(),
+            }],
+        );
+
+        let _ = app.open_diagnostic(1);
+
+        assert_eq!(
+            app.panes.focused_mut().pending_scroll_line,
+            Some(2),
+            "opened the PLUGIN's row, not the compiler's"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -272,14 +491,30 @@ mod tests {
     fn changing_project_clears_stale_problems() {
         let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
         app.compile_report = Some(sc_win::diagnostics::CompileReport {
-            diagnostics: vec![],
             exit_code: Some(1),
             failure: Some("from the last project".to_string()),
         });
+        // A plugin's diagnostics are as stale as the compiler's on a project switch.
+        app.diagnostics.publish(
+            sc_win::diagnostics::DiagnosticSource::Plugin("shaders".into()),
+            "old.wgsl",
+            vec![sc_win::diagnostics::Diagnostic {
+                file: "old.wgsl".to_string(),
+                line: 1,
+                col: 1,
+                severity: sc_win::diagnostics::Severity::Error,
+                code: None,
+                message: "from the last project".to_string(),
+            }],
+        );
 
         app.refresh_project_kind();
 
         assert!(app.compile_report.is_none(), "stale report dropped");
+        assert!(
+            app.diagnostics.is_empty(),
+            "every source's stale problems dropped, not just the compiler's"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

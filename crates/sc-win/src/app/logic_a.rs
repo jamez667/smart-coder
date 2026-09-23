@@ -209,6 +209,9 @@ impl App {
         let mut state = sc_win::persist::load();
         state.record_project(&dir);
         sc_win::persist::save(&state);
+        // Every subscribed plugin is told the project moved (spec 29). All three shipped
+        // plugins cancel their run on this and none has ever received it.
+        self.notify_workspace_changed();
         // Greet: show the README/roadmap in Activity, and open the planning conversation.
         self.show_welcome();
     }

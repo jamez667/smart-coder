@@ -105,10 +105,15 @@ impl App {
             Message::DiscardAndQuit => return Self::quit(),
             Message::CancelQuit => self.confirm_quit = false,
             Message::RunCompile => return self.start_compile(),
-            Message::CompileDone(report) => {
+            Message::CompileDone(done) => {
+                let (report, diagnostics) = *done;
                 self.compiling = false;
                 self.compile_cancel = None;
-                self.compile_report = Some(*report);
+                // Wholesale replacement: a fresh run supersedes the previous one entirely,
+                // including for files it no longer mentions. Other sources are untouched.
+                self.diagnostics
+                    .replace_all(sc_win::diagnostics::DiagnosticSource::Compile, diagnostics);
+                self.compile_report = Some(report);
             }
             Message::CancelCompile => self.cancel_compile(),
             Message::OpenDiagnostic(i) => return self.open_diagnostic(i),
@@ -718,6 +723,9 @@ impl App {
                 self.confirm_close = None;
                 self.save_conflict = None;
                 self.refresh_project_kind();
+                // Closed is a workspace change too — `None` is the real state, not an
+                // error, and a plugin still running against the old root must hear it.
+                self.notify_workspace_changed();
                 // Forget the *current* project so a restart doesn't re-open it, but keep the
                 // recents list (the user may want to re-pick one).
                 let mut state = sc_win::persist::load();
