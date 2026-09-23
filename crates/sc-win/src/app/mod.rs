@@ -354,7 +354,7 @@ mod tests {
 
         assert!(
             app.a_plugin_is_running(),
-            "a running plugin arms the tick even with no panel — the tick is the only              caller of `pump_plugins`, and without this its messages are never drained"
+            "a running plugin arms the tick even with no panel; the tick is the only caller of pump_plugins"
         );
 
         let _ = std::fs::remove_dir_all(dir);

@@ -425,17 +425,32 @@ mod tests {
             })),
         ]);
 
-        let out = p.drain();
-        assert_eq!(out.len(), 2, "both deferred events came back");
-        assert!(
-            matches!(
-                &out[0],
-                PluginEvent::Message(m) if matches!(m.as_ref(), PluginMessage::Log { .. })
-            ),
-            "and in the order the plugin sent them"
-        );
+        // The child exits immediately, so a `Stopped` may or may not have landed by now
+        // — asserting on the batch LENGTH would be asserting on that race. What this
+        // pins is the part that is deterministic: the deferred messages lead the batch,
+        // in the order the plugin sent them, and never come back twice.
+        let deferred = |evs: Vec<PluginEvent>| -> Vec<String> {
+            evs.into_iter()
+                .filter_map(|ev| match ev {
+                    PluginEvent::Message(m) => Some(match *m {
+                        PluginMessage::Log { .. } => "log".to_string(),
+                        PluginMessage::PublishDiagnostics { path, .. } => path,
+                        _ => "other".to_string(),
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
 
-        assert!(p.drain().is_empty(), "taken exactly once, not replayed");
+        assert_eq!(
+            deferred(p.drain()),
+            vec!["log".to_string(), "a.wgsl".to_string()],
+            "both came back, in order"
+        );
+        assert!(
+            deferred(p.drain()).is_empty(),
+            "taken exactly once, not replayed"
+        );
     }
 
     #[test]
