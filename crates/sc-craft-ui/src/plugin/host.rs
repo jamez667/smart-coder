@@ -384,25 +384,35 @@ mod tests {
         }
     }
 
-    /// A `Plugin` over a process that does nothing, for testing the queue.
+    /// A `Plugin` over a process that has already exited, for testing the queue.
     ///
     /// Spawns a real child, because `Plugin` owns one and there is no way around it —
-    /// but the cheapest possible one, and the test never writes to it.
-    fn idle_plugin() -> Option<Plugin> {
+    /// but the cheapest possible one, and **reaped before returning**.
+    ///
+    /// The reap is not tidiness, it is required. [`Plugin::drop`] calls
+    /// `proc::kill_tree` for a child that is still running, and on Unix that signals the
+    /// **process group** with `kill -TERM -<pid>`. A test binary shares its group with
+    /// the children it spawns, so a live child at drop time takes the whole test harness
+    /// down with SIGTERM — the suite dies mid-run with exit 143 and no failing test.
+    /// Correct in the app, where a plugin is not in the harness's group; fatal here.
+    fn reaped_plugin() -> Option<Plugin> {
         // `cmd /c exit` on Windows, `true` elsewhere: present everywhere, exits at once.
         let (command, args) = if cfg!(windows) {
             ("cmd", vec!["/c".to_string(), "exit".to_string()])
         } else {
             ("true", Vec::new())
         };
-        Plugin::spawn(&Discovered {
+        let mut p = Plugin::spawn(&Discovered {
             dir_name: "idle".to_string(),
             dir: std::env::temp_dir(),
             command: command.into(),
             args,
             enabled: Some(true),
         })
-        .ok()
+        .ok()?;
+        // Block until it is gone, so `drop` takes the already-exited path.
+        let _ = p.child.wait();
+        Some(p)
     }
 
     #[test]
@@ -411,7 +421,7 @@ mod tests {
         // the SAME drained batch, behind `Ready`. The handshake returns on `Ready`, so
         // the rest is deferred rather than dropped — otherwise a diagnostics plugin's
         // first push silently never arrives, which is exactly what it did.
-        let Some(mut p) = idle_plugin() else {
+        let Some(mut p) = reaped_plugin() else {
             return; // no shell to spawn; nothing to assert rather than a false failure
         };
 

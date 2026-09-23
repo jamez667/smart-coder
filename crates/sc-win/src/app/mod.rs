@@ -316,45 +316,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// A panel-less plugin still keeps the tick alive (spec 29).
+    /// The tick gate reads whether any plugin is RUNNING, not whether one has a panel.
     ///
-    /// The tick is the ONLY caller of `pump_plugins`, and every other gate on it is a
-    /// panel-feed symptom (a terminal, a pending diff, a plugin autoscroll). A plugin
-    /// that only publishes diagnostics owns no panel and arms none of them, so its
-    /// messages sat unread in the channel forever — the panel stayed empty while the
-    /// host had the diagnostics in hand.
+    /// The tick is the only caller of `pump_plugins`, and every other gate on it is a
+    /// panel-feed symptom (a live terminal, a pending diff, a plugin autoscroll). A
+    /// plugin that only publishes diagnostics owns no panel and armed none of them, so
+    /// its messages sat unread in the channel forever while the host held them.
+    ///
+    /// **Only the empty cases are asserted here, deliberately.** The populated case needs
+    /// a `Plugin`, which owns a live child process — and `Plugin::drop` kill_tree()s it,
+    /// which on Unix signals the process GROUP. A test binary shares its group with what
+    /// it spawns, so constructing one here SIGTERMs the whole harness: exit 143, mid-suite,
+    /// with no failing test. That is how this suite died in CI once already. The populated
+    /// branch is one `!is_empty()` over this same field, and it was verified against a
+    /// real panel-less plugin in the running client.
     #[test]
-    fn a_plugin_with_no_panel_still_arms_the_tick() {
-        let (mut app, dir) = app_with_file("a.rs", "fn main() {}\n");
+    fn the_tick_gate_reads_running_plugins_not_panels() {
+        let (mut app, dir) = app_with_file(
+            "a.rs",
+            "fn main() {}
+",
+        );
+        assert!(!app.a_plugin_is_running(), "no plugin host at all");
+
+        app.plugins = Some(sc_craft_ui::plugin::Plugins::default());
         assert!(
             !app.a_plugin_is_running(),
-            "nothing running, nothing to pump"
-        );
-
-        // A plugin with NO panels and NO subscriptions — the shape that armed nothing.
-        let (command, args) = if cfg!(windows) {
-            ("cmd", vec!["/c".to_string(), "exit".to_string()])
-        } else {
-            ("true", Vec::new())
-        };
-        let Ok(plugin) = sc_craft_ui::plugin::Plugin::spawn(&sc_craft_ui::plugin::Discovered {
-            dir_name: "idle".to_string(),
-            dir: std::env::temp_dir(),
-            command: command.into(),
-            args,
-            enabled: Some(true),
-        }) else {
-            let _ = std::fs::remove_dir_all(dir);
-            return; // no shell to spawn; nothing to assert rather than a false failure
-        };
-        app.plugins = Some(sc_craft_ui::plugin::Plugins {
-            running: vec![plugin],
-            ..Default::default()
-        });
-
-        assert!(
-            app.a_plugin_is_running(),
-            "a running plugin arms the tick even with no panel; the tick is the only caller of pump_plugins"
+            "a host with nothing running is not a running plugin"
         );
 
         let _ = std::fs::remove_dir_all(dir);
