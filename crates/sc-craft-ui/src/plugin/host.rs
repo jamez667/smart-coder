@@ -384,25 +384,58 @@ mod tests {
         }
     }
 
+    /// A `Plugin` over a process that does nothing, for testing the queue.
+    ///
+    /// Spawns a real child, because `Plugin` owns one and there is no way around it —
+    /// but the cheapest possible one, and the test never writes to it.
+    fn idle_plugin() -> Option<Plugin> {
+        // `cmd /c exit` on Windows, `true` elsewhere: present everywhere, exits at once.
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/c".to_string(), "exit".to_string()])
+        } else {
+            ("true", Vec::new())
+        };
+        Plugin::spawn(&Discovered {
+            dir_name: "idle".to_string(),
+            dir: std::env::temp_dir(),
+            command: command.into(),
+            args,
+            enabled: Some(true),
+        })
+        .ok()
+    }
+
     #[test]
     fn deferred_events_lead_the_next_batch_and_are_taken_once() {
         // A plugin that pushes in the same breath as its manifest has those messages in
         // the SAME drained batch, behind `Ready`. The handshake returns on `Ready`, so
         // the rest is deferred rather than dropped — otherwise a diagnostics plugin's
-        // first push silently never arrives. `Plugin` owns a live child process, so the
-        // queue's own semantics are what is pinned here: ordering, and taken exactly once.
-        let mut pending: Vec<u8> = vec![1, 2];
-        let mut drain = |pending: &mut Vec<u8>, fresh: Vec<u8>| -> Vec<u8> {
-            let mut out = std::mem::take(pending);
-            out.extend(fresh);
-            out
+        // first push silently never arrives, which is exactly what it did.
+        let Some(mut p) = idle_plugin() else {
+            return; // no shell to spawn; nothing to assert rather than a false failure
         };
-        assert_eq!(
-            drain(&mut pending, vec![3]),
-            vec![1, 2, 3],
-            "deferred first"
+
+        p.defer(vec![
+            PluginEvent::Message(Box::new(PluginMessage::Log {
+                message: "first".into(),
+            })),
+            PluginEvent::Message(Box::new(PluginMessage::PublishDiagnostics {
+                path: "a.wgsl".into(),
+                diagnostics: Vec::new(),
+            })),
+        ]);
+
+        let out = p.drain();
+        assert_eq!(out.len(), 2, "both deferred events came back");
+        assert!(
+            matches!(
+                &out[0],
+                PluginEvent::Message(m) if matches!(m.as_ref(), PluginMessage::Log { .. })
+            ),
+            "and in the order the plugin sent them"
         );
-        assert_eq!(drain(&mut pending, vec![4]), vec![4], "taken exactly once");
+
+        assert!(p.drain().is_empty(), "taken exactly once, not replayed");
     }
 
     #[test]
